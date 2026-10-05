@@ -32,8 +32,16 @@ fn planning_error<T: serde::Serialize>(error: anyhow::Error) -> Json<ApiResponse
 
 pub async fn list_tasks(
     State(state): State<AppState>,
-    Query(query): Query<PlanningTaskListQuery>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Query(mut query): Query<PlanningTaskListQuery>,
 ) -> Json<ApiResponse<PlanningTaskListResponse>> {
+    // A Kronn-launched agent pages through its project's tasks, filtered in
+    // the query rather than after the page is cut.
+    if let Some(axum::Extension(caller)) = bridge {
+        if query.project_id.is_none() {
+            query.project_id = caller.project;
+        }
+    }
     match state
         .db
         .with_read_conn(move |connection| crate::db::planning::list_tasks(connection, &query))

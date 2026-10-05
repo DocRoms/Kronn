@@ -124,6 +124,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 endpoints: vec![],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         },
 
@@ -190,6 +191,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}/comments".into(), method: "POST".into(), description: "[ISSUES · comment] Add a comment to an issue or PR (top-level, not line-bound). Body: `{body}`.".into() },
                     ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}/labels".into(), method: "POST".into(), description: "[ISSUES · add labels] Add labels to an issue/PR (additive — does not remove existing). Body: `{labels: [\"ci-test\"]}`. Replace `{issue_number}`.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         McpDefinition {
@@ -540,6 +542,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/chats".into(), method: "GET".into(), description: "[TEAMS] The signed-in user's chats (resolve a chat_id for posting).".into() },
                     ApiEndpoint { path: "/chats/{chat_id}/messages".into(), method: "POST".into(), description: "[TEAMS · write] Post a message to a chat. Confirm before use.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         // ── Project Management ──────────────────────────────────────────────
@@ -637,6 +640,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     // ── Filters ─────────────────────────────────────────
                     ApiEndpoint { path: "/rest/api/3/filter/search".into(),                method: "GET".into(),  description: "[FILTERS] User-saved JQL filters. Query: `accountId=...&filterName=Backlog`. Surfaces the JQL of each filter in `jql`.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         // ── Design ──────────────────────────────────────────────────────────
@@ -1095,6 +1099,7 @@ Official docs: https://resend.com/docs/api-reference/introduction
                     // ── API keys (read-only — managing keys via API is rare) ──
                     ApiEndpoint { path: "/api-keys".into(),                              method: "GET".into(),    description: "[KEYS · introspection] List API keys (metadata only — secrets never returned).".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         // Mailjet — EU-friendly transactional + marketing email API. The
@@ -1366,6 +1371,7 @@ Official docs: https://dev.mailjet.com/email/reference/
                     ApiEndpoint { path: "/v3/REST/statcounters".into(),                            method: "GET".into(),  description: "[STATS] Aggregated counters. Query: `CounterSource=APIKey&CounterResolution=Day&CounterTiming=Message&FromTS=<epoch>&ToTS=<epoch>`.".into() },
                     ApiEndpoint { path: "/v3/REST/messagesentstatistics".into(),                   method: "GET".into(),  description: "[STATS] Per-message statistics (opens, clicks). Joinable on MessageID.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         // ── AI & Reasoning ───────────────────────────────────────────────
@@ -1792,6 +1798,7 @@ the final report so the user can judge for themselves.
                     ApiEndpoint { path: "/stats/usage".into(), method: "GET".into(), description: "[USAGE] Account-level usage totals.".into() },
                     ApiEndpoint { path: "/stats/usage_by_service".into(), method: "GET".into(), description: "[USAGE] Usage grouped by Fastly service.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
         McpDefinition {
@@ -2051,6 +2058,7 @@ Official docs: https://docs.chartbeat.com/cbp/api/historical-api/getting-started
                     ApiEndpoint { path: "/historical/social/series/".into(), method: "GET".into(), description: "[HIST · X-CB-AK · sync] Social-referrer time series (Facebook, Twitter/X, etc).".into() },
                     ApiEndpoint { path: "/historical/social/stats/".into(),  method: "GET".into(), description: "[HIST · X-CB-AK · sync] Aggregate social-referrer stats over a date range.".into() },
                 ],
+                default_headers: vec![],
             }),
         },
 
@@ -2258,6 +2266,7 @@ Full schema: [Adobe Analytics 2.0 API docs](https://developer.adobe.com/analytic
                     ApiEndpoint { path: "/calculatedmetrics".into(),      method: "GET".into(),  description: "[META · OAuth2 · sync] ?rsids=<RSID> → user-defined calculated metrics".into() },
                     ApiEndpoint { path: "/users/me".into(),               method: "GET".into(),  description: "[SMOKE · OAuth2 · sync] Current user profile — use as a health check".into() },
                 ],
+                default_headers: vec![],
             }),
         },
 
@@ -2426,6 +2435,7 @@ Official docs: https://developers.google.com/custom-search/v1/reference/rest
                         description: "[SEARCH · apikey= · sync] The one and only endpoint. Pass q=<query>, num=1-10, start=<offset>, plus any filter (dateRestrict, siteSearch, lr, gl, searchType=image). See default_context for the complete param matrix.".into(),
                     },
                 ],
+                default_headers: vec![],
             }),
         },
 
@@ -2528,6 +2538,7 @@ is well within bounds for typical fan-outs.
                     // Declaring them sent agents chasing an aggregated time series
                     // that does not exist, when /v1/tests was the only real source.
                 ],
+                default_headers: vec![],
             }),
         },
     ]

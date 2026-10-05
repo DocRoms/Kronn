@@ -46,7 +46,7 @@ async fn default_adapters_and_explicit_fallback_keep_worker_spawn_boundaries() {
     let bin = dir.path().join("bin");
     let project = dir.path().join("project");
     let linked = dir.path().join("linked repo");
-    let initialized = kronn::core::cmd::sync_cmd("git")
+    let initialized = kronn::core::cmd::git_cmd()
         .arg("init")
         .arg(&linked)
         .output()

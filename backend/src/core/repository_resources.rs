@@ -1119,7 +1119,7 @@ pub fn relocate_skill_entries(
 }
 
 fn is_tracked(root: &Path, relative: &str) -> bool {
-    crate::core::cmd::sync_cmd("git")
+    crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--", relative])
@@ -1405,7 +1405,7 @@ pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<Stri
     let mut pathspecs: Vec<&str> = lock.files.keys().map(String::as_str).collect();
     pathspecs.push(SKILLS_ROOT);
     pathspecs.extend(crate::core::skill_migration::SOURCE_ROOTS.iter().copied());
-    let output = crate::core::cmd::sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(root)
         .args(["status", "--porcelain", "-uall", "--"])
@@ -1473,7 +1473,7 @@ impl RepositoryFileDates {
         if existing.is_empty() {
             return dates;
         }
-        let listed = crate::core::cmd::sync_cmd("git")
+        let listed = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["-c", "core.quotepath=off", "ls-files", "-z", "--"])
@@ -1494,7 +1494,7 @@ impl RepositoryFileDates {
         if pending.is_empty() {
             return dates;
         }
-        let spawned = crate::core::cmd::sync_cmd("git")
+        let spawned = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args([
@@ -2045,6 +2045,38 @@ mod tests {
     use crate::models::{AgentType, ModelTier};
     use chrono::TimeZone;
 
+    /// KT-1017 — the human approval of unmodelled programs is part of what a
+    /// `kronn/` import approves, and leaves older definitions' hashes as is.
+    #[test]
+    fn the_approval_hash_covers_the_unmodelled_programs_approval() {
+        let document = |step: Value| RepositoryDocument {
+            schema_version: 1,
+            kind: ProjectRepositoryResourceKind::Workflow,
+            slug: "wf".into(),
+            updated_at: Utc::now(),
+            requires: vec![],
+            resource: serde_json::json!({"name": "wf", "steps": [step]}),
+            redacted_fields: vec![],
+        };
+        let step: crate::models::WorkflowStep = serde_json::from_value(serde_json::json!({
+            "name": "t", "step_type": {"type": "Exec"}, "exec_command": "terraform",
+            "exec_args": ["plan", "{{x}}"]
+        }))
+        .unwrap();
+        let plain = serde_json::to_value(&step).unwrap();
+        assert!(
+            plain.get("exec_unmodelled_args_approved").is_none(),
+            "absent when not approved"
+        );
+        let mut approved_step = step.clone();
+        approved_step.exec_unmodelled_args_approved = Some(true);
+        let approved = serde_json::to_value(&approved_step).unwrap();
+        assert_ne!(
+            approval_hash(&document(plain)),
+            approval_hash(&document(approved))
+        );
+    }
+
     fn sample_exec(secret: &str) -> QuickExec {
         QuickExec {
             id: "qe-1".into(),
@@ -2060,6 +2092,7 @@ mod tests {
             pinned: false,
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             updated_at: Utc.timestamp_opt(1_700_000_010, 0).unwrap(),
+            unmodelled_args_approved: None,
         }
     }
 
@@ -2720,7 +2753,7 @@ mod tests {
     #[test]
     fn uncommitted_managed_paths_lists_only_dirty_lock_files() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -2734,13 +2767,13 @@ mod tests {
         let dirty = uncommitted_managed_paths(root.path(), &lock);
         assert!(dirty.contains(&"kronn/quick-execs/deploy.yaml".to_string()));
 
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["add", "-A"])
             .status()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args([
@@ -3090,7 +3123,7 @@ mod tests {
 
     fn commit_as(root: &Path, author: &str, date: &str, message: &str) {
         let git = |args: &[&str]| {
-            crate::core::cmd::sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -3110,7 +3143,7 @@ mod tests {
     #[test]
     fn file_dates_come_from_each_files_last_commit_in_one_pass() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -3148,7 +3181,7 @@ mod tests {
     #[test]
     fn file_dates_stop_waiting_for_git_when_the_budget_is_spent() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])

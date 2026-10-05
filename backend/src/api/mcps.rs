@@ -520,7 +520,8 @@ async fn probe_mcp_stdio_with_timeout(
     deadline: Duration,
 ) -> Result<(), String> {
     let operation = async {
-        let mut process = crate::core::cmd::async_cmd(command);
+        let mut process =
+            crate::core::cmd::full_env_cmd(command, crate::core::cmd::FullEnvReason::McpProbe);
         process
             .args(args)
             .envs(env)
@@ -693,7 +694,7 @@ pub async fn create_config(
         if payload.base_url.trim().is_empty() {
             return Json(ApiResponse::err("Custom API requires a base URL"));
         }
-        if let Err(error) = validate_custom_auth(&payload.auth) {
+        if let Err(error) = validate_custom_payload(&payload) {
             return Json(ApiResponse::err(error));
         }
         let server = materialize_custom_server(&payload);
@@ -907,6 +908,15 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
         config_keys,
+        default_headers: payload
+            .default_headers
+            .iter()
+            .filter(|h| !h.name.trim().is_empty())
+            .map(|h| ApiDefaultHeader {
+                name: h.name.trim().to_string(),
+                value: h.value.trim().to_string(),
+            })
+            .collect(),
     };
 
     McpServer {
@@ -924,6 +934,131 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
 fn validate_custom_auth(auth: &ApiAuthKind) -> Result<(), String> {
     if matches!(auth, ApiAuthKind::CliToken { .. }) {
         return Err("CLI token authentication is reserved for trusted built-in plugins".into());
+    }
+    Ok(())
+}
+
+/// Every check a user-authored or imported Custom API spec must pass.
+pub(crate) fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
+    validate_custom_auth(&payload.auth)?;
+    validate_default_headers(payload)
+}
+
+const MAX_DEFAULT_HEADERS: usize = 20;
+
+/// Headers the broker owns: credentials come from the auth section, the
+/// others are set by the HTTP client itself.
+const RESERVED_DEFAULT_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+];
+
+/// Header name the auth scheme itself injects, if any.
+fn auth_header_name(auth: &ApiAuthKind) -> Option<String> {
+    match auth {
+        ApiAuthKind::ApiKeyHeader { header_name, .. } => Some(header_name.to_ascii_lowercase()),
+        ApiAuthKind::TokenExchange {
+            inject: TokenInjection::CustomHeader { name },
+            ..
+        }
+        | ApiAuthKind::CliToken {
+            inject: TokenInjection::CustomHeader { name },
+            ..
+        } => Some(name.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// `${ENV.KEY}` references in a header value, keys upper-cased like the
+/// runtime substitution does.
+fn env_references(value: &str) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.to_ascii_lowercase().find("${env.") {
+        let after = &rest[start + 6..];
+        let end = after
+            .find('}')
+            .ok_or_else(|| format!("unclosed `${{ENV.…}}` reference in `{value}`"))?;
+        let key = after[..end].trim();
+        if key.is_empty() {
+            return Err(format!("empty `${{ENV.}}` reference in `{value}`"));
+        }
+        keys.push(key.to_ascii_uppercase());
+        rest = &after[end + 1..];
+    }
+    Ok(keys)
+}
+
+fn validate_default_headers(payload: &CustomApiPayload) -> Result<(), String> {
+    let headers: Vec<_> = payload
+        .default_headers
+        .iter()
+        .filter(|h| !(h.name.trim().is_empty() && h.value.trim().is_empty()))
+        .collect();
+    if headers.len() > MAX_DEFAULT_HEADERS {
+        return Err(format!(
+            "At most {MAX_DEFAULT_HEADERS} default headers can be declared"
+        ));
+    }
+    let declared: std::collections::HashSet<String> = payload
+        .fields
+        .iter()
+        .filter(|f| !f.label.trim().is_empty())
+        .map(|f| slug_env_key(&f.label))
+        .collect();
+    let auth_header = auth_header_name(&payload.auth);
+    let mut seen = std::collections::HashSet::new();
+    for header in headers {
+        let name = header.name.trim();
+        let value = header.value.trim();
+        if name.is_empty() {
+            return Err(format!("Default header with value `{value}` has no name"));
+        }
+        if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return Err(format!("`{name}` is not a valid HTTP header name"));
+        }
+        let lower = name.to_ascii_lowercase();
+        if RESERVED_DEFAULT_HEADERS.contains(&lower.as_str()) {
+            return Err(format!(
+                "Header `{name}` is managed by Kronn: declare credentials in the authentication section"
+            ));
+        }
+        if auth_header.as_deref() == Some(lower.as_str()) {
+            return Err(format!(
+                "Header `{name}` is already sent by the authentication scheme"
+            ));
+        }
+        if !seen.insert(lower) {
+            return Err(format!("Default header `{name}` is declared twice"));
+        }
+        if value.is_empty() {
+            return Err(format!("Default header `{name}` has no value"));
+        }
+        let references = env_references(value).map_err(|e| format!("Header `{name}`: {e}"))?;
+        if let Some(missing) = references.iter().find(|key| !declared.contains(*key)) {
+            return Err(format!(
+                "Header `{name}` references `${{ENV.{missing}}}` but no field declares `{missing}`"
+            ));
+        }
+        if axum::http::HeaderValue::from_str(value).is_err() {
+            return Err(format!(
+                "Header `{name}` contains characters not allowed in an HTTP header"
+            ));
+        }
+        if references.is_empty() && crate::workflows::api_call_security::looks_like_secret_key(name)
+        {
+            return Err(format!(
+                "Header `{name}` looks like a credential: store it in a field and use `${{ENV.KEY}}` as the value"
+            ));
+        }
     }
     Ok(())
 }
@@ -1075,7 +1210,7 @@ pub async fn update_custom_spec(
     if payload.base_url.trim().is_empty() {
         return Json(ApiResponse::err("Custom API requires a base URL"));
     }
-    if let Err(error) = validate_custom_auth(&payload.auth) {
+    if let Err(error) = validate_custom_payload(&payload) {
         return Json(ApiResponse::err(error));
     }
 
@@ -2766,6 +2901,9 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
             .collect(),
         endpoints: spec.endpoints.clone(),
         auth: spec.auth.clone(),
+        // Safe to export: validation forces credential-like headers to
+        // reference a field instead of carrying a literal value.
+        default_headers: spec.default_headers.clone(),
     })
 }
 
@@ -2781,7 +2919,7 @@ pub fn sanitize_imported_payload(
     if payload.base_url.trim().is_empty() {
         return Err("Imported plugin: `base_url` is required".into());
     }
-    validate_custom_auth(&payload.auth)?;
+    validate_custom_payload(&payload)?;
     // Defensive: an imported file MIGHT carry credentials if someone
     // hand-crafted it. Always strip — the user fills env via the
     // "Edit secrets" drawer afterwards.
@@ -3220,6 +3358,7 @@ mod tests {
                 }],
                 docs_url: None,
                 config_keys: vec![],
+                default_headers: vec![],
             }),
         };
         let env = std::collections::HashMap::from([("TOKEN".into(), token.into())]);
@@ -3662,6 +3801,7 @@ mod tests {
                 },
             ],
             endpoints: vec![],
+            default_headers: vec![],
         };
 
         let server = materialize_custom_server(&payload);
@@ -3687,6 +3827,142 @@ mod tests {
         assert_eq!(spec.config_keys[1].env_key, "ORG_ID");
     }
 
+    fn notion_payload(headers: Vec<(&str, &str)>) -> CustomApiPayload {
+        CustomApiPayload {
+            name: "Notion".into(),
+            base_url: "https://api.notion.com/v1".into(),
+            description: String::new(),
+            docs_url: None,
+            auth: ApiAuthKind::Bearer {
+                env_key: "BEARER_TOKEN".into(),
+            },
+            fields: vec![
+                CustomApiField {
+                    label: "Bearer Token".into(),
+                    value: String::new(),
+                },
+                CustomApiField {
+                    label: "Notion-Version".into(),
+                    value: String::new(),
+                },
+            ],
+            endpoints: vec![],
+            default_headers: headers
+                .into_iter()
+                .map(|(name, value)| ApiDefaultHeader {
+                    name: name.into(),
+                    value: value.into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn materialize_custom_server_keeps_trimmed_default_headers() {
+        let payload = notion_payload(vec![
+            (" Notion-Version ", " ${ENV.NOTION_VERSION} "),
+            ("", ""),
+            ("Accept", "application/json"),
+        ]);
+        let spec = materialize_custom_server(&payload).api_spec.unwrap();
+        assert_eq!(
+            spec.default_headers,
+            vec![
+                ApiDefaultHeader {
+                    name: "Notion-Version".into(),
+                    value: "${ENV.NOTION_VERSION}".into(),
+                },
+                ApiDefaultHeader {
+                    name: "Accept".into(),
+                    value: "application/json".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn default_headers_accept_literals_and_declared_field_references() {
+        let payload = notion_payload(vec![
+            ("Notion-Version", "${ENV.NOTION_VERSION}"),
+            ("X-Static", "2025-09-03"),
+            ("X-Api-Key", "${env.bearer_token}"),
+            ("", ""),
+        ]);
+        assert_eq!(validate_custom_payload(&payload), Ok(()));
+    }
+
+    #[test]
+    fn default_headers_reject_invalid_declarations() {
+        let cases: Vec<(Vec<(&str, &str)>, &str)> = vec![
+            (
+                vec![("Authorization", "${ENV.BEARER_TOKEN}")],
+                "managed by Kronn",
+            ),
+            (vec![("host", "evil.example")], "managed by Kronn"),
+            (vec![("Bad Name", "x")], "not a valid HTTP header name"),
+            (vec![("", "orphan")], "has no name"),
+            (vec![("Notion-Version", "")], "has no value"),
+            (
+                vec![("Notion-Version", "a"), ("notion-version", "b")],
+                "declared twice",
+            ),
+            (
+                vec![("X-Org", "${ENV.ORG_ID}")],
+                "no field declares `ORG_ID`",
+            ),
+            (vec![("X-Org", "${ENV.ORG_ID")], "unclosed"),
+            (vec![("X-Api-Key", "sk-literal")], "looks like a credential"),
+            (vec![("X-Trace", "a\r\nInjected: 1")], "not allowed"),
+        ];
+        for (headers, expected) in cases {
+            let error = validate_custom_payload(&notion_payload(headers.clone())).unwrap_err();
+            assert!(
+                error.contains(expected),
+                "{headers:?}: expected `{expected}` in `{error}`"
+            );
+        }
+    }
+
+    #[test]
+    fn default_headers_reject_the_header_used_by_the_auth_scheme() {
+        let mut payload = notion_payload(vec![("x-api-key", "${ENV.BEARER_TOKEN}")]);
+        payload.auth = ApiAuthKind::ApiKeyHeader {
+            header_name: "X-API-Key".into(),
+            env_key: "BEARER_TOKEN".into(),
+        };
+        let error = validate_custom_payload(&payload).unwrap_err();
+        assert!(
+            error.contains("already sent by the authentication"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn default_headers_are_capped() {
+        let names: Vec<String> = (0..=MAX_DEFAULT_HEADERS)
+            .map(|i| format!("X-H{i}"))
+            .collect();
+        let payload = notion_payload(names.iter().map(|n| (n.as_str(), "v")).collect());
+        let error = validate_custom_payload(&payload).unwrap_err();
+        assert!(error.contains("At most"), "{error}");
+    }
+
+    #[test]
+    fn custom_plugin_export_round_trips_default_headers() {
+        let payload = notion_payload(vec![("Notion-Version", "${ENV.NOTION_VERSION}")]);
+        let server = materialize_custom_server(&payload);
+        let exported = build_custom_plugin_export(&server).unwrap();
+        assert_eq!(exported.default_headers, payload.default_headers);
+        let reimported = sanitize_imported_payload(exported).unwrap();
+        assert_eq!(reimported.default_headers.len(), 1);
+    }
+
+    #[test]
+    fn imported_payload_with_invalid_default_header_is_rejected() {
+        let payload = notion_payload(vec![("Authorization", "Bearer leaked")]);
+        assert!(sanitize_imported_payload(payload).is_err());
+    }
+
     #[test]
     fn materialize_custom_server_filters_blank_fields() {
         let payload = CustomApiPayload {
@@ -3710,6 +3986,7 @@ mod tests {
                 },
             ],
             endpoints: vec![],
+            default_headers: vec![],
         };
         let server = materialize_custom_server(&payload);
         let spec = server.api_spec.unwrap();
@@ -3728,6 +4005,7 @@ mod tests {
             auth: ApiAuthKind::None,
             fields: vec![],
             endpoints: vec![],
+            default_headers: vec![],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert!(
@@ -3781,6 +4059,7 @@ mod tests {
                     description: "List consent events for a user".into(),
                 },
             ],
+            default_headers: vec![],
         };
         let server = materialize_custom_server(&payload);
         let spec = server.api_spec.expect("api_spec set");
@@ -3826,6 +4105,7 @@ mod tests {
                     description: "also blank".into(),
                 },
             ],
+            default_headers: vec![],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert_eq!(spec.endpoints.len(), 1, "blank-path rows must be dropped");
@@ -3862,6 +4142,7 @@ mod tests {
                     description: "".into(),
                 },
             ],
+            default_headers: vec![],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert_eq!(
@@ -3905,6 +4186,7 @@ mod tests {
                 method: "GET".into(),
                 description: "List".into(),
             }],
+            default_headers: vec![],
         };
         let old_id = "custom-didomi-27c67bd7".to_string();
         let old_source = McpSource::Manual;
@@ -3998,6 +4280,7 @@ mod tests {
                     description: "Consent events".into(),
                 },
             ],
+            default_headers: vec![],
         };
         let mut updated = materialize_custom_server(&payload);
         updated.id = "custom-didomi-27c67bd7".into(); // stitched from prev
@@ -4059,6 +4342,7 @@ mod tests {
                         description: String::new(),
                     })
                     .collect(),
+                default_headers: vec![],
             }),
         }
     }
@@ -4078,6 +4362,7 @@ mod tests {
                 .collect(),
             endpoints: vec![],
             auth: ApiAuthKind::None,
+            default_headers: vec![],
         }
     }
 

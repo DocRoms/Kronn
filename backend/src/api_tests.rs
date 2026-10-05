@@ -2653,6 +2653,7 @@ mod tests {
                         endpoints: vec![],
                         docs_url: None,
                         config_keys: vec![],
+                        default_headers: vec![],
                     }),
                 };
                 crate::db::mcps::upsert_server(connection, &server)?;

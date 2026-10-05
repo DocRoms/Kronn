@@ -19,7 +19,7 @@
 - **Derive requirements**: add `PartialEq` to any enum used in `==` / `!=` / `Vec::contains()`.
 - **Type export**: add `#[derive(TS)]` + `#[ts(export)]` on models that need TypeScript types.
 - **State access**: `State(state): State<AppState>` then `state.projects.read().await` / `.write().await`.
-- **Command execution**: ALWAYS use `crate::core::cmd::{async_cmd, sync_cmd}` instead of raw `tokio::process::Command::new()` or `std::process::Command::new()`. These helpers apply `CREATE_NO_WINDOW` on Windows (Tauri desktop). Raw `Command::new` causes visible console windows to flash.
+- **Command execution**: ALWAYS use `crate::core::cmd::{async_cmd, sync_cmd}` (they take a `ChildRoute`, the child's environment; `git_cmd`/`tool_cmd` are shorthands) instead of raw `Command::new()`, which clippy refuses (`backend/clippy.toml`). These helpers apply `CREATE_NO_WINDOW` on Windows (Tauri desktop) and never hand a child the backend's environment (design note agent-secret-boundary §9).
 - **WSL paths**: on Windows, detect WSL UNC paths (`\\wsl.localhost\...`) and run commands via `wsl.exe -e bash -lc "..."` (login shell needed for npm-installed binaries in PATH).
 - **Linter**: `cargo clippy`
 - **Formatter**: `cargo fmt`

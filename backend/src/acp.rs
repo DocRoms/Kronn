@@ -767,10 +767,10 @@ fn native_command(
     launch: &NativeLaunchEnv,
 ) -> Result<tokio::process::Command, String> {
     use crate::core::child_env;
-    let mut command = crate::core::cmd::async_cmd(program);
-    command.args(args).current_dir(cwd);
     let family = native_family(agent);
     let route = child_env::ChildRoute::Agent(family);
+    let mut command = crate::core::cmd::async_cmd(program, route);
+    command.args(args).current_dir(cwd);
     child_env::reset(command.as_std_mut(), route);
     // Under Docker, the MCP values the project's MCP files refer to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut command, std::path::Path::new(cwd));
@@ -2876,7 +2876,7 @@ mod tests {
         }
 
         std::env::remove_var("OPENCODE_CONFIG_CONTENT");
-        let mut command = crate::core::cmd::async_cmd("opencode");
+        let mut command = tokio::process::Command::new("opencode");
         apply_opencode_policy(&mut command);
         assert_eq!(
             config_of(&command).as_deref(),
@@ -2884,7 +2884,7 @@ mod tests {
         );
 
         std::env::set_var("OPENCODE_CONFIG_CONTENT", r#"{"theme":"mine"}"#);
-        let mut command = crate::core::cmd::async_cmd("opencode");
+        let mut command = tokio::process::Command::new("opencode");
         apply_opencode_policy(&mut command);
         std::env::remove_var("OPENCODE_CONFIG_CONTENT");
         assert_eq!(
@@ -2996,7 +2996,7 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}}) + "\n")
         sys.stdout.flush()
 "#;
-        let mut command = crate::core::cmd::async_cmd("python3");
+        let mut command = tokio::process::Command::new("python3");
         command.args(["-c", peer]);
         let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
             .await
@@ -3015,7 +3015,7 @@ for line in sys.stdin:
     async fn shutdown_stops_the_processes_the_agent_started_too() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("descendant.pid");
-        let mut command = crate::core::cmd::async_cmd("sh");
+        let mut command = tokio::process::Command::new("sh");
         command
             .env("PID_FILE", &pid_file)
             .args(["-c", "sleep 300 & echo $! > \"$PID_FILE\"; wait"]);
@@ -3115,7 +3115,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn json_rpc_transport_keeps_updates_emitted_before_prompt_response() {
-        let mut command = crate::core::cmd::async_cmd("sh");
+        let mut command = tokio::process::Command::new("sh");
         command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{},\"promptCapabilities\":{},\"sessionCancellation\":{}}}}' ;; *'\"method\":\"session/new\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fixture-session\"}}' ;; *'\"method\":\"session/prompt\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"content\":[{\"type\":\"text\",\"text\":\"before response\"}],\"usage\":{\"inputTokens\":3,\"outputTokens\":5}}}}'; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}' ;; esac; done"]);
         let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
             .await
@@ -3156,7 +3156,7 @@ for line in sys.stdin:
         // a file, then completes the turn normally.
         let response_file = tempfile::NamedTempFile::new().unwrap();
         let response_path = response_file.path().to_path_buf();
-        let mut command = crate::core::cmd::async_cmd("sh");
+        let mut command = tokio::process::Command::new("sh");
         command
             .env("RESPONSE_FILE", &response_path)
             .args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1}}' ;; *'\"method\":\"session/new\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fixture-session\"}}' ;; *'\"method\":\"session/prompt\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"fixture-session\",\"path\":\"/tmp/x\"}}'; IFS= read -r reply; printf '%s' \"$reply\" > \"$RESPONSE_FILE\"; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}' ;; esac; done"]);
@@ -3264,7 +3264,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn resume_session_over_the_real_transport_maps_the_structured_session_not_found_error() {
-        let mut command = crate::core::cmd::async_cmd("sh");
+        let mut command = tokio::process::Command::new("sh");
         command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"resume\":{}}}}}' ;; *'\"method\":\"session/resume\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32602,\"message\":\"session not found: gone-id\",\"data\":{\"sessionId\":\"gone-id\"}}}' ;; esac; done"]);
         let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
             .await
@@ -3284,7 +3284,7 @@ for line in sys.stdin:
         // be read as a positively-identified missing session: the caller
         // (run_acp_session) fails closed on `Transport` instead of silently
         // starting a replacement session and resending the prompt.
-        let mut command = crate::core::cmd::async_cmd("sh");
+        let mut command = tokio::process::Command::new("sh");
         command.args(["-c", "while IFS= read -r line; do case \"$line\" in *'\"method\":\"initialize\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"resume\":{}}}}}' ;; *'\"method\":\"session/resume\"'*) printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"internal error\"}}' ;; esac; done"]);
         let transport = AcpJsonRpcTransport::spawn(AcpAgent::OpenCode, command, false)
             .await
@@ -3305,7 +3305,7 @@ for line in sys.stdin:
             (AcpAgent::OpenCode, "session/prompt", "gone-id", false),
             (AcpAgent::Codex, "session/resume", "gone-id", false),
         ] {
-            let mut command = crate::core::cmd::async_cmd("sh");
+            let mut command = tokio::process::Command::new("sh");
             command.args(["-c", r#"while IFS= read -r line; do
 case "$line" in
 *'"method":"initialize"'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}' ;;
@@ -3487,7 +3487,7 @@ done"#]);
         /// python3 is already a project dependency (`core::mcp_scanner`,
         /// `core::quick_exec`). Only the stdlib is used here.
         fn command(&self, initialize_reply: Option<&str>) -> tokio::process::Command {
-            let mut command = crate::core::cmd::async_cmd("python3");
+            let mut command = tokio::process::Command::new("python3");
             command.env("ACP_SOCK", &self.path);
             if let Some(reply) = initialize_reply {
                 command.env("ACP_REPLY", reply);

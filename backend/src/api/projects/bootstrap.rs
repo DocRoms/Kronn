@@ -8,7 +8,6 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::agents::runner;
-use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -78,7 +77,7 @@ pub async fn bootstrap(
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
 
             // git init
-            let status = sync_cmd("git")
+            let status = crate::core::cmd::git_cmd()
                 .arg("init")
                 .current_dir(&project_path)
                 .stdout(std::process::Stdio::null())

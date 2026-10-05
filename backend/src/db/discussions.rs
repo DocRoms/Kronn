@@ -650,6 +650,36 @@ pub fn list_discussions_paginated(
     Ok(discussions)
 }
 
+/// The discussions a bridge token may list: its project's, plus the launch's
+/// own (a project-less discussion is private to its launches). Filtered in the
+/// query so pages are full and in order.
+pub fn list_discussions_for_bridge(
+    conn: &Connection,
+    project: Option<&str>,
+    own: &[String],
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<Discussion>> {
+    let own_json = serde_json::to_string(own)?;
+    let sql = format!(
+        "SELECT {} FROM discussions d \
+         WHERE (?1 IS NOT NULL AND d.project_id = ?1) \
+            OR d.id IN (SELECT value FROM json_each(?2)) \
+         ORDER BY d.updated_at DESC{}",
+        DISC_SELECT_COLS,
+        match (limit, offset) {
+            (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
+            (Some(l), None) => format!(" LIMIT {}", l),
+            _ => String::new(),
+        }
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let discussions: Vec<Discussion> = stmt
+        .query_map(rusqlite::params![project, own_json], map_discussion_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(discussions)
+}
+
 /// Like list_discussions but also loads all messages (used for export).
 pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussion>> {
     let mut discussions = list_discussions(conn)?;

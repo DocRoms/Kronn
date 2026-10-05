@@ -39,6 +39,7 @@ import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import { ExecScriptFilesEditor } from './ExecScriptFilesEditor';
+import { UnmodelledApproval } from './UnmodelledApproval';
 import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
@@ -2750,6 +2751,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           onChange={e => updateStep(i, { exec_args: e.target.value.split('\n').filter(s => s.length > 0) })}
                           placeholder={t('wiz.execArgsPlaceholder')}
                           aria-label={t('wiz.execArgs')}
+                        />
+                        <UnmodelledApproval
+                          command={step.exec_command ?? ''}
+                          args={step.exec_args ?? []}
+                          approved={step.exec_unmodelled_args_approved === true}
+                          onChange={approved => updateStep(i, { exec_unmodelled_args_approved: approved || undefined })}
                         />
                         <ExecScriptFilesEditor
                           key={step.id ?? `exec-scripts-${i}`}

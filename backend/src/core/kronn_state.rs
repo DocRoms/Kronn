@@ -333,7 +333,7 @@ fn state_rel_path(project_path: &Path) -> String {
 }
 
 fn git_stdout(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = crate::core::cmd::sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(project_path)
         .args(args)

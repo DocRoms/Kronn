@@ -10,7 +10,6 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::core::cmd::sync_cmd;
 use crate::db::discussion_workspaces::{
     DiscussionWorkspace, HistoryLeaseAcquire, WorkspaceHistoryLease,
 };
@@ -103,7 +102,7 @@ fn required_identity(
 }
 
 fn git_value(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -657,7 +656,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn git(cwd: &Path, args: &[&str]) {
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(args)
             .current_dir(cwd)
             .output()

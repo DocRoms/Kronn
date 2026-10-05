@@ -1,19 +1,24 @@
 //! Scoped bridge tokens (KT-1006 layer B, bridge part).
 //!
-//! Each agent launch gets its own random 256-bit token instead of Kronn's admin
-//! bearer. The token lives in this process's memory only, is bound to the
-//! launch's discussion (or task execution, or workflow run) and its project,
-//! and is revoked when the launch's process handle is dropped. A backend
-//! restart forgets every token.
+//! Every agent launch gets its own random 256-bit token instead of Kronn's
+//! admin bearer. The token lives in this process's memory only, is bound to the
+//! launch's discussions (or task execution, or workflow run, or bare project)
+//! and to one project frozen on first use, and dies when the launch's process
+//! handle is dropped or killed, when its maximum lifetime passes, when its
+//! discussion or run is deleted, or when the backend restarts.
 //!
 //! A request bearing one is accepted only on [`BRIDGE_ROUTES`] — the routes the
-//! `kronn-internal` bridge calls — and only for resources in the token's scope.
-//! Ids are read from the path, the query string and the top-level JSON body.
-//! A request without any token keeps the loopback trust it has today: the
-//! per-action human proof that replaces it is deferred (design note §4).
+//! `kronn-internal` bridge calls — and only for resources in the token's scope,
+//! wherever the request names them: path, query, any depth of the JSON body
+//! (an imported workflow's `content` included). Shared resources (project-less,
+//! or serving every project) may be read, never written; effects on them run
+//! only for the bound project. Every response is scoped too. A request without
+//! any token keeps the loopback trust it has today: the per-action human proof
+//! that replaces it is deferred (design note §4, §9).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use aes_gcm::aead::{rand_core::RngCore, OsRng};
 use sha2::{Digest, Sha256};
@@ -22,8 +27,12 @@ use sha2::{Digest, Sha256};
 /// refused instead of falling back to loopback trust.
 pub const TOKEN_PREFIX: &str = "kbt_";
 
-/// What a launch is bound to. The project is resolved from these ids on first
-/// use, by the auth middleware, which has the database.
+/// Longest a token lives, whatever its launch does: a wedged agent does not
+/// keep a live credential forever.
+pub const MAX_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// What a launch is bound to. The project is resolved from these on first use
+/// (the auth middleware has the database) and frozen there.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BridgeScope {
     /// The launch's own discussions: its discussion and its room / step /
@@ -31,10 +40,14 @@ pub struct BridgeScope {
     pub discussion_ids: Vec<String>,
     pub task_execution_id: Option<String>,
     pub workflow_run_id: Option<String>,
+    /// The launch's project when it names no discussion, execution or run
+    /// (audits, document agents). Ignored otherwise.
+    pub project_id: Option<String>,
 }
 
 impl BridgeScope {
-    pub fn is_empty(&self) -> bool {
+    /// No discussion, execution or run: nothing the launch owns.
+    pub fn owns_nothing(&self) -> bool {
         self.discussion_ids.is_empty()
             && self.task_execution_id.is_none()
             && self.workflow_run_id.is_none()
@@ -53,6 +66,9 @@ pub struct BridgeGrant {
     pub scope: BridgeScope,
     /// Discussions this launch created through the bridge: its own too.
     adopted: Mutex<Vec<String>>,
+    /// The project frozen on first use: `Some(None)` = bound to no project.
+    bound: Mutex<Option<Option<String>>>,
+    expires_at: Instant,
 }
 
 impl BridgeGrant {
@@ -65,11 +81,38 @@ impl BridgeGrant {
                 .is_ok_and(|adopted| adopted.iter().any(|own| own == id))
     }
 
+    /// Every discussion the launch owns, for handlers that query by it.
+    pub fn own_discussions(&self) -> Vec<String> {
+        let mut own = self.scope.discussion_ids.clone();
+        if let Ok(adopted) = self.adopted.lock() {
+            own.extend(adopted.iter().cloned());
+        }
+        own
+    }
+
     /// Record a discussion this launch just created.
     pub fn adopt_discussion(&self, id: &str) {
         if let Ok(mut adopted) = self.adopted.lock() {
             if !adopted.iter().any(|own| own == id) {
                 adopted.push(id.to_owned());
+            }
+        }
+    }
+
+    /// Freeze `resolved` as the token's project on first use; later it must
+    /// match, or the binding changed under the launch and the token is dead.
+    pub fn freeze(&self, resolved: Option<String>) -> Result<Option<String>, Refusal> {
+        let Ok(mut bound) = self.bound.lock() else {
+            return Err(Refusal("bridge token state unavailable".into()));
+        };
+        match bound.as_ref() {
+            Some(frozen) if *frozen != resolved => Err(Refusal(
+                "the bridge token's project changed since its launch".into(),
+            )),
+            Some(frozen) => Ok(frozen.clone()),
+            None => {
+                *bound = Some(resolved.clone());
+                Ok(resolved)
             }
         }
     }
@@ -87,13 +130,28 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Whether `presented` is the operator token. Compares SHA-256 digests in
+/// constant time, so the comparison leaks neither content nor length.
+pub fn operator_token_matches(expected: Option<&str>, presented: &str) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    let (left, right) = (digest(expected), digest(presented));
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
 /// The scope of a bridge-token request, attached to the request for handlers
-/// that would otherwise derive a project from the body (`agent-api/call`).
+/// that pick a project or a list themselves.
 #[derive(Debug, Clone)]
 pub struct BridgeCaller {
     pub token_id: String,
-    /// The token's project; `None` when its scope has none.
+    /// The token's frozen project; `None` when it has none.
     pub project: Option<String>,
+    /// The launch's own discussions (its scope and the ones it created).
+    pub own_discussions: Vec<String>,
 }
 
 /// Holds a live token; dropping it revokes the token.
@@ -129,12 +187,18 @@ impl Drop for BridgeTokenGuard {
     }
 }
 
-/// Mint a token for one launch. `None` when the scope names nothing: such a
-/// launch has no room tools to authorise.
-pub fn mint(scope: BridgeScope) -> Option<BridgeTokenGuard> {
-    if scope.is_empty() {
-        return None;
-    }
+/// Mint a token for one launch, whatever its scope: a launch that owns
+/// nothing gets a token refused almost everywhere rather than no token (which
+/// would leave its bridge on loopback trust). An error must fail the launch.
+pub fn mint(scope: BridgeScope) -> Result<BridgeTokenGuard, String> {
+    mint_with_lifetime(scope, MAX_LIFETIME)
+}
+
+/// [`mint`] with an explicit lifetime.
+pub fn mint_with_lifetime(
+    scope: BridgeScope,
+    lifetime: Duration,
+) -> Result<BridgeTokenGuard, String> {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let value = format!("{TOKEN_PREFIX}{}", hex(&bytes));
@@ -144,30 +208,48 @@ pub fn mint(scope: BridgeScope) -> Option<BridgeTokenGuard> {
         id: id.clone(),
         scope,
         adopted: Mutex::new(Vec::new()),
+        bound: Mutex::new(None),
+        expires_at: Instant::now() + lifetime,
     });
-    REGISTRY.lock().ok()?.insert(hash, grant);
-    Some(BridgeTokenGuard { value, hash, id })
+    REGISTRY
+        .lock()
+        .map_err(|_| "the bridge token registry is unavailable".to_string())?
+        .insert(hash, grant);
+    Ok(BridgeTokenGuard { value, hash, id })
 }
 
-/// The live grant behind `token`, if any.
+/// The live grant behind `token`, if any. An expired grant is removed.
 pub fn lookup(token: &str) -> Option<Arc<BridgeGrant>> {
     if !token.starts_with(TOKEN_PREFIX) {
         return None;
     }
-    REGISTRY.lock().ok()?.get(&digest(token)).cloned()
+    let mut registry = REGISTRY.lock().ok()?;
+    let key = digest(token);
+    let grant = registry.get(&key)?.clone();
+    if Instant::now() >= grant.expires_at {
+        registry.remove(&key);
+        return None;
+    }
+    Some(grant)
 }
 
-/// How a route checks the ids a request names.
+/// How a route treats the resources a request names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
-    /// Every resource must be in the token's project (project-less resources
-    /// are shared and pass); a discussion may also be one of the launch's own.
-    Project,
-    /// As `Project`, but a discussion must be one of the launch's own.
+    /// Reads: shared resources and the token's project are visible.
+    Read,
+    /// Writes to the launch's own discussions; other ids as for `Write`.
     Own,
-    /// An effect (run, trigger, call, launch, generate): every resource must
-    /// belong to the token's project, and the call is logged with the token id.
+    /// Mutations: the target (path ids, subject keys) must belong to the
+    /// token's project and to no other; referenced ids must be visible.
+    Write,
+    /// Runs, triggers, calls, launches: every resource must belong to the
+    /// token's project, or be shared on a route whose handler runs it for that
+    /// project. Logged with the token id.
     Effect,
+    /// Called by the bridge, never granted to a token (the shared agent
+    /// library is written by humans only).
+    Denied,
 }
 
 /// What an id names.
@@ -183,6 +265,37 @@ pub enum Kind {
     QuickApi,
     QuickExec,
     Page,
+    /// An MCP / API plugin configuration (`api_config_id`, `mcp_config_ids`).
+    McpConfig,
+    /// A model-provider connection; shared by design.
+    Connection,
+    /// A task-execution worker offer.
+    Offer,
+}
+
+/// Whether an id is what the request acts on, or something it references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    Target,
+    Ref,
+}
+
+/// One id a request names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedId {
+    pub kind: Kind,
+    pub id: String,
+    pub role: Role,
+}
+
+impl NamedId {
+    fn new(kind: Kind, id: impl Into<String>, role: Role) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            role,
+        }
+    }
 }
 
 /// One route a bridge token may call.
@@ -212,40 +325,34 @@ const fn r(
 
 use Kind::{Discussion as D, Execution as X, Page as G, Project as P, QuickApi as QA};
 use Kind::{QuickExec as QE, QuickPrompt as QP, Run as R, Task as T, Workflow as W};
-use Rule::{Effect, Own, Project};
+use Rule::{Denied, Effect, Own, Read, Write};
 
 /// Every route `backend/scripts/disc-introspection-mcp.py` calls, and nothing
 /// else. `backend/scripts/test_bridge_routes.py` parses the script and fails
 /// when the two drift apart in either direction.
 pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
-    // Discussions and rooms.
-    r("GET", "/api/discussions", Project, &[]),
+    r("GET", "/api/discussions", Read, &[]),
     r("PATCH", "/api/discussions/{id}", Own, &[("id", D)]),
-    r("GET", "/api/discussions/{id}/meta", Project, &[("id", D)]),
+    r("GET", "/api/discussions/{id}/meta", Read, &[("id", D)]),
     r(
         "GET",
         "/api/discussions/{id}/message/{idx}",
-        Project,
+        Read,
         &[("id", D)],
     ),
-    r("GET", "/api/discussions/{id}/notes", Project, &[("id", D)]),
+    r("GET", "/api/discussions/{id}/notes", Read, &[("id", D)]),
     r(
         "GET",
         "/api/discussions/{id}/participants",
-        Project,
+        Read,
         &[("id", D)],
     ),
-    r(
-        "GET",
-        "/api/discussions/{id}/questions",
-        Project,
-        &[("id", D)],
-    ),
-    r("GET", "/api/discussions/{id}/plan", Project, &[("id", D)]),
+    r("GET", "/api/discussions/{id}/questions", Read, &[("id", D)]),
+    r("GET", "/api/discussions/{id}/plan", Read, &[("id", D)]),
     r(
         "GET",
         "/api/discussions/{id}/plan/changes",
-        Project,
+        Read,
         &[("id", D)],
     ),
     r("GET", "/api/discussions/{id}/wait", Own, &[("id", D)]),
@@ -275,119 +382,116 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         Own,
         &[("id", D)],
     ),
-    r("POST", "/api/discussions/peer-join", Project, &[]),
-    r("POST", "/api/discussions/peer-leave", Project, &[]),
-    r("POST", "/api/discussions/peer-resume", Project, &[]),
-    r("POST", "/api/discussions/workflow-step-join", Project, &[]),
+    r("POST", "/api/discussions/peer-join", Write, &[]),
+    r("POST", "/api/discussions/peer-leave", Write, &[]),
+    r("POST", "/api/discussions/peer-resume", Write, &[]),
+    r("POST", "/api/discussions/workflow-step-join", Write, &[]),
     r(
         "POST",
         "/api/discussions/orchestrator-return-resume",
-        Project,
+        Write,
         &[],
     ),
-    r("POST", "/api/disc/create", Project, &[]),
+    r("POST", "/api/disc/create", Write, &[]),
     r("POST", "/api/disc/append", Own, &[]),
     r("POST", "/api/disc/link", Own, &[]),
     r("POST", "/api/disc/unlink", Own, &[]),
     r("POST", "/api/disc/transfer-session", Own, &[]),
-    r("GET", "/api/disc/find_by_session", Project, &[]),
-    r("GET", "/api/disc/load_other", Project, &[]),
-    r("GET", "/api/disc/search", Project, &[]),
-    r("GET", "/api/disc/session-status", Project, &[]),
-    r("GET", "/api/disc/workspace", Project, &[]),
+    r("GET", "/api/disc/find_by_session", Read, &[]),
+    r("GET", "/api/disc/load_other", Read, &[]),
+    r("GET", "/api/disc/search", Read, &[]),
+    r("GET", "/api/disc/session-status", Read, &[]),
+    r("GET", "/api/disc/workspace", Read, &[]),
     r("POST", "/api/disc/workspace", Own, &[]),
     r("POST", "/api/disc/workspace/history-lease", Own, &[]),
-    r("POST", "/api/human-credentials/proof", Project, &[]),
-    r("GET", "/api/resolve/{id}", Project, &[]),
-    // Planning.
-    r("GET", "/api/planning/tasks", Project, &[]),
-    r("POST", "/api/planning/tasks", Project, &[]),
-    r("GET", "/api/planning/tasks/{id}", Project, &[("id", T)]),
-    r("PATCH", "/api/planning/tasks/{id}", Project, &[("id", T)]),
+    r("POST", "/api/human-credentials/proof", Read, &[]),
+    r("GET", "/api/resolve/{id}", Read, &[]),
+    r("GET", "/api/planning/tasks", Read, &[]),
+    r("POST", "/api/planning/tasks", Write, &[]),
+    r("GET", "/api/planning/tasks/{id}", Read, &[("id", T)]),
+    r("PATCH", "/api/planning/tasks/{id}", Write, &[("id", T)]),
     r(
         "PATCH",
         "/api/planning/tasks/{id}/dod/{dod_id}",
-        Project,
+        Write,
         &[("id", T)],
     ),
     r(
         "POST",
         "/api/planning/tasks/{id}/discussions",
-        Project,
+        Write,
         &[("id", T)],
     ),
     r(
         "DELETE",
         "/api/planning/tasks/{id}/discussions",
-        Project,
+        Write,
         &[("id", T)],
     ),
     r(
         "POST",
         "/api/planning/tasks/{id}/blockers",
-        Project,
+        Write,
         &[("id", T)],
     ),
     r(
         "DELETE",
         "/api/planning/tasks/{id}/blockers/{blocker_id}",
-        Project,
+        Write,
         &[("id", T), ("blocker_id", T)],
     ),
-    r("GET", "/api/planning/proposals", Project, &[]),
-    r("GET", "/api/planning/proposals/{id}", Project, &[]),
-    r("POST", "/api/learnings/propose", Project, &[]),
-    // Task orchestration.
-    r("POST", "/api/orchestration/tool/workers", Project, &[]),
-    r("POST", "/api/orchestration/tool/prepare", Project, &[]),
+    r("GET", "/api/planning/proposals", Read, &[]),
+    r("GET", "/api/planning/proposals/{id}", Read, &[]),
+    r("POST", "/api/learnings/propose", Write, &[]),
+    r("POST", "/api/orchestration/tool/workers", Read, &[]),
+    r("POST", "/api/orchestration/tool/prepare", Read, &[]),
     r("POST", "/api/orchestration/tool/launch", Effect, &[]),
     r(
         "POST",
         "/api/orchestration/tool/executions/{id}/status",
-        Project,
+        Read,
         &[("id", X)],
     ),
     r(
         "POST",
         "/api/orchestration/tool/executions/{id}/resume",
-        Project,
+        Write,
         &[("id", X)],
     ),
     r(
         "POST",
         "/api/orchestration/tool/executions/{id}/cancel",
-        Project,
+        Write,
         &[("id", X)],
     ),
     r(
         "POST",
         "/api/orchestration/tool/executions/{id}/reassign",
-        Project,
+        Write,
         &[("id", X)],
     ),
-    r("POST", "/api/orchestration/accept-offer", Project, &[]),
-    r("POST", "/api/orchestration/deliver", Project, &[]),
-    r("POST", "/api/orchestration/worker-commit", Project, &[]),
-    r("POST", "/api/orchestration/review", Project, &[]),
-    // Workflows.
-    r("GET", "/api/workflows", Project, &[]),
-    r("POST", "/api/workflows", Project, &[]),
-    r("POST", "/api/workflows/import", Project, &[]),
-    r("GET", "/api/workflows/step-schema", Project, &[]),
-    r("GET", "/api/workflows/{id}", Project, &[("id", W)]),
-    r("PUT", "/api/workflows/{id}", Project, &[("id", W)]),
-    r("GET", "/api/workflows/{id}/export", Project, &[("id", W)]),
-    r("GET", "/api/workflows/{id}/runs", Project, &[("id", W)]),
+    r("POST", "/api/orchestration/accept-offer", Write, &[]),
+    r("POST", "/api/orchestration/deliver", Write, &[]),
+    r("POST", "/api/orchestration/worker-commit", Write, &[]),
+    r("POST", "/api/orchestration/review", Write, &[]),
+    r("GET", "/api/workflows", Read, &[]),
+    r("POST", "/api/workflows", Write, &[]),
+    r("POST", "/api/workflows/import", Write, &[]),
+    r("GET", "/api/workflows/step-schema", Read, &[]),
+    r("GET", "/api/workflows/{id}", Read, &[("id", W)]),
+    r("PUT", "/api/workflows/{id}", Write, &[("id", W)]),
+    r("GET", "/api/workflows/{id}/export", Read, &[("id", W)]),
+    r("GET", "/api/workflows/{id}/runs", Read, &[("id", W)]),
     r(
         "GET",
         "/api/workflows/{id}/runs/{run_id}",
-        Project,
+        Read,
         &[("id", W), ("run_id", R)],
     ),
     r(
         "POST",
         "/api/workflows/{id}/runs/{run_id}/cancel",
-        Project,
+        Write,
         &[("id", W), ("run_id", R)],
     ),
     r(
@@ -400,77 +504,53 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r(
         "GET",
         "/api/mcp/workflow-run-status/{run_id}",
-        Project,
+        Read,
         &[("run_id", R)],
     ),
     r(
         "GET",
         "/api/mcp/workflow-run-discussions/{run_id}",
-        Project,
+        Read,
         &[("run_id", R)],
     ),
-    r(
-        "POST",
-        "/api/mcp/workflow-wait-for-completion",
-        Project,
-        &[],
-    ),
-    // Quick prompts, APIs and execs.
-    r("GET", "/api/quick-prompts", Project, &[]),
-    r("POST", "/api/quick-prompts", Project, &[]),
-    r("PUT", "/api/quick-prompts/{id}", Project, &[("id", QP)]),
-    r("DELETE", "/api/quick-prompts/{id}", Project, &[("id", QP)]),
+    r("POST", "/api/mcp/workflow-wait-for-completion", Read, &[]),
+    r("GET", "/api/quick-prompts", Read, &[]),
+    r("POST", "/api/quick-prompts", Write, &[]),
+    r("PUT", "/api/quick-prompts/{id}", Write, &[("id", QP)]),
+    r("DELETE", "/api/quick-prompts/{id}", Write, &[("id", QP)]),
     r("POST", "/api/mcp/qp-run", Effect, &[]),
     r("POST", "/api/mcp/qp-batch-run", Effect, &[]),
-    r("GET", "/api/quick-apis", Project, &[]),
-    r("POST", "/api/quick-apis", Project, &[]),
-    r("PUT", "/api/quick-apis/{id}", Project, &[("id", QA)]),
+    r("GET", "/api/quick-apis", Read, &[]),
+    r("POST", "/api/quick-apis", Write, &[]),
+    r("PUT", "/api/quick-apis/{id}", Write, &[("id", QA)]),
     r("POST", "/api/quick-apis/{id}/run", Effect, &[("id", QA)]),
-    r("GET", "/api/quick-execs", Project, &[]),
-    r("POST", "/api/quick-execs", Project, &[]),
-    r("PUT", "/api/quick-execs/{id}", Project, &[("id", QE)]),
+    r("GET", "/api/quick-execs", Read, &[]),
+    r("POST", "/api/quick-execs", Write, &[]),
+    r("PUT", "/api/quick-execs/{id}", Write, &[("id", QE)]),
     r("POST", "/api/quick-execs/{id}/run", Effect, &[("id", QE)]),
     r("POST", "/api/agent-api/call", Effect, &[]),
-    // Pages.
-    r("POST", "/api/pages", Project, &[]),
-    r("GET", "/api/pages/{id}", Project, &[("id", G)]),
-    r("PUT", "/api/pages/{id}/html", Project, &[("id", G)]),
-    r("POST", "/api/pages/{id}/datasets", Project, &[("id", G)]),
-    r("GET", "/api/pages/{id}/workflows", Project, &[("id", G)]),
-    r("GET", "/api/pages/{id}/discussions", Project, &[("id", G)]),
-    // Media.
+    r("POST", "/api/pages", Write, &[]),
+    r("GET", "/api/pages/{id}", Read, &[("id", G)]),
+    r("PUT", "/api/pages/{id}/html", Write, &[("id", G)]),
+    r("POST", "/api/pages/{id}/datasets", Write, &[("id", G)]),
+    r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
+    r("GET", "/api/pages/{id}/discussions", Read, &[("id", G)]),
     r("POST", "/api/media/generate", Effect, &[]),
-    r("GET", "/api/media/jobs/{id}", Project, &[]),
-    // Projects and audits.
-    r("GET", "/api/projects/{id}", Project, &[("id", P)]),
-    r(
-        "GET",
-        "/api/projects/{id}/audit-info",
-        Project,
-        &[("id", P)],
-    ),
-    r(
-        "GET",
-        "/api/projects/{id}/audit-status",
-        Project,
-        &[("id", P)],
-    ),
-    r(
-        "GET",
-        "/api/projects/{id}/audit-latest",
-        Project,
-        &[("id", P)],
-    ),
+    r("GET", "/api/media/jobs/{id}", Read, &[]),
+    r("GET", "/api/projects/{id}", Read, &[("id", P)]),
+    r("GET", "/api/projects/{id}/audit-info", Read, &[("id", P)]),
+    r("GET", "/api/projects/{id}/audit-status", Read, &[("id", P)]),
+    r("GET", "/api/projects/{id}/audit-latest", Read, &[("id", P)]),
     r(
         "GET",
         "/api/projects/{id}/audit-resumable",
-        Project,
+        Read,
         &[("id", P)],
     ),
     r(
         "POST",
         "/api/projects/{id}/install-template",
-        Project,
+        Write,
         &[("id", P)],
     ),
     r(
@@ -485,54 +565,22 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         Effect,
         &[("id", P)],
     ),
-    // Agent library, MCP overview, catalogues (global, not project-bound).
-    r("GET", "/api/skills", Project, &[]),
-    r("POST", "/api/skills", Project, &[]),
-    r("PUT", "/api/skills/{id}", Project, &[]),
-    r("DELETE", "/api/skills/{id}", Project, &[]),
-    r("GET", "/api/profiles", Project, &[]),
-    r("POST", "/api/profiles", Project, &[]),
-    r("PUT", "/api/profiles/{id}", Project, &[]),
-    r("DELETE", "/api/profiles/{id}", Project, &[]),
-    r("GET", "/api/directives", Project, &[]),
-    r("POST", "/api/directives", Project, &[]),
-    r("PUT", "/api/directives/{id}", Project, &[]),
-    r("DELETE", "/api/directives/{id}", Project, &[]),
-    r("GET", "/api/mcps", Project, &[]),
-    r("GET", "/api/signals/catalog", Project, &[]),
-    r("GET", "/api/conventions/agents-md-format-v1", Project, &[]),
+    r("GET", "/api/skills", Read, &[]),
+    r("POST", "/api/skills", Denied, &[]),
+    r("PUT", "/api/skills/{id}", Denied, &[]),
+    r("DELETE", "/api/skills/{id}", Denied, &[]),
+    r("GET", "/api/profiles", Read, &[]),
+    r("POST", "/api/profiles", Denied, &[]),
+    r("PUT", "/api/profiles/{id}", Denied, &[]),
+    r("DELETE", "/api/profiles/{id}", Denied, &[]),
+    r("GET", "/api/directives", Read, &[]),
+    r("POST", "/api/directives", Denied, &[]),
+    r("PUT", "/api/directives/{id}", Denied, &[]),
+    r("DELETE", "/api/directives/{id}", Denied, &[]),
+    r("GET", "/api/mcps", Read, &[]),
+    r("GET", "/api/signals/catalog", Read, &[]),
+    r("GET", "/api/conventions/agents-md-format-v1", Read, &[]),
 ];
-
-/// Routes whose run lands on a project the body may leave unnamed.
-const RUNS_FOR_A_PROJECT: &[&str] = &["/api/mcp/workflow-trigger"];
-
-/// The body with the token's project added when a run-launching route names
-/// none, so a shared or multi-project workflow resolves to that project like a
-/// launch from its discussion (KT-851). `None` = the body stays as sent.
-pub fn with_bound_project(
-    route: &BridgeRoute,
-    bound_project: Option<&str>,
-    body: Option<serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let project = bound_project?;
-    if !RUNS_FOR_A_PROJECT.contains(&route.pattern) {
-        return None;
-    }
-    let mut body = body?;
-    let fields = body.as_object_mut()?;
-    if fields
-        .get("project_id")
-        .is_some_and(|value| !value.is_null())
-    {
-        return None;
-    }
-    fields.insert(
-        "project_id".into(),
-        serde_json::Value::String(project.into()),
-    );
-    Some(body)
-}
-
 /// The route a bridge token may call for this method and matched pattern.
 pub fn route_for(method: &str, pattern: &str) -> Option<&'static BridgeRoute> {
     BRIDGE_ROUTES
@@ -540,7 +588,202 @@ pub fn route_for(method: &str, pattern: &str) -> Option<&'static BridgeRoute> {
         .find(|route| route.method.eq_ignore_ascii_case(method) && route.pattern == pattern)
 }
 
-/// Body and query keys that name a scoped resource, wherever they appear.
+/// Routes a token that owns nothing and has no project may still call: global
+/// catalogues, read only.
+const UNBOUND_ROUTES: &[&str] = &[
+    "/api/conventions/agents-md-format-v1",
+    "/api/workflows/step-schema",
+    "/api/signals/catalog",
+    "/api/skills",
+    "/api/profiles",
+    "/api/directives",
+];
+
+/// Whether a token whose scope owns nothing and names no project may call
+/// this route.
+pub fn unbound_route_allowed(route: &BridgeRoute) -> bool {
+    route.method == "GET" && UNBOUND_ROUTES.contains(&route.pattern)
+}
+
+/// Routes whose run lands on a project the body may leave unnamed: the token's
+/// project is added, so a shared or multi-project resource runs for it.
+const RUNS_FOR_A_PROJECT: &[&str] = &[
+    "/api/mcp/workflow-trigger",
+    "/api/mcp/qp-run",
+    "/api/mcp/qp-batch-run",
+];
+
+/// Effect routes whose handler runs a shared resource for the token's project
+/// (body injection above, or the handler reads [`BridgeCaller`]).
+const SHARED_EFFECT_ROUTES: &[&str] = &[
+    "/api/mcp/workflow-trigger",
+    "/api/mcp/qp-run",
+    "/api/mcp/qp-batch-run",
+    "/api/quick-apis/{id}/run",
+    "/api/quick-execs/{id}/run",
+    "/api/agent-api/call",
+    "/api/media/generate",
+    "/api/orchestration/tool/launch",
+];
+
+/// Create routes and the field holding the new resource's project: forced to
+/// the token's project.
+const CREATE_ROUTES: &[(&str, &str)] = &[
+    ("/api/workflows", "project_id"),
+    ("/api/workflows/import", "project_id"),
+    ("/api/quick-prompts", "project_id"),
+    ("/api/quick-apis", "project_id"),
+    ("/api/quick-execs", "project_id"),
+    ("/api/pages", "project_id"),
+    ("/api/planning/tasks", "project_ids"),
+    ("/api/disc/create", "project_id"),
+];
+
+/// Update routes whose handler resets or may drop the project when the body
+/// omits it: the token's project is sent explicitly.
+const KEEPS_PROJECT_ON_UPDATE: &[&str] = &[
+    "/api/workflows/{id}",
+    "/api/quick-prompts/{id}",
+    "/api/quick-apis/{id}",
+    "/api/quick-execs/{id}",
+];
+
+/// The JSON body the handler will receive: the token's project forced on
+/// creation, kept on update, added to a project-less run; a project removed,
+/// changed or widened, or a workflow scope beyond the token's project, is
+/// refused. `Ok(None)` = the body stays as sent.
+pub fn prepare_body(
+    route: &BridgeRoute,
+    bound: Option<&str>,
+    body: Option<&serde_json::Value>,
+) -> Result<Option<serde_json::Value>, Refusal> {
+    if route.method == "GET" {
+        return Ok(None);
+    }
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let mut body = body.clone();
+    let mut changed = false;
+    if let Some(fields) = body.as_object_mut() {
+        let create = CREATE_ROUTES
+            .iter()
+            .find(|(pattern, _)| route.method == "POST" && *pattern == route.pattern);
+        if let Some((_, field)) = create {
+            let unset = match fields.get(*field) {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::Array(items)) => items.is_empty(),
+                Some(_) => false,
+            };
+            if unset {
+                match (bound, *field) {
+                    (Some(project), "project_ids") => {
+                        fields.insert(field.to_string(), serde_json::json!([project]));
+                        changed = true;
+                    }
+                    (Some(project), _) => {
+                        fields.insert(field.to_string(), serde_json::json!(project));
+                        changed = true;
+                    }
+                    // A project-less launch may create its own discussions only.
+                    (None, _) if route.pattern == "/api/disc/create" => {}
+                    (None, _) => {
+                        return Err(Refusal(
+                            "a bridge token without a project cannot create shared resources"
+                                .into(),
+                        ))
+                    }
+                }
+            }
+        } else if let Some(project) = bound {
+            let keeps = route.method == "PUT" && KEEPS_PROJECT_ON_UPDATE.contains(&route.pattern);
+            if keeps && !fields.contains_key("project_id") {
+                fields.insert("project_id".into(), serde_json::json!(project));
+                changed = true;
+            }
+            if RUNS_FOR_A_PROJECT.contains(&route.pattern)
+                && fields.get("project_id").is_none_or(|value| value.is_null())
+            {
+                fields.insert("project_id".into(), serde_json::json!(project));
+                changed = true;
+            }
+        }
+        // The resource's own project may be named only as the token's.
+        match fields.get("project_id") {
+            Some(serde_json::Value::Null) => {
+                return Err(Refusal(
+                    "a bridge token cannot move a resource out of its project".into(),
+                ))
+            }
+            Some(serde_json::Value::String(project)) if Some(project.as_str()) != bound => {
+                return Err(Refusal(format!(
+                    "project {project} is outside this bridge token's project"
+                )))
+            }
+            _ => {}
+        }
+        match fields.get("project_ids") {
+            Some(serde_json::Value::Null) => {
+                return Err(Refusal(
+                    "a bridge token cannot move a resource out of its project".into(),
+                ))
+            }
+            Some(serde_json::Value::Array(items)) if items.is_empty() => {
+                return Err(Refusal(
+                    "a bridge token cannot move a resource out of its project".into(),
+                ))
+            }
+            _ => {}
+        }
+    }
+    check_project_scopes(&body, bound)?;
+    if route.pattern == "/api/workflows/import" {
+        let content = import_content(&body)?;
+        check_project_scopes(&content, bound)?;
+    }
+    Ok(changed.then_some(body))
+}
+
+/// A workflow may be scoped to the token's project only: `null`, or
+/// `{"type":"Projects","project_ids":[bound]}`.
+fn check_project_scopes(value: &serde_json::Value, bound: Option<&str>) -> Result<(), Refusal> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
+                let kind = scope.get("type").and_then(|kind| kind.as_str());
+                let ids: Vec<&str> = scope
+                    .get("project_ids")
+                    .and_then(|ids| ids.as_array())
+                    .map(|ids| ids.iter().filter_map(|id| id.as_str()).collect())
+                    .unwrap_or_default();
+                let only_bound =
+                    kind == Some("Projects") && bound.is_some_and(|project| ids == [project]);
+                if !only_bound {
+                    return Err(Refusal(
+                        "a bridge token may scope a workflow to its own project only".into(),
+                    ));
+                }
+            }
+            fields
+                .values()
+                .try_for_each(|child| check_project_scopes(child, bound))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|child| check_project_scopes(child, bound)),
+        _ => Ok(()),
+    }
+}
+
+/// The workflow envelope an import carries as a JSON string.
+fn import_content(body: &serde_json::Value) -> Result<serde_json::Value, Refusal> {
+    body.get("content")
+        .and_then(|content| content.as_str())
+        .and_then(|content| serde_json::from_str(content).ok())
+        .ok_or_else(|| Refusal("an imported workflow must be a JSON envelope".into()))
+}
+
+/// Body and query keys that name a scoped resource, at any depth.
 const ID_KEYS: &[(&str, Kind)] = &[
     ("discussion_id", Kind::Discussion),
     ("disc_id", Kind::Discussion),
@@ -555,11 +798,15 @@ const ID_KEYS: &[(&str, Kind)] = &[
     ("resume_disc_id", Kind::Discussion),
     ("expected_disc_id", Kind::Discussion),
     ("expected_child_disc_id", Kind::Discussion),
+    ("bound_disc_id", Kind::Discussion),
+    ("connected_disc_id", Kind::Discussion),
+    ("room_id", Kind::Discussion),
     ("project_id", Kind::Project),
     ("project_ids", Kind::Project),
     ("target_project_id", Kind::Project),
     ("task_id", Kind::Task),
     ("blocker_task_id", Kind::Task),
+    ("task_reference", Kind::Task),
     ("workflow_id", Kind::Workflow),
     ("parent_workflow_id", Kind::Workflow),
     ("sub_workflow_id", Kind::Workflow),
@@ -571,66 +818,157 @@ const ID_KEYS: &[(&str, Kind)] = &[
     ("task_execution_id", Kind::Execution),
     ("qp_id", Kind::QuickPrompt),
     ("quick_prompt_id", Kind::QuickPrompt),
+    ("batch_quick_prompt_id", Kind::QuickPrompt),
+    ("batch_chain_prompt_ids", Kind::QuickPrompt),
     ("qa_id", Kind::QuickApi),
     ("quick_api_id", Kind::QuickApi),
     ("qe_id", Kind::QuickExec),
     ("page_id", Kind::Page),
+    ("api_config_id", Kind::McpConfig),
+    ("mcp_config_ids", Kind::McpConfig),
+    ("connection_id", Kind::Connection),
+    ("offer_id", Kind::Offer),
 ];
 
-fn kind_of_key(key: &str) -> Option<Kind> {
+/// Keys naming what a write acts on rather than what it references.
+const TARGET_KEYS: &[&str] = &["task_execution_id", "execution_id", "offer_id", "parent_id"];
+
+fn kind_of_key(route: &BridgeRoute, key: &str) -> Option<Kind> {
+    // `parent_id` is a task only on the planning routes; elsewhere it names
+    // something unscoped (a message, a step).
+    if key == "parent_id" {
+        return route
+            .pattern
+            .starts_with("/api/planning/tasks")
+            .then_some(Kind::Task);
+    }
     ID_KEYS
         .iter()
         .find_map(|(name, kind)| (*name == key).then_some(*kind))
 }
 
-/// The ids a request names: path parameters the route declares, query
-/// parameters and top-level JSON body fields with a known key.
+fn key_role(key: &str) -> Role {
+    if TARGET_KEYS.contains(&key) {
+        Role::Target
+    } else {
+        Role::Ref
+    }
+}
+
+/// Path parameters a route declares that name what it references, not what
+/// it acts on.
+fn param_role(route: &BridgeRoute, name: &str) -> Role {
+    let reference =
+        (name == "id" && route.pattern.contains("/runs/{run_id}")) || name == "blocker_id";
+    if reference {
+        Role::Ref
+    } else {
+        Role::Target
+    }
+}
+
+/// Collect every id under a known key in `value`, at any depth. `skip_keys`
+/// are not collected; `internal` ids are defined inside the value itself.
+fn walk_ids(
+    route: &BridgeRoute,
+    value: &serde_json::Value,
+    skip_keys: &[&str],
+    internal: &HashSet<String>,
+    out: &mut Vec<NamedId>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, child) in fields {
+                if let Some(kind) =
+                    kind_of_key(route, key).filter(|_| !skip_keys.contains(&key.as_str()))
+                {
+                    let role = key_role(key);
+                    let mut push = |id: &str| {
+                        if !id.is_empty() && !internal.contains(id) {
+                            out.push(NamedId::new(kind, id, role));
+                        }
+                    };
+                    match child {
+                        serde_json::Value::String(id) => push(id),
+                        serde_json::Value::Array(items) => items
+                            .iter()
+                            .filter_map(|item| item.as_str())
+                            .for_each(&mut push),
+                        _ => {}
+                    }
+                }
+                walk_ids(route, child, skip_keys, internal, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk_ids(route, item, skip_keys, internal, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every `id` value defined inside a value (the resources an import bundles).
+fn defined_ids(value: &serde_json::Value, out: &mut HashSet<String>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Some(id) = fields.get("id").and_then(|id| id.as_str()) {
+                out.insert(id.to_owned());
+            }
+            fields.values().for_each(|child| defined_ids(child, out));
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|child| defined_ids(child, out)),
+        _ => {}
+    }
+}
+
+/// The ids a request names: declared path parameters, query parameters, and
+/// known keys at any depth of the JSON body, plus the workflow an import
+/// carries (its own project fields are replaced at import, and the resources
+/// it bundles are not looked up).
 pub fn collect_ids(
     route: &BridgeRoute,
     path_params: &[(String, String)],
     query: Option<&str>,
     body: Option<&serde_json::Value>,
-) -> Vec<(Kind, String)> {
+) -> Result<Vec<NamedId>, Refusal> {
     let mut ids = Vec::new();
     for (name, value) in path_params {
         if let Some((_, kind)) = route.params.iter().find(|(param, _)| param == name) {
-            ids.push((*kind, value.clone()));
+            ids.push(NamedId::new(*kind, value.clone(), param_role(route, name)));
         }
     }
     if let Some(query) = query {
         for pair in query.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            if let Some(kind) = kind_of_key(&percent_decode(key)) {
+            let key = percent_decode(key);
+            if let Some(kind) = kind_of_key(route, &key) {
                 let value = percent_decode(value);
                 if !value.is_empty() {
-                    ids.push((kind, value));
+                    ids.push(NamedId::new(kind, value, key_role(&key)));
                 }
             }
         }
     }
-    if let Some(serde_json::Value::Object(fields)) = body {
-        for (key, value) in fields {
-            let Some(kind) = kind_of_key(key) else {
-                continue;
-            };
-            match value {
-                serde_json::Value::String(id) if !id.is_empty() => {
-                    ids.push((kind, id.clone()));
-                }
-                serde_json::Value::Array(items) => {
-                    for item in items {
-                        if let serde_json::Value::String(id) = item {
-                            if !id.is_empty() {
-                                ids.push((kind, id.clone()));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+    if let Some(body) = body {
+        walk_ids(route, body, &[], &HashSet::new(), &mut ids);
+        if route.pattern == "/api/workflows/import" {
+            let content = import_content(body)?;
+            let mut internal = HashSet::new();
+            defined_ids(&content, &mut internal);
+            walk_ids(
+                route,
+                &content,
+                &["project_id", "project_ids"],
+                &internal,
+                &mut ids,
+            );
         }
     }
-    ids
+    ids.sort_by(|a, b| (a.id.as_str(), a.role as u8).cmp(&(b.id.as_str(), b.role as u8)));
+    ids.dedup();
+    Ok(ids)
 }
 
 /// `application/x-www-form-urlencoded` decoding: `+` and `%XX`. Invalid
@@ -659,25 +997,36 @@ pub fn percent_decode(raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Where a resource lives. `None` from the resolver = the resource does not
-/// exist (the handler answers 404 on its own).
+/// Where a resource lives. `None` from the resolver = it does not exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Residence {
-    /// Project-less: shared by every scope.
+    /// Project-less: shared by every scope (a project-less discussion is
+    /// private to its own launches instead).
     Global,
     /// Every project the resource serves.
     Projects(HashSet<String>),
-    /// Serves every project (a workflow scoped to all of them).
+    /// Serves every project (a global config, a workflow scoped to all).
     AllProjects,
+    /// Visible to project-less callers only (an MCP config opted into General
+    /// discussions and linked to no project).
+    General,
 }
 
 impl Residence {
     fn holds(&self, project: &str) -> bool {
         match self {
-            Self::Global => false,
             Self::AllProjects => true,
             Self::Projects(projects) => projects.contains(project),
+            Self::Global | Self::General => false,
         }
+    }
+
+    fn only(&self, project: &str) -> bool {
+        matches!(self, Self::Projects(projects) if projects.len() == 1 && projects.contains(project))
+    }
+
+    fn shared(&self) -> bool {
+        !matches!(self, Self::Projects(_))
     }
 }
 
@@ -685,233 +1034,128 @@ impl Residence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+fn owns(grant: &BridgeGrant, kind: Kind, id: &str) -> bool {
+    match kind {
+        Kind::Discussion => grant.owns_discussion(id),
+        Kind::Execution => grant.scope.task_execution_id.as_deref() == Some(id),
+        Kind::Run => grant.scope.workflow_run_id.as_deref() == Some(id),
+        _ => false,
+    }
+}
+
+/// Whether a token may see a resource: its own, its project's, or shared
+/// (project-less discussions excepted: they are private to their launches).
+pub fn visible_for_read(
+    grant: &BridgeGrant,
+    kind: Kind,
+    id: &str,
+    place: &Residence,
+    bound: Option<&str>,
+) -> bool {
+    if owns(grant, kind, id) {
+        return true;
+    }
+    match (kind, place) {
+        (Kind::Project, _) => bound == Some(id),
+        (Kind::Discussion, Residence::Projects(_)) => bound.is_some_and(|p| place.holds(p)),
+        (Kind::Discussion, _) => false,
+        (_, Residence::Projects(_)) => bound.is_some_and(|p| place.holds(p)),
+        (_, Residence::General) => bound.is_none(),
+        (_, Residence::Global | Residence::AllProjects) => true,
+    }
+}
+
+fn writable(
+    grant: &BridgeGrant,
+    kind: Kind,
+    id: &str,
+    place: &Residence,
+    bound: Option<&str>,
+) -> bool {
+    owns(grant, kind, id) || bound.is_some_and(|project| place.only(project))
+}
+
+fn effect_allowed(
+    grant: &BridgeGrant,
+    route: &BridgeRoute,
+    kind: Kind,
+    id: &str,
+    place: &Residence,
+    bound: Option<&str>,
+) -> bool {
+    if owns(grant, kind, id) {
+        return true;
+    }
+    if kind == Kind::Discussion {
+        // Discussions are never shared resources: own, or the bound project's.
+        return matches!(place, Residence::Projects(_)) && bound.is_some_and(|p| place.holds(p));
+    }
+    if let Some(project) = bound {
+        if matches!(place, Residence::Projects(_)) {
+            return place.holds(project);
+        }
+    }
+    let shared_effect = SHARED_EFFECT_ROUTES.contains(&route.pattern);
+    match (place, bound) {
+        (Residence::Projects(_), _) => false,
+        (_, Some(_)) => shared_effect && !matches!(place, Residence::General),
+        // A project-less token runs only what is itself project-less.
+        (Residence::Global | Residence::General, None) => shared_effect,
+        (Residence::AllProjects, None) => false,
+    }
+}
+
 /// Decide one request against the grant. `residence` looks a resource up;
-/// `bound_project` is the grant's resolved project.
+/// `bound` is the grant's frozen project.
 pub fn authorize(
     grant: &BridgeGrant,
     route: &BridgeRoute,
-    bound_project: Option<&str>,
-    ids: &[(Kind, String)],
+    bound: Option<&str>,
+    ids: &[NamedId],
     mut residence: impl FnMut(Kind, &str) -> Result<Option<Residence>, Refusal>,
 ) -> Result<(), Refusal> {
-    // An explicit project in the body is where an effect lands: it lets a
-    // shared (project-less) resource act on the bound project only.
-    let targets_bound_project = ids
-        .iter()
-        .any(|(kind, id)| *kind == Kind::Project && Some(id.as_str()) == bound_project);
-    for (kind, id) in ids {
-        let own = match kind {
-            Kind::Discussion => grant.owns_discussion(id),
-            Kind::Execution => grant.scope.task_execution_id.as_deref() == Some(id.as_str()),
-            Kind::Run => grant.scope.workflow_run_id.as_deref() == Some(id.as_str()),
-            Kind::Project => bound_project == Some(id.as_str()),
-            _ => false,
-        };
-        if own {
-            continue;
-        }
-        if *kind == Kind::Discussion && route.rule == Rule::Own {
-            return Err(Refusal(format!(
-                "a bridge token may only write to its own discussion, not {id}"
-            )));
-        }
-        if *kind == Kind::Project {
+    if route.rule == Rule::Denied {
+        return Err(Refusal(
+            "this route is not available to a Kronn-launched agent's bridge token".into(),
+        ));
+    }
+    for named in ids {
+        let (kind, id) = (named.kind, named.id.as_str());
+        if kind == Kind::Project {
+            if bound == Some(id) {
+                continue;
+            }
             return Err(Refusal(format!(
                 "project {id} is outside this bridge token's project"
             )));
         }
-        // An id the operation would not resolve either is refused, never let
-        // through: authorizing must see what the handler will act on.
-        let Some(place) = residence(*kind, id)? else {
-            return Err(Refusal(format!("{kind:?} {id} does not exist")));
-        };
-        let allowed = match (&place, bound_project) {
-            (Residence::Global, _) => {
-                route.rule != Rule::Effect || targets_bound_project || bound_project.is_none()
-            }
-            (_, Some(project)) => place.holds(project),
-            (Residence::AllProjects, None) => route.rule != Rule::Effect,
-            (Residence::Projects(_), None) => false,
-        };
-        if !allowed {
+        if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
             return Err(Refusal(format!(
-                "{kind:?} {id} is outside this bridge token's scope"
+                "a bridge token may only write to its own discussion, not {id}"
             )));
         }
+        // An id the operation would not resolve either is refused, never let
+        // through: authorizing must see what the handler will act on.
+        let place = match residence(kind, id)? {
+            Some(place) => place,
+            None if owns(grant, kind, id) => continue,
+            None => return Err(Refusal(format!("{kind:?} {id} does not exist"))),
+        };
+        let allowed = match (route.rule, named.role) {
+            (Rule::Effect, _) => effect_allowed(grant, route, kind, id, &place, bound),
+            (Rule::Write | Rule::Own, Role::Target) => writable(grant, kind, id, &place, bound),
+            _ => visible_for_read(grant, kind, id, &place, bound),
+        };
+        if !allowed {
+            let why = if place.shared() && named.role == Role::Target {
+                "is shared: a bridge token may read it, not change it"
+            } else {
+                "is outside this bridge token's scope"
+            };
+            return Err(Refusal(format!("{kind:?} {id} {why}")));
+        }
     }
     Ok(())
-}
-
-/// Whether a bridge-token response is scoped after the handler ran: every
-/// read, so lists, searches and lookups only show the token's project.
-pub fn scopes_response(route: &BridgeRoute) -> bool {
-    route.method == "GET"
-}
-
-const DISCUSSION_FIELDS: &[&str] = &["discussion_id", "disc_id"];
-
-fn object_has_project_fields(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
-    fields.contains_key("project_id") || fields.contains_key("project_ids")
-}
-
-/// Discussion ids an object names without a project of its own, at the depths
-/// [`scope_response`] inspects; their projects are looked up before scoping.
-pub fn discussions_to_resolve(data: &serde_json::Value) -> Vec<String> {
-    fn visit(value: &serde_json::Value, depth: usize, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::Object(fields) => {
-                if !object_has_project_fields(fields) {
-                    for key in DISCUSSION_FIELDS {
-                        if let Some(id) = fields.get(*key).and_then(|v| v.as_str()) {
-                            out.push(id.to_owned());
-                        }
-                    }
-                }
-                if depth < 3 {
-                    for child in fields.values() {
-                        visit(child, depth + 1, out);
-                    }
-                }
-            }
-            serde_json::Value::Array(items) if depth < 3 => {
-                for item in items {
-                    visit(item, depth + 1, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    visit(data, 0, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-/// Whether one response object belongs to the token's scope: its project
-/// fields when it has some (a workflow's `project_scope` included), else the
-/// project of the discussion it names, else it is not project-bound.
-fn object_visible(
-    fields: &serde_json::Map<String, serde_json::Value>,
-    grant: &BridgeGrant,
-    bound: Option<&str>,
-    discussion_projects: &HashMap<String, Option<String>>,
-) -> bool {
-    let holds = |project: &str| bound == Some(project);
-    if object_has_project_fields(fields) {
-        if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
-            let raw = scope.to_string();
-            let home = fields
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            return match workflow_residence(home, Some(raw)) {
-                Residence::Global | Residence::AllProjects => true,
-                Residence::Projects(projects) => bound.is_some_and(|p| projects.contains(p)),
-            };
-        }
-        let single = match fields.get("project_id") {
-            Some(serde_json::Value::String(project)) => Some(holds(project)),
-            _ => None,
-        };
-        let listed: Vec<&str> = fields
-            .get("project_ids")
-            .and_then(|v| v.as_array())
-            .map(|ids| ids.iter().filter_map(|id| id.as_str()).collect())
-            .unwrap_or_default();
-        return match single {
-            Some(visible) => visible || listed.iter().any(|p| holds(p)),
-            None => listed.is_empty() || listed.iter().any(|p| holds(p)),
-        };
-    }
-    for key in DISCUSSION_FIELDS {
-        if let Some(id) = fields.get(*key).and_then(|v| v.as_str()) {
-            if grant.owns_discussion(id) {
-                return true;
-            }
-            return match discussion_projects.get(id) {
-                Some(None) => true,
-                Some(Some(project)) => holds(project),
-                None => false,
-            };
-        }
-    }
-    true
-}
-
-/// Scope a read's `data` to the token: an object outside the scope is refused,
-/// list entries outside it are dropped (arrays down to two levels below
-/// `data`, the depth every list response here uses).
-pub fn scope_response(
-    data: &mut serde_json::Value,
-    grant: &BridgeGrant,
-    bound: Option<&str>,
-    discussion_projects: &HashMap<String, Option<String>>,
-) -> Result<(), Refusal> {
-    fn filter(
-        value: &mut serde_json::Value,
-        depth: usize,
-        grant: &BridgeGrant,
-        bound: Option<&str>,
-        projects: &HashMap<String, Option<String>>,
-    ) {
-        match value {
-            serde_json::Value::Array(items) => {
-                items.retain(|item| match item {
-                    serde_json::Value::Object(fields) => {
-                        object_visible(fields, grant, bound, projects)
-                    }
-                    _ => true,
-                });
-                if depth < 2 {
-                    for item in items.iter_mut() {
-                        filter(item, depth + 1, grant, bound, projects);
-                    }
-                }
-            }
-            serde_json::Value::Object(fields) if depth < 2 => {
-                for child in fields.values_mut() {
-                    filter(child, depth + 1, grant, bound, projects);
-                }
-            }
-            _ => {}
-        }
-    }
-    if let serde_json::Value::Object(fields) = &*data {
-        if !object_visible(fields, grant, bound, discussion_projects) {
-            return Err(Refusal(
-                "this resource is outside the bridge token's project".into(),
-            ));
-        }
-    }
-    filter(data, 0, grant, bound, discussion_projects);
-    Ok(())
-}
-
-/// The scoped resource an id-resolver answer names (`/api/resolve/{id}`).
-pub fn resolved_resource(data: &serde_json::Value) -> Option<(Kind, String)> {
-    let kind = data.get("kind")?.as_str()?;
-    let id = data.get("id")?.as_str()?.to_owned();
-    let parent = || {
-        data.get("parent")
-            .and_then(|parent| parent.get("id"))
-            .and_then(|id| id.as_str())
-            .map(str::to_owned)
-    };
-    Some(match kind {
-        "discussion" => (Kind::Discussion, id),
-        "message" | "planning_proposal" => (Kind::Discussion, parent()?),
-        "project" => (Kind::Project, id),
-        "workflow" => (Kind::Workflow, id),
-        "workflow_run" => (Kind::Run, id),
-        "task" => (Kind::Task, id),
-        "task_execution" => (Kind::Execution, id),
-        "quick_prompt" => (Kind::QuickPrompt, id),
-        "quick_api" => (Kind::QuickApi, id),
-        "quick_exec" => (Kind::QuickExec, id),
-        "page" => (Kind::Page, id),
-        _ => return None,
-    })
 }
 
 fn single_or_global(project: Option<String>) -> Residence {
@@ -964,30 +1208,83 @@ pub fn residence(
             .optional()?
             .map(single_or_global))
     };
+    let execution_residence = |execution_id: &str| -> anyhow::Result<Option<Residence>> {
+        // Same resolution as the orchestration tools: an execution id, or a
+        // task reference standing for its active or latest execution.
+        let Some(execution) =
+            crate::api::orchestration::resolve_task_execution_reference(conn, execution_id)?
+        else {
+            return Ok(None);
+        };
+        Ok(conn
+            .query_row(
+                "SELECT project_id FROM discussions WHERE id = ?1",
+                [&execution.parent_discussion_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .map(single_or_global))
+    };
     match kind {
         Kind::Discussion => project_of("SELECT project_id FROM discussions WHERE id = ?1"),
         Kind::QuickPrompt => project_of("SELECT project_id FROM quick_prompts WHERE id = ?1"),
         Kind::QuickApi => project_of("SELECT project_id FROM quick_apis WHERE id = ?1"),
         Kind::QuickExec => project_of("SELECT project_id FROM quick_execs WHERE id = ?1"),
         Kind::Page => project_of("SELECT project_id FROM live_pages WHERE id = ?1"),
-        Kind::Execution => {
-            // Same resolution as the orchestration tools: an execution id, or
-            // a task reference standing for its active or latest execution.
-            let Some(execution) =
-                crate::api::orchestration::resolve_task_execution_reference(conn, id)?
-            else {
+        Kind::Execution => execution_residence(id),
+        Kind::Offer => {
+            let execution: Option<String> = conn
+                .query_row(
+                    "SELECT task_execution_id FROM task_execution_worker_offers WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match execution {
+                Some(execution) => execution_residence(&execution),
+                None => Ok(None),
+            }
+        }
+        Kind::Project => Ok(conn
+            .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(()))
+            .optional()?
+            .map(|()| single_or_global(Some(id.to_owned())))),
+        Kind::Connection => Ok(conn
+            .query_row(
+                "SELECT 1 FROM external_api_connections WHERE id = ?1",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .map(|()| Residence::Global)),
+        Kind::McpConfig => {
+            let flags: Option<(bool, bool)> = conn
+                .query_row(
+                    "SELECT is_global, include_general FROM mcp_configs WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((is_global, include_general)) = flags else {
                 return Ok(None);
             };
-            Ok(conn
-                .query_row(
-                    "SELECT project_id FROM discussions WHERE id = ?1",
-                    [&execution.parent_discussion_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .map(single_or_global))
+            if is_global {
+                return Ok(Some(Residence::AllProjects));
+            }
+            let mut statement =
+                conn.prepare("SELECT project_id FROM mcp_config_projects WHERE config_id = ?1")?;
+            let projects: HashSet<String> = statement
+                .query_map([id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(Some(if !projects.is_empty() {
+                Residence::Projects(projects)
+            } else if include_general {
+                Residence::General
+            } else {
+                // Linked nowhere: usable by no agent.
+                Residence::Projects(HashSet::new())
+            }))
         }
-        Kind::Project => Ok(Some(single_or_global(Some(id.to_owned())))),
         Kind::Task => {
             // Same resolution as the planning handlers: `KT-12` or an id.
             let Some(task_id) = crate::db::planning::lookup_task_id(conn, id)? else {
@@ -1011,30 +1308,58 @@ pub fn residence(
                 |row| Ok(workflow_residence(row.get(0)?, row.get(1)?)),
             )
             .optional()?),
-        Kind::Run => Ok(conn
-            .query_row(
-                "SELECT r.project_id, w.project_id, w.project_scope_json FROM workflow_runs r \
-                 LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
-                [id],
-                |row| {
-                    let run_project: Option<String> = row.get(0)?;
-                    Ok(match run_project {
-                        Some(project) => single_or_global(Some(project)),
-                        None => workflow_residence(row.get(1)?, row.get(2)?),
-                    })
-                },
-            )
-            .optional()?),
+        Kind::Run => {
+            let workflow_run = conn
+                .query_row(
+                    "SELECT r.project_id, w.project_id, w.project_scope_json FROM workflow_runs r \
+                     LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
+                    [id],
+                    |row| {
+                        let run_project: Option<String> = row.get(0)?;
+                        Ok(match run_project {
+                            Some(project) => single_or_global(Some(project)),
+                            None => workflow_residence(row.get(1)?, row.get(2)?),
+                        })
+                    },
+                )
+                .optional()?;
+            match workflow_run {
+                Some(place) => Ok(Some(place)),
+                // A Quick Prompt / API / Exec run is a run too.
+                None => project_of("SELECT project_id FROM shared_runs WHERE id = ?1"),
+            }
+        }
     }
 }
 
-/// The project a scope is bound to. `Err(None)` = every resource the scope
-/// names is gone (its discussion or run was deleted): the token is dead.
+/// What a scope is bound to now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeBinding {
+    Bound(Option<String>),
+    /// Every resource the scope names is gone: the token is dead.
+    Dead,
+    /// The scope's resources sit in different projects: no single binding.
+    Conflict,
+}
+
+/// The project a scope is bound to: every existing discussion, execution and
+/// run it names must agree. A scope naming none is bound to its declared
+/// project (when it still exists), or to none.
 pub fn resolve_scope_project(
     conn: &rusqlite::Connection,
     scope: &BridgeScope,
-) -> anyhow::Result<Result<Option<String>, ()>> {
+) -> anyhow::Result<ScopeBinding> {
     use rusqlite::OptionalExtension;
+    if scope.owns_nothing() {
+        return Ok(match &scope.project_id {
+            None => ScopeBinding::Bound(None),
+            Some(project) => match residence(conn, Kind::Project, project)? {
+                Some(_) => ScopeBinding::Bound(Some(project.clone())),
+                None => ScopeBinding::Dead,
+            },
+        });
+    }
+    let mut seen: Vec<Option<String>> = Vec::new();
     for discussion in &scope.discussion_ids {
         let found = conn
             .query_row(
@@ -1044,7 +1369,7 @@ pub fn resolve_scope_project(
             )
             .optional()?;
         if let Some(project) = found {
-            return Ok(Ok(project));
+            seen.push(project);
         }
     }
     for (kind, id) in [
@@ -1054,13 +1379,433 @@ pub fn resolve_scope_project(
         let Some(id) = id else { continue };
         match residence(conn, kind, id)? {
             Some(Residence::Projects(projects)) if projects.len() == 1 => {
-                return Ok(Ok(projects.into_iter().next()));
+                seen.push(projects.into_iter().next());
             }
-            Some(_) => return Ok(Ok(None)),
+            Some(_) => seen.push(None),
             None => {}
         }
     }
-    Ok(Err(()))
+    let Some(first) = seen.first().cloned() else {
+        return Ok(ScopeBinding::Dead);
+    };
+    if seen.iter().any(|project| *project != first) {
+        return Ok(ScopeBinding::Conflict);
+    }
+    Ok(ScopeBinding::Bound(first))
+}
+
+/// Discussions some routes reach through a credential instead of an id (an
+/// invite token, a resume credential, a session): resolved read-only before
+/// the handler acts, so a token never crosses into another project's room
+/// through them. An invite that resolves to nothing here (another instance's
+/// room) is refused.
+pub fn credential_targets(
+    conn: &rusqlite::Connection,
+    route: &BridgeRoute,
+    body: Option<&serde_json::Value>,
+) -> anyhow::Result<Vec<NamedId>> {
+    use rusqlite::OptionalExtension;
+    let field = |name: &str| {
+        body.and_then(|body| body.get(name))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    let hash = |raw: &str| hex(&Sha256::digest(raw.as_bytes()));
+    let unresolved = || NamedId::new(Kind::Discussion, "<unresolved credential>", Role::Target);
+    let mut out = Vec::new();
+    match route.pattern {
+        "/api/discussions/peer-join" => {
+            let found: Option<String> = match field("token") {
+                Some(token) => conn
+                    .query_row(
+                        "SELECT disc_id FROM discussion_invite_tokens WHERE token_hash = ?1",
+                        [hash(token.trim())],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            out.push(found.map_or_else(unresolved, |disc| {
+                NamedId::new(Kind::Discussion, disc, Role::Target)
+            }));
+        }
+        "/api/discussions/peer-resume" | "/api/discussions/orchestrator-return-resume" => {
+            let found: Option<String> = match field("resume_token") {
+                Some(token) => conn
+                    .query_row(
+                        "SELECT disc_id FROM discussion_sessions WHERE resume_token_hash = ?1",
+                        [hash(token.trim())],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            out.push(found.map_or_else(unresolved, |disc| {
+                NamedId::new(Kind::Discussion, disc, Role::Target)
+            }));
+        }
+        "/api/discussions/peer-leave" => {
+            if let (Some(agent), Some(session)) = (field("agent_type"), field("session_id")) {
+                let mut statement = conn.prepare(
+                    "SELECT DISTINCT disc_id FROM discussion_sessions \
+                     WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'",
+                )?;
+                let rooms = statement
+                    .query_map([agent, session], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                out.extend(
+                    rooms
+                        .into_iter()
+                        .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+// ─── Response scoping ───────────────────────────────────────────────────────
+
+/// Whether every bridge-token response is scoped after the handler ran: yes,
+/// whatever the verb.
+pub fn scopes_response(_route: &BridgeRoute) -> bool {
+    true
+}
+
+/// The kind of the `id` field of a response's root object and list entries,
+/// for routes that return resources without naming them under a typed key.
+fn returned_kind(pattern: &str) -> Option<Kind> {
+    Some(match pattern {
+        "/api/discussions" | "/api/discussions/{id}" | "/api/discussions/{id}/meta" => {
+            Kind::Discussion
+        }
+        "/api/workflows" | "/api/workflows/{id}" => Kind::Workflow,
+        "/api/quick-prompts" | "/api/quick-prompts/{id}" => Kind::QuickPrompt,
+        "/api/quick-apis" | "/api/quick-apis/{id}" => Kind::QuickApi,
+        "/api/quick-execs" | "/api/quick-execs/{id}" => Kind::QuickExec,
+        "/api/planning/tasks" | "/api/planning/tasks/{id}" => Kind::Task,
+        "/api/pages" | "/api/pages/{id}" => Kind::Page,
+        _ => return None,
+    })
+}
+
+fn is_project_key(key: &str) -> bool {
+    matches!(key, "project_id" | "project_ids" | "target_project_id")
+}
+
+/// The scoped resource an id-resolver answer names (`/api/resolve/{id}`).
+pub fn resolved_resource(data: &serde_json::Value) -> Option<(Kind, String)> {
+    let kind = data.get("kind")?.as_str()?;
+    let id = data.get("id")?.as_str()?.to_owned();
+    let parent = || {
+        data.get("parent")
+            .and_then(|parent| parent.get("id"))
+            .and_then(|id| id.as_str())
+            .map(str::to_owned)
+    };
+    Some(match kind {
+        "discussion" => (Kind::Discussion, id),
+        "message" | "planning_proposal" => (Kind::Discussion, parent()?),
+        "project" => (Kind::Project, id),
+        "workflow" => (Kind::Workflow, id),
+        "workflow_run" => (Kind::Run, id),
+        "task" => (Kind::Task, id),
+        "task_execution" => (Kind::Execution, id),
+        "quick_prompt" => (Kind::QuickPrompt, id),
+        "quick_api" => (Kind::QuickApi, id),
+        "quick_exec" => (Kind::QuickExec, id),
+        "page" => (Kind::Page, id),
+        "mcp_config" => (Kind::McpConfig, id),
+        _ => return None,
+    })
+}
+
+/// Every (kind, id) a response names that scoping must resolve: known keys at
+/// any depth, the typed `id` of the root object and of list entries, and the
+/// resource an id-resolver answer names.
+pub fn response_ids(route: &BridgeRoute, data: &serde_json::Value) -> Vec<(Kind, String)> {
+    fn visit(route: &BridgeRoute, value: &serde_json::Value, out: &mut Vec<(Kind, String)>) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, child) in fields {
+                    if is_project_key(key) {
+                        continue;
+                    }
+                    if let Some(kind) = kind_of_key(route, key) {
+                        match child {
+                            serde_json::Value::String(id) if !id.is_empty() => {
+                                out.push((kind, id.clone()))
+                            }
+                            serde_json::Value::Array(items) => out.extend(
+                                items
+                                    .iter()
+                                    .filter_map(|item| item.as_str())
+                                    .filter(|id| !id.is_empty())
+                                    .map(|id| (kind, id.to_owned())),
+                            ),
+                            _ => {}
+                        }
+                    }
+                    visit(route, child, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().for_each(|item| visit(route, item, out))
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    visit(route, data, &mut out);
+    if let Some(kind) = returned_kind(route.pattern) {
+        for entry in typed_entries(data) {
+            if let Some(id) = entry.get("id").and_then(|id| id.as_str()) {
+                out.push((kind, id.to_owned()));
+            }
+        }
+    }
+    if route.pattern == "/api/resolve/{id}" {
+        out.extend(resolved_resource(data));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out.dedup();
+    out
+}
+
+/// Where a typed `id` names the route's kind: the root object when it has an
+/// `id` (the resource itself), else the entries of the root array or of the
+/// arrays directly under a root wrapper object.
+fn typed_entries(data: &serde_json::Value) -> Vec<&serde_json::Map<String, serde_json::Value>> {
+    let mut entries = Vec::new();
+    match data {
+        serde_json::Value::Object(fields) if fields.contains_key("id") => entries.push(fields),
+        serde_json::Value::Object(fields) => {
+            for child in fields.values() {
+                if let serde_json::Value::Array(items) = child {
+                    entries.extend(items.iter().filter_map(|item| item.as_object()));
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            entries.extend(items.iter().filter_map(|item| item.as_object()))
+        }
+        _ => {}
+    }
+    entries
+}
+
+/// Resolved residences for [`scope_response`]: `None` = the id resolves to
+/// nothing (hidden by default).
+pub type Residences = HashMap<(Kind, String), Option<Residence>>;
+
+struct Scoper<'a> {
+    route: &'a BridgeRoute,
+    grant: &'a BridgeGrant,
+    bound: Option<&'a str>,
+    residences: &'a Residences,
+}
+
+impl Scoper<'_> {
+    fn id_visible(&self, kind: Kind, id: &str) -> bool {
+        match self.residences.get(&(kind, id.to_owned())) {
+            Some(Some(place)) => visible_for_read(self.grant, kind, id, place, self.bound),
+            _ => owns(self.grant, kind, id),
+        }
+    }
+
+    /// The object's own fields: its project, its workflow scope, every typed
+    /// id it names. Nested objects are judged by [`Self::keep`].
+    fn own_fields_visible(
+        &self,
+        fields: &serde_json::Map<String, serde_json::Value>,
+        typed: Option<Kind>,
+    ) -> bool {
+        let holds = |project: &str| self.bound == Some(project);
+        if let Some(scope) = fields.get("project_scope").filter(|scope| !scope.is_null()) {
+            let home = fields
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let place = workflow_residence(home, Some(scope.to_string()));
+            let visible = match place {
+                Residence::Projects(projects) => self.bound.is_some_and(|p| projects.contains(p)),
+                Residence::General => self.bound.is_none(),
+                Residence::Global | Residence::AllProjects => true,
+            };
+            if !visible {
+                return false;
+            }
+        } else if let Some(serde_json::Value::String(project)) = fields.get("project_id") {
+            let also_listed = fields
+                .get("project_ids")
+                .and_then(|v| v.as_array())
+                .is_some_and(|ids| ids.iter().filter_map(|id| id.as_str()).any(holds));
+            if !holds(project) && !also_listed {
+                return false;
+            }
+        }
+        if let Some(listed) = fields.get("project_ids").and_then(|v| v.as_array()) {
+            let ids: Vec<&str> = listed.iter().filter_map(|id| id.as_str()).collect();
+            if !ids.is_empty() && !ids.iter().any(|p| holds(p)) {
+                return false;
+            }
+        }
+        if let (Some(kind), Some(id)) = (typed, fields.get("id").and_then(|id| id.as_str())) {
+            if !self.id_visible(kind, id) {
+                return false;
+            }
+        }
+        for (key, child) in fields {
+            if is_project_key(key) {
+                continue;
+            }
+            let Some(kind) = kind_of_key(self.route, key) else {
+                continue;
+            };
+            let named: Vec<&str> = match child {
+                serde_json::Value::String(id) if !id.is_empty() => vec![id.as_str()],
+                serde_json::Value::Array(items) => {
+                    items.iter().filter_map(|i| i.as_str()).collect()
+                }
+                _ => Vec::new(),
+            };
+            if named.iter().any(|id| !self.id_visible(kind, id)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether `value` stays, filtering its lists in place. An object hidden
+    /// anywhere through its object fields hides its parent; a hidden list
+    /// entry is dropped, and the counts beside the list follow.
+    fn keep(&self, value: &mut serde_json::Value, typed: Option<Kind>) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if !self.own_fields_visible(fields, typed) {
+                    return false;
+                }
+                let mut filtered: Vec<usize> = Vec::new();
+                for child in fields.values_mut() {
+                    if child.is_array() {
+                        if let Some(left) = self.filter_list(child, None) {
+                            filtered.push(left);
+                        }
+                    } else if child.is_object() && !self.keep(child, None) {
+                        return false;
+                    }
+                }
+                if !filtered.is_empty() {
+                    fix_counts(fields, &filtered);
+                }
+                true
+            }
+            serde_json::Value::Array(_) => {
+                self.filter_list(value, typed);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// Drop hidden entries; `Some(len)` when any was dropped.
+    fn filter_list(&self, value: &mut serde_json::Value, typed: Option<Kind>) -> Option<usize> {
+        let serde_json::Value::Array(items) = value else {
+            return None;
+        };
+        let before = items.len();
+        items.retain_mut(|item| self.keep(item, typed));
+        (items.len() != before).then_some(items.len())
+    }
+}
+
+/// After entries were dropped from the lists of an object, its count fields
+/// can no longer be trusted: set to the remaining length when one list was
+/// filtered, removed when several were.
+fn fix_counts(fields: &mut serde_json::Map<String, serde_json::Value>, filtered: &[usize]) {
+    let counts: Vec<String> = fields
+        .iter()
+        .filter(|(key, value)| {
+            let key = key.to_ascii_lowercase();
+            value.is_number() && (key.contains("count") || key.contains("total"))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in counts {
+        if let [left] = filtered {
+            fields.insert(key, serde_json::json!(left));
+        } else {
+            fields.remove(&key);
+        }
+    }
+}
+
+/// Scope a response's `data` to the token, at any depth: an object naming
+/// anything outside the scope is dropped from its list, or refused when it is
+/// the response itself; an id that resolves to nothing hides its object.
+pub fn scope_response(
+    route: &BridgeRoute,
+    data: &mut serde_json::Value,
+    grant: &BridgeGrant,
+    bound: Option<&str>,
+    residences: &Residences,
+) -> Result<(), Refusal> {
+    let scoper = Scoper {
+        route,
+        grant,
+        bound,
+        residences,
+    };
+    if route.pattern == "/api/resolve/{id}" {
+        if let Some((kind, id)) = resolved_resource(data) {
+            if !scoper.id_visible(kind, &id) {
+                return Err(Refusal(
+                    "this resource is outside the bridge token's project".into(),
+                ));
+            }
+        }
+    }
+    let typed = returned_kind(route.pattern);
+    let hidden = || {
+        Err(Refusal(
+            "this resource is outside the bridge token's project".into(),
+        ))
+    };
+    match data {
+        serde_json::Value::Array(_) => {
+            scoper.filter_list(data, typed);
+            Ok(())
+        }
+        serde_json::Value::Object(fields) if fields.contains_key("id") => {
+            if scoper.keep(data, typed) {
+                Ok(())
+            } else {
+                hidden()
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            // A wrapper: its own fields, then its lists of typed entries.
+            if !scoper.own_fields_visible(fields, None) {
+                return hidden();
+            }
+            let mut filtered = Vec::new();
+            for child in fields.values_mut() {
+                if child.is_array() {
+                    if let Some(left) = scoper.filter_list(child, typed) {
+                        filtered.push(left);
+                    }
+                } else if child.is_object() && !scoper.keep(child, None) {
+                    return hidden();
+                }
+            }
+            if !filtered.is_empty() {
+                fix_counts(fields, &filtered);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

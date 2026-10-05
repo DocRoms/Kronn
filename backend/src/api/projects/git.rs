@@ -10,7 +10,6 @@ use axum::{
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
-use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -39,6 +38,7 @@ fn status_page(
     commit_offset: u32,
     commit_limit: u32,
     skip_pr_lookup: bool,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
     if skip_pr_lookup {
         crate::api::git_ops::run_git_status_page_without_pr_lookup(
@@ -47,24 +47,12 @@ fn status_page(
             commit_limit,
         )
     } else {
-        crate::api::git_ops::run_git_status_page(repo_path, commit_offset, commit_limit)
+        crate::api::git_ops::run_git_status_page(repo_path, commit_offset, commit_limit, github_env)
     }
 }
 
 fn default_git_commit_limit() -> u32 {
     crate::api::git_ops::GIT_COMMIT_PAGE_DEFAULT
-}
-
-/// Resolve GitHub token from MCP configs for git operations (push, PR creation).
-async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
-    let cfg = state.config.read().await;
-    let secret = cfg.encryption_secret.clone()?;
-    drop(cfg);
-    let db = state.db.clone();
-    db.with_conn(move |conn| Ok(crate::api::git_ops::resolve_github_token(conn, &secret)))
-        .await
-        .ok()
-        .flatten()
 }
 
 /// Helper: resolve a project's filesystem path from its DB id.
@@ -228,6 +216,12 @@ pub async fn git_status(
             })
     };
 
+    // The PR lookup's `gh` gets this project's GitHub variables, if connected.
+    let github_env = if query.skip_pr_lookup {
+        Vec::new()
+    } else {
+        crate::core::github_connection::env_for_launch(Some(&id)).await
+    };
     if query.refresh {
         // Explicit re-check: compute inline, as before.
         let exclusions_for_compute = exclusions.clone();
@@ -235,7 +229,13 @@ pub async fn git_status(
         let commit_limit = query.commit_limit;
         let skip_pr_lookup = query.skip_pr_lookup;
         let result = tokio::task::spawn_blocking(move || {
-            let mut status = status_page(&repo_path, commit_offset, commit_limit, skip_pr_lookup)?;
+            let mut status = status_page(
+                &repo_path,
+                commit_offset,
+                commit_limit,
+                skip_pr_lookup,
+                &github_env,
+            )?;
             status.languages = crate::api::ai_docs::compute_source_language_stats(
                 &repo_path,
                 &exclusions_for_compute,
@@ -274,6 +274,7 @@ pub async fn git_status(
             commit_offset,
             commit_limit,
             skip_pr_lookup,
+            &github_env,
         )
     })
     .await
@@ -579,7 +580,7 @@ pub async fn git_branch(
 
     let branch_name = req.name.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<GitBranchResponse, String> {
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(["checkout", "-b", &branch_name])
             .current_dir(&repo_path)
             .output()
@@ -652,9 +653,9 @@ pub async fn git_push(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let github_token = resolve_github_token_from_state(&state).await;
+    let github_env = crate::core::github_connection::env_for_launch(Some(&id)).await;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_push(&repo_path, github_token.as_deref())
+        crate::api::git_ops::run_git_push(&repo_path, &github_env)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
@@ -730,15 +731,9 @@ pub async fn create_pr(
     let title = req.title.clone();
     let body = req.body.clone();
     let base = req.base.clone();
-    let github_token = resolve_github_token_from_state(&state).await;
+    let github_env = crate::core::github_connection::env_for_launch(Some(&id)).await;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_create_pr(
-            &repo_path,
-            &title,
-            &body,
-            &base,
-            github_token.as_deref(),
-        )
+        crate::api::git_ops::run_create_pr(&repo_path, &title, &body, &base, &github_env)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
@@ -759,7 +754,7 @@ pub async fn pr_template(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let branch = sync_cmd("git")
+    let branch = crate::core::cmd::git_cmd()
         .args(["branch", "--show-current"])
         .current_dir(&repo_path)
         .output()

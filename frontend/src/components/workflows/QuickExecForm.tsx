@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Plus, Save, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { userError } from '../../lib/userError';
+import { UnmodelledApproval } from './UnmodelledApproval';
 import type {
   CollectQuickExecOutputFormat,
   CreateQuickExecRequest,
@@ -37,6 +38,7 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
   const [projectId, setProjectId] = useState(editExec?.project_id ?? '');
   const [command, setCommand] = useState(editExec?.command ?? '');
   const [args, setArgs] = useState(editExec?.args.join('\n') ?? '');
+  const [unmodelledApproved, setUnmodelledApproved] = useState(editExec?.unmodelled_args_approved === true);
   const [timeout, setTimeoutValue] = useState(editExec?.timeout_secs ?? 60);
   const [outputFormat, setOutputFormat] = useState<CollectQuickExecOutputFormat>(
     editExec?.output_format ?? 'json',
@@ -58,6 +60,7 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
         project_id: projectId || null,
         command: command.trim(),
         args: args.split('\n').filter(argument => argument.length > 0),
+        unmodelled_args_approved: unmodelledApproved || undefined,
         timeout_secs: Math.max(1, Math.min(1800, timeout)),
         output_format: outputFormat,
         variables: variables
@@ -130,6 +133,12 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
             placeholder={'cloudwatch\nget-metric-data\n--output\njson'}
           />
           <small>{t('qe.argsHint')}</small>
+          <UnmodelledApproval
+            command={command}
+            args={args.split('\n').filter(argument => argument.length > 0)}
+            approved={unmodelledApproved}
+            onChange={setUnmodelledApproved}
+          />
         </label>
         <label>
           <span>{t('qe.outputFormat')}</span>

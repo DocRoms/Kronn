@@ -410,7 +410,7 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
 /// considered: an untracked local screenshot or cache is a developer-state
 /// concern, not a finding against the project.
 fn detect_tracked_repo_artifacts(root: &Path) -> Vec<DetectedSignal> {
-    let output = match crate::core::cmd::sync_cmd("git")
+    let output = match crate::core::cmd::git_cmd()
         .args(["-C"])
         .arg(root)
         .args(["ls-files", "-z", "--cached"])
@@ -949,7 +949,7 @@ mod tests {
 
     // ── tracked repository artifacts ──
     fn init_git(root: &Path) {
-        let status = crate::core::cmd::sync_cmd("git")
+        let status = crate::core::cmd::git_cmd()
             .args(["init", "-q"])
             .current_dir(root)
             .status()
@@ -958,7 +958,7 @@ mod tests {
     }
 
     fn git_add_all(root: &Path) {
-        let status = crate::core::cmd::sync_cmd("git")
+        let status = crate::core::cmd::git_cmd()
             .args(["add", "--", "."])
             .current_dir(root)
             .status()

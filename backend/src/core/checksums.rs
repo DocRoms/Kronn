@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::cmd::sync_cmd;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChecksumsFile {
     pub audited_at: String,
@@ -375,7 +373,7 @@ fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
 /// carry arbitrary path bytes (`ls-tree -z`): a lossy UTF-8 pass would
 /// silently alter non-UTF-8 names. Returns None on failure.
 fn run_git_bytes(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let mut cmd = sync_cmd("git");
+    let mut cmd = crate::core::cmd::git_cmd();
     cmd.arg("-C").arg(project_path);
     for arg in args {
         cmd.arg(arg);
@@ -389,7 +387,7 @@ fn run_git_bytes(project_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
 
 /// Run a git command in the given directory, returning stdout trimmed. Returns None on failure.
 fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
-    let mut cmd = sync_cmd("git");
+    let mut cmd = crate::core::cmd::git_cmd();
     cmd.arg("-C").arg(project_path);
     for arg in args {
         cmd.arg(arg);

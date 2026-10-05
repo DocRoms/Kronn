@@ -3976,19 +3976,44 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
             }
         }
 
+        // Names only: a header value may resolve a config secret.
+        if !spec.default_headers.is_empty() {
+            let names = spec
+                .default_headers
+                .iter()
+                .map(|h| format!("`{}`", h.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "Headers sent automatically by `api_call` (do not pass them): {names}.\n"
+            ));
+        }
+
         // Non-secret config keys (e.g. Chartbeat's host, Adobe's company_id).
         // Two ways to use them: (a) query param by convention for simple
         // plugins, (b) interpolation into `base_url` when the plugin spec
         // opts in via `{ENV_KEY}` placeholders in the URL. The display
-        // message adapts so the agent knows which it is.
-        if !spec.config_keys.is_empty() {
+        // message adapts so the agent knows which it is. Keys consumed by
+        // the auth or a default header are already sent and stay unlisted.
+        let header_uses = |env_key: &str| {
+            let reference = format!("${{ENV.{env_key}}}");
+            spec.default_headers
+                .iter()
+                .any(|h| h.value.to_ascii_uppercase().contains(&reference))
+        };
+        let listed_keys: Vec<_> = spec
+            .config_keys
+            .iter()
+            .filter(|k| !auth_env_keys.contains(k.env_key.as_str()) && !header_uses(&k.env_key))
+            .collect();
+        if !listed_keys.is_empty() {
             let is_in_url = spec.base_url.contains('{');
             if is_in_url {
                 out.push_str("Config (already interpolated into Base URL above):\n");
             } else {
                 out.push_str("Config (pass as query params):\n");
             }
-            for k in &spec.config_keys {
+            for k in listed_keys {
                 out.push_str(&format!(
                     "- `${{ENV.{}}}`  ({})\n",
                     k.env_key, k.description

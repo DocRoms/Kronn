@@ -4318,6 +4318,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -4664,6 +4665,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -5627,7 +5629,7 @@ mod tests {
     }
 
     async fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(cwd)

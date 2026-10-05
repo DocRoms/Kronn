@@ -880,7 +880,7 @@ fn git_ignored_paths(
     // `git ls-files --ignored` enumerates every ignored cache entry in the
     // repository (hundreds of thousands in some Symfony projects). Ask Git
     // only about the bounded set already admitted to the source tree instead.
-    let child = crate::core::cmd::sync_cmd("git")
+    let child = crate::core::cmd::git_cmd()
         .args(["check-ignore", "--stdin", "-z"])
         .current_dir(root)
         .stdin(Stdio::piped())

@@ -87,7 +87,7 @@ fn ledger_lock(root: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
 /// Whether git tracks `rel` in the repository at `root`. Outside a repository,
 /// or without git, nothing is tracked.
 fn is_tracked(root: &Path, rel: &str) -> bool {
-    crate::core::cmd::sync_cmd("git")
+    crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--", rel])

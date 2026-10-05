@@ -36,63 +36,135 @@ fn resolve_windows_program(program: &OsStr) -> Option<PathBuf> {
     which::which(s).ok()
 }
 
-/// Whether `program` is git, which runs repository-controlled code (hooks,
-/// filters, fsmonitor, diff drivers) inside its own process.
-fn is_git(program: &OsStr) -> bool {
-    std::path::Path::new(program)
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("git"))
-}
+pub use crate::core::child_env::ChildRoute;
 
-/// Every git process gets the built git environment instead of the backend's
-/// (KT-1006): a repository hook never sees Kronn's key or a provider key.
-fn isolate_git(program: &OsStr, command: &mut std::process::Command) {
-    if is_git(program) {
-        crate::core::child_env::isolate(command, crate::core::child_env::ChildRoute::Git);
-    }
-}
-
-/// Create a `tokio::process::Command` that won't flash a console window on Windows.
-///
-/// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, `PathBuf`, …)
-/// so callers don't have to round-trip through `.to_str()` to invoke a binary by path.
-pub fn async_cmd<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
+/// The only place a process is constructed (clippy's `disallowed_methods`
+/// refuses `Command::new` elsewhere). No environment is applied yet.
+#[allow(clippy::disallowed_methods)]
+fn raw_async(program: &OsStr) -> tokio::process::Command {
     #[cfg(target_os = "windows")]
-    let resolved = resolve_windows_program(program.as_ref());
-    #[cfg(target_os = "windows")]
-    let mut cmd = match resolved {
+    let mut cmd = match resolve_windows_program(program) {
         Some(path) => tokio::process::Command::new(path),
-        None => tokio::process::Command::new(program.as_ref()),
+        None => tokio::process::Command::new(program),
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = tokio::process::Command::new(&program);
+    let cmd = tokio::process::Command::new(program);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    isolate_git(program.as_ref(), cmd.as_std_mut());
     cmd
 }
 
-/// Create a `std::process::Command` that won't flash a console window on Windows.
-///
-/// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, `PathBuf`, …).
-pub fn sync_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
+#[allow(clippy::disallowed_methods)]
+fn raw_sync(program: &OsStr) -> std::process::Command {
     #[cfg(target_os = "windows")]
-    let resolved = resolve_windows_program(program.as_ref());
-    #[cfg(target_os = "windows")]
-    let mut cmd = match resolved {
+    let mut cmd = match resolve_windows_program(program) {
         Some(path) => std::process::Command::new(path),
-        None => std::process::Command::new(program.as_ref()),
+        None => std::process::Command::new(program),
     };
     #[cfg(not(target_os = "windows"))]
-    let mut cmd = std::process::Command::new(&program);
+    let cmd = std::process::Command::new(program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    isolate_git(program.as_ref(), &mut cmd);
     cmd
+}
+
+/// A `tokio::process::Command` for `program` with the environment built for
+/// `route` (KT-1006): nothing of the backend's environment beyond the route's
+/// allow-list. Values the caller adds afterwards are its launch's own; a
+/// caller adding any must seal again (`child_env::seal`).
+///
+/// Accepts anything `Command::new` accepts (`&str`, `String`, `&Path`, …).
+pub fn async_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> tokio::process::Command {
+    let mut cmd = raw_async(program.as_ref());
+    crate::core::child_env::isolate(cmd.as_std_mut(), route);
+    cmd
+}
+
+/// [`async_cmd`] for a `std::process::Command`.
+pub fn sync_cmd<S: AsRef<OsStr>>(program: S, route: ChildRoute) -> std::process::Command {
+    let mut cmd = raw_sync(program.as_ref());
+    crate::core::child_env::isolate(&mut cmd, route);
+    cmd
+}
+
+/// `git`, whose repository hooks, filters and drivers run inside it.
+pub fn git_cmd() -> std::process::Command {
+    sync_cmd("git", ChildRoute::Git)
+}
+
+/// [`git_cmd`] for tokio.
+pub fn async_git_cmd() -> tokio::process::Command {
+    async_cmd("git", ChildRoute::Git)
+}
+
+/// A program Kronn runs for itself (installer, system probe): the base
+/// allow-list only.
+pub fn tool_cmd<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
+    async_cmd(program, ChildRoute::Tool)
+}
+
+/// [`tool_cmd`] for a `std::process::Command`.
+pub fn sync_tool_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
+    sync_cmd(program, ChildRoute::Tool)
+}
+
+/// Why a process keeps the backend's whole environment. Each variant is a
+/// declared exception of the design note (§9); `full_env_cmd_sites` lists the
+/// call sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullEnvReason {
+    /// The document sidecar Kronn ships.
+    DocsSidecar,
+    /// A CLI asked which models it serves.
+    ModelDiscovery,
+    /// A CLI asked for its version.
+    VersionDiscovery,
+    /// An MCP server started once to check that it answers.
+    McpProbe,
+}
+
+/// A process that inherits the backend's environment: only for a declared
+/// [`FullEnvReason`]. It starts in the temporary directory, never in a
+/// repository (the backend's own directory may be one).
+pub fn full_env_cmd<S: AsRef<OsStr>>(program: S, reason: FullEnvReason) -> tokio::process::Command {
+    let _ = reason;
+    let mut cmd = raw_async(program.as_ref());
+    cmd.current_dir(std::env::temp_dir());
+    cmd
+}
+
+/// The system opener (`open`, `xdg-open`, `start`) for `target`, with the
+/// base allow-list only. The `open` crate's own spawning entry points are
+/// refused by clippy.
+pub fn open_in_system<T: AsRef<OsStr>>(target: T) -> std::io::Result<()> {
+    let mut last = Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no system opener",
+    ));
+    for command in open::commands(target) {
+        let mut command = rebuild_for_tool(command);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        last = match command.status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => Err(std::io::Error::other(format!(
+                "opener exited with {status}"
+            ))),
+            Err(error) => Err(error),
+        };
+    }
+    last
+}
+
+/// The opener command `open::commands` built, isolated with the Tool route.
+fn rebuild_for_tool(mut command: std::process::Command) -> std::process::Command {
+    crate::core::child_env::isolate(&mut command, ChildRoute::Tool);
+    command
 }
 
 #[cfg(test)]
@@ -101,7 +173,7 @@ mod tests {
 
     #[test]
     fn async_cmd_creates_command() {
-        let cmd = async_cmd("echo");
+        let cmd = tool_cmd("echo");
         // Just verify it doesn't panic — creation_flags is Windows-only
         drop(cmd);
     }
@@ -131,7 +203,7 @@ mod tests {
                     ("GH_TOKEN", "sentinel-github"),
                     ("GIT_DIR", "/sentinel/elsewhere"),
                 ],
-                || sync_cmd("git").args(args).current_dir(repo.path()).output(),
+                || git_cmd().args(args).current_dir(repo.path()).output(),
             )
             .unwrap();
             assert!(
@@ -154,23 +226,122 @@ mod tests {
         std::env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
     }
 
+    /// A program Kronn runs for itself gets the base allow-list only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tool_command_runs_without_the_backend_environment() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let dir = tempfile::tempdir().unwrap();
+        let out_async = probe::env_dumping_program(dir.path(), "kronn-tool");
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        let home = dir.path().to_str().unwrap();
+        let (mut async_command, mut sync_command) = probe::with_secret_parent(&path, home, || {
+            (tool_cmd("kronn-tool"), sync_tool_cmd("kronn-tool"))
+        });
+        probe::assert_built_without_secrets(async_command.as_std(), &path, &[]);
+        probe::assert_built_without_secrets(&sync_command, &path, &[]);
+        assert!(async_command.status().await.unwrap().success());
+        let recorded = probe::read_dump(&out_async);
+        probe::assert_dump_without_secrets(&recorded, &[]);
+        assert_eq!(recorded.get("HOME").map(String::as_str), Some(home));
+        std::fs::remove_file(&out_async).unwrap();
+        assert!(sync_command.status().unwrap().success());
+        probe::assert_dump_without_secrets(&probe::read_dump(&out_async), &[]);
+    }
+
+    /// The system opener is started with the Tool environment, every
+    /// candidate the platform has (B3-11).
     #[test]
-    fn only_git_gets_the_git_policy() {
-        assert!(is_git(OsStr::new("git")));
-        assert!(is_git(OsStr::new("/usr/bin/git")));
-        assert!(!is_git(OsStr::new("gitk")));
-        assert!(!is_git(OsStr::new("echo")));
+    fn the_system_opener_gets_no_backend_secret() {
+        use crate::core::child_env::probe;
+        let commands = probe::with_secret_parent("/usr/bin", "/home/u", || {
+            open::commands("https://example.invalid")
+                .into_iter()
+                .map(rebuild_for_tool)
+                .collect::<Vec<_>>()
+        });
+        assert!(!commands.is_empty());
+        for command in &commands {
+            probe::assert_built_without_secrets(command, "/usr/bin", &[]);
+        }
+    }
+
+    /// Exactly the exceptions design §9 declares keep the backend's
+    /// environment; any other process needs a route to compile.
+    #[test]
+    fn full_env_cmd_sites_are_exactly_the_declared_exceptions() {
+        let expected: &[(&str, &str, usize)] = &[
+            ("agents/mod.rs", "VersionDiscovery", 4),
+            ("api/mcps.rs", "McpProbe", 1),
+            ("core/docs_sidecar.rs", "DocsSidecar", 2),
+            (
+                "core/model_catalog/claude_discovery.rs",
+                "ModelDiscovery",
+                2,
+            ),
+            ("core/model_catalog/codex_discovery.rs", "ModelDiscovery", 1),
+            ("core/versions.rs", "VersionDiscovery", 1),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut found: std::collections::BTreeMap<(String, String), usize> = Default::default();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.extension().is_none_or(|ext| ext != "rs") || rel == "core/cmd.rs" {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (at, _) in text.match_indices("full_env_cmd") {
+                    let rest = &text[at + "full_env_cmd".len()..];
+                    if rest.starts_with(',') || rest.starts_with('}') {
+                        continue; // the import
+                    }
+                    assert!(rest.starts_with('('), "{rel}: full_env_cmd used as a value");
+                    let close = rest.find(')').unwrap();
+                    let reason = rest[..close]
+                        .rsplit("FullEnvReason::")
+                        .next()
+                        .unwrap()
+                        .trim()
+                        .trim_end_matches(',')
+                        .to_string();
+                    *found.entry((rel.clone(), reason)).or_default() += 1;
+                }
+            }
+        }
+        let expected: std::collections::BTreeMap<(String, String), usize> = expected
+            .iter()
+            .map(|(file, reason, n)| ((file.to_string(), reason.to_string()), *n))
+            .collect();
+        assert_eq!(found, expected);
+        assert_eq!(
+            full_env_cmd("x", FullEnvReason::McpProbe)
+                .as_std()
+                .get_current_dir(),
+            Some(std::env::temp_dir().as_path())
+        );
     }
 
     #[test]
     fn sync_cmd_creates_command() {
-        let cmd = sync_cmd("echo");
+        let cmd = sync_tool_cmd("echo");
         drop(cmd);
     }
 
     #[tokio::test]
     async fn async_cmd_runs_successfully() {
-        let output = async_cmd("echo")
+        let output = tool_cmd("echo")
             .arg("hello")
             .output()
             .await
@@ -180,7 +351,7 @@ mod tests {
 
     #[test]
     fn sync_cmd_runs_successfully() {
-        let output = sync_cmd("echo")
+        let output = sync_tool_cmd("echo")
             .arg("hello")
             .output()
             .expect("echo should succeed");

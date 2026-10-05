@@ -453,7 +453,7 @@ const MAX_GIT_BYTES: usize = 192 * 1024;
 /// agent actually needs to review work. The separate commit primitive below is
 /// narrower still: named paths only, after durable execution authorisation.
 fn git_read(root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = crate::core::cmd::sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(args)
         .current_dir(root)
         .output()
@@ -3386,7 +3386,7 @@ mod tests {
     fn tiny_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            crate::core::cmd::sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .args(args)
                 .current_dir(dir.path())
                 .output()
@@ -3431,7 +3431,7 @@ mod tests {
         let repo = tiny_repo();
         std::fs::write(repo.path().join("a.txt"), "one\nchanged\n").unwrap();
         std::fs::write(repo.path().join("b.txt"), "other\n").unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(["add", "b.txt"])
             .current_dir(repo.path())
             .output()
@@ -3475,12 +3475,12 @@ mod tests {
         let repo = tiny_repo();
         // A second file with its own history, distinct from a.txt's.
         std::fs::write(repo.path().join("b.txt"), "one\n").unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(["add", "b.txt"])
             .current_dir(repo.path())
             .output()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(["commit", "-m", "second"])
             .current_dir(repo.path())
             .output()

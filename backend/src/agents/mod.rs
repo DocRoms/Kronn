@@ -1,6 +1,3 @@
-use crate::core::cmd::async_cmd;
-#[cfg(target_os = "windows")]
-use crate::core::cmd::sync_cmd;
 use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -11,11 +8,17 @@ use std::time::Instant;
 async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     #[cfg(unix)]
     {
-        Ok(async_cmd("sh").args(["-c", cmd]).output().await?)
+        Ok(crate::core::cmd::tool_cmd("sh")
+            .args(["-c", cmd])
+            .output()
+            .await?)
     }
     #[cfg(windows)]
     {
-        Ok(async_cmd("cmd").args(["/C", cmd]).output().await?)
+        Ok(crate::core::cmd::tool_cmd("cmd")
+            .args(["/C", cmd])
+            .output()
+            .await?)
     }
 }
 
@@ -1004,7 +1007,8 @@ async fn probe_runtime(def: &AgentDef) -> bool {
 
     // Probe: npx --yes <pkg> --version with 15s timeout
     tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
-    let mut cmd = async_cmd("npx");
+    let mut cmd =
+        crate::core::cmd::full_env_cmd("npx", crate::core::cmd::FullEnvReason::VersionDiscovery);
     cmd.args(["--yes", pkg, "--version"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1184,7 +1188,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         // Login-shell lookup. We pass the binary name through `command -v` rather
         // than `which` so it works even when which is not installed inside the
         // WSL distro. Single-quoted to avoid shell interpolation surprises.
-        let mut cmd = sync_cmd("wsl.exe");
+        let mut cmd = crate::core::cmd::sync_tool_cmd("wsl.exe");
         cmd.args(["-e", "bash", "-lc", &format!("command -v '{}'", name)]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -1214,7 +1218,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             .map(|p| format!("test -x {} && echo {}", p, p))
             .collect::<Vec<_>>()
             .join(" || ");
-        let mut cmd = sync_cmd("wsl.exe");
+        let mut cmd = crate::core::cmd::sync_tool_cmd("wsl.exe");
         cmd.args(["-e", "bash", "-c", &test_script]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -1246,17 +1250,32 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
         {
             if binary_path.starts_with('/') {
                 // WSL path — run via wsl.exe with login shell for correct PATH
-                async_cmd("wsl.exe")
-                    .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
-                    .output()
-                    .await?
+                crate::core::cmd::full_env_cmd(
+                    "wsl.exe",
+                    crate::core::cmd::FullEnvReason::VersionDiscovery,
+                )
+                .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
+                .output()
+                .await?
             } else {
-                async_cmd(binary_path).arg("--version").output().await?
+                crate::core::cmd::full_env_cmd(
+                    binary_path,
+                    crate::core::cmd::FullEnvReason::VersionDiscovery,
+                )
+                .arg("--version")
+                .output()
+                .await?
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            async_cmd(binary_path).arg("--version").output().await?
+            crate::core::cmd::full_env_cmd(
+                binary_path,
+                crate::core::cmd::FullEnvReason::VersionDiscovery,
+            )
+            .arg("--version")
+            .output()
+            .await?
         }
     };
 

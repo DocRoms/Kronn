@@ -448,7 +448,7 @@ fn history_lookup_outside_git_or_with_the_file_present_finds_nothing() {
 fn restore_refuses_a_commit_without_a_valid_state_file() {
     let tmp = fresh_tmp("history-invalid");
     let git = |args: &[&str]| {
-        assert!(crate::core::cmd::sync_cmd("git")
+        assert!(crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(&tmp)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])

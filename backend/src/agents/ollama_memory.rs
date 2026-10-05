@@ -324,7 +324,7 @@ fn server_env(name: &str) -> Option<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let output = crate::core::cmd::sync_cmd("launchctl")
+        let output = crate::core::cmd::sync_tool_cmd("launchctl")
             .args(["getenv", name])
             .output()
             .ok()?;
@@ -373,7 +373,7 @@ pub(crate) fn server_is_local(base: &str) -> bool {
 fn apple_silicon_gpu_budget(total_ram_bytes: Option<u64>) -> Option<u64> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        let wired_limit_mb = crate::core::cmd::sync_cmd("sysctl")
+        let wired_limit_mb = crate::core::cmd::sync_tool_cmd("sysctl")
             .args(["-n", "iogpu.wired_limit_mb"])
             .output()
             .ok()

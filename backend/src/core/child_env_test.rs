@@ -54,7 +54,57 @@ const EVERY_ROUTE: &[ChildRoute] = &[
     ChildRoute::WorkflowExec,
     ChildRoute::QuickExec,
     ChildRoute::CredentialCli,
+    ChildRoute::Git,
+    ChildRoute::GitHost,
+    ChildRoute::DependencyCheck,
+    ChildRoute::Docker,
+    ChildRoute::Tool,
 ];
+
+/// Each Kronn-owned route keeps its program's own settings and nothing that
+/// looks like a credential, whatever family it belongs to.
+#[test]
+fn kronn_owned_routes_keep_their_settings_and_no_credential() {
+    let parent: Vec<(OsString, OsString)> = [
+        ("PATH", "/usr/bin"),
+        ("GH_CONFIG_DIR", "/home/u/.config/gh"),
+        ("GLAB_CONFIG_DIR", "/home/u/.config/glab-cli"),
+        ("GIT_AUTHOR_NAME", "U"),
+        ("GITLAB_TOKEN", "glpat"),
+        ("GH_TOKEN", "ghp"),
+        ("GOPROXY", "https://proxy.golang.org"),
+        ("COMPOSER_HOME", "/home/u/.composer"),
+        ("NPM_TOKEN", "npm"),
+        ("CARGO_REGISTRIES_ACME_TOKEN", "cargo"),
+        ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+        ("COMPOSE_PROJECT_NAME", "p"),
+        ("DOCKER_AUTH_TOKEN", "d"),
+        ("DOCKER_PASSWORD", "d"),
+        ("KRONN_AUTH_TOKEN", "admin"),
+        ("ANTHROPIC_API_KEY", "sk-ant"),
+    ]
+    .iter()
+    .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+    .collect();
+    let expectations: &[(ChildRoute, &[&str])] = &[
+        (
+            ChildRoute::GitHost,
+            &["GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "GIT_AUTHOR_NAME"],
+        ),
+        (ChildRoute::DependencyCheck, &["GOPROXY", "COMPOSER_HOME"]),
+        (ChildRoute::Docker, &["DOCKER_HOST", "COMPOSE_PROJECT_NAME"]),
+        (ChildRoute::Tool, &[]),
+    ];
+    for (route, own) in expectations {
+        let inherited = names(&inherited_from(*route, parent.clone()));
+        let mut expected: Vec<&str> = own.to_vec();
+        expected.push("PATH");
+        let mut got: Vec<&str> = inherited.iter().map(String::as_str).collect();
+        expected.sort_unstable();
+        got.sort_unstable();
+        assert_eq!(got, expected, "{route:?}");
+    }
+}
 
 #[test]
 fn no_route_inherits_the_admin_token_the_key_or_the_data_dir() {
@@ -338,6 +388,11 @@ fn secret_looking_names_are_recognised() {
         "X_API_KEY",
         "AWS_SECRET_ACCESS_KEY",
         "KRONN_KEK",
+        "NPM_CONFIG__AUTH",
+        "npm_config__auth",
+        "npm_config_//registry.example.com/:_auth",
+        "NGROK_AUTHTOKEN",
+        "npm_config__password",
     ] {
         assert!(looks_secret(name), "{name}");
     }
@@ -347,8 +402,36 @@ fn secret_looking_names_are_recognised() {
         "KRONN_DISCUSSION_ID",
         "LANG",
         "SSH_AUTH_SOCK",
+        "GIT_AUTHOR_NAME",
+        "XAUTHORITY",
+        "NPM_CONFIG_REGISTRY",
     ] {
         assert!(!looks_secret(name), "{name}");
+    }
+}
+
+/// npm's registry credentials ride on an allow-listed prefix: every route
+/// drops them all the same (B3-09).
+#[test]
+fn npm_registry_credentials_reach_no_route() {
+    let parent: &[(&str, &str)] = &[
+        ("PATH", "/usr/bin"),
+        ("NPM_CONFIG_REGISTRY", "https://registry.example.com/"),
+        ("NPM_CONFIG__AUTH", "dXNlcjpwYXNz"),
+        ("npm_config__auth", "dXNlcjpwYXNz"),
+        ("npm_config_//registry.example.com/:_auth", "dXNlcjpwYXNz"),
+        ("npm_config_//registry.example.com/:_authToken", "npm-token"),
+        ("npm_config__password", "cGFzcw=="),
+    ];
+    for route in EVERY_ROUTE {
+        let mut command = std::process::Command::new("node");
+        with_parent_env(parent, || isolate(&mut command, *route));
+        let names: Vec<String> = env_of(&command).into_keys().collect();
+        assert_eq!(
+            names,
+            vec!["NPM_CONFIG_REGISTRY".to_string(), "PATH".to_string()],
+            "{route:?}"
+        );
     }
 }
 

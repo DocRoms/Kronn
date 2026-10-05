@@ -1,0 +1,35 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+
+const execLineCheck = vi.fn();
+vi.mock('../../../lib/api', () => ({
+  workflows: { execLineCheck: (...args: unknown[]) => execLineCheck(...args) },
+}));
+vi.mock('../../../lib/I18nContext', () => ({
+  useT: () => ({ t: (key: string, arg?: string) => `${key}:${arg ?? ''}` }),
+}));
+
+import { UnmodelledApproval } from '../UnmodelledApproval';
+
+describe('UnmodelledApproval', () => {
+  beforeEach(() => execLineCheck.mockReset());
+
+  it('stays hidden when the line needs no approval', async () => {
+    execLineCheck.mockResolvedValue({ unmodelled_program: null });
+    const { container } = render(
+      <UnmodelledApproval command="echo" args={['{{x}}']} approved={false} onChange={vi.fn()} />,
+    );
+    await waitFor(() => expect(execLineCheck).toHaveBeenCalledWith({ command: 'echo', args: ['{{x}}'] }));
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('names the program and reports the human approval', async () => {
+    execLineCheck.mockResolvedValue({ unmodelled_program: 'terraform' });
+    const onChange = vi.fn();
+    render(<UnmodelledApproval command="terraform" args={['plan', '{{x}}']} approved={false} onChange={onChange} />);
+    const box = await screen.findByRole('checkbox');
+    expect(screen.getByText('exec.unmodelledApprove:terraform')).toBeDefined();
+    fireEvent.click(box);
+    expect(onChange).toHaveBeenCalledWith(true);
+  });
+});

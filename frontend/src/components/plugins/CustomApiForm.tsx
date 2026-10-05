@@ -24,6 +24,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
     customDocsUrl, setCustomDocsUrl,
     customFields, setCustomFields,
     customEndpoints, setCustomEndpoints,
+    customHeaders, setCustomHeaders,
     editingCustomServerId, editingCustomConfigId,
     replacingFields, setReplacingFields,
     customAuth, setCustomAuth,
@@ -369,6 +370,44 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
           </p>
         )}
       </div>
+      <div className="mb-5">
+        <label className="mcp-field-label">{t('mcp.custom.headers.header')}</label>
+        <p className="mcp-env-key-desc mb-3">{t('mcp.custom.headers.hint')}</p>
+        {customHeaders.map((h, idx) => (
+          <div key={idx} className="mcp-custom-field-row mb-2" data-testid="mcp-custom-header-row">
+            <input
+              className="input mcp-input-mono mcp-custom-field-label"
+              value={h.name}
+              onChange={(ev) => setCustomHeaders(prev => prev.map((row, i) => i === idx ? { ...row, name: ev.target.value } : row))}
+              placeholder={t('mcp.custom.headers.namePlaceholder')}
+              aria-label={t('mcp.custom.headers.namePlaceholder')}
+            />
+            <input
+              className="input mcp-input-mono"
+              value={h.value}
+              onChange={(ev) => setCustomHeaders(prev => prev.map((row, i) => i === idx ? { ...row, value: ev.target.value } : row))}
+              placeholder={t('mcp.custom.headers.valuePlaceholder')}
+              aria-label={t('mcp.custom.headers.valuePlaceholder')}
+            />
+            <button
+              type="button"
+              className="mcp-icon-btn"
+              onClick={() => setCustomHeaders(prev => prev.filter((_, i) => i !== idx))}
+              aria-label={t('mcp.custom.headers.remove')}
+              title={t('mcp.custom.headers.remove')}
+            >
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          className="mcp-btn-action"
+          onClick={() => setCustomHeaders(prev => [...prev, { name: '', value: '' }])}
+        >
+          <Plus size={12} /> {t('mcp.custom.headers.add')}
+        </button>
+      </div>
       {/* Single reusable scope editor (KT-831) — same component as the
           registry add flow, the fiche and bundle import. Custom API
           plugins are always API-only, so no CLI-sync section (the
@@ -415,6 +454,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
               docs_url: customDocsUrl,
               fields: customFields,
               endpoints: customEndpoints,
+              default_headers: customHeaders,
             }}
             onApply={(updates: Partial<CustomApiPayload>) => {
               if (typeof updates.name === 'string') setCustomName(updates.name);
@@ -451,6 +491,15 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
                   ...updates.endpoints.filter(e => !seen.has(key(e))),
                 ];
                 setCustomEndpoints(merged);
+              }
+              // Same no-wipe merge, keyed by case-insensitive header name.
+              if (Array.isArray(updates.default_headers) && updates.default_headers.length > 0) {
+                const existing = customHeaders.filter(h => h.name.trim() !== '');
+                const seen = new Set(existing.map(h => h.name.trim().toLowerCase()));
+                setCustomHeaders([
+                  ...existing,
+                  ...updates.default_headers.filter(h => !seen.has(h.name.trim().toLowerCase())),
+                ]);
               }
             }}
             installedAgents={installedAgentTypes}

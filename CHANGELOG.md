@@ -166,9 +166,33 @@ Release notes for 0.9.3 and earlier are available in the
   is stored on the run, so it still applies after a Gate approval or a resume,
   and the step shows the agent it really ran on; the workflow is never
   modified.
+- API plugins can declare headers sent on every call, whatever their
+  authentication: Notion's mandatory `Notion-Version`, GitHub's
+  `X-GitHub-Api-Version`, a required `Accept`. Without one, such an API
+  refused every request (Notion: `400 missing_version`) and each workflow
+  step or agent had to repeat it. Custom API plugins edit them in the new
+  **Headers sent on every call** section, as a literal or `${ENV.KEY}` from
+  a field; a header given on a call overrides the default. The 🪄 helper and
+  the Workflow architect now look for such a header in the docs and propose
+  it. Validation refuses credentials, `Authorization`, `Host`, duplicates and
+  undeclared fields, and now also runs on bundle imports, which skipped the
+  check refusing CLI-token authentication.
+- Agents no longer see an API's authentication keys, or keys already sent as
+  headers, listed as "pass as query params" in their API context.
 
 ### Fixed
 
+- A Kronn-launched agent's bridge token is checked against what each request
+  really does: ids nested anywhere in a body or in an imported workflow, task
+  references, offers, invites and sessions are resolved before the check;
+  shared resources (project-less or serving several projects) and the agent
+  library are read but never written; created resources land in the agent's
+  project and no update can move them out; effects on shared resources run for
+  the agent's project only; General discussions stay private to their own
+  launches; every response, whatever the verb, is scoped at any depth with its
+  counts; the token's project is frozen at first use; every launch gets a token,
+  dies when cancelled or after 12 hours; the operator token is compared in
+  constant time (KT-1006).
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task
@@ -182,6 +206,32 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
+- The other processes Kronn starts get a built environment too (KT-1006):
+  dependency checks (`npm`, `cargo`, `go`, `bundle`, `dotnet`, `poetry`,
+  `composer`, Renovate through `npx`, and Composer through Docker) keep only
+  their registry, cache and toolchain settings; `gh` and `glab` (PR creation,
+  PR lookup, `gh auth token`, GitLab discovery) keep their own login and the
+  connected project's GitHub token, and the git they start inherits nothing
+  more; `docker compose` keeps only `DOCKER_*`/`COMPOSE_*` settings, so a
+  compose file can no longer interpolate a backend secret; the `cargo
+  metadata` run before a validation gets the Quick Exec environment; and the
+  agent installers, RTK, ccusage, WSL, Tailscale and system probes get the base
+  allow-list. `glab` no longer reads a `GITLAB_TOKEN` exported to Kronn and a
+  package manager no longer reads a registry token from Kronn's environment:
+  both use their own login or config file. Every process now names its
+  environment when it is built: a spawn without one does not compile, clippy
+  refuses any other way to start a process (the system opener included), and
+  the exceptions declared in the design note start in the temporary
+  directory, never in a repository. The desktop app follows the same rule:
+  its sleep inhibitor and its login-shell PATH probe no longer pass the
+  desktop's whole environment on. npm registry credentials
+  (`npm_config__auth` and its registry-scoped forms) are dropped like any
+  other secret.
+- `git push` and `gh` PR creation use the project's own GitHub connection,
+  never the first GitHub MCP token of any project. The token no longer
+  appears in the push URL or in a variable a repository hook can read: it is
+  sent as a header scoped to github.com, with hooks and credential helpers
+  off for that push (KT-1006).
 - The project and discussion terminal no longer runs `env` and no longer
   reads outside the project: `cat`, `head`, `tail`, `find`, `stat`, `grep`,
   `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
@@ -476,7 +526,36 @@ Release notes for 0.9.3 and earlier are available in the
   Quick Exec import and the `kronn/` import apply it too. An unsafe line is
   kept on save only when it is exactly the stored one (same step, position,
   name and arguments), and an unquoted shell value no longer gets an
-  automatic fix, since `"$1"` would not print the same thing.
+  automatic fix, since `"$1"` would not print the same thing. It also knows
+  that a shell never glues its script to `-c` (`bash -cx SCRIPT`), covers
+  `make --eval` and `VAR=value`, `npm`/`pnpm`/`yarn exec`/`dlx`/`install`/`run`
+  and `bunx`, `gdb -ex`, `tar --to-command`, `rsync -e`, `curl -K`, `vim -c`
+  and `+cmd`, `sqlite3`, `mysql -e`, `psql -c`, `crontab` and `at`, refuses
+  any value given to an interpreter it does not model, and refuses an
+  `exec_stdin` value when the program runs its stdin as code (a shell or an
+  interpreter without a script or inline code). A config restore imports a
+  workflow that fails these rules disabled and leaves such a Quick Exec out,
+  and its report names each one and why. Option clusters of launchers
+  (`sudo -Eu`, `env -iS`), `docker compose`, git options and subcommands
+  that run commands (`rebase --exec`, `submodule foreach`, `bisect run`,
+  `git config` values), more launchers (`watch`, `flock`, `kubectl exec`,
+  `chroot`, `strace`, `parallel`…) and package fetchers (`pip install`,
+  `pipx run`, `uvx`, `go run`, `cargo install`, `gem install`,
+  `deno run`/`eval`) follow the same rule.
+- A run value can no longer reach a program Kronn does not model unless a
+  human approved it (KT-1017). Every program is now either known to read
+  its arguments as plain data (`echo`, `cat`, `grep`, `jq`…), parsed by the
+  classifier, or refused: an Exec step or Quick Exec that passes a template
+  value to any other program is refused at save and at run time, with the
+  program named. The step editor and the Quick Exec form show a checkbox for
+  such a line ("terraform receives values from the run; I confirm it treats
+  its arguments as plain data"); only a human can tick it, an agent's save
+  never sets it, and a bundle, an Artifact import or an import through an
+  agent drops it.
+- A run value given to a data-only program that still reads options (`rm`,
+  `cp`, `mv`, `chmod`, `date`, `grep`…) is refused at run time when it renders
+  to an option (`rm {{x}}` as `-rf`), unless a literal `--` precedes it
+  (KT-1017).
 
 ### Changed
 

@@ -451,6 +451,13 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
  */
 export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
 
+/**
+ * Fixed request header declared on an API plugin. `value` is a literal
+ * or contains `${ENV.KEY}` references to the config's fields, resolved
+ * server-side so the value never reaches agent prompts.
+ */
+export type ApiDefaultHeader = { name: string, value: string, };
+
 export type ApiEndpoint = { path: string,
 /**
  * `"GET"`, `"POST"`, etc. Kept free-form to avoid constraining agents
@@ -503,7 +510,13 @@ docs_url?: string | null,
  * in the config's encrypted env and surfaced to agents only as
  * `${ENV.KEY}` broker references — never as literal prompt values.
  */
-config_keys?: Array<ApiConfigKey>, };
+config_keys?: Array<ApiConfigKey>,
+/**
+ * Headers the broker sends on every call, whatever the auth kind
+ * (e.g. Notion's mandatory `Notion-Version`). A header given on the
+ * call itself overrides the default of the same name.
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
@@ -1164,7 +1177,11 @@ fields?: Array<CustomApiField>,
  * method, description}` (matches the existing `ApiEndpoint`
  * shape).
  */
-endpoints?: Array<ApiEndpoint>, };
+endpoints?: Array<ApiEndpoint>,
+/**
+ * Headers sent on every call (see `ApiSpec::default_headers`).
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -1714,7 +1731,11 @@ export type CreateProfileRequest = { name: string, persona_name?: string, role: 
 
 export type CreateQuickApiRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, api_plugin_slug: string, api_config_id: string, api_endpoint_path: string, api_method?: string | null, api_query?: { [key in string]: string } | null, api_path_params?: { [key in string]: string } | null, api_headers?: { [key in string]: string } | null, api_body?: JsonValue | null, api_extract?: ExtractSpec | null, api_pagination?: PaginationSpec | null, api_timeout_ms?: number | null, api_max_retries?: number | null, variables?: Array<PromptVariable>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
 
-export type CreateQuickExecRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, command: string, args?: Array<string>, timeout_secs?: number | null, output_format?: CollectQuickExecOutputFormat, variables?: Array<PromptVariable>, };
+export type CreateQuickExecRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, command: string, args?: Array<string>, timeout_secs?: number | null, output_format?: CollectQuickExecOutputFormat, variables?: Array<PromptVariable>,
+/**
+ * See [`QuickExec::unmodelled_args_approved`].
+ */
+unmodelled_args_approved?: boolean, };
 
 export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, connection_id?: string | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
 
@@ -1777,7 +1798,11 @@ fields?: Array<CustomApiField>,
  * method, description}` (matches the existing `ApiEndpoint`
  * shape).
  */
-endpoints?: Array<ApiEndpoint>, };
+endpoints?: Array<ApiEndpoint>,
+/**
+ * Headers sent on every call (see `ApiSpec::default_headers`).
+ */
+default_headers?: Array<ApiDefaultHeader>, };
 
 export type DailyUsage = { date: string, tokens: number, cost: CostAggregate, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
 
@@ -3090,6 +3115,21 @@ export type EvidenceCheck = { reference: string, status: string, fabricated: boo
  * What a run may be evidence for.
  */
 export type EvidenceTarget = "task" | "review_finding";
+
+/**
+ * What the editors need to know about one command line.
+ */
+export type ExecLineCheck = {
+/**
+ * The unmodelled program that receives a value from the run, when the
+ * line needs a human's approval to be saved (KT-1017).
+ */
+unmodelled_program: string | null, };
+
+/**
+ * A command line to check for the step editor and the Quick Exec form.
+ */
+export type ExecLineCheckRequest = { command: string, args?: Array<string>, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -5931,7 +5971,12 @@ export type QuickExec = { id: string, name: string, icon: string, description: s
 /**
  * User-pinned / favorite Quick Exec in the Automation library.
  */
-pinned: boolean, created_at: string, updated_at: string, };
+pinned: boolean,
+/**
+ * KT-1017 — a human confirmed that an unmodelled program here treats
+ * its arguments as plain data. Never set by an agent's save.
+ */
+unmodelled_args_approved?: boolean, created_at: string, updated_at: string, };
 
 export type QuickExecDiagnostics = {
 /**
@@ -9183,6 +9228,12 @@ exec_stdin?: string | null,
  * verified copy and fails before running when a file no longer matches.
  */
 exec_script_files?: Array<ExecScriptFile>,
+/**
+ * KT-1017 — a human confirmed that the programs of this step that the
+ * classifier does not model treat their arguments as plain data, so
+ * templated values may reach them. Never set by an agent's save.
+ */
+exec_unmodelled_args_approved?: boolean,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

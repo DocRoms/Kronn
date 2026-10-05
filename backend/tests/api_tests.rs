@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // fixtures start processes directly
 //! Integration tests for the Kronn backend API.
 //!
 //! These tests exercise the full HTTP layer (router + handlers + DB)
@@ -1689,6 +1690,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 variables: vec![],
                 created_at: now,
                 updated_at: now,
+                unmodelled_args_approved: None,
             };
             kronn::db::quick_execs::insert_quick_exec(connection, &quick_exec)?;
 
@@ -2280,6 +2282,69 @@ async fn artifact_import_reuses_identical_automations_copies_publishers_and_reje
     })).await;
     assert_eq!(stale["success"], false, "{stale}");
     assert_eq!(workflow_import_database_snapshot(&state).await, after);
+}
+
+/// An artifact can come from another instance: an approval it carries is
+/// dropped, so only a human of this instance approves an unmodelled program.
+#[tokio::test]
+async fn artifact_import_drops_the_unmodelled_program_approval_it_carries() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_quick_execs"][0]["unmodelled_args_approved"] = serde_json::json!(true);
+    for workflow in bundle["referenced_workflows"].as_array_mut().unwrap() {
+        for step in workflow["steps"].as_array_mut().unwrap() {
+            step["exec_unmodelled_args_approved"] = serde_json::json!(true);
+        }
+    }
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let mut request = serde_json::json!({
+        "content": bundle.to_string(), "approved_quick_exec_ids": ["qe-portable"]
+    });
+    let (_, preview) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    request["preview_digest"] = preview["data"]["digest"].clone();
+    let (_, imported) = post_json(app.clone(), "/api/pages/import", request).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            let execs = kronn::db::quick_execs::list_quick_execs(conn)?;
+            assert!(!execs.is_empty());
+            assert!(execs.iter().all(|e| e.unmodelled_args_approved.is_none()));
+            let workflows = kronn::db::workflows::list_workflows(conn)?;
+            assert!(!workflows.is_empty());
+            for workflow in workflows {
+                assert!(workflow
+                    .steps
+                    .iter()
+                    .chain(&workflow.on_failure)
+                    .all(|s| s.exec_unmodelled_args_approved.is_none()));
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // An unmodelled program with a templated argument is refused, approval or not.
+    bundle["referenced_quick_execs"][0]["command"] = serde_json::json!("terraform");
+    bundle["referenced_quick_execs"][0]["args"] = serde_json::json!(["plan", "{{x}}"]);
+    let (_, refused) = post_json(
+        app,
+        "/api/pages/import/preview",
+        serde_json::json!({"content": bundle.to_string(), "approved_quick_exec_ids": ["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap_or_default().contains("terraform"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]
@@ -3599,7 +3664,7 @@ async fn project_repository_resources_expose_uses_and_used_by_with_missing_refer
                         variables: Vec::new(),
                         pinned: false,
                         created_at: now,
-                        updated_at: now,
+                        updated_at: now, unmodelled_args_approved: None,
                     },
                 )?;
                 let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
@@ -3684,6 +3749,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
                         pinned: false,
                         created_at: now,
                         updated_at: now,
+                        unmodelled_args_approved: None,
                     },
                 )?;
                 Ok(())
@@ -16599,7 +16665,7 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                 .map(|path| std::fs::read(path).unwrap())
                 .collect();
 
-            let mut child = kronn::core::cmd::async_cmd(std::env::current_exe().unwrap())
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "mcp_host_sync_router_confines_an_inherited_host_home",
@@ -26034,6 +26100,7 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
                     pinned: false,
                     created_at: now,
                     updated_at: now,
+                    unmodelled_args_approved: None,
                 },
             )
         })

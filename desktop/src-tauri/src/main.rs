@@ -50,7 +50,7 @@ mod wake_lock {
         {
             // Spawn caffeinate in background — it will be killed on release
             std::thread::spawn(|| {
-                let _ = std::process::Command::new("caffeinate")
+                let _ = kronn::core::cmd::sync_tool_cmd("caffeinate")
                     .arg("-i") // prevent idle sleep
                     .arg("-w")
                     .arg(std::process::id().to_string()) // tied to this process
@@ -294,7 +294,9 @@ fn shell_path_from_user_shell() -> Option<String> {
 
     // Spawn the shell as a child process so we can enforce a timeout.
     // -i = interactive (sources .zshrc/.bashrc), -l = login (sources .profile)
-    let mut child = match std::process::Command::new(&shell)
+    // The rc files run with the base allow-list (HOME, PATH, SHELL…), never
+    // the desktop's whole environment (KT-1006).
+    let mut child = match kronn::core::cmd::sync_tool_cmd(&shell)
         .args(["-i", "-l", "-c", "echo $PATH"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

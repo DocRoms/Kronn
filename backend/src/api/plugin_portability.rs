@@ -1393,6 +1393,7 @@ mod tests {
                     placeholder: String::new(),
                     description: String::new(),
                 }],
+                default_headers: vec![],
             }),
         }
     }
