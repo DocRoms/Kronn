@@ -17,10 +17,14 @@ covers:
 
 ```toml
 [server]
-auth_token = "<random-uuid>"   # generated on first boot
 auth_enabled = true            # toggleable from Settings UI
 auth_strict_localhost = false  # localhost gets free pass (default)
 ```
+
+The token itself (a random UUID generated on first boot) is stored
+encrypted in the database since 0.14.3, not in `config.toml`; see
+[key-management.md](key-management.md). `KRONN_AUTH_TOKEN` still
+overrides it.
 
 Behaviour:
 

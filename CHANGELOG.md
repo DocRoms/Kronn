@@ -155,7 +155,17 @@ Release notes for 0.9.3 and earlier are available in the
   `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
   outside it, symlinks followed, and `find -exec`/`-delete` and
   `git diff --no-index` are refused (KT-1006).
-
+- The encryption key can no longer be lost to an unreadable vault or to
+  encrypted data the boot did not look at (KT-1007). A denied or locked
+  keychain, or an unreadable `encryption_key` file, now stops Kronn at startup
+  with a message saying what to do, instead of being read as empty and
+  overwritten; a key is generated only when no encrypted column holds data
+  (MCP settings, execution-variable snapshots and stored credentials, all
+  listed in one registry checked against the database schema). When no key
+  decrypts existing data, Kronn keeps running for a restore but holds no key,
+  so nothing new is encrypted under a key that no vault keeps.
+- Replacing the recovery passphrase now asks for the current one, so the
+  `recovery.key` that restores the key cannot be swapped silently (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
   listed in `WSLENV` (appended to the user's own list), and the Windows paths
@@ -425,6 +435,14 @@ Release notes for 0.9.3 and earlier are available in the
 - The project and discussion terminal runs its command without a shell:
   quotes still group words, but `$VAR`, `~` and globs are passed literally
   (`find . -name "*.rs"` still works) (KT-1006).
+- `config.toml` no longer holds secrets (KT-1007): provider and External API
+  connection keys and the API auth token are stored encrypted in the database,
+  and the encryption key stays in the OS keychain or the `encryption_key` file,
+  kept in `config.toml` only while no vault can hold it, or while a single
+  copy would remain without a recovery passphrase. The first start moves
+  existing values, checks each one decrypts back, keeps the previous file
+  encrypted as `config.toml.pre-credential-store.enc`, and can be interrupted
+  and rerun without loss. See `docs/operations/key-management.md`.
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from

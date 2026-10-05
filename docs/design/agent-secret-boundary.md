@@ -218,27 +218,43 @@ Security only helps if the user can see it:
   item, with the action that unlocks it.
 - The GitHub connection shows its real scope or "scope not verified" (4.5).
 
-### Layer C — storage consolidation (KT-1007, before any file removal)
+### Layer C — storage consolidation (KT-1007) — implemented in 0.14.3
 
-DoD items, each with a test:
-1. One registry of every encrypted column (MCP configs, connections,
-   execution-variable snapshots, the new credentials table). `collect_encrypted_rows`
-   reads all of it; a test compares the registry with the schema so a new
-   encrypted column cannot be forgotten.
-2. `KeyVault::retrieve` distinguishes `Empty` from `Denied`/`Unavailable`.
-   Reconcile never mints a key while any registered column holds ciphertext and
-   never `mirror()`s into a vault that errored; startup stops with an
-   actionable message instead.
-3. `encryption_secret` is no longer serialized and reconcile stops setting it,
-   in the same change as any file deletion.
-4. `tokens.keys[].value` and `server.auth_token` move to an encrypted table.
-   The migration decrypts every moved value back before rewriting
-   `config.toml`, is interrupt-safe and idempotent (rerun, partial, already
-   migrated), and keeps a backup protected by the recovery passphrase.
-5. `recovery/set` refuses to replace an existing `recovery.key` without the
-   current recovery passphrase or the human factor.
-6. Dev builds test the Keychain path with the existing `KRONN_USE_KEYCHAIN=1`
-   (`keyvault.rs:172-177`).
+Operator view: [`operations/key-management.md`](../operations/key-management.md).
+
+1. **Done.** `keystore::ENCRYPTED_COLUMNS` lists every encrypted column
+   (`mcp_configs.env_encrypted`, `execution_variable_snapshots.values_encrypted`,
+   `stored_credentials.value_encrypted`); `collect_encrypted_rows` samples all
+   of them, and `encrypted_column_registry_matches_the_schema` fails when a
+   column named `*encrypted*`/`*cipher*` is missing from the registry.
+2. **Done.** `KeyVault::retrieve` returns `Ok(None)` only for an empty vault;
+   denied or unreadable vaults return a `VaultError`. `KeyStore::snapshot`
+   fails on the first unreadable vault and the reconciler stops the boot with
+   `KeyBootError::VaultUnreadable` (both mains exit); `mirror()` never writes
+   a vault whose read failed. Mint/adopt only when no registered column holds
+   ciphertext.
+3. **Done.** `encryption_secret` is `serde(skip_serializing)`. It stays the
+   in-process key every consumer reads; the only copy written to
+   `config.toml` is the one `config::retain_disk_key` keeps until a vault
+   reads the key back, the key decrypts every non-empty column, and either a
+   recovery passphrase exists or the sidecar holds the key too (a different
+   legacy key is kept). Without a recovery passphrase no local copy is
+   deleted; `recovery/status` exposes `key_copies_kept` / `config_holds_key`.
+   A locked boot keeps no key in memory (fail closed).
+4. **Done.** `tokens.keys[]` and `server.auth_token` live in
+   `stored_credentials` (migration 217). The boot migration merges, writes,
+   reads back, writes an encrypted backup of the old file
+   (`config.toml.pre-credential-store.enc`, `0600`, under the instance key,
+   hence recoverable through the recovery passphrase), then rewrites
+   `config.toml`; it also scrubs the DB migration runner's plaintext
+   `config.toml.backup`. Readers keep using the live config, filled from the
+   table at boot and written back by every `config::save`. Reveal routes are
+   unchanged.
+5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
+   `recovery.key` without `current_passphrase`; the human factor (D1) is not
+   part of 0.14.3.
+6. **Done.** Dev builds exercise the keychain with `KRONN_USE_KEYCHAIN=1`
+   (`keyvault.rs` `use_os_keychain`); outside macOS/Windows the default is off.
 
 ### Layer D — files out of reach (KT-990, KT-969)
 

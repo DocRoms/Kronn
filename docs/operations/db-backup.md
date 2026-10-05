@@ -164,16 +164,17 @@ copy without stopping the backend.
 
 ## Encrypted secrets
 
-`config.toml::server.encryption_secret` is the AES-GCM key for the
-MCP env-var encryption. Back it up **separately** from the DB — if
-you lose the secret, the encrypted env values in the DB are
-unrecoverable. A single git-crypt'd file or a password manager entry
-is enough.
+The AES-GCM key encrypts MCP env values, execution-variable snapshots,
+provider keys and the API auth token (all in the DB since 0.14.3). It
+lives in the OS keychain or the `encryption_key` sidecar, not in the DB:
+a DB backup alone is unreadable without it. Set a recovery passphrase
+(Settings → Recovery) and keep the recovery code off the machine — see
+[key-management.md](key-management.md).
 
 ## What's NOT covered
 
-- `~/.config/kronn/config.toml` — re-derivable from the backend's
-  defaults + the user's API keys (which they should also back up).
+- `~/.config/kronn/config.toml` — settings only; credentials are in
+  the DB (encrypted) since 0.14.3.
 - `~/.kronn/user-context/*.md` — uploaded markdown, lives outside
   the DB. Snapshot the whole `~/.kronn/` if you want belt+suspenders.
 - Disc workspace dirs (`/path/to/repo/.kronn-worktrees/<disc>/`) —
