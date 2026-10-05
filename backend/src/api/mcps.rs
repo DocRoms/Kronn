@@ -325,17 +325,27 @@ async fn probe_api_with_policy(
     required: bool,
     policy: crate::workflows::api_call_executor::SecurityPolicy,
 ) -> McpProbeCheck {
-    let Some(definition) = registry::api_readiness_probe(&server.id) else {
-        return failed_probe(
-            "api",
-            "Authenticated API",
-            required,
-            ProbeDiagnosticCode::Other,
-            "No side-effect-free authentication probe is declared for this plugin",
-        );
+    let declared = registry::api_readiness_probe(&server.id);
+    let custom_path = server
+        .id
+        .starts_with("custom-")
+        .then(|| server.api_spec.as_ref().and_then(ApiSpec::probe_endpoint))
+        .flatten();
+    let (probe_path, query_from_config) = match (&declared, custom_path) {
+        (Some(definition), _) => (definition.path.to_string(), definition.query_from_config),
+        (None, Some(path)) => (path.to_string(), &[][..]),
+        (None, None) => {
+            return failed_probe(
+                "api",
+                "Authenticated API",
+                required,
+                ProbeDiagnosticCode::Other,
+                "No test endpoint: declare a GET endpoint without path parameters and select it as the test endpoint",
+            );
+        }
     };
     let mut query = std::collections::HashMap::new();
-    for (parameter, env_key) in definition.query_from_config {
+    for (parameter, env_key) in query_from_config {
         let Some(value) = env.get(*env_key).filter(|value| !value.trim().is_empty()) else {
             return failed_probe(
                 "api",
@@ -353,7 +363,7 @@ async fn probe_api_with_policy(
         step_type: StepType::ApiCall,
         api_plugin_slug: Some(server.id.clone()),
         api_config_id: Some(config.id.clone()),
-        api_endpoint_path: Some(definition.path.into()),
+        api_endpoint_path: Some(probe_path.clone()),
         api_method: Some("GET".into()),
         api_query: (!query.is_empty()).then_some(query),
         ..WorkflowStep::default()
@@ -367,7 +377,7 @@ async fn probe_api_with_policy(
             "api",
             "Authenticated API",
             required,
-            &format!("GET {} authenticated successfully", definition.path),
+            &format!("GET {probe_path} authenticated successfully"),
         ),
         Ok(outcome) => {
             let code = classify_probe_failure(&outcome.result.output);
@@ -997,6 +1007,11 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
                 value: h.value.trim().to_string(),
             })
             .collect(),
+        test_endpoint: payload
+            .test_endpoint
+            .as_ref()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty()),
     };
 
     McpServer {
@@ -1021,7 +1036,44 @@ fn validate_custom_auth(auth: &ApiAuthKind) -> Result<(), String> {
 /// Every check a user-authored or imported Custom API spec must pass.
 pub(crate) fn validate_custom_payload(payload: &CustomApiPayload) -> Result<(), String> {
     validate_custom_auth(&payload.auth)?;
-    validate_default_headers(payload)
+    validate_default_headers(payload)?;
+    validate_test_endpoint(payload)
+}
+
+/// The test endpoint must be one of the plugin's declared `GET`s without
+/// path parameters, so the "Test" button never changes anything remotely.
+fn validate_test_endpoint(payload: &CustomApiPayload) -> Result<(), String> {
+    let Some(path) = payload
+        .test_endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(());
+    };
+    let declared: Vec<_> = payload
+        .endpoints
+        .iter()
+        .filter(|e| e.path.trim() == path)
+        .collect();
+    if declared.is_empty() {
+        return Err(format!(
+            "Test endpoint `{path}` is not one of the declared endpoints"
+        ));
+    }
+    if !declared.iter().any(|e| {
+        ApiEndpoint {
+            path: e.path.trim().to_string(),
+            method: e.method.clone(),
+            description: String::new(),
+        }
+        .is_testable()
+    }) {
+        return Err(format!(
+            "Test endpoint `{path}` must be a GET without path parameters"
+        ));
+    }
+    Ok(())
 }
 
 const MAX_DEFAULT_HEADERS: usize = 20;
@@ -2984,6 +3036,7 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
         // Safe to export: validation forces credential-like headers to
         // reference a field instead of carrying a literal value.
         default_headers: spec.default_headers.clone(),
+        test_endpoint: spec.test_endpoint.clone(),
     })
 }
 
@@ -3481,6 +3534,7 @@ mod tests {
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let env = std::collections::HashMap::from([("TOKEN".into(), token.into())]);
@@ -3563,11 +3617,41 @@ mod tests {
         assert!(check.detail.contains("credentials"));
     }
 
+    fn notion_like_endpoints() -> Vec<ApiEndpoint> {
+        vec![
+            ApiEndpoint {
+                path: "/search".into(),
+                method: "POST".into(),
+                description: String::new(),
+            },
+            ApiEndpoint {
+                path: "/users/{user_id}".into(),
+                method: "GET".into(),
+                description: String::new(),
+            },
+            ApiEndpoint {
+                path: "/users".into(),
+                method: "GET".into(),
+                description: String::new(),
+            },
+            ApiEndpoint {
+                path: "/users/me".into(),
+                method: "get".into(),
+                description: String::new(),
+            },
+        ]
+    }
+
     #[tokio::test]
-    async fn api_probe_without_an_explicit_safe_endpoint_never_claims_ready() {
+    async fn api_probe_without_a_testable_endpoint_never_claims_ready() {
         let (state, mut server, config, env) =
             api_probe_fixture("https://example.test", "token").await;
         server.id = "custom-no-probe".into();
+        server.api_spec.as_mut().unwrap().endpoints = vec![ApiEndpoint {
+            path: "/items/{id}".into(),
+            method: "GET".into(),
+            description: String::new(),
+        }];
         let check = probe_api_with_policy(
             &state,
             &server,
@@ -3578,7 +3662,140 @@ mod tests {
         )
         .await;
         assert!(!check.ok);
-        assert!(check.detail.contains("No side-effect-free"));
+        assert!(check.detail.contains("No test endpoint"), "{check:?}");
+    }
+
+    #[tokio::test]
+    async fn api_probe_of_a_registry_plugin_never_guesses_an_endpoint() {
+        let (state, mut server, config, env) =
+            api_probe_fixture("https://example.test", "token").await;
+        server.id = "api-without-declared-probe".into();
+        server.api_spec.as_mut().unwrap().endpoints = notion_like_endpoints();
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::production(),
+        )
+        .await;
+        assert!(!check.ok);
+        assert!(check.detail.contains("No test endpoint"), "{check:?}");
+    }
+
+    #[tokio::test]
+    async fn api_probe_of_a_custom_plugin_calls_its_identity_endpoint_with_default_headers() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let remote = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/me"))
+            .and(header("authorization", "Bearer good-token"))
+            .and(header("Notion-Version", "2025-09-03"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"object": "user"})),
+            )
+            .mount(&remote)
+            .await;
+        let (state, mut server, config, env) = api_probe_fixture(&remote.uri(), "good-token").await;
+        server.id = "custom-notion-abc".into();
+        let spec = server.api_spec.as_mut().unwrap();
+        spec.endpoints = notion_like_endpoints();
+        spec.default_headers = vec![ApiDefaultHeader {
+            name: "Notion-Version".into(),
+            value: "2025-09-03".into(),
+        }];
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert!(check.ok, "{check:?}");
+        assert!(check.detail.contains("GET /users/me"), "{check:?}");
+    }
+
+    #[tokio::test]
+    async fn api_probe_of_a_custom_plugin_honours_the_selected_test_endpoint() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let remote = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"results": []})),
+            )
+            .mount(&remote)
+            .await;
+        let (state, mut server, config, env) = api_probe_fixture(&remote.uri(), "good-token").await;
+        server.id = "custom-notion-abc".into();
+        let spec = server.api_spec.as_mut().unwrap();
+        spec.endpoints = notion_like_endpoints();
+        spec.test_endpoint = Some("/users".into());
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert!(check.ok, "{check:?}");
+        let requests = remote.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/users");
+    }
+
+    #[test]
+    fn test_endpoint_must_be_a_declared_get_without_path_parameters() {
+        let mut payload = notion_payload(vec![]);
+        payload.endpoints = notion_like_endpoints();
+        for (chosen, expected) in [
+            ("/users/me", None),
+            (" /users ", None),
+            ("", None),
+            ("/search", Some("must be a GET")),
+            ("/users/{user_id}", Some("must be a GET")),
+            ("/nope", Some("not one of the declared endpoints")),
+        ] {
+            payload.test_endpoint = Some(chosen.into());
+            match (validate_custom_payload(&payload), expected) {
+                (Ok(()), None) => {}
+                (Err(error), Some(fragment)) => {
+                    assert!(error.contains(fragment), "{chosen}: {error}")
+                }
+                (result, _) => panic!("{chosen}: unexpected {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_endpoint_is_trimmed_stored_and_exported() {
+        let mut payload = notion_payload(vec![]);
+        payload.endpoints = notion_like_endpoints();
+        payload.test_endpoint = Some(" /users ".into());
+        let server = materialize_custom_server(&payload);
+        assert_eq!(
+            server.api_spec.as_ref().unwrap().test_endpoint.as_deref(),
+            Some("/users")
+        );
+        let exported = build_custom_plugin_export(&server).unwrap();
+        assert_eq!(exported.test_endpoint.as_deref(), Some("/users"));
+
+        payload.test_endpoint = Some("   ".into());
+        let blank = materialize_custom_server(&payload);
+        assert_eq!(blank.api_spec.unwrap().test_endpoint, None);
     }
 
     /// KT-829 — `/mcps/test-all` probes every visible config, one result
@@ -3924,6 +4141,7 @@ mod tests {
             ],
             endpoints: vec![],
             default_headers: vec![],
+            test_endpoint: None,
         };
 
         let server = materialize_custom_server(&payload);
@@ -3976,6 +4194,7 @@ mod tests {
                     value: value.into(),
                 })
                 .collect(),
+            test_endpoint: None,
         }
     }
 
@@ -4109,6 +4328,7 @@ mod tests {
             ],
             endpoints: vec![],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let server = materialize_custom_server(&payload);
         let spec = server.api_spec.unwrap();
@@ -4128,6 +4348,7 @@ mod tests {
             fields: vec![],
             endpoints: vec![],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert!(
@@ -4182,6 +4403,7 @@ mod tests {
                 },
             ],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let server = materialize_custom_server(&payload);
         let spec = server.api_spec.expect("api_spec set");
@@ -4228,6 +4450,7 @@ mod tests {
                 },
             ],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert_eq!(spec.endpoints.len(), 1, "blank-path rows must be dropped");
@@ -4265,6 +4488,7 @@ mod tests {
                 },
             ],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
         assert_eq!(
@@ -4309,6 +4533,7 @@ mod tests {
                 description: "List".into(),
             }],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let old_id = "custom-didomi-27c67bd7".to_string();
         let old_source = McpSource::Manual;
@@ -4403,6 +4628,7 @@ mod tests {
                 },
             ],
             default_headers: vec![],
+            test_endpoint: None,
         };
         let mut updated = materialize_custom_server(&payload);
         updated.id = "custom-didomi-27c67bd7".into(); // stitched from prev
@@ -4465,6 +4691,7 @@ mod tests {
                     })
                     .collect(),
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         }
     }
@@ -4485,6 +4712,7 @@ mod tests {
             endpoints: vec![],
             auth: ApiAuthKind::None,
             default_headers: vec![],
+            test_endpoint: None,
         }
     }
 

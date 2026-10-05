@@ -1892,6 +1892,7 @@ args = ["@example/old-mcp"]
                     description: "Host tracked".into(),
                 }],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env = HashMap::new();
@@ -2095,6 +2096,7 @@ args = ["@example/old-mcp"]
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let out = build_api_context_block(&[(server, "cfg-1".into(), HashMap::new())]);
@@ -2201,6 +2203,7 @@ args = ["@example/old-mcp"]
                     docs_url: None,
                     config_keys: vec![],
                     default_headers: vec![],
+                    test_endpoint: None,
                 }),
             };
             let out = build_api_context_block(&[(server, format!("cfg-{idx}"), env.clone())]);
@@ -2242,6 +2245,7 @@ args = ["@example/old-mcp"]
                     description: String::new(),
                 }],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env = HashMap::new();
@@ -2688,6 +2692,7 @@ args = ["@example/old-mcp"]
                     description: "Tenant id".into(),
                 }],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env_with_token = env.clone();
@@ -2734,6 +2739,7 @@ args = ["@example/old-mcp"]
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2774,6 +2780,7 @@ args = ["@example/old-mcp"]
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2849,6 +2856,7 @@ args = ["@example/old-mcp"]
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let mut env = std::collections::HashMap::new();
@@ -2893,6 +2901,7 @@ args = ["@example/old-mcp"]
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let srv_ok = mk_srv("ok-plugin", "https://a.com");

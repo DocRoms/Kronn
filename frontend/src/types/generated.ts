@@ -516,7 +516,12 @@ config_keys?: Array<ApiConfigKey>,
  * (e.g. Notion's mandatory `Notion-Version`). A header given on the
  * call itself overrides the default of the same name.
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Path of the declared endpoint the "Test" button calls to check the
+ * credentials. Only a `GET` without path parameters qualifies.
+ */
+test_endpoint?: string, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
@@ -1148,7 +1153,11 @@ endpoints?: Array<ApiEndpoint>,
 /**
  * Headers sent on every call (see `ApiSpec::default_headers`).
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
+ */
+test_endpoint?: string, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -1769,7 +1778,11 @@ endpoints?: Array<ApiEndpoint>,
 /**
  * Headers sent on every call (see `ApiSpec::default_headers`).
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
+ */
+test_endpoint?: string, };
 
 export type DailyUsage = { date: string, tokens: number, cost: CostAggregate, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
 

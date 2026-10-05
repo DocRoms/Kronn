@@ -9,6 +9,7 @@ import type { AgentType, McpDefinition, McpOverview, Project } from '../../types
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { usePluginListState } from './usePluginListState';
 import { useAddPluginRegistryState } from './useAddPluginRegistryState';
+import { effectiveTestEndpoint } from './testEndpoint';
 import { useCustomApiFormState } from './useCustomApiFormState';
 import { visibleToPluginProject } from './pluginHealth';
 
@@ -77,7 +78,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   } = addRegistry;
   const {
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
-    setCustomFields, setCustomEndpoints, setCustomHeaders, setEditingCustomServerId,
+    setCustomFields, setCustomEndpoints, setCustomHeaders, setCustomTestEndpoint, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
   } = customForm;
 
@@ -98,6 +99,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setCustomFields([{ label: '', value: '' }]);
     setCustomEndpoints([]);
     setCustomHeaders([]);
+    setCustomTestEndpoint(null);
     setEditingCustomServerId(null);
     setEditingCustomConfigId(null);
     setEditingCustomOriginalScope(null);
@@ -106,7 +108,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   }, [
     setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal, setAddMcpProjectIds,
     setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, setCustomName, setCustomBaseUrl, setCustomDescription,
-    setCustomDocsUrl, setCustomFields, setCustomEndpoints, setCustomHeaders, setEditingCustomServerId,
+    setCustomDocsUrl, setCustomFields, setCustomEndpoints, setCustomHeaders, setCustomTestEndpoint, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
   ]);
   const handleAddMcpModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -163,7 +165,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
   const handleAddMcpFromRegistry = async () => {
     const { addMcpSelected, addMcpLabel, addMcpEnv, addMcpGlobal, addMcpProjectIds, addMcpHostSync } = addRegistry;
     const {
-      customName, customBaseUrl, customDescription, customDocsUrl, customFields, customEndpoints, customHeaders, customAuth,
+      customName, customBaseUrl, customDescription, customDocsUrl, customFields, customEndpoints, customHeaders, customTestEndpoint, customAuth,
       editingCustomServerId, editingCustomConfigId, editingCustomOriginalScope,
     } = customForm;
     // Refonte 2b (2026-06-10) — the EDIT path no longer rides on the Add
@@ -208,6 +210,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
             endpoints: customEndpoints.filter(e => e.path.trim() !== ''),
             auth: customAuth,
             default_headers: customHeaders.filter(h => h.name.trim() !== '' || h.value.trim() !== ''),
+            test_endpoint: effectiveTestEndpoint(customEndpoints, customTestEndpoint) ?? undefined,
           });
           // 0.8.6 (#60) — detect orphan env keys left behind by a rename
           // / removal across all OTHER configs of this server (the
@@ -332,6 +335,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
             endpoints: customEndpoints.filter(e => e.path.trim() !== ''),
             auth: customAuth,
             default_headers: customHeaders.filter(h => h.name.trim() !== '' || h.value.trim() !== ''),
+            test_endpoint: effectiveTestEndpoint(customEndpoints, customTestEndpoint) ?? undefined,
           },
         });
         resetAddMcp();

@@ -2057,6 +2057,50 @@ describe('McpPage', () => {
     expect(spec.default_headers).toEqual([{ name: 'Notion-Version', value: '${ENV.NOTION_VERSION}' }]);
   });
 
+  const openNotionEdit = async () => {
+    vi.useRealTimers();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const serverId = 'custom-notion-abc12345';
+    const server = makeCustomServer(serverId, 'Notion');
+    server.api_spec!.endpoints = [
+      { path: '/search', method: 'POST', description: 'Search' },
+      { path: '/users', method: 'GET', description: 'List users' },
+      { path: '/users/me', method: 'GET', description: 'Bot user' },
+    ];
+    const overview: McpOverview = {
+      servers: [server],
+      configs: [makeConfig('cfg-notion', serverId, 'Notion', { env_keys: ['API_KEY'] })],
+      customized_contexts: [],
+      incompatibilities: [], incomplete_configs: [],
+    };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notion — Voir les détails' }));
+    await act(async () => { fireEvent.click(screen.getByTitle('Modifier le plugin')); });
+    await screen.findByText(/Enregistrer les modifications/, undefined, { timeout: 2000 });
+  };
+  const saveAndReadTestEndpoint = async () => {
+    fireEvent.click(screen.getByText(/Enregistrer les modifications/));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    return (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mock.calls[0][1].test_endpoint;
+  };
+
+  it('Modifier le plugin: the test endpoint is auto-selected, only safe GETs are selectable', async () => {
+    await openNotionEdit();
+    const radios = screen.getAllByTestId('mcp-custom-test-endpoint') as HTMLInputElement[];
+    expect(radios.map(r => [r.checked, r.disabled])).toEqual([[false, true], [false, false], [true, false]]);
+    expect(screen.getByTestId('mcp-custom-test-endpoint-hint').textContent).toContain('GET /users/me');
+    expect(await saveAndReadTestEndpoint()).toBe('/users/me');
+  });
+
+  it('Modifier le plugin: a test endpoint picked by hand is saved', async () => {
+    await openNotionEdit();
+    fireEvent.click(screen.getAllByTestId('mcp-custom-test-endpoint')[1]);
+    expect((screen.getAllByTestId('mcp-custom-test-endpoint') as HTMLInputElement[])[1].checked).toBe(true);
+    expect(screen.getByTestId('mcp-custom-test-endpoint-hint').textContent).toContain('GET /users');
+    expect(await saveAndReadTestEndpoint()).toBe('/users');
+  });
+
   it('Modifier le plugin: the 👁 reveals the stored value read-only (coherent with the card)', async () => {
     // Coherence with the card: a stored field can be peeked via the eye —
     // fetched on demand (read-only display, never round-tripped on save).

@@ -36,8 +36,10 @@ nonempty parse failures and pagination ending with an empty response.
 ## Default headers declared on a plugin
 
 Some APIs reject every request that lacks a fixed header: Notion answers
-`400 missing_version` without `Notion-Version`, GitHub expects
-`X-GitHub-Api-Version`, some vendors require an `Accept` value. An API plugin
+`400 missing_version` without `Notion-Version`, Anthropic requires
+`anthropic-version`, Heroku and PagerDuty require a vendor `Accept` value.
+(GitHub's `X-GitHub-Api-Version` is optional; the `User-Agent` it requires is
+always sent by the executor.) An API plugin
 declares these once in `ApiSpec.default_headers` (`[{name, value}]`), and the
 broker sends them on every call whatever the auth scheme: `ApiCall`,
 `BatchApiCall`, `CollectApiData`, Quick APIs and the `api_call` MCP tool all go
@@ -60,6 +62,29 @@ like a credential, so a plugin export never carries a secret. Agents only see
 the header names in their API context, never the values.
 [src: file: backend/src/api/mcps.rs:941-1063]
 [src: file: backend/src/core/mcp_scanner.rs:3988]
+
+## Test endpoint of a plugin
+
+The plugin **Test** button proves the credentials with one side-effect-free
+request. Built-in plugins declare it in `registry::api_readiness_probe`. A
+Custom API plugin uses `ApiSpec.test_endpoint`: the path of one of its declared
+endpoints, which must be a `GET` without `{param}`. When none is selected, or
+the selection no longer qualifies, `ApiSpec::probe_endpoint` picks the
+testable endpoint whose last segment answers "who am I" or checks the token,
+then the first testable one; the form shows the same choice
+(`frontend/src/components/plugins/testEndpoint.ts`). The segment list comes
+from documented paths: `/me` (Microsoft Graph, Spotify, Typeform), SCIM `/Me`
+(RFC 7644 §3.11), OpenID Connect `/userinfo`, `/users/me` (Notion, Asana, Box,
+Calendly, Okta, Zoom), `/users/@me` (Discord), `/users/me.json` (Zendesk),
+`/myself` (Jira), `/whoami` (Airtable), `/user` (GitHub, GitLab, Vercel,
+ClickUp, Todoist), `/account` (DigitalOcean, Heroku), `/tokens/verify`
+(Cloudflare), `/validate` (Datadog). `ping` and `health` are excluded: often
+public, they would pass with a wrong token. APIs whose identity check is a
+`POST` (Slack `auth.test`, Dropbox `users/get_current_account`, GraphQL APIs
+such as Linear) cannot be tested this way; the probe falls back to their first
+`GET`, or reports that none qualifies. The request goes through
+the normal executor, so auth and default headers apply. A built-in plugin
+without a declared probe is never guessed.
 
 ## Binary responses (images and other files)
 

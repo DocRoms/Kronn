@@ -168,8 +168,8 @@ Release notes for 0.9.3 and earlier are available in the
   and the step shows the agent it really ran on; the workflow is never
   modified.
 - API plugins can declare headers sent on every call, whatever their
-  authentication: Notion's mandatory `Notion-Version`, GitHub's
-  `X-GitHub-Api-Version`, a required `Accept`. Without one, such an API
+  authentication: Notion's mandatory `Notion-Version`, Anthropic's
+  `anthropic-version`, the `Accept` Heroku requires. Without one, such an API
   refused every request (Notion: `400 missing_version`) and each workflow
   step or agent had to repeat it. Custom API plugins edit them in the new
   **Headers sent on every call** section, as a literal or `${ENV.KEY}` from
@@ -180,6 +180,13 @@ Release notes for 0.9.3 and earlier are available in the
   check refusing CLI-token authentication.
 - Agents no longer see an API's authentication keys, or keys already sent as
   headers, listed as "pass as query params" in their API context.
+- A Custom API plugin's **Test** button now works: it calls the endpoint
+  marked as test endpoint (a round button on each endpoint row), which must be
+  a `GET` without path parameters. Kronn selects the most likely one by
+  default (`/users/me`, `/me`, `/whoami`…, else the first such `GET`), so
+  existing plugins pass the test without being edited. It used to answer "No
+  side-effect-free authentication probe is declared" for every custom plugin,
+  even a working one.
 
 ### Fixed
 

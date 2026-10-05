@@ -973,3 +973,115 @@ fn api_response_err_coded_serializes_error_code_and_plain_err_omits_it() {
     let jo = serde_json::to_value(&ok).unwrap();
     assert!(jo.get("error_code").is_none());
 }
+
+// ─── ApiSpec::probe_endpoint ─────────────────────────────────────────────
+
+fn spec_with(endpoints: &[(&str, &str)], test_endpoint: Option<&str>) -> ApiSpec {
+    ApiSpec {
+        base_url: "https://api.example.com".into(),
+        auth: ApiAuthKind::None,
+        endpoints: endpoints
+            .iter()
+            .map(|(method, path)| ApiEndpoint {
+                method: (*method).into(),
+                path: (*path).into(),
+                description: String::new(),
+            })
+            .collect(),
+        docs_url: None,
+        config_keys: vec![],
+        default_headers: vec![],
+        test_endpoint: test_endpoint.map(String::from),
+    }
+}
+
+#[test]
+fn probe_endpoint_prefers_an_identity_get_over_earlier_ones() {
+    let spec = spec_with(
+        &[
+            ("POST", "/search"),
+            ("GET", "/users"),
+            ("GET", "/users/me/"),
+        ],
+        None,
+    );
+    assert_eq!(spec.probe_endpoint(), Some("/users/me/"));
+    let spec = spec_with(&[("GET", "/pages"), ("get", "/v2/WhoAmI")], None);
+    assert_eq!(spec.probe_endpoint(), Some("/v2/WhoAmI"));
+}
+
+#[test]
+fn probe_endpoint_falls_back_to_the_first_testable_get() {
+    let spec = spec_with(
+        &[
+            ("POST", "/me"),
+            ("GET", "/items/{id}"),
+            ("GET", "/items"),
+            ("GET", "/tags"),
+        ],
+        None,
+    );
+    assert_eq!(spec.probe_endpoint(), Some("/items"));
+}
+
+#[test]
+fn probe_endpoint_honours_a_valid_selection_and_ignores_a_stale_one() {
+    let endpoints = [
+        ("GET", "/users"),
+        ("GET", "/users/me"),
+        ("DELETE", "/cache"),
+    ];
+    assert_eq!(
+        spec_with(&endpoints, Some("/users")).probe_endpoint(),
+        Some("/users")
+    );
+    assert_eq!(
+        spec_with(&endpoints, Some("/cache")).probe_endpoint(),
+        Some("/users/me")
+    );
+    assert_eq!(
+        spec_with(&endpoints, Some("/gone")).probe_endpoint(),
+        Some("/users/me")
+    );
+}
+
+#[test]
+fn probe_endpoint_is_none_without_a_testable_get() {
+    assert_eq!(spec_with(&[], None).probe_endpoint(), None);
+    assert_eq!(
+        spec_with(
+            &[("POST", "/me"), ("GET", "/users/{id}")],
+            Some("/users/{id}")
+        )
+        .probe_endpoint(),
+        None
+    );
+}
+
+/// Documented "who am I" / token-check paths of common APIs; mirrored in
+/// `frontend/src/components/plugins/__tests__/testEndpoint.test.ts`.
+#[test]
+fn probe_endpoint_recognises_documented_identity_paths() {
+    for path in [
+        "/user",                         // GitHub, GitLab, Bitbucket
+        "/v1/users/me",                  // Notion, Asana, Box, Calendly, Okta, Zoom
+        "/1/members/me",                 // Trello
+        "/v1.0/me",                      // Microsoft Graph
+        "/rest/api/3/myself",            // Jira
+        "/v0/meta/whoami",               // Airtable
+        "/api/v10/users/@me",            // Discord
+        "/api/v2/users/me.json",         // Zendesk
+        "/oauth2/v3/userinfo",           // OpenID Connect UserInfo (Google)
+        "/client/v4/user/tokens/verify", // Cloudflare
+        "/api/v1/validate",              // Datadog
+        "/v2/account",                   // DigitalOcean, Heroku
+        "/scim/v2/Me",                   // SCIM (RFC 7644 §3.11)
+    ] {
+        let spec = spec_with(&[("GET", "/list"), ("GET", path)], None);
+        assert_eq!(spec.probe_endpoint(), Some(path), "{path}");
+    }
+    for path in ["/3.0/ping", "/health", "/v1/models"] {
+        let spec = spec_with(&[("GET", "/list"), ("GET", path)], None);
+        assert_eq!(spec.probe_endpoint(), Some("/list"), "{path} must not win");
+    }
+}

@@ -1920,6 +1920,10 @@ body"#;
             c.contains("Do not repeat them in `api_headers`"),
             "skill must forbid per-step duplication"
         );
+        assert!(
+            c.contains("**test endpoint**") && c.contains("changes nothing"),
+            "skill must teach the side-effect-free test endpoint behind the Test button"
+        );
     }
 
     #[test]
