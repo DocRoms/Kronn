@@ -13,6 +13,14 @@ use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+fn sha256_hex(raw: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(raw.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 async fn call(
     app: &Router,
     method: &str,
@@ -86,13 +94,68 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
             [],
         )?;
         conn.execute(
-            "INSERT INTO mcp_configs(id, server_id, label) VALUES ('cfg-b', 'synthetic-api', 'cfg-b')",
+            "INSERT INTO mcp_configs(id, server_id, label, include_general) VALUES ('cfg-b', 'synthetic-api', 'cfg-b', 0)",
             [],
         )?;
         conn.execute(
             "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-b', 'p2')",
             [],
         )?;
+        // Layer B review fixtures: shared resources, a General room, a p2
+        // session, invite and offer, a cross-project blocker, a replay binding.
+        conn.execute(
+            "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
+             VALUES ('room-g', 'room-g', NULL, ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO quick_prompts(id, name, prompt_template, project_id, created_at, updated_at) \
+             VALUES ('qp-global', 'qp-global', 'x', NULL, ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO quick_execs(id, name, project_id, command, created_at, updated_at) \
+             VALUES ('qe-global', 'qe-global', NULL, 'echo', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO quick_apis(id, name, project_id, api_plugin_slug, api_config_id, \
+             api_endpoint_path, created_at, updated_at) \
+             VALUES ('qa-global', 'qa-global', NULL, 'synthetic-api', 'cfg-b', '/', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
+             VALUES ('task-global', 9003, 'task-global', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO workflows(id, name, project_id, project_scope_json, trigger_json, steps_json, \
+             created_at, updated_at) VALUES ('wf-all', 'wf-all', NULL, '{\"type\":\"All\"}', \
+             '{\"type\":\"Manual\"}', '[]', ?1, ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_sessions(id, disc_id, agent_type, session_id, role, status, joined_at) \
+             VALUES (901, 'room-b', 'Codex', 'sess-b', 'peer', 'active', ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO discussion_invite_tokens(token_hash, disc_id, created_at, expires_at) \
+             VALUES (?1, 'room-b', ?2, '2999-01-01T00:00:00Z')",
+            rusqlite::params![sha256_hex("kr-join-room-b"), now],
+        )?;
+        for (suffix, number) in [("1", 1), ("2", 2), ("3", 3)] {
+            conn.execute(
+                "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
+                 VALUES (?1, ?1, 'p2', ?2, ?2)",
+                rusqlite::params![
+                    format!("p2-newer-{suffix}"),
+                    format!("2999-01-0{number}T00:00:00Z")
+                ],
+            )?;
+        }
+        kronn::db::disc_source::bind_to_source(conn, "room-b", "Codex", "sess-b-bind")?;
         // The global config the fixture's quick APIs use.
         conn.execute(
             "INSERT INTO mcp_configs(id, server_id, label, is_global) VALUES ('c', 'synthetic-api', 'c', 1)",
@@ -160,6 +223,17 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
                 ],
             )?;
         }
+        conn.execute(
+            "INSERT INTO planning_task_blockers(task_id, blocker_task_id, created_at) \
+             VALUES ('task-a', 'task-b', ?1)",
+            [&now],
+        )?;
+        conn.execute(
+            "INSERT INTO task_execution_worker_offers(id, task_execution_id, target_cli_session_id, \
+             origin_discussion_id, child_discussion_id, created_at, updated_at) \
+             VALUES ('offer-b', 'exec-b', 901, 'room-b', 'room-b', ?1, ?1)",
+            [&now],
+        )?;
         Ok(())
     })
     .await
@@ -861,4 +935,626 @@ async fn a_bridge_token_never_approves_a_repository_script() {
         .as_str()
         .unwrap_or_default();
     assert_eq!(pinned.len(), 64, "a human save pins the content: {human}");
+}
+
+// ─── Layer B completeness review (review-layer-b2) ──────────────────────────
+
+async fn raw_call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    bearer: &str,
+    content_type: &str,
+    body: &str,
+) -> (u16, String) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", content_type)
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40404))));
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The handler refused the config for the token's scope (not some later,
+/// unrelated failure).
+fn refused_for_scope(response: &Value) -> bool {
+    response["success"] == false
+        && response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not available to this agent's project"))
+}
+
+async fn query_one(
+    db: &Arc<kronn::db::Database>,
+    sql: &'static str,
+    arg: String,
+) -> Option<String> {
+    db.with_conn(move |conn| {
+        Ok(rusqlite::OptionalExtension::optional(
+            conn.query_row(sql, [&arg], |row| row.get::<_, Option<String>>(0)),
+        )?
+        .flatten())
+    })
+    .await
+    .unwrap()
+}
+
+/// B-01 / B-02 — an id nested in a workflow body, a step or `on_failure`,
+/// naming another project's resource, is refused on create and update.
+#[tokio::test]
+async fn nested_step_references_to_another_project_are_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for step in [
+        json!({"sub_workflow_id": "wf-b"}),
+        json!({"room_id": "room-b"}),
+        json!({"quick_prompt_id": "qp-b"}),
+        json!({"batch_quick_prompt_id": "qp-b"}),
+        json!({"quick_api_id": "qa-b"}),
+        json!({"api_config_id": "cfg-b"}),
+        json!({"name": "s", "on_failure": [{"quick_prompt_id": "qp-b"}]}),
+    ] {
+        let body = json!({"name": "x", "steps": [step.clone()]});
+        let (status, response) = call(
+            &app,
+            "PUT",
+            "/api/workflows/wf-a",
+            Some(&token),
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, 403, "update with {step}: {response}");
+        let (status, response) =
+            call(&app, "POST", "/api/workflows", Some(&token), Some(body)).await;
+        assert_eq!(status, 403, "create with {step}: {response}");
+    }
+}
+
+/// B-16 — the workflow an import carries is walked too.
+#[tokio::test]
+async fn an_import_naming_another_project_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    for workflow in [
+        json!({"id": "w", "steps": [{"sub_workflow_id": "wf-b"}]}),
+        json!({"id": "w", "steps": [], "project_scope": {"type": "Projects", "project_ids": ["p2"]}}),
+        json!({"id": "w", "steps": [], "project_scope": {"type": "All"}}),
+    ] {
+        let content = json!({"kind": "kronn.workflow", "workflow": workflow}).to_string();
+        let (status, response) = call(
+            &app,
+            "POST",
+            "/api/workflows/import",
+            Some(guard.value()),
+            Some(json!({"content": content})),
+        )
+        .await;
+        assert_eq!(status, 403, "{response}");
+    }
+}
+
+/// B-03 — a workflow scope may name the token's project only.
+#[tokio::test]
+async fn a_workflow_scope_beyond_the_token_s_project_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    for scope in [
+        json!({"type": "All"}),
+        json!({"type": "Projects", "project_ids": ["p2"]}),
+        json!({"type": "Projects", "project_ids": ["p1", "p2"]}),
+    ] {
+        let (status, response) = call(
+            &app,
+            "PUT",
+            "/api/workflows/wf-a",
+            Some(guard.value()),
+            Some(json!({"project_scope": scope})),
+        )
+        .await;
+        assert_eq!(status, 403, "{response}");
+    }
+    let (status, response) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(guard.value()),
+        Some(json!({"project_scope": {"type": "Projects", "project_ids": ["p1"]}})),
+    )
+    .await;
+    assert_ne!(status, 403, "its own project: {response}");
+}
+
+/// B-04 / F-02 — shared resources are read, never written.
+#[tokio::test]
+async fn shared_resources_are_read_but_never_written() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (method, path, body) in [
+        (
+            "PUT",
+            "/api/quick-prompts/qp-global",
+            Some(json!({"name": "x"})),
+        ),
+        ("DELETE", "/api/quick-prompts/qp-global", None),
+        (
+            "PUT",
+            "/api/quick-apis/qa-global",
+            Some(json!({"name": "x"})),
+        ),
+        (
+            "PUT",
+            "/api/quick-execs/qe-global",
+            Some(json!({"name": "x"})),
+        ),
+        (
+            "PATCH",
+            "/api/planning/tasks/task-global",
+            Some(json!({"title": "x"})),
+        ),
+        ("PUT", "/api/workflows/wf-all", Some(json!({"name": "x"}))),
+        (
+            "PUT",
+            "/api/workflows/wf-global",
+            Some(json!({"name": "x"})),
+        ),
+    ] {
+        let (status, response) = call(&app, method, path, Some(&token), body).await;
+        assert_eq!(status, 403, "{method} {path}: {response}");
+    }
+    for path in [
+        "/api/workflows/wf-all",
+        "/api/workflows/wf-global",
+        "/api/planning/tasks/task-global",
+    ] {
+        let (status, response) = call(&app, "GET", path, Some(&token), None).await;
+        assert_eq!(status, 200, "GET {path}: {response}");
+    }
+}
+
+/// B-05 — a shared Quick API runs for the token's project, so a config only
+/// another project sees is refused; a shared Quick Exec runs for the token's
+/// project, whatever the body says.
+#[tokio::test]
+async fn shared_quick_runs_happen_for_the_token_s_project_only() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/quick-apis/qa-global/run",
+        Some(guard.value()),
+        Some(json!({"project_id": "p1", "variables": {}})),
+    )
+    .await;
+    assert!(
+        status == 403 || refused_for_scope(&response),
+        "a config only p2 sees must not run: {status} {response}"
+    );
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/quick-execs/qe-global/run",
+        Some(guard.value()),
+        Some(json!({"variables": {}})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let run_id = response["data"]["run_id"].as_str().unwrap().to_owned();
+    let project = query_one(
+        &db,
+        "SELECT project_id FROM shared_runs WHERE id = ?1",
+        run_id,
+    )
+    .await;
+    assert_eq!(
+        project.as_deref(),
+        Some("p1"),
+        "the run belongs to the token's project"
+    );
+}
+
+/// B-06 / F-03 — a project-less token (a General discussion's).
+#[tokio::test]
+async fn a_project_less_token_cannot_reach_project_resources_through_shared_ones() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-g");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/quick-apis/qa-global/run",
+        Some(&token),
+        Some(json!({"variables": {}})),
+    )
+    .await;
+    assert!(
+        status == 403 || refused_for_scope(&response),
+        "a project-only config: {status} {response}"
+    );
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(&token),
+        Some(json!({"workflow_id": "wf-all"})),
+    )
+    .await;
+    assert_eq!(status, 403, "an every-project workflow");
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-all",
+        Some(&token),
+        Some(json!({"name": "x"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B-07 — created resources land in the token's project; a move out of it is
+/// refused.
+#[tokio::test]
+async fn created_resources_land_in_the_token_s_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/quick-prompts",
+        Some(&token),
+        Some(json!({"name": "created", "prompt_template": "x"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let id = response["data"]["id"].as_str().unwrap().to_owned();
+    let project = query_one(
+        &db,
+        "SELECT project_id FROM quick_prompts WHERE id = ?1",
+        id,
+    )
+    .await;
+    assert_eq!(project.as_deref(), Some("p1"));
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "created task"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let id = response["data"]["id"].as_str().unwrap().to_owned();
+    let project = query_one(
+        &db,
+        "SELECT project_id FROM planning_task_projects WHERE task_id = ?1",
+        id,
+    )
+    .await;
+    assert_eq!(project.as_deref(), Some("p1"));
+    let (status, _) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(&token),
+        Some(json!({"project_id": null})),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B-08 — a task cannot be attached under another project's task.
+#[tokio::test]
+async fn a_task_parent_in_another_project_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/planning/tasks",
+        Some(&token),
+        Some(json!({"title": "t", "parent_id": "task-b"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-a",
+        Some(&token),
+        Some(json!({"parent_id": "task-b"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B-09 — the shared agent library is read only for a token.
+#[tokio::test]
+async fn the_agent_library_is_read_only_for_a_token() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (method, path) in [
+        ("PUT", "/api/skills/any-skill"),
+        ("DELETE", "/api/skills/any-skill"),
+        ("POST", "/api/profiles"),
+        ("DELETE", "/api/directives/any-directive"),
+    ] {
+        let (status, _) = call(&app, method, path, Some(&token), Some(json!({}))).await;
+        assert_eq!(status, 403, "{method} {path}");
+    }
+    let (status, _) = call(&app, "GET", "/api/skills", Some(&token), None).await;
+    assert_eq!(status, 200);
+}
+
+/// B-10 — a session or invite of another project's room is refused (a
+/// deliberate rule, design §9).
+#[tokio::test]
+async fn sessions_and_invites_cannot_cross_projects() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-leave",
+        Some(&token),
+        Some(json!({"agent_type": "Codex", "session_id": "sess-b"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-join",
+        Some(&token),
+        Some(json!({"token": "kr-join-room-b", "agent_type": "Codex", "session_id": "s"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-resume",
+        Some(&token),
+        Some(json!({"agent_type": "Codex", "session_id": "s", "resume_token": "unknown"})),
+    )
+    .await;
+    assert_eq!(status, 403, "an unresolvable credential");
+}
+
+/// B-11 — accepting an offer of another project's execution is refused.
+#[tokio::test]
+async fn an_offer_of_another_project_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/orchestration/accept-offer",
+        Some(guard.value()),
+        Some(json!({"offer_id": "offer-b", "source_agent": "Codex",
+            "source_session_id": "s", "source_binding_session_id": "s"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+}
+
+/// B-12 / F-04 — non-GET responses are scoped: a replay returning another
+/// project's discussion is refused, another project's blocker is dropped.
+#[tokio::test]
+async fn write_responses_are_scoped_too() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/disc/create",
+        Some(&token),
+        Some(
+            json!({"title": "x", "agent": "Codex", "source_agent": "Codex",
+            "source_session_id": "sess-b-bind"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 403, "replay of room-b: {response}");
+    let (status, response) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-a",
+        Some(&token),
+        Some(json!({"title": "renamed"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert!(
+        !response.to_string().contains("task-b"),
+        "p2's blocker leaked: {response}"
+    );
+}
+
+/// B-14 — resolving another project's config is refused.
+#[tokio::test]
+async fn resolving_another_project_s_config_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, _) = call(&app, "GET", "/api/resolve/cfg-b", Some(guard.value()), None).await;
+    assert_eq!(status, 403);
+}
+
+/// B-15 — the project filter is in the list query: newer rows of another
+/// project do not push the token's own off the first page.
+#[tokio::test]
+async fn a_bridge_list_page_is_filtered_in_the_query() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/discussions?page=1&per_page=2",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let page = response["data"].as_array().unwrap();
+    assert_eq!(page.len(), 2, "a full page of in-scope rows: {response}");
+    assert!(
+        page.iter().all(|item| item["project_id"] == "p1"),
+        "{response}"
+    );
+}
+
+/// B-17 — a token cannot move its own room out of its project.
+#[tokio::test]
+async fn a_token_cannot_move_its_room_out_of_its_project() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-a",
+        Some(&token),
+        Some(json!({"project_id": null})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a2/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "still bound to p1");
+}
+
+/// B-18 — a task reference of another project is refused before prepare.
+#[tokio::test]
+async fn a_task_reference_of_another_project_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/orchestration/tool/prepare",
+        Some(guard.value()),
+        Some(json!({"task_reference": "KT-9002"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B-19 — a declared path parameter that cannot be decoded is refused.
+#[tokio::test]
+async fn an_undecodable_path_parameter_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/workflows/%FF%FE",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 400, "{response}");
+    assert_eq!(
+        response["error"], "invalid path parameters",
+        "refused by the gate, before any handler"
+    );
+}
+
+/// C-01 — a General discussion is private to its own launches.
+#[tokio::test]
+async fn a_general_discussion_is_private_to_its_launches() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for path in [
+        "/api/discussions/room-g/meta",
+        "/api/disc/load_other?discussion_id=room-g",
+    ] {
+        let (status, _) = call(&app, "GET", path, Some(&token), None).await;
+        assert_eq!(status, 403, "{path}");
+    }
+    let (_, list) = call(&app, "GET", "/api/discussions", Some(&token), None).await;
+    assert!(!list.to_string().contains("room-g"), "{list}");
+    let own = bridge_for("room-g");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-g/meta",
+        Some(own.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "its own launch reads it");
+}
+
+/// E-01 — a launch that owns nothing reads catalogues only.
+#[tokio::test]
+async fn a_token_owning_nothing_reads_catalogues_only() {
+    let (app, _repos) = fixture().await;
+    let guard = mint(BridgeScope::default()).unwrap();
+    let (status, _) = call(&app, "GET", "/api/discussions", Some(guard.value()), None).await;
+    assert_eq!(status, 403);
+    let (status, _) = call(&app, "GET", "/api/skills", Some(guard.value()), None).await;
+    assert_eq!(status, 200);
+}
+
+/// E-04 — a scope spanning two projects has no binding.
+#[tokio::test]
+async fn a_scope_spanning_projects_is_dead() {
+    let (app, _repos) = fixture().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into(), "room-b".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+}
+
+/// F-07 — a non-JSON body is not a way around the body checks.
+#[tokio::test]
+async fn a_non_json_body_is_refused() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let body = json!({"disc_id": "room-b", "messages": []}).to_string();
+    let (status, response) = raw_call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        guard.value(),
+        "text/plain",
+        &body,
+    )
+    .await;
+    assert_eq!(status, 415, "{response}");
+    assert!(
+        response.contains("a bridge-token request body must be JSON"),
+        "refused by the gate, before any handler: {response}"
+    );
 }

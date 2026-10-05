@@ -1308,20 +1308,27 @@ pub fn residence(
                 |row| Ok(workflow_residence(row.get(0)?, row.get(1)?)),
             )
             .optional()?),
-        Kind::Run => Ok(conn
-            .query_row(
-                "SELECT r.project_id, w.project_id, w.project_scope_json FROM workflow_runs r \
-                 LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
-                [id],
-                |row| {
-                    let run_project: Option<String> = row.get(0)?;
-                    Ok(match run_project {
-                        Some(project) => single_or_global(Some(project)),
-                        None => workflow_residence(row.get(1)?, row.get(2)?),
-                    })
-                },
-            )
-            .optional()?),
+        Kind::Run => {
+            let workflow_run = conn
+                .query_row(
+                    "SELECT r.project_id, w.project_id, w.project_scope_json FROM workflow_runs r \
+                     LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
+                    [id],
+                    |row| {
+                        let run_project: Option<String> = row.get(0)?;
+                        Ok(match run_project {
+                            Some(project) => single_or_global(Some(project)),
+                            None => workflow_residence(row.get(1)?, row.get(2)?),
+                        })
+                    },
+                )
+                .optional()?;
+            match workflow_run {
+                Some(place) => Ok(Some(place)),
+                // A Quick Prompt / API / Exec run is a run too.
+                None => project_of("SELECT project_id FROM shared_runs WHERE id = ?1"),
+            }
+        }
     }
 }
 
