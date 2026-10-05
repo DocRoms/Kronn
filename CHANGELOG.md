@@ -234,7 +234,13 @@ Release notes for 0.9.3 and earlier are available in the
   the exceptions declared in the design note start in the temporary
   directory, never in a repository. The desktop app follows the same rule:
   its sleep inhibitor and its login-shell PATH probe no longer pass the
-  desktop's whole environment on. npm registry credentials
+  desktop's whole environment on, and its restart relaunches it without the
+  admin token or the raw key in its environment. The declared exceptions
+  (document sidecar, model and version discovery) no longer receive any
+  secret, and testing an MCP server, which may come from a repository's
+  `.mcp.json`, starts it with only its own configured values. An
+  operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
+  start, like the admin token. npm registry credentials
   (`npm_config__auth` and its registry-scoped forms) are dropped like any
   other secret.
 - `git push` and `gh` PR creation use the project's own GitHub connection,

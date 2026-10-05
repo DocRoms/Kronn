@@ -426,11 +426,15 @@ take a `ChildRoute` and build the environment before returning the command
 (`git_cmd`, `async_git_cmd`, `tool_cmd`, `sync_tool_cmd` are shorthands); a
 spawn without a route does not compile. `backend/clippy.toml` refuses
 `std::process::Command::new`, `tokio::process::Command::new`, the `open`
-crate's spawning functions and libc's `fork`/`exec*`/`posix_spawn*`/`system`
+crate's functions (`open::commands`/`with_command` included) and libc's
+`fork`/`clone`/`exec*`/`fexecve`/`posix_spawn*`/`popen`/`system`/`syscall`
 outside `core/cmd.rs` (test code excepted), which also covers aliases and
 function pointers; `desktop/src-tauri/clippy.toml` holds the desktop crate to
-the same rule (its `caffeinate` and login-shell PATH probe use the Tool
-route), and CI runs clippy on both crates. The system opener goes through `cmd::open_in_system`
+the same rule, plus `tauri_plugin_shell::Shell::{command,sidecar,open}`,
+`AppHandle::restart` and `tauri::process::restart` (its `caffeinate` and
+login-shell PATH probe use the Tool route), and CI runs clippy on both
+crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
+`#[allow]` sites of both crates. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -456,18 +460,31 @@ argument or a variable named after it, and that push runs with hooks off
 repository's could receive it) and TLS verification forced. Other remotes,
 or a project not connected, push with the user's own credentials.
 
-Declared exceptions (they keep the backend's environment, through
-`cmd::full_env_cmd(program, FullEnvReason)`, which starts them in the
-temporary directory; the test `full_env_cmd_sites_are_exactly_the_declared_exceptions`
-lists every call site): the document
-sidecar (`core/docs_sidecar.rs::start`), model discovery
+Declared exceptions inherit the environment instead of a route's, through
+`cmd::full_env_cmd` / `full_env_sync_cmd(program, FullEnvReason)`; the test
+`full_env_cmd_sites_are_exactly_the_declared_exceptions` lists every call site
+in both crates. None receives a secret: the forbidden names, provider keys,
+GitHub variables and every secret-looking name are removed
+(`child_env::strip_inherited_secrets`), and they start in the temporary
+directory, never in a repository. They are the document sidecar
+(`core/docs_sidecar.rs::start`), model discovery
 (`model_catalog/claude_discovery.rs::discover`,
-`model_catalog/codex_discovery.rs::discover`), version discovery
+`model_catalog/codex_discovery.rs::discover`) and version discovery
 (`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
-and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`)
-and the MCP probe (`api/mcps.rs::probe_mcp_stdio_with_timeout`). None runs in
-a repository (all start in the temporary directory): each starts a binary
-Kronn found or the operator configured.
+and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`):
+each starts a binary Kronn found. A CLI authenticated only by a provider key
+exported to Kronn therefore reports no models; its configured key reaches it
+on a real launch. The one exception that keeps its provider keys is the
+desktop relaunching itself (`desktop/src-tauri/src/main.rs::self_restart_command`,
+`SelfRestart`): it is Kronn, keeps its own working directory, loses only the
+forbidden names, and gets the operator's key override handed back.
+
+The MCP probe is no longer an exception: a server's command may come from a
+repository's `.mcp.json`, so the probe starts it with a built environment (base
+allow-list plus that server's configured values, `api/mcps.rs::mcp_probe_command`).
+An operator-set `KRONN_ENCRYPTION_KEK` (and the legacy `KRONN_KEK`) leaves the
+process environment at start, like `KRONN_AUTH_TOKEN`; the key is kept in
+memory (`keyvault::take_env_kek`).
 
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
@@ -560,8 +577,8 @@ remote peers (claim-by-token, fetch-file) refuse a bridge token. Any bearer
 that matches neither the operator token nor a live bridge token is refused
 outright, never downgraded to loopback trust. Not covered by an agent's
 environment any more but still inheriting the backend's: the declared exceptions
-of the spawn inventory above (CLI version and model discovery, the MCP probe, the
-document sidecar).
+of the spawn inventory above (CLI version and model discovery, the document
+sidecar), with every secret removed.
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its
