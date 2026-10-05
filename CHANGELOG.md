@@ -169,6 +169,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A Kronn-launched agent's bridge token is checked against what each request
+  really does: ids nested anywhere in a body or in an imported workflow, task
+  references, offers, invites and sessions are resolved before the check;
+  shared resources (project-less or serving several projects) and the agent
+  library are read but never written; created resources land in the agent's
+  project and no update can move them out; effects on shared resources run for
+  the agent's project only; General discussions stay private to their own
+  launches; every response, whatever the verb, is scoped at any depth with its
+  counts; the token's project is frozen at first use; every launch gets a token,
+  dies when cancelled or after 12 hours; the operator token is compared in
+  constant time (KT-1006).
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task

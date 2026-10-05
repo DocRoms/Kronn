@@ -454,39 +454,62 @@ any path argument of `cat`, `head`, `tail`, `find`, `stat`, `grep`, `rg`, `wc`,
 followed (`core/fs_guard.rs::resolve_contained_read`).
 
 **Layer B, bridge token — shipped (KT-1006).** `backend/src/core/bridge_token.rs`.
-A random 256-bit token (`kbt_…`) per agent launch, held only in memory, bound
-to the launch's discussions, task execution and workflow run, and to their
-project (resolved on first use). It is revoked when the launch's process handle
-is dropped, is dead when its discussion or run no longer exists, and is lost on
-restart. The bridge reads `KRONN_BRIDGE_TOKEN` first and falls back to
-`KRONN_AUTH_TOKEN` for host sessions. A request bearing a bridge token is
-accepted only on `BRIDGE_ROUTES` (derived from the bridge script; the test
-`backend/scripts/test_bridge_routes.py` fails on drift in either direction) and
-only for resources in its scope: ids in the path, the query and the top-level
-JSON body. Writes to a discussion need one of the launch's own discussions (or
-one it created through `disc/create`); reads need the token's project;
-effectful routes need the token's project and are logged with the token id.
-Ids are resolved the way the handler resolves them before the check (`KT-12`
-task references, an execution named by its task), and an id that resolves to
-nothing is refused, never let through. Reads are scoped after the handler
-runs: list, search and lookup responses drop entries outside the token's
-project (by their project fields, or the project of the discussion they name),
-and a lone object outside it is refused; `/api/resolve/{id}` is checked against
-the resource it names. `agent-api/call` runs for the token's project, never one
-taken from the body or the chosen config, and refuses a config that project
-cannot see. The token's discussion or run is re-read on every call, so deleting
-it kills the token at once. The WebSocket bus refuses a bridge token (403) and
-any credential other than the operator token (401); without a credential it
-keeps loopback trust.
-A workflow trigger that names no project gets the token's project added to its
-body, so a shared or multi-project workflow runs for that project (KT-851
-resolution) and one that does not serve it is refused. A
-bridge token is refused on every other route, secret-class ones included, even
-from loopback. Any bearer that matches neither the operator token nor a live
-bridge token (dead, expired, mistyped) is refused outright, never downgraded to
-loopback trust. Not covered by an agent's environment any more but still
-inheriting the backend's: the declared exceptions of the spawn inventory above
-(CLI version and model discovery, the MCP probe, the document sidecar).
+
+*Lifecycle.* Every agent launch gets a random 256-bit token (`kbt_…`), held only
+in memory, including a launch that owns no discussion, execution or run (that
+token reads the global catalogues and nothing else); a launch whose token cannot
+be minted does not start. The token is bound to the launch's discussions, task
+execution and workflow run, else to its declared project, and its project is
+frozen on first use: the scope's resources must all sit in one project, and a
+later change (a discussion moved, the first one deleted) kills the token. It dies
+when the launch's process handle is dropped, when the launch is cancelled, after
+12 hours whatever happens, when its discussion or run is deleted (re-read on
+every call), and on restart. The operator token is compared in constant time on
+the HTTP and WebSocket paths. The bridge reads `KRONN_BRIDGE_TOKEN` first and
+falls back to `KRONN_AUTH_TOKEN` for host sessions.
+
+*Requests.* A token is accepted only on `BRIDGE_ROUTES` (derived from the bridge
+script; `backend/scripts/test_bridge_routes.py` fails on drift either way), and
+the agent library's write routes are listed but never granted. Every id is
+read wherever the request names it: declared path parameters (undecodable ones
+refused), the query, any depth of the JSON body, and the workflow an import
+carries in `content`. A non-JSON body is refused (only the context-file upload
+is multipart). Ids are resolved the way the handler resolves them (`KT-12`
+references, an execution named by its task, an offer through its execution, an
+invite or resume credential to its room) and an id that resolves to nothing is
+refused. Then:
+- *shared resources* (project-less, serving every project, or several projects)
+  may be read, never written; a write needs a resource that belongs to the
+  token's project and to no other; a project-less discussion is private to its
+  own launches;
+- *effects* need the token's project, or a shared resource on a route whose
+  handler runs it for that project (workflow, Quick Prompt and batch triggers
+  get the project added; Quick API, Quick Exec and `agent-api/call` read the
+  token's project in the handler and refuse a config it cannot see); a
+  project-less token runs only project-less resources; effects are logged with
+  the token id;
+- *projects*: a created resource is forced into the token's project, an update
+  cannot clear, change or widen its project, and a workflow may be scoped to the
+  token's project only (`null` or `Projects:[bound]`); an agent's workflow save
+  stays in that project and never approves script content (KT-918);
+- *sessions and invites do not cross projects* (deliberate rule): peer-join,
+  peer-resume, orchestrator-return-resume and peer-leave resolve the room their
+  credential or session names and refuse one outside the token's project; an
+  invite for another instance's room is refused.
+
+*Responses.* Every response is scoped, whatever the verb: an object naming any
+resource outside the scope, at any depth, is dropped from its list (the counts
+beside the list follow) or refused when it is the response itself; an object
+naming an id that resolves to nothing is hidden. The discussion list, the task
+list and the discussion search filter in the query, so pages stay full.
+
+The WebSocket bus refuses a bridge token (403) and any credential other than the
+operator token (401); without a credential it keeps loopback trust. Any bearer
+that matches neither the operator token nor a live bridge token is refused
+outright, never downgraded to loopback trust. Not covered by an agent's
+environment any more but still inheriting the backend's: the declared exceptions
+of the spawn inventory above (CLI version and model discovery, the MCP probe, the
+document sidecar).
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its
