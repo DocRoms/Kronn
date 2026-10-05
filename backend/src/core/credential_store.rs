@@ -277,6 +277,11 @@ pub async fn boot(
     env_auth_token: Option<&str>,
 ) -> Result<Option<CredentialBoot>> {
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
+        // A stored token we cannot read is "auth locked", never "no auth".
+        if config.server.auth_token.is_none() {
+            let stored = db.with_conn(rows::list).await?;
+            config.server.auth_locked = stored.iter().any(|r| r.kind == KIND_AUTH_TOKEN);
+        }
         tracing::warn!(
             "credentials: the encryption key is locked — stored provider keys and the auth token \
              are unavailable until it is restored; config.toml is left as it is"
@@ -355,6 +360,7 @@ pub async fn boot(
         .context("backing up config.toml before removing its secrets failed")?;
 
     apply_to_config(config, &merged);
+    config.server.auth_locked = config.server.auth_token.is_none() && preserve.contains(&auth_key);
     armed_map().insert(
         dir.to_path_buf(),
         Arc::new(Armed {

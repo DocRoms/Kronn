@@ -89,6 +89,12 @@ pub struct ServerConfig {
     #[serde(default)]
     #[ts(skip)]
     pub auth_enabled: bool,
+    /// Runtime only: a stored auth token exists but cannot be decrypted (the
+    /// key is locked). Not the same as "no token": the middleware then refuses
+    /// everything but the routes that restore the key (KT-1007).
+    #[serde(skip)]
+    #[ts(skip)]
+    pub auth_locked: bool,
     /// Strict-auth opt-in: when `true`, the localhost auto-bypass is
     /// disabled and even `127.0.0.1` / Docker bridge clients must
     /// present the Bearer token. Defaults to `false` (current

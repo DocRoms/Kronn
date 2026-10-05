@@ -163,7 +163,11 @@ Release notes for 0.9.3 and earlier are available in the
   (MCP settings, execution-variable snapshots and stored credentials, all
   listed in one registry checked against the database schema). When no key
   decrypts existing data, Kronn keeps running for a restore but holds no key,
-  so nothing new is encrypted under a key that no vault keeps.
+  so nothing new is encrypted under a key that no vault keeps. Two keys that
+  each decrypt part of the data stop the startup with nothing written, and a
+  vault holding another key is never overwritten. A stored API token that can
+  no longer be decrypted locks the API (only health and the recovery routes
+  answer) instead of leaving it open.
 - Replacing the recovery passphrase now asks for the current one, so the
   `recovery.key` that restores the key cannot be swapped silently (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them

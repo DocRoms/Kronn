@@ -2433,6 +2433,9 @@ pub async fn restore_recovery(
             {
                 tracing::error!("Credential store after key restore: {e:#}");
             }
+            if config.server.auth_token.is_some() {
+                config.server.auth_locked = false;
+            }
             Json(ApiResponse::ok(()))
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),

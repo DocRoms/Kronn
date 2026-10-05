@@ -295,9 +295,9 @@ impl KeyStore {
             .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
     }
 
-    /// Persist `secret` into every writable vault that doesn't already hold it.
-    /// A vault whose read fails is never written: its item may be the only copy
-    /// of another key. Returns per-vault results; callers should warn loudly if
+    /// Persist `secret` into every EMPTY writable vault. A vault holding another
+    /// key, or whose read fails, is never written: its item may be the only copy
+    /// of that key. Returns per-vault results; callers should warn loudly if
     /// EVERY tier failed (no durable backup exists).
     pub fn mirror(&self, secret: &str) -> Vec<(&'static str, Result<()>)> {
         self.vaults
@@ -305,7 +305,10 @@ impl KeyStore {
             .map(|v| {
                 let res = match v.retrieve() {
                     Ok(Some(cur)) if cur == secret => Ok(()),
-                    Ok(_) => v.store(secret),
+                    Ok(Some(_)) => Err(anyhow::anyhow!(
+                        "not written: the vault holds a different key"
+                    )),
+                    Ok(None) => v.store(secret),
                     Err(e) => Err(e.context("not written: the vault could not be read first")),
                 };
                 (v.name(), res)
@@ -547,6 +550,24 @@ mod tests {
         assert!(results.iter().all(|(_, r)| r.is_ok()));
         assert_eq!(ks.primary(), Some(("KEY".to_string(), "keychain")));
         assert_eq!(ks.snapshot().unwrap()[2].1, Some("KEY".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn mirror_never_overwrites_a_vault_holding_another_key() {
+        std::env::remove_var(ENV_KEK);
+        let ks = KeyStore::from_vaults(vec![
+            boxed(MockVault::with_value("keychain", "K1")),
+            boxed(MockVault::with_value("sidecar", "K2")),
+        ]);
+        let results = ks.mirror("K1");
+        assert!(results[0].1.is_ok());
+        assert!(
+            results[1].1.is_err(),
+            "a different key is reported, not replaced"
+        );
+        let snap = ks.snapshot().unwrap();
+        assert_eq!(snap[2].1.as_deref(), Some("K2"));
     }
 
     #[test]

@@ -58,9 +58,9 @@ pub const ENCRYPTED_COLUMNS: &[EncryptedColumn] = &[
     },
 ];
 
-/// Rows decrypted per column when testing a key: newest first, enough to tell
-/// the right key from a wrong one without reading every snapshot at boot.
-const SAMPLE_PER_COLUMN: usize = 32;
+/// Rows read per column (newest first) when testing keys. High enough to see
+/// rows under a second key, bounded so a huge snapshot table cannot stall boot.
+const SAMPLE_PER_COLUMN: usize = 10_000;
 
 /// Ciphertext found in one registered column.
 #[derive(Debug, Clone)]
@@ -81,6 +81,18 @@ pub enum KeyBootError {
         vault: &'static str,
         error: String,
         hint: &'static str,
+    },
+    #[error(
+        "Several encryption keys each decrypt part of Kronn's encrypted data: {details}. \
+         Nothing was changed: Kronn will not pick one, the other's data would be lost. Back up \
+         every copy (the OS keychain item {service}/{account}, the encryption_key file in the \
+         data directory, KRONN_ENCRYPTION_KEK, config.toml), then remove the key whose data you \
+         no longer need, or re-enter that data under the key you keep, and restart Kronn."
+    )]
+    SeveralKeys {
+        details: String,
+        service: &'static str,
+        account: &'static str,
     },
 }
 
@@ -129,6 +141,9 @@ enum Decision {
     Accept(String, &'static str),
     /// Rows exist and nothing decrypts them → lock (fail-soft).
     Lock(usize),
+    /// Several distinct keys each decrypt some rows: stop, write nothing.
+    /// (source, key fingerprint, rows it decrypts) per decrypting candidate.
+    Conflict(Vec<(&'static str, String, usize)>),
 }
 
 fn decide(candidates: &[(String, &'static str)], columns: &[ColumnRows]) -> Decision {
@@ -138,17 +153,32 @@ fn decide(candidates: &[(String, &'static str)], columns: &[ColumnRows]) -> Deci
             None => Decision::Mint,
         };
     }
-    // Authority = decrypt self-test. Accept the highest-priority candidate that
-    // actually decrypts existing ciphertext; never accept a key by provenance.
-    for (cand, src) in candidates {
-        if columns
-            .iter()
-            .any(|col| col.sample.iter().any(|enc| decrypts(enc, cand)))
-        {
-            return Decision::Accept(cand.clone(), src);
-        }
+    // Authority = decrypt self-test, never provenance. Exactly one distinct key
+    // may decrypt data: with two, choosing either would orphan the other's rows.
+    let decrypting: Vec<(&String, &'static str, usize)> = candidates
+        .iter()
+        .map(|(cand, src)| {
+            let n = columns
+                .iter()
+                .map(|col| col.sample.iter().filter(|enc| decrypts(enc, cand)).count())
+                .sum::<usize>();
+            (cand, *src, n)
+        })
+        .filter(|(_, _, n)| *n > 0)
+        .collect();
+    match decrypting.as_slice() {
+        [] => Decision::Lock(columns.iter().map(|c| c.total).sum()),
+        [(cand, src, _)] => Decision::Accept((*cand).clone(), src),
+        several => Decision::Conflict(
+            several
+                .iter()
+                .map(|(cand, src, n)| {
+                    let fp = crypto::key_fingerprint_hex(cand).unwrap_or_else(|_| "?".into());
+                    (*src, fp, *n)
+                })
+                .collect(),
+        ),
     }
-    Decision::Lock(columns.iter().map(|c| c.total).sum())
 }
 
 /// True when `key` decrypts at least one sampled row of every non-empty column.
@@ -311,6 +341,19 @@ pub async fn reconcile_with(
         Decision::Accept(key, source) => {
             tracing::info!("keystore: key from {source} decrypts existing data — accepted");
             (key, KeyOutcome::Resolved { source })
+        }
+        Decision::Conflict(found) => {
+            let details = found
+                .iter()
+                .map(|(src, fp, n)| format!("{src} holds key {fp} (decrypts {n} row(s))"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(KeyBootError::SeveralKeys {
+                details,
+                service: crate::core::keyvault::KEYCHAIN_SERVICE,
+                account: crate::core::keyvault::KEYCHAIN_ACCOUNT,
+            }
+            .into());
         }
         Decision::Lock(n) => {
             // I1 + I3: do NOT mint, do NOT touch ciphertext. Boot continues so the
@@ -1153,6 +1196,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(config::retained_disk_key(tmp.path()), None);
+    }
+
+    /// Keychain holds K1, sidecar holds K2, each with rows only it decrypts:
+    /// the boot stops and both keys stay where they were.
+    #[tokio::test]
+    async fn two_keys_each_decrypting_data_stop_the_boot_without_any_write() {
+        let db = Database::open_in_memory().unwrap();
+        let k1 = crypto::generate_secret();
+        let k2 = crypto::generate_secret();
+        seed_row(&db, &k1).await;
+        seed_snapshot(&db, &k2).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (keychain, kc) = mem_vault("keychain", Some(&k1));
+        let (sidecar, sc) = mem_vault("sidecar", Some(&k2));
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+
+        let err = reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("keychain holds key") && msg.contains("sidecar holds key"),
+            "{msg}"
+        );
+        assert!(msg.contains("decrypts 1 row(s)"), "{msg}");
+        assert!(
+            !msg.contains(&k1) && !msg.contains(&k2),
+            "never print a key"
+        );
+        assert_eq!(kc.lock().unwrap().as_deref(), Some(k1.as_str()));
+        assert_eq!(sc.lock().unwrap().as_deref(), Some(k2.as_str()));
+        assert!(cfg.encryption_secret.is_none());
+        assert_eq!(
+            config::retained_disk_key(tmp.path()),
+            None,
+            "nothing retained or written"
+        );
+    }
+
+    /// No ciphertext: the first key is adopted, but a vault holding another key
+    /// is not overwritten.
+    #[tokio::test]
+    async fn adopting_a_key_never_overwrites_a_vault_holding_another() {
+        let db = Database::open_in_memory().unwrap();
+        let k1 = crypto::generate_secret();
+        let k2 = crypto::generate_secret();
+        let tmp = tempfile::tempdir().unwrap();
+        let (keychain, _kc) = mem_vault("keychain", Some(&k1));
+        let (sidecar, sc) = mem_vault("sidecar", Some(&k2));
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(outcome, KeyOutcome::Resolved { source: "keychain" });
+        assert_eq!(sc.lock().unwrap().as_deref(), Some(k2.as_str()));
     }
 
     #[tokio::test]

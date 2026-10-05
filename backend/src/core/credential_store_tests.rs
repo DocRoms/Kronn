@@ -614,3 +614,99 @@ async fn an_env_auth_token_is_stored_encrypted_and_leaves_the_environment() {
         Some("operator-env-token-0007")
     );
 }
+
+async fn status_of(
+    router: axum::Router,
+    method: &str,
+    path: &str,
+    from: [u8; 4],
+) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(if method == "POST" {
+            "{}"
+        } else {
+            ""
+        }))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            from, 40000,
+        ))));
+    router.oneshot(req).await.unwrap().status()
+}
+
+/// A stored auth token the boot cannot decrypt (key lost) is "auth locked",
+/// not "no auth": ordinary routes are refused, recovery stays reachable locally.
+#[tokio::test]
+#[serial]
+async fn a_locked_auth_token_refuses_ordinary_routes_and_keeps_recovery_open() {
+    use axum::http::StatusCode;
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    boot_like_main(&dir, &db).await;
+    assert!(!dir.config_text().contains(&key));
+
+    // The only copy of the key disappears (keychain reset, sidecar lost).
+    dir.restart();
+    std::fs::remove_file(dir.path().join(crate::core::keyvault::SIDECAR_FILENAME)).unwrap();
+    let mut cfg = config::load().await.unwrap().unwrap();
+    assert!(cfg.server.auth_enabled);
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.server.auth_token.is_none());
+    assert!(
+        cfg.server.auth_locked,
+        "a missing key is not a deliberate auth disable"
+    );
+
+    let state = crate::AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(cfg)),
+        db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let router = crate::build_router_with_auth(state, true);
+    let loopback = [127, 0, 0, 1];
+    assert_eq!(
+        status_of(router.clone(), "GET", "/api/projects", loopback).await,
+        StatusCode::LOCKED
+    );
+    assert_eq!(
+        status_of(
+            router.clone(),
+            "GET",
+            "/api/config/recovery/status",
+            loopback
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(router.clone(), "GET", "/api/health", loopback).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_of(
+            router.clone(),
+            "GET",
+            "/api/config/recovery/status",
+            [192, 168, 1, 9]
+        )
+        .await,
+        StatusCode::LOCKED,
+        "recovery is local-only while locked"
+    );
+    // The restore route is reached (it answers, here with a refusal for the
+    // missing passphrase, instead of the lock).
+    assert_ne!(
+        status_of(router, "POST", "/api/config/recovery/restore", loopback).await,
+        StatusCode::LOCKED
+    );
+}

@@ -65,6 +65,15 @@ pub async fn resolve_key_and_credentials(
     }
     // A different stored token wins (with a warning), as config.toml did before.
     crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
+    if config.server.auth_token.is_some() {
+        config.server.auth_locked = false;
+    } else if config.server.auth_locked {
+        tracing::error!(
+            "API auth is LOCKED: the stored auth token cannot be decrypted. Every route except \
+             health and the recovery routes is refused until the key is restored (Settings → \
+             Recovery, or POST /api/config/recovery/restore)."
+        );
+    }
     Ok(())
 }
 
@@ -524,7 +533,18 @@ async fn auth_middleware(
     let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
     let strict_localhost = config.server.auth_strict_localhost;
+    let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();
     drop(config);
+
+    // A stored token that cannot be decrypted is not "auth off": only the routes
+    // that bring the key back stay open, and only to a local caller.
+    if auth_locked {
+        let local = !strict_localhost && request_is_local_ip(&headers, &request);
+        if auth_locked_allows(request.uri().path(), local) {
+            return Ok(next.run(request).await);
+        }
+        return Ok(auth_locked_refusal());
+    }
 
     // Trust primitives, computed once. `local_trusted` is the self-hosted bypass
     // (a request from a local IP, unless the user opted into strict-localhost);
@@ -564,6 +584,32 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Routes reachable while auth is locked: the recovery status and restore,
+/// from a local caller (health is answered before the auth check).
+const AUTH_LOCKED_ROUTES: &[&str] = &[
+    "/api/config/recovery/status",
+    "/api/config/recovery/restore",
+];
+
+fn auth_locked_allows(path: &str, local_caller: bool) -> bool {
+    local_caller && AUTH_LOCKED_ROUTES.contains(&path)
+}
+
+fn auth_locked_refusal() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::LOCKED,
+        axum::Json(serde_json::json!({
+            "success": false,
+            "data": null,
+            "error": "API authentication is locked: the stored auth token cannot be decrypted \
+                      until the encryption key is restored (Settings → Recovery, or POST \
+                      /api/config/recovery/restore with the recovery passphrase)."
+        })),
+    )
+        .into_response()
 }
 
 /// Largest JSON body a bridge-token request may carry (its ids are read before
@@ -2812,8 +2858,17 @@ mod cancel_guard_tests {
 
 #[cfg(test)]
 mod auth_tests {
-    use super::{auth_allows, is_local_ip};
+    use super::{auth_allows, auth_locked_allows, is_local_ip};
     use axum::http::Method;
+
+    #[test]
+    fn locked_auth_opens_only_the_recovery_routes_to_a_local_caller() {
+        assert!(auth_locked_allows("/api/config/recovery/status", true));
+        assert!(auth_locked_allows("/api/config/recovery/restore", true));
+        assert!(!auth_locked_allows("/api/config/recovery/restore", false));
+        assert!(!auth_locked_allows("/api/config/recovery/set", true));
+        assert!(!auth_locked_allows("/api/projects", true));
+    }
 
     // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────
     const RESET: &str = "/api/setup/reset";

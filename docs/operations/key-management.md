@@ -40,6 +40,11 @@ the previous file untouched.
      keychain it says to choose Allow, or to start with
      `KRONN_USE_KEYCHAIN=0` (`open --env KRONN_USE_KEYCHAIN=0 -a Kronn`);
    - a key is minted only when no registered column holds ciphertext;
+   - two distinct keys that each decrypt some rows (say the keychain holds
+     K1 and the sidecar K2) **stop the boot** with nothing written; the
+     message names each source, its key fingerprint and how many rows it
+     decrypts. Kronn never picks one, and never overwrites a vault that holds
+     a different key than the one in use;
    - rows exist and no key decrypts them: locked state, nothing overwritten,
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
@@ -65,6 +70,19 @@ stores it as the auth token when none is stored yet; a different stored token
 wins, with a warning, as the `config.toml` one did before. Either way auth is
 enabled and the value never reaches `config.toml` or a child process. The
 LAN guard and the auth middleware read the resulting token.
+
+## Auth locked
+
+When a stored auth token exists but cannot be decrypted (key locked, or the
+row is under another key) and auth is enabled, the API is **auth locked**,
+not open: every route answers `423 Locked` except `/api/health` and, from a
+local caller, `GET /api/config/recovery/status` and
+`POST /api/config/recovery/restore`. A successful restore loads the token and
+lifts the lock. The WebSocket gives no connection the local-frontend trust in
+that state. The static UI still loads; there is no dedicated recovery screen
+yet, so restore through Settings → Recovery when it renders, or with the
+restore route. An operator-set `KRONN_AUTH_TOKEN` replaces the locked token
+for the session.
 
 ## The one-time migration from 0.14.2
 
