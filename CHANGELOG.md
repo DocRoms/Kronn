@@ -12,6 +12,7 @@ Release notes for 0.9.3 and earlier are available in the
 ## [Unreleased]
 
 ### Added
+- When a dangerous Exec step needs a manual fix, its warning now offers a ready prompt to copy and hand to an agent: it names the workflow, each step and value to fix, and the safe pattern (KT-1017).
 
 - Each project now decides whether its agents receive a GitHub token (KT-1006,
   D2). A "GitHub" row on the project's Overview, and a chip in the discussion

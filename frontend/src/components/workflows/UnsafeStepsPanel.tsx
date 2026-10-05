@@ -1,7 +1,8 @@
 // KT-1017 — saved Exec steps that interpolate a value into inline code are
 // refused at run time. This panel names them and, on request, shows the
 // suggested positional-argument rewrite as a diff; nothing is applied until
-// the user clicks Apply.
+// the user clicks Apply. When a step needs a manual fix, it offers a ready
+// prompt to hand to an agent.
 import { useEffect, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { workflows as workflowsApi } from '../../lib/api';
@@ -16,11 +17,19 @@ interface UnsafeStepsPanelProps {
 const issueKey = (issue: UnsafeExecStep) =>
   `${issue.on_failure ? 'rollback' : 'main'}:${issue.step_name}:${issue.phase}:${issue.source_alias ?? ''}`;
 
+const phaseLabel = (issue: UnsafeExecStep, t: (key: string, ...args: (string | number)[]) => string) => {
+  if (issue.phase === 'setup') return ` (${t('wf.unsafeSetup')})`;
+  if (issue.phase === 'stdin') return ' (stdin)';
+  if (issue.phase === 'source') return ` (${t('wf.unsafeSource', issue.source_alias ?? '')})`;
+  return '';
+};
+
 export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
   const { t } = useT();
   const [issues, setIssues] = useState<UnsafeExecStep[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [applying, setApplying] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +41,31 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
   }, [workflow]);
 
   if (issues.length === 0) return null;
+
+  const manualIssues = issues.filter(issue => !issue.suggested_args);
+  const agentPrompt = manualIssues.length === 0 ? '' : t(
+    'wf.unsafeAgentPrompt',
+    workflow.name,
+    workflow.id,
+    String(manualIssues.length),
+    manualIssues
+      .map(issue => {
+        const what = issue.placeholder || issue.reason;
+        const why = issue.manual_fix ? ` — ${issue.manual_fix}` : '';
+        return `- ${issue.step_name}${phaseLabel(issue, t)} : ${what}${why}`;
+      })
+      .join('\n'),
+  );
+
+  const copyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(agentPrompt);
+      setCopied(true);
+    } catch {
+      // Clipboard can be refused; the prompt stays visible to copy by hand.
+      setCopied(false);
+    }
+  };
 
   const apply = async (issue: UnsafeExecStep) => {
     const key = issueKey(issue);
@@ -60,9 +94,7 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
               <div className="wf-unsafe-item-head">
                 <span>
                   <strong>{issue.step_name}</strong>
-                  {issue.phase === 'setup' ? ` (${t('wf.unsafeSetup')})` : ''}
-                  {issue.phase === 'stdin' ? ' (stdin)' : ''}
-                  {issue.phase === 'source' ? ` (${t('wf.unsafeSource', issue.source_alias ?? '')})` : ''}
+                  {phaseLabel(issue, t)}
                   {' — '}
                   <code>{issue.placeholder || issue.reason}</code>
                   {issue.reason === 'unmodelled_program' ? ` — ${t('wf.unsafeUnmodelled', issue.command)}` : ''}
@@ -73,7 +105,7 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
                   aria-expanded={open === key}
                   onClick={() => setOpen(open === key ? null : key)}
                 >
-                  {t('wf.unsafeSuggest')}
+                  {issue.suggested_args ? t('wf.unsafeSuggest') : t('wf.unsafeHow')}
                 </button>
               </div>
               {open === key && (
@@ -104,6 +136,15 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
           );
         })}
       </ul>
+      {agentPrompt && (
+        <div className="wf-unsafe-agent">
+          <p className="wf-unsafe-agent-intro">{t('wf.unsafeAgentIntro')}</p>
+          <pre className="wf-unsafe-diff wf-unsafe-prompt" aria-label={t('wf.unsafeAgentPromptLabel')}>{agentPrompt}</pre>
+          <button type="button" className="wf-btn-secondary" onClick={() => { void copyPrompt(); }}>
+            {copied ? t('wf.unsafeAgentCopied') : t('wf.unsafeAgentCopy')}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
