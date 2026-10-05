@@ -3055,6 +3055,26 @@ export type EvidenceTarget = "task" | "review_finding";
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
 /**
+ * One repository file an Exec step runs (KT-918): its repository-relative
+ * path and the approved content hash. An empty hash is pinned to the current
+ * content when the workflow is saved.
+ */
+export type ExecScriptFile = { path: string, sha256: string, };
+
+/**
+ * Where a declared file stands against its approved hash.
+ */
+export type ExecScriptFileState = "approved" | "changed" | "pending" | "invalid";
+
+export type ExecScriptFileStatus = { path: string, state: ExecScriptFileState, current_sha256?: string, error?: string, };
+
+/**
+ * `POST /api/workflows/exec-scripts/status`: the declared files of one step
+ * checked against the home project's repository.
+ */
+export type ExecScriptStatusRequest = { project_id?: string, files: Array<ExecScriptFile>, };
+
+/**
  * Compact sidebar edge. The canonical relation already lives on
  * `task_executions`; this projection avoids overloading the workflow-run FK on
  * discussions or making clients fetch every execution detail separately.
@@ -9103,6 +9123,13 @@ exec_setup_args?: Array<string>,
  * the main `exec_command` only, not `exec_setup_command`.
  */
 exec_stdin?: string | null,
+/**
+ * KT-918 — repository files the main command runs (the entry script and
+ * the modules it loads), relative to the repository of the workflow's
+ * home project. Each carries the approved content hash; the step runs a
+ * verified copy and fails before running when a file no longer matches.
+ */
+exec_script_files?: Array<ExecScriptFile>,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

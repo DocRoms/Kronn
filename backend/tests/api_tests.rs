@@ -26389,3 +26389,65 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
     let (_, changed) = put(serde_json::json!([changed, safe_exec_step("other")])).await;
     assert_eq!(changed["success"], false, "changed placeholder: {changed}");
 }
+
+/// KT-918 — the write paths that check Exec definitions also check the shape
+/// of declared script files: a path leaving the repository is refused by the
+/// bundle (parent and child) and by a workflow import.
+#[tokio::test]
+async fn bundle_and_import_refuse_a_script_path_leaving_the_repository() {
+    let escaping = || {
+        serde_json::json!({
+            "name": "framing",
+            "step_type": {"type": "Exec"},
+            "exec_command": "bash",
+            "exec_args": ["scripts/run.sh"],
+            "exec_script_files": [{"path": "../outside.sh"}]
+        })
+    };
+    let assert_refused = |body: &Value, label: &str| {
+        assert_eq!(body["success"], false, "{label}: {body}");
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("relative to the repository"),
+            "{label}: {error}"
+        );
+    };
+    let app = test_app();
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({"workflow": workflow_request(serde_json::json!([escaping()]))}),
+    )
+    .await;
+    assert_refused(&bundle, "bundle parent");
+    let mut child = workflow_request(serde_json::json!([escaping()]));
+    child["bundle_id"] = serde_json::json!("child");
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([{
+                "name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"
+            }]))
+        }),
+    )
+    .await;
+    assert_refused(&bundle, "bundle child");
+
+    let (_, exported) = workflow_portability_fixture().await;
+    let mut import = exported.clone();
+    import["workflow"]["exec_allowlist"] = serde_json::json!(["bash"]);
+    import["workflow"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(escaping());
+    let app = build_router_with_auth(test_state(), false);
+    let (_, body) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&import).unwrap(), "project_id": null}),
+    )
+    .await;
+    assert_refused(&body, "workflow import");
+}

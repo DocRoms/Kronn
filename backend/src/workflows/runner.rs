@@ -916,6 +916,44 @@ async fn execute_run_body(
     } else {
         (String::new(), None)
     };
+    // KT-918 — declared scripts are read from the carrying repository's
+    // checkout, never from the run's worktree.
+    let declares_scripts = workflow
+        .steps
+        .iter()
+        .chain(workflow.on_failure.iter())
+        .any(|step| !step.exec_script_files.is_empty());
+    // The launch may already carry the run's project in `project_id`; the
+    // stored definition keeps the home project, which carries the scripts.
+    let carrying_project_id = if declares_scripts {
+        let workflow_id = workflow.id.clone();
+        db.with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &workflow_id))
+            .await?
+            .map(|stored| stored.project_id)
+            .unwrap_or_else(|| workflow.project_id.clone())
+    } else {
+        None
+    };
+    let carrying_repository: Option<String> = match carrying_project_id {
+        Some(pid) if declares_scripts => {
+            let path = if workflow.project_id.as_deref() == Some(pid.as_str()) {
+                Some(project_path.clone())
+            } else {
+                db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+                    .await?
+                    .map(|project| project.path)
+            };
+            path.filter(|path| !path.is_empty()).map(|path| {
+                let resolved = crate::core::scanner::resolve_host_path(&path);
+                if resolved.exists() {
+                    resolved.to_string_lossy().to_string()
+                } else {
+                    path
+                }
+            })
+        }
+        _ => None,
+    };
 
     // 0.7.0 Phase 4 — detect resume: a non-empty step_results means
     // this is a continuation from a Gate pause (or a future restart-
@@ -2197,6 +2235,7 @@ async fn execute_run_body(
                         &work_dir,
                         &ctx,
                         workflow.project_id.as_deref(),
+                        carrying_repository.as_deref(),
                     )
                     .await
                 }
@@ -3128,6 +3167,7 @@ async fn execute_run_body(
                         &work_dir,
                         &ctx,
                         workflow.project_id.as_deref(),
+                        carrying_repository.as_deref(),
                     )
                     .await
                 }
@@ -4277,6 +4317,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -4622,6 +4663,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -8522,6 +8564,364 @@ mod tests {
         );
         assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    // ─── KT-918 — approved repository scripts ────────────────────────────
+
+    fn write_file(root: &std::path::Path, relative: &str, text: &str) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// An entry that loads its helper through a path built from its cwd, the
+    /// dynamic import a copy alone would not cover.
+    const SCRIPT_ENTRY: &str = "const fs = require('fs');\n\
+        const h = require(process.cwd() + '/lib/helper.cjs');\n\
+        fs.writeFileSync(require('path').join(process.env.KRONN_WORKTREE, 'ran'), h);\n\
+        console.log('SENTINEL=' + h + ' WT=' + process.env.KRONN_WORKTREE);\n";
+
+    async fn create_script_workflow(
+        state: &crate::AppState,
+        home: &str,
+        scope: Option<serde_json::Value>,
+        files: &[&str],
+    ) -> Result<Workflow, String> {
+        let mut request = serde_json::json!({
+            "name": format!("scripts-{home}"),
+            "project_id": home,
+            "trigger": {"type": "Manual"},
+            "exec_allowlist": ["node"],
+            "steps": [{
+                "name": "framing",
+                "step_type": {"type": "Exec"},
+                "agent": "ClaudeCode",
+                "prompt_template": "",
+                "exec_command": "node",
+                "exec_args": ["scripts/entry.cjs"],
+                "exec_script_files": files
+                    .iter()
+                    .map(|path| serde_json::json!({"path": path}))
+                    .collect::<Vec<_>>(),
+            }],
+        });
+        if let Some(scope) = scope {
+            request["project_scope"] = scope;
+        }
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(request).unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0;
+        match response.data {
+            Some(workflow) if response.success => Ok(workflow),
+            _ => Err(response.error.unwrap_or_default()),
+        }
+    }
+
+    async fn run_scripts(
+        state: &crate::AppState,
+        workflow: &Workflow,
+        project: &str,
+    ) -> WorkflowRun {
+        let (_, tokens, agents) = test_state_and_configs();
+        let (wf, mut run) = crate::api::workflows::create_manual_run(
+            state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                requested_project_id: Some(project.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        run
+    }
+
+    #[tokio::test]
+    async fn an_approved_script_loads_its_approved_helper_not_the_worktree_one() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        let target = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        // The run's checkout holds modified copies at the same paths.
+        write_file(
+            target.path(),
+            "scripts/entry.cjs",
+            "console.log('MUTATED ENTRY');\n",
+        );
+        write_file(
+            target.path(),
+            "lib/helper.cjs",
+            "module.exports = 'MUTATED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-home", home.path()).await;
+        insert_project_at(&state, "proj-kt918-target", target.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-home",
+            Some(serde_json::json!({"type": "Projects", "project_ids": ["proj-kt918-target"]})),
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+        let pinned = &workflow.steps[0].exec_script_files;
+        assert!(
+            pinned.iter().all(|file| file.sha256.len() == 64),
+            "{pinned:?}"
+        );
+
+        let run = run_scripts(&state, &workflow, "proj-kt918-target").await;
+
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Success, "{output}");
+        assert!(output.contains("SENTINEL=APPROVED"), "{output}");
+        assert!(!output.contains("MUTATED"), "{output}");
+        assert!(
+            output.contains(&format!("WT={}", target.path().display())),
+            "{output}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.path().join("ran")).unwrap(),
+            "APPROVED"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_one_line_change_to_the_script_or_a_module_blocks_the_run_and_names_the_file() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-drift", home.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-drift",
+            None,
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n// x\n",
+        );
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(
+            output.contains("`lib/helper.cjs` changed since approval"),
+            "{output}"
+        );
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        write_file(
+            home.path(),
+            "scripts/entry.cjs",
+            &format!("{SCRIPT_ENTRY}// x\n"),
+        );
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(
+            output.contains("`scripts/entry.cjs` changed since approval"),
+            "{output}"
+        );
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+
+        // Restored content matches the approval again.
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        let run = run_scripts(&state, &workflow, "proj-kt918-drift").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    }
+
+    #[tokio::test]
+    async fn a_script_saved_by_an_agent_does_not_run_until_a_human_approves_it() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(
+            home.path(),
+            "lib/helper.cjs",
+            "module.exports = 'APPROVED';\n",
+        );
+        insert_project_at(&state, "proj-kt918-agent", home.path()).await;
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "agent-draft", "project_id": "proj-kt918-agent",
+                "trigger": {"type": "Manual"}, "exec_allowlist": ["node"],
+                "steps": [{"name": "framing", "step_type": {"type": "Exec"},
+                    "agent": "ClaudeCode", "prompt_template": "", "exec_command": "node",
+                    "exec_args": ["scripts/entry.cjs"],
+                    "exec_script_files": [{"path": "scripts/entry.cjs"}, {"path": "lib/helper.cjs"}]}],
+            }))
+            .unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Agent,
+        )
+        .await
+        .0;
+        let workflow = response.data.expect("saved");
+        assert!(workflow.steps[0]
+            .exec_script_files
+            .iter()
+            .all(|file| file.sha256.is_empty()));
+
+        let run = run_scripts(&state, &workflow, "proj-kt918-agent").await;
+        let output = &run.step_results.last().unwrap().output;
+        assert_eq!(run.status, RunStatus::Failed, "{output}");
+        assert!(output.contains("no approved hash"), "{output}");
+        assert!(
+            !home.path().join("ran").exists(),
+            "the step must not have run"
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_refuses_a_script_outside_the_repository_or_behind_an_escaping_symlink() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(outside.path(), "secret.cjs", "x");
+        insert_project_at(&state, "proj-kt918-save", home.path()).await;
+
+        let error = create_script_workflow(&state, "proj-kt918-save", None, &["../secret.cjs"])
+            .await
+            .unwrap_err();
+        assert!(error.contains("relative to the repository"), "{error}");
+        let error =
+            create_script_workflow(&state, "proj-kt918-save", None, &["scripts/missing.cjs"])
+                .await
+                .unwrap_err();
+        assert!(error.contains("scripts/missing.cjs"), "{error}");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.cjs"),
+                home.path().join("scripts/leak.cjs"),
+            )
+            .unwrap();
+            let error =
+                create_script_workflow(&state, "proj-kt918-save", None, &["scripts/leak.cjs"])
+                    .await
+                    .unwrap_err();
+            assert!(error.contains("outside the repository"), "{error}");
+        }
+        let request: crate::models::CreateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({
+                "name": "no-project", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": ["node"],
+                "steps": [{"name": "s", "step_type": {"type": "Exec"}, "agent": "ClaudeCode",
+                    "prompt_template": "", "exec_command": "node",
+                    "exec_script_files": [{"path": "scripts/entry.cjs"}]}],
+            }))
+            .unwrap();
+        let response = crate::api::workflows::create_as(
+            state.clone(),
+            request,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0;
+        assert!(!response.success);
+        assert!(
+            response
+                .error
+                .unwrap_or_default()
+                .contains("need a project"),
+            "a script needs a carrying repository"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_step_editor_reads_each_file_state() {
+        let (state, _, _) = test_state_and_configs();
+        let home = tempfile::TempDir::new().unwrap();
+        write_file(home.path(), "scripts/entry.cjs", SCRIPT_ENTRY);
+        write_file(home.path(), "lib/helper.cjs", "module.exports = 1;\n");
+        insert_project_at(&state, "proj-kt918-status", home.path()).await;
+        let workflow = create_script_workflow(
+            &state,
+            "proj-kt918-status",
+            None,
+            &["scripts/entry.cjs", "lib/helper.cjs"],
+        )
+        .await
+        .expect("saved");
+        write_file(home.path(), "lib/helper.cjs", "module.exports = 2;\n");
+        let mut files = workflow.steps[0].exec_script_files.clone();
+        files.push(crate::models::ExecScriptFile {
+            path: "scripts/new.cjs".into(),
+            sha256: String::new(),
+        });
+        let request = crate::models::ExecScriptStatusRequest {
+            project_id: Some("proj-kt918-status".into()),
+            files,
+        };
+        let response = crate::api::workflows::exec_script_status(
+            axum::extract::State(state.clone()),
+            axum::Json(request),
+        )
+        .await
+        .0;
+        let states: Vec<_> = response
+            .data
+            .unwrap()
+            .into_iter()
+            .map(|status| (status.path, status.state))
+            .collect();
+        use crate::models::ExecScriptFileState::*;
+        assert_eq!(
+            states,
+            vec![
+                ("scripts/entry.cjs".to_string(), Approved),
+                ("lib/helper.cjs".to_string(), Changed),
+                ("scripts/new.cjs".to_string(), Invalid),
+            ]
+        );
     }
 }
 

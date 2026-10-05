@@ -1,5 +1,6 @@
 pub mod agent_skill;
 pub mod anti_halluc;
+pub mod approved_scripts;
 pub mod argv_roles;
 pub mod audit_detectors;
 pub mod audit_mcp_filter;

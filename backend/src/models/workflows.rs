@@ -649,6 +649,12 @@ pub struct WorkflowStep {
     /// the main `exec_command` only, not `exec_setup_command`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_stdin: Option<String>,
+    /// KT-918 — repository files the main command runs (the entry script and
+    /// the modules it loads), relative to the repository of the workflow's
+    /// home project. Each carries the approved content hash; the step runs a
+    /// verified copy and fails before running when a file no longer matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_script_files: Vec<ExecScriptFile>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
@@ -1852,6 +1858,56 @@ pub struct WorkflowSummary {
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
+}
+
+/// One repository file an Exec step runs (KT-918): its repository-relative
+/// path and the approved content hash. An empty hash is pinned to the current
+/// content when the workflow is saved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptFile {
+    pub path: String,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+/// Where a declared file stands against its approved hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ExecScriptFileState {
+    /// The file matches its approved hash.
+    Approved,
+    /// The file changed since approval: the step refuses to run.
+    Changed,
+    /// No hash yet: saving the workflow approves the current content.
+    Pending,
+    /// Missing, outside the repository or behind an escaping symlink.
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptFileStatus {
+    pub path: String,
+    pub state: ExecScriptFileState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `POST /api/workflows/exec-scripts/status`: the declared files of one step
+/// checked against the home project's repository.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecScriptStatusRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    pub files: Vec<ExecScriptFile>,
 }
 
 /// An Exec command line that interpolates a template value into inline code

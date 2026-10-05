@@ -568,6 +568,22 @@ pub fn isolate_with_github(
     seal(command, route, GITHUB_ENV);
 }
 
+/// [`isolate_with_github`] plus per-launch values the step itself sets, such
+/// as where an approved-script step's worktree and copy are (KT-918).
+pub fn isolate_with_github_and_values(
+    command: &mut std::process::Command,
+    route: ChildRoute,
+    github_env: &[(String, String)],
+    values: &[(&str, &OsStr)],
+) {
+    reset(command, route);
+    crate::core::github_connection::apply_launch_env(command, github_env);
+    for (name, value) in values {
+        command.env(name, value);
+    }
+    seal(command, route, GITHUB_ENV);
+}
+
 /// Reset + seal for a child that adds nothing of its own (exec routes, Quick
 /// Exec, credential CLIs).
 pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {

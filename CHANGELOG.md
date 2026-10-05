@@ -139,6 +139,20 @@ Release notes for 0.9.3 and earlier are available in the
   WebSocket bus refuses it. The bridge reads `KRONN_BRIDGE_TOKEN`
   first. Loopback requests without a token keep today's trust until the
   per-action human proof ships in 0.15 (KT-1006).
+- An Exec step that runs a repository script can declare the script and the
+  modules it loads, as paths relative to the repository of the workflow's
+  home project (KT-918). Saving refuses a path outside the repository, a
+  missing file or a symlink that leads out of it, and records each file's
+  content hash, which enters the workflow's approval fingerprint; a save made
+  by an agent never records a hash, so only a human approves. Before the
+  command runs, Kronn checks every file against its approved hash and copies
+  it into the run's artifacts directory; the command runs from that copy,
+  with the run's checkout in `KRONN_WORKTREE`. A file changed since approval,
+  even by one line, stops the step before anything runs and the error names
+  it; the step editor shows each file as approved or changed and re-approves
+  the current content on save. A workflow published to `kronn/` names the
+  files and their hashes, never their content. Absolute imports and packages
+  found outside the copy are not covered.
 
 - Launching a workflow, you can see and change the agent, model and effort of
   each Agent step, for that run only (KT-1025). The launch card, in a

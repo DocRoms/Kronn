@@ -509,3 +509,38 @@ async fn an_adapter_launch_env_cannot_reinject_forbidden_names() {
         Some("kbt_adapter")
     );
 }
+
+#[test]
+fn an_approved_script_step_gets_its_launch_values_on_the_built_environment() {
+    with_parent_env(PARENT, || {
+        let mut command = std::process::Command::new("node");
+        isolate_with_github_and_values(
+            &mut command,
+            ChildRoute::WorkflowExec,
+            &[],
+            &[
+                ("KRONN_WORKTREE", OsStr::new("/repo/wt")),
+                ("KRONN_APPROVED_SCRIPTS_DIR", OsStr::new("/data/copy")),
+                ("SOME_TOKEN", OsStr::new("not granted")),
+            ],
+        );
+        let set = env_of(&command);
+        assert_eq!(
+            set.get("KRONN_WORKTREE").map(String::as_str),
+            Some("/repo/wt")
+        );
+        assert_eq!(
+            set.get("KRONN_APPROVED_SCRIPTS_DIR").map(String::as_str),
+            Some("/data/copy")
+        );
+        assert_eq!(set.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+        for gone in [
+            "SOME_TOKEN",
+            "KRONN_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "GH_TOKEN",
+        ] {
+            assert!(!set.contains_key(gone), "{gone} reached the step");
+        }
+    });
+}

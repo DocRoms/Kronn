@@ -1098,8 +1098,9 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
 }
 
 /// An unsafe command line already stored in a workflow, with its exact
-/// place: chain (`on_failure`), step position, then the line itself.
-pub(crate) type KeptLine = (bool, usize, UnsafeExecStep);
+/// place: chain (`on_failure`), step position, the line itself, then the
+/// step's declared script files (KT-918), so a changed hash is not "unchanged".
+pub(crate) type KeptLine = (bool, usize, UnsafeExecStep, Vec<ExecScriptFile>);
 
 /// The unsafe lines a stored workflow already holds. An update that leaves
 /// one of them exactly as it is (same chain, position, step name, phase,
@@ -1113,7 +1114,7 @@ pub(crate) fn kept_lines(steps: &[WorkflowStep], on_failure: &[WorkflowStep]) ->
             .flat_map(move |(index, step)| {
                 crate::core::inline_code::classify_step(step, rollback)
                     .into_iter()
-                    .map(move |line| (rollback, index, line))
+                    .map(move |line| (rollback, index, line, step.exec_script_files.clone()))
             })
             .collect::<Vec<_>>()
     };
@@ -1134,7 +1135,17 @@ fn is_grandfathered(
     } else {
         (step.exec_command.as_deref(), &step.exec_args)
     };
-    is_grandfathered_line(kept, rollback, index, &step.name, phase, None, cmd, args)
+    is_grandfathered_line(
+        kept,
+        rollback,
+        index,
+        &step.name,
+        phase,
+        None,
+        cmd,
+        args,
+        &step.exec_script_files,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1147,17 +1158,20 @@ fn is_grandfathered_line(
     alias: Option<&str>,
     cmd: Option<&str>,
     args: &[String],
+    scripts: &[ExecScriptFile],
 ) -> bool {
     let cmd = cmd.map(str::trim).unwrap_or_default();
-    kept.iter().any(|(kept_rollback, kept_index, known)| {
-        *kept_rollback == rollback
-            && *kept_index == index
-            && known.step_name == step_name
-            && known.phase == phase
-            && known.source_alias.as_deref() == alias
-            && known.command == cmd
-            && known.args == args
-    })
+    kept.iter()
+        .any(|(kept_rollback, kept_index, known, kept_scripts)| {
+            *kept_rollback == rollback
+                && *kept_index == index
+                && known.step_name == step_name
+                && known.phase == phase
+                && known.source_alias.as_deref() == alias
+                && known.command == cmd
+                && known.args == args
+                && kept_scripts.as_slice() == scripts
+        })
 }
 
 fn validate_exec_steps_keeping(
@@ -1169,6 +1183,16 @@ fn validate_exec_steps_keeping(
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
     for (index, s) in steps.iter().enumerate() {
+        if !s.exec_script_files.is_empty() {
+            if !matches!(s.step_type, StepType::Exec) {
+                return Err(format!(
+                    "Step « {} » : `exec_script_files` only applies to Exec steps.",
+                    s.name
+                ));
+            }
+            crate::core::approved_scripts::validate_declaration(&s.exec_script_files)
+                .map_err(|error| format!("Step Exec « {} » : {error}", s.name))?;
+        }
         if matches!(s.step_type, StepType::CollectApiData) {
             if let Some(config) = &s.collect_api_data {
                 for source in &config.sources {
@@ -1219,6 +1243,7 @@ fn validate_exec_steps_keeping(
                         Some(&source.alias),
                         Some(cmd),
                         &exec.args,
+                        &s.exec_script_files,
                     );
                     if !kept {
                         if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
@@ -1365,6 +1390,88 @@ fn validate_exec_steps_keeping(
         }
     }
     Ok(())
+}
+
+/// The checkout of the repository carrying a workflow's approved scripts: its
+/// home project's (KT-918, ADR-005 §Workflows).
+async fn carrying_repository_root(
+    state: &AppState,
+    project_id: Option<String>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(project_id) = project_id else {
+        return Ok(None);
+    };
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    Ok(project.map(|project| crate::core::scanner::resolve_host_path(&project.path)))
+}
+
+/// Save-time check of declared repository scripts: each file exists inside the
+/// carrying repository with no escaping symlink, and an empty hash is pinned
+/// to the current content when a human saves (KT-918).
+async fn pin_exec_script_files(
+    state: &AppState,
+    project_id: Option<String>,
+    steps: &mut [WorkflowStep],
+    on_failure: &mut [WorkflowStep],
+    writer: WorkflowWriter,
+) -> Result<(), String> {
+    let Some(first) = steps
+        .iter()
+        .chain(on_failure.iter())
+        .find(|step| !step.exec_script_files.is_empty())
+        .map(|step| step.name.clone())
+    else {
+        return Ok(());
+    };
+    let Some(root) = carrying_repository_root(state, project_id).await? else {
+        return Err(format!(
+            "Step Exec « {first} » : repository scripts need a project; attach the workflow to the project whose repository carries them."
+        ));
+    };
+    for step in steps.iter_mut().chain(on_failure.iter_mut()) {
+        if step.exec_script_files.is_empty() {
+            continue;
+        }
+        let checked = if writer == WorkflowWriter::Human {
+            crate::core::approved_scripts::validate_and_pin(&root, &mut step.exec_script_files)
+        } else {
+            crate::core::approved_scripts::validate_files(&root, &step.exec_script_files)
+        };
+        checked.map_err(|error| format!("Step Exec « {} » : {error}", step.name))?;
+    }
+    Ok(())
+}
+
+/// POST /api/workflows/exec-scripts/status — where each declared file of one
+/// step stands against its approved hash, for the step editor (KT-918).
+pub async fn exec_script_status(
+    State(state): State<AppState>,
+    Json(req): Json<ExecScriptStatusRequest>,
+) -> Json<ApiResponse<Vec<ExecScriptFileStatus>>> {
+    if req.files.len() > crate::core::approved_scripts::MAX_FILES {
+        return Json(ApiResponse::err(format!(
+            "too many script files ({}, max {})",
+            req.files.len(),
+            crate::core::approved_scripts::MAX_FILES
+        )));
+    }
+    let root = match carrying_repository_root(&state, req.project_id).await {
+        Ok(root) => root,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let files = req.files;
+    match tokio::task::spawn_blocking(move || {
+        crate::core::approved_scripts::status(root.as_deref(), &files)
+    })
+    .await
+    {
+        Ok(statuses) => Json(ApiResponse::ok(statuses)),
+        Err(error) => Json(ApiResponse::err(format!("status check failed: {error}"))),
+    }
 }
 
 /// Saved Quick Exec references carry their command outside the workflow JSON.
@@ -1595,9 +1702,39 @@ async fn resolve_saved_references(
     outcome
 }
 
+/// Who saves a workflow. Only a human approves script content: an agent's
+/// save leaves an empty script hash empty, so the step refuses to run until
+/// a human saves it (KT-918).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkflowWriter {
+    Human,
+    Agent,
+}
+
+impl WorkflowWriter {
+    fn from_bridge(
+        bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    ) -> Self {
+        if bridge.is_some() {
+            Self::Agent
+        } else {
+            Self::Human
+        }
+    }
+}
+
 pub async fn create(
     State(state): State<AppState>,
-    Json(mut req): Json<CreateWorkflowRequest>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<CreateWorkflowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    create_as(state, req, WorkflowWriter::from_bridge(&bridge)).await
+}
+
+pub(crate) async fn create_as(
+    state: AppState,
+    mut req: CreateWorkflowRequest,
+    writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
     if let Err(e) = validate_project_scope_db(&state, req.project_scope.clone()).await {
         return Json(ApiResponse::err(e));
@@ -1731,6 +1868,17 @@ pub async fn create(
     let mut used_step_ids = std::collections::HashSet::new();
     normalize_step_ids(&mut steps, None, &mut used_step_ids);
     normalize_step_ids(&mut on_failure, None, &mut used_step_ids);
+    if let Err(e) = pin_exec_script_files(
+        &state,
+        req.project_id.clone(),
+        &mut steps,
+        &mut on_failure,
+        writer,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
     let wf = Workflow {
         pinned: false,
         id: Uuid::new_v4().to_string(),
@@ -1862,7 +2010,7 @@ pub async fn create_feasibility_autopilot(
         &parent_name,
         params.decomposed,
     );
-    let child_resp = create(State(state.clone()), Json(child_req)).await;
+    let child_resp = create_as(state.clone(), child_req, WorkflowWriter::Human).await;
     let child = match child_resp.0.data {
         Some(w) => w,
         // Surface the child's creation error verbatim (no orphan parent).
@@ -1875,14 +2023,24 @@ pub async fn create_feasibility_autopilot(
             s.sub_workflow_id = Some(child.id.clone());
         }
     }
-    create(State(state), Json(parent_req)).await
+    create_as(state, parent_req, WorkflowWriter::Human).await
 }
 
 /// PUT /api/workflows/:id
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(mut req): Json<UpdateWorkflowRequest>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<UpdateWorkflowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    update_as(state, id, req, WorkflowWriter::from_bridge(&bridge)).await
+}
+
+pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    mut req: UpdateWorkflowRequest,
+    writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -2030,6 +2188,8 @@ pub async fn update(
         }
     }
 
+    let scripts_need_check =
+        req.steps.is_some() || req.on_failure.is_some() || req.project_id.is_some();
     let mut steps = req.steps.unwrap_or_else(|| existing.steps.clone());
     let mut on_failure = req
         .on_failure
@@ -2041,6 +2201,17 @@ pub async fn update(
         Some(&existing.on_failure),
         &mut used_step_ids,
     );
+    if scripts_need_check {
+        let project_id = req
+            .project_id
+            .clone()
+            .unwrap_or_else(|| existing.project_id.clone());
+        if let Err(e) =
+            pin_exec_script_files(&state, project_id, &mut steps, &mut on_failure, writer).await
+        {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     let updated = Workflow {
         id: existing.id,
@@ -5107,6 +5278,7 @@ pub async fn suggestions(
                     multi_agent_review: None,
                     room_id: None,
                     read_only_repos: vec![],
+                    exec_script_files: vec![],
                     sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
@@ -6047,6 +6219,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            exec_script_files: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -7923,5 +8096,55 @@ mod tests {
             "{undeclared}"
         );
         assert!(validate_required_fields_per_type(&[step(" ", serde_json::json!({}))]).is_err());
+    }
+
+    // KT-918 — a pinned script hash is part of an unsafe line's identity: an
+    // import that changes it is a new line, refused like any other.
+    #[test]
+    fn an_import_that_changes_a_pinned_script_hash_is_not_an_unchanged_line() {
+        let script = |hash: &str| ExecScriptFile {
+            path: "scripts/run.sh".into(),
+            sha256: hash.into(),
+        };
+        let mut stored = mk_workflow_for_export("identity");
+        let mut step = mk_step("greet", StepType::Exec);
+        step.exec_command = Some("bash".into());
+        step.exec_args = vec!["-c".into(), "echo \"{{issue.title}}\"".into()];
+        step.exec_script_files = vec![script(&"a".repeat(64))];
+        stored.steps = vec![step];
+        stored.on_failure = vec![];
+        stored.exec_allowlist = vec!["bash".into()];
+        let kept = kept_lines(&stored.steps, &stored.on_failure);
+        assert!(validate_workflow_for_import_keeping(&stored, &kept).is_ok());
+
+        let mut imported = stored.clone();
+        imported.steps[0].exec_script_files = vec![script(&"b".repeat(64))];
+        let error = validate_workflow_for_import_keeping(&imported, &kept).unwrap_err();
+        assert!(error.contains("{{issue.title}}"), "{error}");
+    }
+
+    #[test]
+    fn every_definition_check_refuses_a_malformed_script_declaration() {
+        let mut workflow = mk_workflow_for_export("shape");
+        let mut step = mk_step("run", StepType::Exec);
+        step.exec_command = Some("node".into());
+        step.exec_script_files = vec![ExecScriptFile {
+            path: "../outside.cjs".into(),
+            sha256: String::new(),
+        }];
+        workflow.steps = vec![step];
+        workflow.on_failure = vec![];
+        workflow.exec_allowlist = vec!["node".into()];
+        for error in [
+            validate_exec_definition(&workflow).unwrap_err(),
+            validate_workflow_for_import(&workflow).unwrap_err(),
+        ] {
+            assert!(error.contains("relative to the repository"), "{error}");
+        }
+        workflow.steps[0].step_type = StepType::Notify;
+        workflow.steps[0].exec_script_files[0].path = "scripts/run.cjs".into();
+        assert!(validate_exec_definition(&workflow)
+            .unwrap_err()
+            .contains("only applies to Exec steps"));
     }
 }

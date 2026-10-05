@@ -1935,6 +1935,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(
+            "/api/workflows/exec-scripts/status",
+            post(api::workflows::exec_script_status),
+        )
+        .route(
             "/api/workflows/test-batch-step",
             post(api::workflows::test_batch_step),
         )

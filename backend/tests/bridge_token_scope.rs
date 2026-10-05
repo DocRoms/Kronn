@@ -789,3 +789,72 @@ async fn step_agents_on_workflow_trigger_reach_the_handler_and_keep_the_scope() 
         "the handler saw the field: {body}"
     );
 }
+
+/// KT-918 — the script status endpoint is for the step editor only, and an
+/// agent's save never approves script content: an empty hash stays empty
+/// until a human saves the workflow.
+#[tokio::test]
+async fn a_bridge_token_never_approves_a_repository_script() {
+    let (app, repos) = fixture().await;
+    let script = repos.path().join("p1/scripts/run.cjs");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "console.log('x');\n").unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/workflows/exec-scripts/status",
+        Some(&token),
+        Some(json!({"project_id": "p1", "files": [{"path": "scripts/run.cjs", "sha256": ""}]})),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "the status endpoint is out of bridge reach: {body}"
+    );
+
+    let workflow = json!({
+        "name": "framing", "project_id": "p1", "trigger": {"type": "Manual"},
+        "exec_allowlist": ["node"],
+        "steps": [{"name": "run", "step_type": {"type": "Exec"}, "exec_command": "node",
+            "exec_args": ["scripts/run.cjs"],
+            "exec_script_files": [{"path": "scripts/run.cjs", "sha256": ""}]}]
+    });
+    let (status, agent) = call(
+        &app,
+        "POST",
+        "/api/workflows",
+        Some(&token),
+        Some(workflow.clone()),
+    )
+    .await;
+    assert_eq!(status, 200, "{agent}");
+    assert_eq!(agent["success"], true, "{agent}");
+    assert_eq!(
+        agent["data"]["steps"][0]["exec_script_files"][0]["sha256"], "",
+        "an agent's save leaves the hash empty"
+    );
+
+    let id = agent["data"]["id"].as_str().unwrap().to_owned();
+    let (status, updated) = call(
+        &app,
+        "PUT",
+        &format!("/api/workflows/{id}"),
+        Some(&token),
+        Some(json!({"steps": workflow["steps"]})),
+    )
+    .await;
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(
+        updated["data"]["steps"][0]["exec_script_files"][0]["sha256"],
+        ""
+    );
+
+    let (_, human) = call(&app, "POST", "/api/workflows", None, Some(workflow)).await;
+    let pinned = human["data"]["steps"][0]["exec_script_files"][0]["sha256"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(pinned.len(), 64, "a human save pins the content: {human}");
+}

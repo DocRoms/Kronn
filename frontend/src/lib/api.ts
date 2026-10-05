@@ -111,6 +111,8 @@ import type {
   WorkflowStep,
   WorkflowSummary,
   UnsafeExecStep,
+  ExecScriptFileStatus,
+  ExecScriptStatusRequest,
   WorkflowRun,
   BatchRunSummary,
   BatchCompareDetails,
@@ -2399,6 +2401,9 @@ export const workflows = {
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
   /** KT-1017 — Exec command lines refused at run time, with suggested rewrites. */
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
+  /** KT-918 — where each declared script file stands against its approved hash. */
+  execScriptStatus: (req: ExecScriptStatusRequest) =>
+    api<ExecScriptFileStatus[]>('POST', '/workflows/exec-scripts/status', req),
   create: (req: CreateWorkflowRequest) => api<Workflow>('POST', '/workflows', req),
   /** 0.8.3 — atomic bundle creation. POSTs a payload with optional
    *  `quick_prompts` / `quick_apis` / `custom_apis` sections plus a
