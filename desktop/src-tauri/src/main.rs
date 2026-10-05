@@ -556,6 +556,7 @@ async fn start_backend(
     reserved: std::net::TcpListener,
     dist_dir: std::path::PathBuf,
     data_dir_lock: std::fs::File,
+    env_token: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!("Starting embedded Kronn backend on port {}", port);
 
@@ -590,7 +591,7 @@ async fn start_backend(
     let database = Arc::new(Database::open().expect("Failed to open database"));
 
     // Resolve the encryption key and the stored credentials now the DB is open.
-    kronn::resolve_key_and_credentials(&mut app_config, &database, None).await?;
+    kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(
@@ -911,6 +912,9 @@ fn reserve_backend_port() -> std::io::Result<port::ChosenPort> {
 fn main() {
     // The update banner then only offers a release that has an installer.
     std::env::set_var(kronn::api::version::DESKTOP_APP_ENV, "1");
+    // An operator-set KRONN_AUTH_TOKEN leaves the environment before any thread
+    // or child starts; the backend stores or uses it (KT-1006, KT-1007).
+    let env_token = kronn::core::config::take_env_auth_token();
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_writer(std::io::stdout)
@@ -1031,7 +1035,14 @@ fn main() {
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {
                         if let Err(e) =
-                            start_backend(backend_port, reserved, dist_dir, data_dir_lock).await
+                            start_backend(
+                                backend_port,
+                                reserved,
+                                dist_dir,
+                                data_dir_lock,
+                                env_token,
+                            )
+                            .await
                         {
                             tracing::error!("Backend failed: {}", e);
                             let message =

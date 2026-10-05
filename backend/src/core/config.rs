@@ -59,10 +59,12 @@ pub(crate) fn disk_toml(
     dir: &std::path::Path,
     strip_credentials: bool,
 ) -> Result<String> {
-    let body = if strip_credentials {
+    let body = if strip_credentials || config.server.auth_token_session_only {
         let mut disk = config.clone();
         disk.server.auth_token = None;
-        disk.tokens.keys.clear();
+        if strip_credentials {
+            disk.tokens.keys.clear();
+        }
         toml::to_string_pretty(&disk)
     } else {
         toml::to_string_pretty(config)
@@ -442,6 +444,7 @@ pub fn default_config() -> AppConfig {
             auth_token: None,
             auth_enabled: false,
             auth_locked: false,
+            auth_token_session_only: false,
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,

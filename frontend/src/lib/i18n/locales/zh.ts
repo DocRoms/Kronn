@@ -2495,6 +2495,8 @@ const zh: TranslationDict = {
   "mcp.recovery.codePlaceholder": "恢复代码（如果此机器上存在则可选）",
   "mcp.recovery.restoreBtn": "恢复密钥",
   "mcp.recovery.restored": "密钥已恢复 — 密钥可再次读取。",
+  "authLocked.title": "Kronn 已锁定",
+  "authLocked.hint": "打开已存储 API 令牌的加密密钥缺失（钥匙串已重置或密钥文件丢失）。没有删除任何内容。输入恢复密码（如果本机已没有恢复代码，也请输入恢复代码）以恢复密钥。",
   "mcp.recovery.reencryptCta": "重新加密导入的密钥",
   "mcp.recovery.reencryptHint": "从另一台机器导入的密钥使用该机器的密钥加密。输入在那里设置的恢复密码（如需要还有其恢复代码）：它们将使用本机的密钥重新加密，本机密钥不变。",
   "mcp.recovery.reencryptBtn": "重新加密",

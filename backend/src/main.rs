@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
         exposed,
         app_config.server.auth_enabled,
-        app_config.server.auth_token.is_some(),
+        app_config.server.auth_token_or_lock(),
         ack_insecure,
     ) {
         tracing::error!("{msg}");

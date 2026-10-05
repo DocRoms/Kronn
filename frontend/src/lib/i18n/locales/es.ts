@@ -2519,6 +2519,8 @@ const es: TranslationDict = {
   'mcp.recovery.codePlaceholder': 'Código de recuperación (opcional si está en esta máquina)',
   'mcp.recovery.restoreBtn': 'Restaurar clave',
   'mcp.recovery.restored': 'Clave restaurada — los secretos vuelven a ser legibles.',
+  'authLocked.title': 'Kronn está bloqueado',
+  'authLocked.hint': 'Falta la clave de cifrado que abre tu token de API guardado (llavero restablecido o archivo de clave perdido). No se ha borrado nada. Introduce tu frase de recuperación, y el código de recuperación si esta máquina ya no lo tiene, para restaurar la clave.',
   'mcp.recovery.reencryptCta': 'Volver a cifrar los secretos importados',
   'mcp.recovery.reencryptHint': 'Los secretos importados de otra máquina están cifrados con la clave de esa máquina. Introduce la frase de recuperación definida allí (y su código si hace falta): se vuelven a cifrar con la clave de esta máquina, que no cambia.',
   'mcp.recovery.reencryptBtn': 'Volver a cifrar',

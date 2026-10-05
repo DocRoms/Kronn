@@ -51,20 +51,45 @@ pub async fn resolve_key_and_credentials(
             return Err(e);
         }
     };
+    let dir = crate::core::config::config_dir()?;
     match crate::core::credential_store::boot(
         config,
         database.clone(),
-        &crate::core::config::config_dir()?,
+        &dir,
         &key_outcome,
         env_auth_token.as_deref(),
     )
     .await
     {
         Ok(result) => tracing::info!("Credential store: {result:?}"),
-        Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
+        Err(e) if crate::core::credential_store::is_armed(&dir) => tracing::error!(
+            "Credential store armed, but finishing its migration failed (the next start \
+             completes it): {e:#}"
+        ),
+        Err(e) => {
+            tracing::error!("Credential store not armed, config.toml left as it is: {e:#}");
+            // A stored token we did not load is "auth locked", never "no auth".
+            if config.server.auth_token.is_none()
+                && crate::core::credential_store::stored_auth_token_exists(database)
+                    .await
+                    .unwrap_or(true)
+            {
+                config.server.auth_locked = true;
+            }
+        }
     }
-    // A different stored token wins (with a warning), as config.toml did before.
-    crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
+    if crate::core::credential_store::is_armed(&dir) {
+        // A different stored token wins (with a warning), as config.toml did before.
+        crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
+    } else if let Some(token) = env_auth_token.filter(|t| !t.is_empty()) {
+        // Store not armed (key locked): the operator's token serves this session
+        // only, never written in plaintext nor replacing the stored one.
+        if config.server.auth_token.is_none() {
+            config.server.auth_token = Some(token);
+            config.server.auth_token_session_only = true;
+        }
+        config.server.auth_enabled = true;
+    }
     if config.server.auth_token.is_some() {
         config.server.auth_locked = false;
     } else if config.server.auth_locked {
@@ -616,6 +641,7 @@ fn auth_locked_refusal() -> axum::response::Response {
         axum::Json(serde_json::json!({
             "success": false,
             "data": null,
+            "error_code": "auth_locked",
             "error": "API authentication is locked: the stored auth token cannot be decrypted \
                       until the encryption key is restored (Settings → Recovery, or POST \
                       /api/config/recovery/restore with the recovery passphrase)."

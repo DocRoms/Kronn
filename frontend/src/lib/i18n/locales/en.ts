@@ -2519,6 +2519,8 @@ const en: TranslationDict = {
   'mcp.recovery.codePlaceholder': 'Recovery code (optional if present on this machine)',
   'mcp.recovery.restoreBtn': 'Restore key',
   'mcp.recovery.restored': 'Key restored — secrets are readable again.',
+  'authLocked.title': 'Kronn is locked',
+  'authLocked.hint': 'The encryption key that opens your stored API token is missing (keychain reset or lost key file). Nothing was deleted. Enter your recovery passphrase, and the recovery code if this machine no longer has it, to restore the key.',
   'mcp.recovery.reencryptCta': 'Re-encrypt imported secrets',
   'mcp.recovery.reencryptHint': 'Secrets imported from another machine are under that machine\'s key. Enter the recovery passphrase set there (and its recovery code if needed): they are re-encrypted under this machine\'s key, which does not change.',
   'mcp.recovery.reencryptBtn': 'Re-encrypt',

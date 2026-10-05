@@ -95,6 +95,12 @@ pub struct ServerConfig {
     #[serde(skip)]
     #[ts(skip)]
     pub auth_locked: bool,
+    /// Runtime only: `auth_token` came from `KRONN_AUTH_TOKEN` while the
+    /// credential store was not armed. It is used for this session and never
+    /// written to config.toml nor to the store (KT-1007).
+    #[serde(skip)]
+    #[ts(skip)]
+    pub auth_token_session_only: bool,
     /// Strict-auth opt-in: when `true`, the localhost auto-bypass is
     /// disabled and even `127.0.0.1` / Docker bridge clients must
     /// present the Bearer token. Defaults to `false` (current
@@ -279,6 +285,12 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// Whether the auth middleware enforces something for the LAN boot guard:
+    /// a token, or the locked state (which refuses all but local recovery).
+    pub fn auth_token_or_lock(&self) -> bool {
+        self.auth_token.is_some() || self.auth_locked
+    }
+
     /// Actual listener port for this process; `port` remains the saved preference.
     pub fn listening_port(&self) -> u16 {
         self.runtime_port.unwrap_or(self.port)

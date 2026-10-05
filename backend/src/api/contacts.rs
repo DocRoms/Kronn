@@ -271,6 +271,7 @@ mod tests {
             auth_token: None,
             auth_enabled: false,
             auth_locked: false,
+            auth_token_session_only: false,
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,

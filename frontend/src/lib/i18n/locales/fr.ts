@@ -2529,6 +2529,8 @@ const fr: TranslationDict = {
   'mcp.recovery.codePlaceholder': 'Code de récupération (optionnel si présent sur cette machine)',
   'mcp.recovery.restoreBtn': 'Restaurer la clé',
   'mcp.recovery.restored': 'Clé restaurée — les secrets sont de nouveau lisibles.',
+  'authLocked.title': 'Kronn est verrouillé',
+  'authLocked.hint': 'La clé de chiffrement qui ouvre votre jeton d\'API enregistré est absente (trousseau réinitialisé ou fichier de clé perdu). Rien n\'a été supprimé. Saisissez votre phrase de récupération, et le code de récupération si cette machine ne l\'a plus, pour restaurer la clé.',
   'mcp.recovery.reencryptCta': 'Rechiffrer les secrets importés',
   'mcp.recovery.reencryptHint': 'Les secrets importés d\'une autre machine sont chiffrés avec la clé de celle-ci. Saisissez la phrase de récupération définie là-bas (et son code si besoin) : ils sont rechiffrés avec la clé de cette machine, qui ne change pas.',
   'mcp.recovery.reencryptBtn': 'Rechiffrer',

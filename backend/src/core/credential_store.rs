@@ -77,7 +77,12 @@ fn from_config(config: &AppConfig) -> Vec<PlainCredential> {
             value: k.value.clone(),
         })
         .collect();
-    if let Some(token) = config.server.auth_token.clone().filter(|t| !t.is_empty()) {
+    if let Some(token) = config
+        .server
+        .auth_token
+        .clone()
+        .filter(|t| !t.is_empty() && !config.server.auth_token_session_only)
+    {
         out.push(PlainCredential::auth_token(token));
     }
     out
@@ -99,6 +104,16 @@ fn apply_to_config(config: &mut AppConfig, creds: &[PlainCredential]) {
         .iter()
         .find(|c| c.kind == KIND_AUTH_TOKEN)
         .map(|c| c.value.clone());
+    config.server.auth_token_session_only = false;
+}
+
+/// Whether an auth token row is stored (readable or not).
+pub async fn stored_auth_token_exists(db: &Database) -> Result<bool> {
+    Ok(db
+        .with_conn(rows::list)
+        .await?
+        .iter()
+        .any(|r| r.kind == KIND_AUTH_TOKEN))
 }
 
 /// Table rows first, then config.toml entries; the file wins on the same id
@@ -196,8 +211,9 @@ async fn write_and_verify(
 
 struct Armed {
     db: Arc<Database>,
-    /// Rows the current key cannot decrypt: never rewritten nor deleted.
-    preserve: HashSet<(String, String)>,
+    /// Rows the current key cannot decrypt: never rewritten nor deleted, unless
+    /// the user explicitly sets a new value for that row (a new auth token).
+    preserve: std::sync::Mutex<HashSet<(String, String)>>,
     /// What the table holds, as last written and read back.
     persisted: tokio::sync::Mutex<Vec<PlainCredential>>,
 }
@@ -240,7 +256,28 @@ pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool
         .as_deref()
         .filter(|k| !k.is_empty())
         .context("the encryption key is locked: credentials cannot be stored")?;
-    write_and_verify(&armed.db, &desired, &armed.preserve, true, key).await?;
+    let mut preserve = armed
+        .preserve
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    // A value set now for an undecryptable row (regenerated token, network
+    // exposure) is an explicit replacement; every other such row stays as is.
+    let replaced: Vec<(String, String)> = desired
+        .iter()
+        .map(PlainCredential::row_key)
+        .filter(|k| preserve.contains(k))
+        .collect();
+    for key in &replaced {
+        tracing::warn!(
+            "credentials: replacing the undecryptable stored {}:{} with the new value",
+            key.0,
+            key.1
+        );
+        preserve.remove(key);
+    }
+    write_and_verify(&armed.db, &desired, &preserve, true, key).await?;
+    *armed.preserve.lock().unwrap_or_else(|p| p.into_inner()) = preserve;
     *persisted = desired;
     Ok(true)
 }
@@ -365,7 +402,7 @@ pub async fn boot(
         dir.to_path_buf(),
         Arc::new(Armed {
             db,
-            preserve: preserve.clone(),
+            preserve: std::sync::Mutex::new(preserve.clone()),
             persisted: tokio::sync::Mutex::new(merged),
         }),
     );
