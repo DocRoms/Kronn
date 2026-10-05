@@ -3734,6 +3734,38 @@ fn discussions_list_with_messages_batch_loads() {
 }
 
 #[test]
+fn a_removed_worktree_is_forgotten_by_its_finished_sharers_only() {
+    // KT-984 — a sub-workflow child shares its parent's worktree path.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let path = "/repo/.kronn/worktrees/gone-é";
+    for (id, status) in [
+        ("owner", RunStatus::Success),
+        ("child", RunStatus::Failed),
+        ("interrupted", RunStatus::Interrupted),
+        ("waiting", RunStatus::WaitingApproval),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.status = status;
+        run.workspace_path = Some(path.into());
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    assert_eq!(
+        crate::db::workflows::forget_removed_workspace(&conn, path).unwrap(),
+        2
+    );
+    let kept = |id: &str| {
+        crate::db::workflows::get_run(&conn, id)
+            .unwrap()
+            .unwrap()
+            .workspace_path
+            .is_some()
+    };
+    assert!(!kept("owner") && !kept("child"));
+    assert!(kept("interrupted") && kept("waiting"));
+}
+
+#[test]
 fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
     // WF-9 — the delete cascades to the run rows a runner or a worktree
     // still depends on.

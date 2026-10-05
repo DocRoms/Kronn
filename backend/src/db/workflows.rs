@@ -1358,6 +1358,18 @@ pub fn mark_workspace_cleaned(
     )? > 0)
 }
 
+/// Clear `workspace_path` on every terminal run that points at a checkout
+/// now gone: the owner and the sub-workflow children that shared it. A
+/// paused or interrupted sharer keeps the path, as resume evidence.
+pub fn forget_removed_workspace(conn: &Connection, workspace_path: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE workflow_runs SET workspace_path = NULL
+          WHERE workspace_path = ?1
+            AND status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')",
+        params![workspace_path],
+    )?)
+}
+
 pub fn list_runs_paginated(
     conn: &Connection,
     workflow_id: &str,

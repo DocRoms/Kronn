@@ -22,7 +22,9 @@ const PLAIN_RUN_TYPES: &str = "'linear','subworkflow'";
 /// Columns that point at a run but are not listed here are logs with their own
 /// lifetime and read no step output: `agent_decisions.run_id`,
 /// `api_call_logs.run_id`, `execution_variable_snapshots.run_id`,
-/// `workflow_step_room_sessions.run_id`, `workflow_step_room_activity.run_id`.
+/// `workflow_step_room_sessions.run_id`. `shared_runs.id` is not listed either:
+/// every workflow run has that card, which renders step names and links to the
+/// run rather than reading its outputs; listing it would protect every run.
 pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
     // A run another run was launched from (sub-workflow, batch, retry).
     ("workflow_runs", "parent_run_id"),
@@ -39,8 +41,6 @@ pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
     // Live page data points and publications produced by the run.
     ("live_page_dataset_points", "workflow_run_id"),
     ("live_page_publications", "workflow_run_id"),
-    // A shared run view, which renders the run's step outputs.
-    ("shared_runs", "id"),
     // A question whose answer resumes the run.
     ("discussion_questions", "resume_run_id"),
     // Room messages attributed to one of the run's steps.
@@ -377,6 +377,15 @@ mod tests {
             )
             .unwrap();
         assert!(untouched.contains(&"x".repeat(50_000)));
+    }
+
+    #[test]
+    fn the_shared_run_card_every_run_has_does_not_protect_it() {
+        let conn = db();
+        run(&conn, "carded", "Success", "linear", Some(OLD));
+        reference(&conn, "shared_runs", "id", "carded");
+        assert_eq!(compact_all(&conn), 1);
+        assert!(compacted(&conn, "carded"));
     }
 
     #[test]

@@ -428,6 +428,11 @@ pub async fn settle_errored_run(
             Ok(crate::db::workflows::get_run(conn, &run_id)?.map(|row| row.status))
         })
         .await;
+    // The execute_run wrapper reclaimed the worktree before this settle made
+    // the run terminal.
+    if matches!(settled, Ok(None)) {
+        forget_removed_workspace(state, run).await;
+    }
     match settled {
         Ok(None) => {
             let _ = state
@@ -648,6 +653,25 @@ async fn execute_run_with_notify_policy(
         }
     }
     result
+}
+
+/// Finished runs whose checkout is gone no longer own a worktree. Clearing
+/// the durable path lets run retention reach them without the boot janitor; a
+/// checkout still on disk, or a run not yet terminal in the database, keeps it.
+pub(crate) async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun) {
+    let Some(path) = run.workspace_path.clone() else {
+        return;
+    };
+    if std::path::Path::new(&path).exists() {
+        return;
+    }
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::forget_removed_workspace(conn, &path))
+        .await
+    {
+        tracing::warn!(run_id = %run.id, "could not clear the removed worktree path: {error}");
+    }
 }
 
 /// Removes the worktree a run owns once it will not execute again, keeping its
@@ -3237,6 +3261,7 @@ async fn execute_run_body(
                 }
             }
         }
+        forget_removed_workspace(&state, run).await;
     } else if active_child_dispatches > 0 {
         tracing::warn!(
             run_id = %run.id,
@@ -7639,6 +7664,126 @@ mod tests {
         let run = run_to_end(&state, &workflow, "run-end-success").await;
         assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
         assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    async fn persisted_workspace(state: &crate::AppState, run_id: &str) -> Option<String> {
+        let run_id = run_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_path
+    }
+
+    async fn trimmable(state: &crate::AppState, run_id: &str) -> bool {
+        let run_id = run_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                // A cutoff tomorrow: any finished run is old enough.
+                let future = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+                crate::db::run_retention::compact_run_payloads_chunk(conn, &future, 100)?;
+                Ok(conn.query_row(
+                    "SELECT payload_compacted_at IS NOT NULL FROM workflow_runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_worktree_is_removed_at_runtime_becomes_trimmable() {
+        // KT-984 — the path stayed set until the boot janitor, so retention
+        // skipped every run finished since the last boot.
+        let (state, _, _) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-forget-path").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        workflow.steps = vec![commit_step("commit")];
+        let run = run_to_end(&state, &workflow, "run-forget-path").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(!std::path::Path::new(run.workspace_path.as_deref().unwrap()).exists());
+        assert_eq!(persisted_workspace(&state, "run-forget-path").await, None);
+        assert!(trimmable(&state, "run-forget-path").await);
+    }
+
+    #[tokio::test]
+    async fn an_errored_run_settled_after_its_worktree_went_is_trimmable() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-forget-error").await;
+        workflow.variables = vec![crate::models::PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }];
+        workflow.steps = vec![pwd_step("where")];
+        let mut run = pending_run("run-forget-error", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        // No variable snapshot: execute_run fails after creating the worktree.
+        let (wf_db, run_db) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        let error = execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("missing snapshot");
+        settle_errored_run(&state, &workflow, &mut run, &error).await;
+        assert_eq!(persisted_workspace(&state, "run-forget-error").await, None);
+        assert!(trimmable(&state, "run-forget-error").await);
+    }
+
+    #[tokio::test]
+    async fn a_kept_checkout_or_a_live_run_keeps_its_path() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-keep-path".into();
+        let kept = tempfile::TempDir::new().unwrap();
+        let mut finished = pending_run("run-kept-checkout", &workflow.id);
+        finished.status = RunStatus::Success;
+        finished.workspace_path = Some(kept.path().to_string_lossy().to_string());
+        insert_wf_and_run(&state, &workflow, &finished).await;
+        let mut paused = pending_run("run-paused-gone", &workflow.id);
+        paused.status = RunStatus::WaitingApproval;
+        paused.workspace_path = Some("/nonexistent/kronn-paused".into());
+        let paused_db = paused.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &paused_db))
+            .await
+            .unwrap();
+
+        forget_removed_workspace(&state, &finished).await;
+        forget_removed_workspace(&state, &paused).await;
+        assert!(persisted_workspace(&state, "run-kept-checkout")
+            .await
+            .is_some());
+        assert!(persisted_workspace(&state, "run-paused-gone")
+            .await
+            .is_some());
     }
 
     #[tokio::test]

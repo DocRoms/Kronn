@@ -25,8 +25,10 @@ Release notes for 0.9.3 and earlier are available in the
   workflow runs finished more than 30 days ago and keeps the runs, their
   steps, statuses, timings and tokens. Runs in progress, paused or
   interrupted, batch and compare runs, runs that still own a worktree and runs
-  referenced elsewhere (child runs, discussions, ratings, live pages, shared
-  views, questions, room activity) are never touched. The delay is set in
+  referenced elsewhere (child runs, discussions, ratings, live pages,
+  questions, room activity) are never touched. A run's worktree path is
+  cleared as soon as the worktree is removed, so a finished run does not wait
+  for a restart to become eligible. The delay is set in
   Settings → Database ("keep forever" turns it off). Settings → Database also
   offers to compact the database, which gives the freed space back to the
   disk and reports the size before and after; on a generated 4 GB base the

@@ -62,16 +62,16 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,
 `WaitingApproval` or `Interrupted`); batch and compare runs; runs that still
-own a worktree (`workspace_path` set; the boot janitor clears it once the
-checkout is gone, so a run finished since the last boot waits for the next
-one); children of a parent that can still resume; and every run named by a
+own a worktree (`workspace_path` set; cleared by the runner as soon as the
+checkout is removed, by the boot janitor otherwise); children of a parent that can still resume; and every run named by a
 column of `REFERENCING_COLUMNS`: `workflow_runs.parent_run_id`,
 `workflow_runs.triggered_by_run_id`, `discussions.workflow_run_id`,
 `compare_run_scopes`, `batch_compare_judge_runs`,
 `batch_compare_evaluations`, `live_page_dataset_points`,
-`live_page_publications`, `shared_runs`, `discussion_questions.resume_run_id`
-and `workflow_step_room_activities`. A test fails when a new foreign key to
-`workflow_runs` is not listed. Deleting a workflow is refused while one of its
+`live_page_publications`, `discussion_questions.resume_run_id` and
+`workflow_step_room_activities`. A test fails when a new foreign key to
+`workflow_runs` is not listed. `shared_runs.id` is deliberately absent: every
+run has that card, which links to the run instead of reading its outputs. Deleting a workflow is refused while one of its
 runs is live, paused or interrupted with a worktree.
 
 Trimming only grows SQLite's free list: the file keeps its size. Settings →

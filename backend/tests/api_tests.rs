@@ -5753,10 +5753,10 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
     let child: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
         "id": "foreach-child", "name": "child", "project_id": null,
         "trigger": {"type": "Manual"},
-        "steps": [{"name": "note", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+        "steps": [{"name": "where", "step_type": {"type": "Exec"}, "exec_command": "pwd"}],
         "actions": [], "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
         "workspace_config": null, "concurrency_limit": null, "guards": null, "artifacts": {},
-        "on_failure": [], "exec_allowlist": [], "variables": [], "enabled": true, "pinned": false,
+        "on_failure": [], "exec_allowlist": ["pwd"], "variables": [], "enabled": true, "pinned": false,
         "created_at": now, "updated_at": now,
     }))
     .unwrap();
@@ -5838,11 +5838,16 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
             .db
             .with_conn(move |conn| {
                 let run = kronn::db::workflows::get_run(conn, &run_id)?.expect("run");
-                let children: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
-                    [&run_id],
-                    |row| row.get(0),
+                let mut statement = conn.prepare(
+                    "SELECT id FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
                 )?;
+                let ids: Vec<String> = statement
+                    .query_map([&run_id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut children = Vec::new();
+                for id in ids {
+                    children.push(kronn::db::workflows::get_run(conn, &id)?.expect("child"));
+                }
                 Ok((run, children))
             })
             .await
@@ -5853,15 +5858,41 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
             "{:?}",
             run.step_results
         );
-        assert_eq!(children, 2, "each run's foreach processes both items once");
-        let workspace = run
-            .workspace_path
-            .clone()
-            .expect("an isolated run records its worktree");
-        assert_ne!(
-            workspace,
-            repo.path().to_string_lossy(),
-            "never the main checkout"
+        assert_eq!(
+            children.len(),
+            2,
+            "each run's foreach processes both items once"
+        );
+        // The worktree is gone, so neither the run nor its children keep a path.
+        assert_eq!(run.workspace_path, None);
+        let mut seen: Vec<String> = children
+            .iter()
+            .map(|child| {
+                assert_eq!(child.workspace_path, None);
+                let output = &child.step_results[0].output;
+                let envelope = output
+                    .split("---STEP_OUTPUT---")
+                    .nth(1)
+                    .and_then(|rest| rest.split("---END_STEP_OUTPUT---").next())
+                    .unwrap_or_else(|| panic!("pwd envelope: {output}"));
+                let envelope: Value = serde_json::from_str(envelope.trim()).unwrap();
+                envelope["data"]["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            1,
+            "both items ran in the run's worktree: {seen:?}"
+        );
+        let workspace = seen.remove(0);
+        assert!(
+            workspace.contains(".kronn/worktrees"),
+            "never the main checkout: {workspace}"
         );
         workspaces.push(workspace);
     }
