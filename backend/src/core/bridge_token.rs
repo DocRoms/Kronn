@@ -1688,18 +1688,12 @@ impl Scoper<'_> {
                 }
                 let mut filtered: Vec<usize> = Vec::new();
                 for child in fields.values_mut() {
-                    match child {
-                        serde_json::Value::Array(_) => {
-                            if let Some(left) = self.filter_list(child, None) {
-                                filtered.push(left);
-                            }
+                    if child.is_array() {
+                        if let Some(left) = self.filter_list(child, None) {
+                            filtered.push(left);
                         }
-                        serde_json::Value::Object(_) => {
-                            if !self.keep(child, None) {
-                                return false;
-                            }
-                        }
-                        _ => {}
+                    } else if child.is_object() && !self.keep(child, None) {
+                        return false;
                     }
                 }
                 if !filtered.is_empty() {
@@ -1797,18 +1791,12 @@ pub fn scope_response(
             }
             let mut filtered = Vec::new();
             for child in fields.values_mut() {
-                match child {
-                    serde_json::Value::Array(_) => {
-                        if let Some(left) = scoper.filter_list(child, typed) {
-                            filtered.push(left);
-                        }
+                if child.is_array() {
+                    if let Some(left) = scoper.filter_list(child, typed) {
+                        filtered.push(left);
                     }
-                    serde_json::Value::Object(_) => {
-                        if !scoper.keep(child, None) {
-                            return hidden();
-                        }
-                    }
-                    _ => {}
+                } else if child.is_object() && !scoper.keep(child, None) {
+                    return hidden();
                 }
             }
             if !filtered.is_empty() {
