@@ -4855,6 +4855,7 @@ const zh: TranslationDict = {
   "config.executionVariableRetentionHint": "敏感值始终加密并隐藏；值清除后仍保留来源元数据。",
   "config.runPayloadRetention": "已完成运行的步骤输出",
   "config.runPayloadRetention.forever": "永久保留",
+  "config.runPayloadRetention.suggested": "{0} 天（建议）",
   "config.runPayloadRetentionHint": "超过该期限后，已完成工作流运行的步骤输出会被清空；运行、步骤、状态、耗时和 token 保留。进行中、暂停、中断、对比、批量、共享、被引用或仍占用 worktree 的运行永不处理。压缩数据库即可把空间还给磁盘。",
   "config.runRetentionBannerTitle": "保留已关闭：数据库会保留每次运行的输出并持续增长",
   "config.runRetentionBannerSize": "数据库文件大小为 {0}。",

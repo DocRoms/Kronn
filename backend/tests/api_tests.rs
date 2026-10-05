@@ -11228,7 +11228,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
     assert_eq!(json["data"]["execution_variable_retention_days"], 30);
-    assert_eq!(json["data"]["run_payload_retention_days"], 30);
+    assert_eq!(json["data"]["run_payload_retention_days"], 0);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])

@@ -757,6 +757,7 @@ describe('SettingsPage', () => {
     const select = screen.getByLabelText('Conservation des valeurs d’exécution') as HTMLSelectElement;
     expect(select.value).toBe('30');
     expect(document.getElementById('settings-database')).toContainElement(select);
+    expect(screen.getByRole('option', { name: /suggéré|suggested/i })).toHaveValue('30');
 
     await act(async () => { fireEvent.change(select, { target: { value: '0' } }); });
     await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({

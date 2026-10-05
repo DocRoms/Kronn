@@ -29,12 +29,13 @@ Release notes for 0.9.3 and earlier are available in the
   inside the container; the full-access switch now shows that state as locked
   and always on instead of "Restricted" (KT-975).
 
-- Run retention (KT-984) is on by default on a new install and off on an
-  existing one until you turn it on. While it is off, the Automations page and
+- Run retention (KT-984) is opt-in on every install, new ones included:
+  nothing is emptied until you choose a window in Settings → Database, where
+  30 days is the suggested value. While it is off, the Automations page and
   Settings → Database show a banner with the database size and a button to the
-  setting; it can be dismissed and comes back past 2 GB. Every 6 hours, in chunks that
+  setting; it can be dismissed and comes back past 2 GB. Once on, every 6 hours, in chunks that
   leave the database free between them, Kronn empties the step outputs of
-  workflow runs finished more than 30 days ago and keeps the runs, their
+  workflow runs finished before that delay and keeps the runs, their
   steps, statuses, timings and tokens. Runs in progress, paused or
   interrupted, batch and compare runs, runs that still own a worktree and runs
   referenced elsewhere (child runs, discussions, ratings, live pages,

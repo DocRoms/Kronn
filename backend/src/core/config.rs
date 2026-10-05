@@ -386,7 +386,7 @@ pub fn default_config() -> AppConfig {
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,
-            run_payload_retention_days: crate::models::setup::DEFAULT_RUN_PAYLOAD_RETENTION_DAYS,
+            run_payload_retention_days: 0,
             execution_variable_retention_days: 30,
             interrupted_worktree_ttl_days:
                 crate::models::setup::DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS,
@@ -510,13 +510,12 @@ mod tests {
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
-    fn run_payload_retention_is_on_for_a_new_install_and_off_for_an_existing_one() {
+    fn run_payload_retention_is_off_on_every_install_until_chosen() {
         let fresh = default_config();
-        assert_eq!(fresh.server.run_payload_retention_days, 30);
+        assert_eq!(fresh.server.run_payload_retention_days, 0);
 
         // A config.toml written before the field existed has no such line.
         let toml = toml::to_string_pretty(&fresh).unwrap();
-        assert!(toml.contains("run_payload_retention_days = 30"));
         let legacy: String = toml
             .lines()
             .filter(|l| !l.starts_with("run_payload_retention_days"))
@@ -525,7 +524,11 @@ mod tests {
         let existing: crate::models::AppConfig = toml::from_str(&legacy).unwrap();
         assert_eq!(existing.server.run_payload_retention_days, 0);
 
-        let kept: crate::models::AppConfig = toml::from_str(&toml).unwrap();
+        let chosen = toml.replace(
+            "run_payload_retention_days = 0",
+            "run_payload_retention_days = 30",
+        );
+        let kept: crate::models::AppConfig = toml::from_str(&chosen).unwrap();
         assert_eq!(kept.server.run_payload_retention_days, 30);
     }
 

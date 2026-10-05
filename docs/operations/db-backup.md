@@ -49,11 +49,10 @@ Step outputs are almost all of a workflow run's weight, and `workflow_runs`
 was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
 `[src: file: backend/src/db/run_retention.rs:1]`
 
-- **Payload retention, on for a new install, off for an existing one.** Every 6 h (first pass 10 min after
+- **Payload retention, opt-in on every install.** Once enabled, every 6 h (first pass 10 min after
   boot, never during boot), Kronn replaces the step outputs of finished runs
-  older than `server.run_payload_retention_days` (30 on a new install; a
-  `config.toml` without the field reads `0`, which keeps them, until the user
-  sets it in Settings → Database) with `[Output removed by run retention]`. The run row,
+  older than `server.run_payload_retention_days` (default `0`, which keeps
+  them; Settings → Database suggests 30 days, one click) with `[Output removed by run retention]`. The run row,
   its steps, statuses, timings, tokens, branches and links stay, so no foreign
   key cascade fires. It works 25 runs per transaction and releases the write
   connection between chunks. `payload_compacted_at` marks a trimmed run.

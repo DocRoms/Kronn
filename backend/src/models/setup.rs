@@ -113,9 +113,8 @@ pub struct ServerConfig {
     pub run_retention_days: u32,
     /// KT-984 — blank the step outputs of workflow runs finished more than N
     /// days ago, keeping every run row and its metadata. `0` keeps outputs
-    /// forever. A fresh install starts at 30 (`core::config::default_config`); a
-    /// config.toml without the field, i.e. an existing install, reads 0 until
-    /// the user turns it on. See `db::run_retention` for what is never touched.
+    /// forever. Off on every install until the user chooses a window (Settings
+    /// suggests 30). See `db::run_retention` for what is never touched.
     #[serde(default)]
     pub run_payload_retention_days: u32,
     /// Encrypted execution-variable snapshot retention. `0` keeps metadata
@@ -305,7 +304,6 @@ fn default_disk_critical_gib() -> u64 {
 fn default_execution_variable_retention_days() -> u32 {
     30
 }
-pub(crate) const DEFAULT_RUN_PAYLOAD_RETENTION_DAYS: u32 = 30;
 pub(crate) const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
 fn default_interrupted_worktree_ttl_days() -> u32 {
     DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS

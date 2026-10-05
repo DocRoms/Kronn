@@ -1927,7 +1927,7 @@ export function SettingsPage({
               }}
             >
               <option value={7}>{t('config.executionVariableRetention.days', 7)}</option>
-              <option value={30}>{t('config.executionVariableRetention.days', 30)}</option>
+              <option value={30}>{t('config.runPayloadRetention.suggested', 30)}</option>
               <option value={90}>{t('config.executionVariableRetention.days', 90)}</option>
               <option value={365}>{t('config.executionVariableRetention.days', 365)}</option>
               <option value={0}>{t('config.runPayloadRetention.forever')}</option>
