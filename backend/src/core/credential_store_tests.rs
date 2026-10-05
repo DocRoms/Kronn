@@ -918,3 +918,143 @@ async fn a_failed_credential_boot_locks_auth() {
     assert!(!is_armed(dir.path()));
     assert!(cfg.server.auth_locked, "auth must lock, not open");
 }
+
+async fn reset_via_api(db: &Arc<Database>, cfg: AppConfig) -> AppConfig {
+    let state = crate::AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(cfg)),
+        db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let status = status_of(
+        crate::build_router_with_auth(state.clone(), true),
+        "POST",
+        "/api/setup/reset",
+        [127, 0, 0, 1],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let out = state.config.read().await.clone();
+    out
+}
+
+async fn rows_in(db: &Database, table: &'static str) -> i64 {
+    db.with_conn(move |c| {
+        Ok(c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
+    })
+    .await
+    .unwrap()
+}
+
+/// Reset where config.toml carries a needed copy of the key (sidecar-only):
+/// the file keeps only the key, the next start is a first run with that key,
+/// and every table holding ciphertext is emptied.
+#[tokio::test]
+#[serial]
+async fn reset_never_removes_a_needed_key_copy_and_clears_every_encrypted_table() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
+        .await
+        .unwrap();
+    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
+        .await
+        .unwrap();
+    assert!(config::retained_disk_key(dir.path()).is_some());
+
+    let after = reset_via_api(&db, cfg).await;
+    assert_eq!(after.encryption_secret.as_deref(), Some(key.as_str()));
+    assert_eq!(
+        dir.config_text().trim(),
+        format!("encryption_secret = \"{key}\"")
+    );
+    assert!(config::is_first_run().await.unwrap());
+    for col in keystore::ENCRYPTED_COLUMNS {
+        assert_eq!(
+            rows_in(&db, col.table).await,
+            0,
+            "{} not cleared",
+            col.table
+        );
+    }
+    // The next start reads the key back from the key-only file.
+    dir.restart();
+    let reloaded = config::load().await.unwrap().unwrap();
+    assert_eq!(reloaded.encryption_secret.as_deref(), Some(key.as_str()));
+    assert_eq!(config::retained_disk_key(dir.path()), Some(key));
+}
+
+/// With two vault copies, reset removes config.toml as before.
+#[tokio::test]
+#[serial]
+async fn reset_removes_config_toml_when_the_vaults_hold_the_key() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    assert!(config::retained_disk_key(dir.path()).is_none());
+    reset_via_api(&db, cfg).await;
+    assert!(!dir.path().join("config.toml").exists());
+    assert!(config::is_first_run().await.unwrap());
+}
+
+/// No config.toml: no random key is offered, so none can be kept for good.
+#[tokio::test]
+#[serial]
+async fn a_missing_config_toml_never_offers_a_random_key() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    crate::core::keyvault::KeyVault::store(&SidecarFile::in_dir(dir.path()), &key).unwrap();
+    assert!(config::load().await.unwrap().is_none());
+
+    let mut cfg = config::default_config_without_key();
+    keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
+        .await
+        .unwrap();
+    assert_eq!(cfg.encryption_secret.as_deref(), Some(key.as_str()));
+    // Sidecar only: the second copy kept in config.toml is the REAL key.
+    assert_eq!(config::retained_disk_key(dir.path()), Some(key.clone()));
+
+    dir.restart();
+    let mut cfg = config::default_config_without_key();
+    keystore::reconcile_with(&mut cfg, &db, &dir.sidecar(), dir.path())
+        .await
+        .unwrap();
+    assert_eq!(config::retained_disk_key(dir.path()), None);
+}
+
+/// Both mains take the data-dir lock before loading config.toml, and remove
+/// KRONN_AUTH_TOKEN from their environment.
+#[test]
+fn both_mains_lock_before_loading_and_drop_the_env_token() {
+    let backend = include_str!("../main.rs");
+    let lock = backend.find("acquire_data_dir_lock()").unwrap();
+    let load = backend.find("config::load().await").unwrap();
+    assert!(lock < load, "backend: lock before config::load()");
+    assert!(backend.contains("take_env_auth_token()"));
+
+    let desktop = include_str!("../../../desktop/src-tauri/src/main.rs");
+    let main_fn = desktop.find("fn main()").unwrap();
+    let take = desktop.find("take_env_auth_token()").unwrap();
+    let builder = desktop.find("tauri::Builder::default()").unwrap();
+    assert!(
+        main_fn < take && take < builder,
+        "desktop: env token removed early in main()"
+    );
+    // config::load() runs in start_backend, which only the setup closure calls,
+    // after main() took the lock.
+    let lock = main_fn + desktop[main_fn..].find("acquire_data_dir_lock()").unwrap();
+    let call = main_fn + desktop[main_fn..].find("start_backend(").unwrap();
+    assert!(
+        lock < builder && builder < call,
+        "desktop: lock in main(), backend started later"
+    );
+    assert!(desktop.contains("config::load().await"));
+}

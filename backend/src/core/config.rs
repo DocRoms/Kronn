@@ -88,9 +88,18 @@ pub async fn load() -> Result<Option<AppConfig>> {
     let content = fs::read_to_string(&path)
         .await
         .context("Failed to read config file")?;
+    let dir = config_dir()?;
+    if let Some(key) = key_only_file(&content)? {
+        // Left by a reset that had to keep the key: first run, with that key.
+        if let Some(key) = key.as_deref() {
+            retain_disk_key(&dir, key);
+        }
+        let mut config = default_config_without_key();
+        config.encryption_secret = key;
+        return Ok(Some(config));
+    }
 
     let mut config: AppConfig = toml::from_str(&content).context("Failed to parse config file")?;
-    let dir = config_dir()?;
     if let Some(key) = config
         .encryption_secret
         .as_deref()
@@ -552,10 +561,55 @@ pub fn default_config() -> AppConfig {
     }
 }
 
-/// Check if this is the first run (no config exists)
+/// `default_config()` without a key: a missing config.toml must not offer a
+/// random key to the reconciler, which could then keep it for good.
+pub fn default_config_without_key() -> AppConfig {
+    let mut config = default_config();
+    config.encryption_secret = None;
+    config
+}
+
+/// `Some(key)` when `content` holds no settings, only (optionally) the key:
+/// the file a reset writes when config.toml carries a needed copy of the key.
+fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
+    let table: toml::Table = content.parse().context("Failed to parse config file")?;
+    if table.contains_key("server") {
+        return Ok(None);
+    }
+    Ok(Some(
+        table
+            .get("encryption_secret")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    ))
+}
+
+/// Replace config.toml with a file holding only the retained key (reset).
+/// Without a retained key, the file is removed as before.
+pub async fn reset_to_key_only() -> Result<()> {
+    let dir = config_dir()?;
+    let path = config_path()?;
+    match retained_disk_key(&dir) {
+        Some(key) => {
+            let content = format!("encryption_secret = {}\n", toml::Value::String(key));
+            persist_atomic(dir, path, content).await
+        }
+        None => match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        },
+    }
+}
+
+/// Check if this is the first run (no config, or one holding only the key)
 pub async fn is_first_run() -> Result<bool> {
     let path = config_path()?;
-    Ok(!path.exists())
+    if !path.exists() {
+        return Ok(true);
+    }
+    let content = fs::read_to_string(&path).await?;
+    Ok(key_only_file(&content).ok().flatten().is_some())
 }
 
 #[cfg(test)]

@@ -2277,11 +2277,13 @@ pub async fn import_data(
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // Delete config file
-    if let Ok(path) = config::config_path() {
-        let _ = tokio::fs::remove_file(&path).await;
-        tracing::info!("Config reset: {}", path.display());
+    // Remove the settings; a needed copy of the key stays in a key-only file.
+    if let Err(e) = config::reset_to_key_only().await {
+        return Json(ApiResponse::err(format!(
+            "Reset failed, nothing was cleared: {e}"
+        )));
     }
+    tracing::info!("Config reset");
 
     // Reset in-memory config to defaults, keeping the active key: a fresh
     // random one would encrypt new secrets under a key no vault holds.
@@ -2295,10 +2297,14 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
         }
     }
 
-    // Clear all data from DB
+    // Clear all data from DB, every encrypted column's table included.
     if let Err(e) = state.db.with_conn(|conn| {
+        conn.execute_batch("DELETE FROM mcp_config_projects;")?;
+        for col in crate::core::keystore::ENCRYPTED_COLUMNS {
+            conn.execute(&format!("DELETE FROM {}", col.table), [])?;
+        }
         conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
+            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;"
         )?;
         Ok(())
     }).await {

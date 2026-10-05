@@ -570,7 +570,7 @@ async fn start_backend(
     // Load or create config
     let mut app_config = match config::load().await? {
         Some(cfg) => cfg,
-        None => config::default_config(),
+        None => config::default_config_without_key(),
     };
 
     // Embedded mode: bind loopback by default, but HONOR the network-exposure

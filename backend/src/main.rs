@@ -13,13 +13,16 @@ use kronn::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load config FIRST (before tracing init) so `debug_mode` can influence
-    // the tracing filter's default level. This is a tiny re-order vs. the
-    // historical flow — `config::load()` doesn't emit logs itself, so we
-    // can afford to run it silently.
+    // Exactly ONE backend per data dir, taken before `config::load()` (which
+    // may rewrite config.toml): a second process must not write anything.
+    // Held for the whole process lifetime.
+    let data_dir_lock = config::acquire_data_dir_lock()?;
+
+    // Load config before tracing init so `debug_mode` can influence the
+    // tracing filter's default level; `config::load()` emits no logs.
     let mut app_config = match config::load().await? {
         Some(cfg) => cfg,
-        None => config::default_config(),
+        None => config::default_config_without_key(),
     };
 
     // 0.8.7 anti-hallucination — arm the process-global mode flag from config
@@ -129,15 +132,6 @@ async fn main() -> anyhow::Result<()> {
     // leaves this process's environment: children never inherit the admin
     // token. Kronn-launched agents receive a scoped bridge token per launch.
     let env_token = kronn::core::config::take_env_auth_token();
-
-    // Exactly ONE backend per data dir. Refuse to start if another instance
-    // already holds the lock — prevents two processes (a stale one, or P2P peers
-    // sharing a synced dir) racing on config.toml / the key / the DB. Held for
-    // the whole process lifetime; released when the application state drops at exit.
-    let data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
-        tracing::error!("{e}");
-        e
-    })?;
 
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
