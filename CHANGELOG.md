@@ -209,8 +209,14 @@ Release notes for 0.9.3 and earlier are available in the
   and headers) are no longer read as Kronn ids; the plugin overview and a
   page's feeding workflows show a token only its project's; any discussion the
   token owns, deleted or moved, ends it; its planning writes are recorded as
-  an agent's; a plan proposal from a room only touches that room's project's
-  tasks, creates its tasks there and names the project on its card.
+  an agent's; a plan proposal from a room only touches tasks of that room's
+  project alone, creates its tasks there and names the project on its card. A
+  token's workflow may publish only into its own project's pages and rooms; a
+  workflow run without a project is private to its launch; peer-join cannot
+  end a session another project's room holds; a config opted into General is
+  usable by project-less tokens as the plugin overview shows; a page slug can
+  no longer look like a page id, a page resolves by id first, and a token's
+  slug conflict names no other project.
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task

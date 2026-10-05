@@ -532,8 +532,11 @@ Kronn through a template is checked where it is rendered: a PublishPageData
 page or an Agent step's room named through a template must, once rendered,
 belong to the run's project (or be project-less for a project-less run), on
 every run whoever triggered it. A literal page or room id is the workflow
-author's choice and is used whatever its project; a bridge token cannot save
-one outside its project, since the gate walks a workflow's step ids. In an import, only the resources the bundle
+author's choice and is used whatever its project. On a token's workflow save,
+update or import, a step's `page_publish.page_id` and `room_id` are what the
+workflow will write into: each must belong to the token's project and to no
+other, so a token never saves a literal shared or foreign page or room. A
+page slug never looks like an id, and a page is resolved by id before slug. In an import, only the resources the bundle
 lists are internal, per kind (`workflow.id` and `referenced_workflows` for
 workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
 `_pages`); a room, config or connection is never internal. A non-JSON body is
@@ -547,8 +550,10 @@ project) and an id that resolves to nothing is refused. A refusal names the
 kind, never the other project's id. Then:
 - *shared resources* (project-less, serving every project, or several projects)
   may be read, never written; a write needs a resource that belongs to the
-  token's project and to no other; a project-less discussion is private to its
-  own launches;
+  token's project and to no other; a project-less discussion or workflow run is
+  private to its own launch (run lists are typed and filtered the same way); an
+  MCP config linked to projects and opted into General serves those projects
+  and project-less tokens, as the plugin overview shows;
 - *effects* need the token's project, or a shared resource on a route whose
   handler runs it for that project (workflow, Quick Prompt and batch triggers
   get the project added; Quick API, Quick Exec and `agent-api/call` read the
@@ -564,7 +569,9 @@ kind, never the other project's id. Then:
   peer-leave, the workspace and its history lease, link, unlink,
   transfer-session, accept-offer, find_by_session, session-status) resolves the
   room its credential or session names first and refuses one outside the
-  token's scope; a write whose session resolves to no room is refused, and a
+  token's scope (peer-join also checks every room where the named session is
+  active, since joining ends it there); a write whose session resolves to no
+  room is refused, and a
   token never forces a session reassignment. Any other route naming a joined
   session needs that session's room visible. A test lists every request type
   carrying a caller-supplied session; a new one fails until reviewed. An
@@ -576,8 +583,9 @@ kind, never the other project's id. Then:
   project, which the token then owns;
 - *planning*: a token's planning write is recorded as an agent's, whatever
   actor it names; a `kronn-plan-action` fence posted in a room may only touch
-  tasks of the room's project (an item naming another is refused on arrival
-  and again at apply), a created task lands in the room's project, and the card
+  tasks of the room's project and of no other (an item naming another
+  project's task, or a task shared with one, is refused on arrival and again
+  at apply), a created task lands in the room's project, and the card
   names that project.
 
 *Responses.* Every response is scoped, whatever the verb and its shape (an
