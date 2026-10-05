@@ -1532,10 +1532,10 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
     let first_word = cmd.split_whitespace().next().unwrap_or("");
 
     // Allowlist of safe commands
+    // No `env`: it would print the process environment (KT-1006).
     const ALLOWED_CMDS: &[&str] = &[
-        "git", "ls", "find", "wc", "head", "tail", "cat", "echo", "date", "whoami", "pwd", "env",
-        "npm", "node", "cargo", "python3", "pnpm", "which", "grep", "rg", "tree", "file", "stat",
-        "du",
+        "git", "ls", "find", "wc", "head", "tail", "cat", "echo", "date", "whoami", "pwd", "npm",
+        "node", "cargo", "python3", "pnpm", "which", "grep", "rg", "tree", "file", "stat", "du",
     ];
 
     if !ALLOWED_CMDS.contains(&first_word) {
@@ -1564,6 +1564,13 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
         if subcommand == "reset" && parts.contains(&"--hard") {
             return Err(DENY_MSG.to_string());
         }
+        // `--no-index` diffs any two files on disk; `--output` writes a file.
+        if parts
+            .iter()
+            .any(|part| *part == "--no-index" || part.starts_with("--output"))
+        {
+            return Err(DENY_MSG.to_string());
+        }
         // Only allow known safe git subcommands
         const SAFE_GIT: &[&str] = &[
             "status", "diff", "log", "branch", "stash", "show", "blame", "shortlog", "reset",
@@ -1581,12 +1588,149 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Execute a shell command in the given directory.
+/// Commands whose arguments name files to read: every path among them must
+/// stay inside the project (symlinks followed).
+const FILE_READING_CMDS: &[&str] = &[
+    "cat", "head", "tail", "find", "stat", "grep", "rg", "wc", "du", "file", "tree", "ls",
+];
+
+/// `find` primaries that run a program or write/delete files.
+const FIND_ACTIONS: &[&str] = &[
+    "-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls",
+];
+
+/// Split a command line the way a POSIX shell quotes words, without any
+/// expansion: no variables, no `~`, no globs. Errors on an unclosed quote.
+pub fn split_exec_words(cmd: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = cmd.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(inner) => word.push(inner),
+                        None => return Err("Unclosed single quote".into()),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(escaped @ ('"' | '\\' | '$' | '`')) => word.push(escaped),
+                            Some(other) => {
+                                word.push('\\');
+                                word.push(other);
+                            }
+                            None => return Err("Unclosed double quote".into()),
+                        },
+                        Some(inner) => word.push(inner),
+                        None => return Err("Unclosed double quote".into()),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                if let Some(escaped) = chars.next() {
+                    word.push(escaped);
+                }
+            }
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+/// The argv `run_exec` will start, refused when a file-reading command names
+/// a path outside `repo_path` or `find` asks to run or write something.
+pub fn exec_argv(repo_path: &Path, cmd: &str) -> Result<Vec<String>, String> {
+    let words = split_exec_words(cmd)?;
+    let Some(program) = words.first() else {
+        return Err("Empty command".into());
+    };
+    if !FILE_READING_CMDS.contains(&program.as_str()) {
+        return Ok(words);
+    }
+    if program == "find" {
+        if let Some(action) = words.iter().find(|w| FIND_ACTIONS.contains(&w.as_str())) {
+            return Err(format!("find {action} is not allowed in the terminal"));
+        }
+    }
+    // grep/rg take their pattern as the first operand unless -e/-f gives it.
+    let pattern_flag = |w: &String| {
+        matches!(w.as_str(), "-e" | "-f" | "--regexp" | "--file")
+            || w.starts_with("--regexp=")
+            || w.starts_with("--file=")
+    };
+    let mut skip_pattern =
+        matches!(program.as_str(), "grep" | "rg") && !words.iter().any(pattern_flag);
+    for word in &words[1..] {
+        let candidate = match word.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => value,
+            _ if word.starts_with('-') && word.len() > 1 => continue,
+            _ => word.as_str(),
+        };
+        if skip_pattern && !word.starts_with('-') {
+            skip_pattern = false;
+            continue;
+        }
+        if candidate.is_empty() {
+            continue;
+        }
+        crate::core::fs_guard::resolve_contained_read(repo_path, Path::new(candidate)).map_err(
+            |_| format!("`{candidate}` is outside the project; the terminal only reads inside it"),
+        )?;
+    }
+    Ok(words)
+}
+
+/// The exact process `run_exec` starts: argv without a shell, a built
+/// environment, the project as working directory.
+/// `github_env` is the project's GitHub variables when it is connected (D2).
+pub fn exec_command(
+    repo_path: &Path,
+    cmd: &str,
+    github_env: &[(String, String)],
+) -> Result<std::process::Command, String> {
+    let argv = exec_argv(repo_path, cmd)?;
+    let mut command = sync_cmd(&argv[0]);
+    command.args(&argv[1..]).current_dir(repo_path);
+    crate::core::child_env::isolate_with_github(
+        &mut command,
+        crate::core::child_env::ChildRoute::ProjectExec,
+        github_env,
+    );
+    Ok(command)
+}
+
+/// Execute an allow-listed command in the given directory, without a shell
+/// and with a built environment.
 /// The caller MUST call `validate_exec_command` before this function.
-pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
-    let output = sync_cmd("sh")
-        .args(["-c", cmd])
-        .current_dir(repo_path)
+pub fn run_exec(
+    repo_path: &Path,
+    cmd: &str,
+    github_env: &[(String, String)],
+) -> Result<ExecResponse, String> {
+    let output = exec_command(repo_path, cmd, github_env)?
         .output()
         .map_err(|e| format!("Failed to execute: {}", e))?;
 
@@ -1936,6 +2080,117 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn exec_refuses_env() {
+        assert!(validate_exec_command("env").is_err());
+        assert!(validate_exec_command("env FOO=1").is_err());
+    }
+
+    #[test]
+    fn exec_refuses_a_read_outside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn x() {}").unwrap();
+        for cmd in [
+            "cat /etc/passwd",
+            "cat ../../x",
+            "head -n 3 ../secret",
+            "tail src/../../secret",
+            "find / -name passwd",
+            "stat /etc",
+            "grep -r root /etc",
+            "rg --file=/etc/passwd src",
+            "wc -l /etc/hosts",
+            "du -sh ..",
+            "file /bin/sh",
+            "tree /",
+            "ls /",
+        ] {
+            assert!(
+                validate_exec_command(cmd).is_ok(),
+                "{cmd} passes the allow-list"
+            );
+            assert!(exec_argv(&root, cmd).is_err(), "{cmd} must be refused");
+        }
+        for cmd in [
+            "cat src/lib.rs",
+            "head -n 1 src/lib.rs",
+            "grep -rn \"/api/\" src",
+            "find . -name \"*.rs\"",
+            "ls -la",
+            "wc -l src/lib.rs",
+            "git status",
+        ] {
+            assert!(exec_argv(&root, cmd).is_ok(), "{cmd} must be accepted");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_refuses_a_symlink_leaving_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret"), root.join("link")).unwrap();
+        assert!(exec_argv(&root, "cat link").is_err());
+    }
+
+    #[test]
+    fn exec_refuses_find_actions_and_git_no_index() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(exec_argv(root.path(), "find . -exec cat {} +").is_err());
+        assert!(exec_argv(root.path(), "find . -delete").is_err());
+        assert!(validate_exec_command("git diff --no-index /etc/passwd README.md").is_err());
+        assert!(validate_exec_command("git log --output=x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_runs_an_in_project_read_without_a_shell_or_the_backend_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note é.txt"), "bonjour").unwrap();
+        let read = run_exec(dir.path(), "cat 'note é.txt'", &[]).unwrap();
+        assert_eq!(read.stdout, "bonjour");
+        assert_eq!(read.exit_code, 0);
+        // No shell: a variable stays literal instead of expanding.
+        let echoed = run_exec(dir.path(), "echo $HOME", &[]).unwrap();
+        assert_eq!(echoed.stdout.trim(), "$HOME");
+        assert!(run_exec(dir.path(), "cat /etc/passwd", &[]).is_err());
+    }
+
+    #[test]
+    fn the_exec_command_carries_a_built_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin:/bin"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("KRONN_ENCRYPTION_KEK", "raw"),
+                ("ANTHROPIC_API_KEY", "sk"),
+            ],
+            || exec_command(dir.path(), "git status", &[]).unwrap(),
+        );
+        let env: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(env, vec!["PATH".to_string()]);
+    }
+
+    #[test]
+    fn exec_words_split_like_a_shell_without_expanding() {
+        assert_eq!(
+            split_exec_words(r#"grep -n "a b" 'c d' e\ f"#).unwrap(),
+            vec!["grep", "-n", "a b", "c d", "e f"]
+        );
+        assert_eq!(split_exec_words("  ").unwrap(), Vec::<String>::new());
+        assert!(split_exec_words("cat 'open").is_err());
+        assert!(split_exec_words("cat \"open").is_err());
+    }
 
     #[test]
     fn exec_allows_git_status() {

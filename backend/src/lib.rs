@@ -494,15 +494,27 @@ async fn auth_middleware(
     // `has_valid_token` is a correct Bearer token. See `is_local_ip` for what
     // counts as local (loopback + Docker bridge gateway, NOT LAN/Tailscale).
     let local_trusted = !strict_localhost && request_is_local_ip(&headers, &request);
-    let has_valid_token = match &expected_token {
-        Some(expected) => headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t == expected)
-            .unwrap_or(false),
-        None => false,
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let has_valid_token = match (&expected_token, bearer) {
+        (Some(expected), Some(bearer)) => bearer == expected,
+        _ => false,
     };
+    // A bridge token is a narrower statement than the origin: it never falls
+    // back to loopback trust, even when dead (KT-1006).
+    if let Some(token) = bearer.filter(|token| {
+        !has_valid_token && token.starts_with(crate::core::bridge_token::TOKEN_PREFIX)
+    }) {
+        let token = token.to_owned();
+        return Ok(bridge_gate(&state, &token, request, next).await);
+    }
+    // A bearer that matches nothing is refused outright: presenting a wrong
+    // credential never falls back to loopback trust.
+    if bearer.is_some() && !has_valid_token {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     if auth_allows(
         request.method(),
@@ -515,6 +527,181 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Largest JSON body a bridge-token request may carry (its ids are read before
+/// the handler runs).
+const BRIDGE_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
+fn bridge_refusal(status: StatusCode, message: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        status,
+        axum::Json(serde_json::json!({ "success": false, "data": null, "error": message })),
+    )
+        .into_response()
+}
+
+/// Admit a bridge-token request only on its positive list and its scope.
+async fn bridge_gate(
+    state: &AppState,
+    token: &str,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    use crate::core::bridge_token;
+    use axum::extract::FromRequestParts;
+    let Some(grant) = bridge_token::lookup(token) else {
+        return bridge_refusal(
+            StatusCode::UNAUTHORIZED,
+            "bridge token is not live (its launch ended or the backend restarted)",
+        );
+    };
+    let method = request.method().as_str().to_owned();
+    let pattern = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|matched| matched.as_str().to_owned())
+        .unwrap_or_default();
+    let Some(route) = bridge_token::route_for(&method, &pattern) else {
+        tracing::warn!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
+            "bridge token refused on a route outside its list");
+        return bridge_refusal(
+            StatusCode::FORBIDDEN,
+            "this route is not available to a Kronn-launched agent's bridge token",
+        );
+    };
+    let (mut parts, body) = request.into_parts();
+    let path_params: Vec<(String, String)> =
+        match axum::extract::RawPathParams::from_request_parts(&mut parts, state).await {
+            Ok(params) => params
+                .iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+    let query = parts.uri.query().map(str::to_owned);
+    let is_json = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .is_some_and(|mime| mime == "application/json" || mime.ends_with("+json"));
+    let (body, json) = if is_json {
+        let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
+            return bridge_refusal(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "bridge request body too large",
+            );
+        };
+        let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+        (axum::body::Body::from(bytes), json)
+    } else {
+        (body, None)
+    };
+    let resolver = grant.clone();
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            if let Some(project) = resolver.cached_project() {
+                return Ok(Ok(project));
+            }
+            let resolved = bridge_token::resolve_scope_project(conn, &resolver.scope)?;
+            if let Ok(project) = &resolved {
+                resolver.cache_project(project.clone());
+            }
+            Ok(resolved)
+        })
+        .await;
+    let project = match project {
+        Ok(Ok(project)) => project,
+        Ok(Err(())) => {
+            return bridge_refusal(
+                StatusCode::UNAUTHORIZED,
+                "bridge token's discussion or run no longer exists",
+            )
+        }
+        Err(error) => {
+            tracing::warn!(target: "kronn::bridge_token", token = %grant.id, "scope resolution failed: {error}");
+            return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
+        }
+    };
+    // A trigger naming no project runs for the token's project (KT-851).
+    let injected = bridge_token::with_bound_project(route, project.as_deref(), json.clone());
+    let (body, json) = match injected {
+        Some(json) => match serde_json::to_vec(&json) {
+            Ok(bytes) => (axum::body::Body::from(bytes), Some(json)),
+            Err(_) => return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body"),
+        },
+        None => (body, json),
+    };
+    let ids = bridge_token::collect_ids(route, &path_params, query.as_deref(), json.as_ref());
+    let checked = grant.clone();
+    let decision = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(
+                bridge_token::authorize(&checked, route, project.as_deref(), &ids, |kind, id| {
+                    bridge_token::residence(conn, kind, id).map_err(|error| {
+                        bridge_token::Refusal(format!("scope lookup failed: {error}"))
+                    })
+                })
+                .map_err(|refusal| (StatusCode::FORBIDDEN, refusal.0)),
+            )
+        })
+        .await;
+    match decision {
+        Ok(Ok(())) => {}
+        Ok(Err((status, message))) => {
+            tracing::warn!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
+                reason = %message, "bridge token refused");
+            return bridge_refusal(status, &message);
+        }
+        Err(error) => {
+            tracing::warn!(target: "kronn::bridge_token", token = %grant.id, "scope check failed: {error}");
+            return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
+        }
+    }
+    if route.rule == bridge_token::Rule::Effect {
+        tracing::info!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
+            "bridge token effect");
+    }
+    let response = next
+        .run(axum::extract::Request::from_parts(parts, body))
+        .await;
+    if pattern == "/api/disc/create" && response.status().is_success() {
+        return adopt_created_discussion(&grant, response).await;
+    }
+    response
+}
+
+/// A discussion a launch creates becomes one of its own, so it can write there.
+/// Only a fresh row counts: an idempotent replay returns a discussion chosen
+/// by caller-supplied session ids, which proves nothing.
+async fn adopt_created_discussion(
+    grant: &crate::core::bridge_token::BridgeGrant,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
+        return bridge_refusal(StatusCode::INTERNAL_SERVER_ERROR, "response too large");
+    };
+    if let Ok(created) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        let data = &created["data"];
+        if data["created"] == serde_json::Value::Bool(true) {
+            if let Some(id) = data["disc_id"].as_str() {
+                grant.adopt_discussion(id);
+            }
+        }
+    }
+    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
 /// POST endpoints that irreversibly destroy user data, change key material or

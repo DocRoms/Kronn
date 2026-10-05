@@ -183,6 +183,7 @@ pub async fn execute_collect_api_data_step(
                             &work_dir,
                             &child_context,
                             super::exec_step::MAX_COLLECT_OUTPUT_BYTES,
+                            project_id.as_deref(),
                         )
                         .await,
                         Some(output_format),

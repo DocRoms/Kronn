@@ -515,7 +515,7 @@ mod tests {
             !bridge
                 .args
                 .iter()
-                .any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
+                .any(|arg| arg.contains("KRONN_AUTH_TOKEN") || arg.contains("KRONN_BRIDGE_TOKEN")),
             "no credential, and no placeholder for one, may travel over ACP"
         );
 
@@ -9994,6 +9994,7 @@ Suite de la réponse.";
             room_agent,
             workflow_step,
             &[],
+            None,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -10034,6 +10035,7 @@ Suite de la réponse.";
             None,
             None,
             github_env,
+            None,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
@@ -12215,7 +12217,7 @@ Suite de la réponse.";
                 "KRONN_TASK_WORKER_CONTEXT": "${KRONN_TASK_WORKER_CONTEXT}",
                 "KRONN_DISCUSSION_ID": "${KRONN_DISCUSSION_ID}",
                 "KRONN_BACKEND_URL": "${KRONN_BACKEND_URL:-http://127.0.0.1:3140}",
-                "KRONN_AUTH_TOKEN": "${KRONN_AUTH_TOKEN:-}",
+                "KRONN_BRIDGE_TOKEN": "${KRONN_BRIDGE_TOKEN:-}",
             })
         );
         assert!(!encoded.contains("UNRELATED_PROJECT_VALUE"));
@@ -12772,6 +12774,7 @@ Suite de la réponse.";
                 http_cancel: None,
                 pgid: Some(pgid),
                 token_fragments: false,
+                bridge_token: None,
             };
             let exit = process.wait().await.expect("leader exits");
             assert!(exit.success);
@@ -12898,6 +12901,7 @@ sleep 3600
             http_cancel: None,
             pgid,
             token_fragments: false,
+            bridge_token: None,
         };
 
         // Call the production kill() method
@@ -12977,6 +12981,7 @@ sleep 3600
             http_cancel: None,
             pgid: None,
             token_fragments: false,
+            bridge_token: None,
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));

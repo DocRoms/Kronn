@@ -487,6 +487,7 @@ impl AcpTransport for CodexAcpAdapter {
             self.launch.room_agent_context.as_ref(),
             self.launch.workflow_step_context.as_ref(),
             &self.launch.github_env,
+            self.launch.bridge_token.as_deref(),
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child

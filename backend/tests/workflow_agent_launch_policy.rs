@@ -76,6 +76,8 @@ if [ "$1" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
   exit 0
 fi
+# Agents get a built environment: the fixture's paths ride in names each owns.
+KRONN_POLICY_ARGV="${CLAUDE_POLICY_ARGV:-$CODEX_POLICY_ARGV}"
 printf '%s\n' "$@" > "$KRONN_POLICY_ARGV"
 printf '%s\n' "${ENABLE_TOOL_SEARCH-unset}" > "$KRONN_POLICY_ARGV.env"
 cat >/dev/null
@@ -97,7 +99,8 @@ esac
     async fn launch(&mut self, agent: AgentType, options: &LaunchOptions) -> Vec<String> {
         let argv = self.dir.path().join(format!("argv-{}", self.count));
         self.count += 1;
-        self.env.set("KRONN_POLICY_ARGV", argv.clone());
+        self.env.set("CLAUDE_POLICY_ARGV", argv.clone());
+        self.env.set("CODEX_POLICY_ARGV", argv.clone());
         let base = kronn::core::config::default_config();
         let project = self.project.to_string_lossy().to_string();
         let config = AgentStartConfig {

@@ -466,7 +466,7 @@ struct ScriptedOpenCodeOnPath(Vec<(&'static str, Option<std::ffi::OsString>)>);
 #[cfg(unix)]
 impl ScriptedOpenCodeOnPath {
     fn install(bin: &Path, out: &Path) -> Self {
-        let saved: Vec<_> = ["PATH", "FIXTURE_OUT", "OPENCODE_CONFIG_CONTENT"]
+        let saved: Vec<_> = ["PATH", "OPENCODE_FIXTURE_OUT", "OPENCODE_CONFIG_CONTENT"]
             .into_iter()
             .map(|name| (name, std::env::var_os(name)))
             .collect();
@@ -475,7 +475,7 @@ impl ScriptedOpenCodeOnPath {
         ))
         .unwrap();
         std::env::set_var("PATH", path);
-        std::env::set_var("FIXTURE_OUT", out);
+        std::env::set_var("OPENCODE_FIXTURE_OUT", out);
         std::env::remove_var("OPENCODE_CONFIG_CONTENT");
         Self(saved)
     }

@@ -3557,7 +3557,7 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                 b'{"success":true,"data":{"file":{"id":"f-1"}}}'
             )
             response.__exit__.return_value = False
-            with mock.patch.dict(os.environ, {"KRONN_AUTH_TOKEN": "secret"}), \
+            with mock.patch.dict(os.environ, {"KRONN_BRIDGE_TOKEN": "secret"}), \
                  mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
                 result = self.mod._http_upload_context_file("disc/one", str(image_path))
 
@@ -7334,10 +7334,9 @@ class DiscListTests(unittest.TestCase):
 
 
 class HttpAuthHeaderTests(unittest.TestCase):
-    """0.8.11 — the sidecar authenticates to the backend: `_http`/`_http_text`
-    send `Authorization: Bearer <token>` iff KRONN_AUTH_TOKEN is set. This is the
-    contract that makes an auth-enabled / LAN-exposed backend reachable by its
-    own sidecar (was a silent 401 before the boot injects the token)."""
+    """The bridge authenticates with the scoped token Kronn mints per launch
+    (`KRONN_BRIDGE_TOKEN`, KT-1006), falling back to an operator token a host
+    session exported (`KRONN_AUTH_TOKEN`), and sends nothing without either."""
 
     def setUp(self):
         # `_http` is the SUBJECT here, so it must be the real one; the transport
@@ -7352,12 +7351,26 @@ class HttpAuthHeaderTests(unittest.TestCase):
 
     def test_http_adds_bearer_when_token_present(self):
         with mock.patch.dict(os.environ,
-                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "sekret"},
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_BRIDGE_TOKEN": "sekret"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
             self.mod._http("GET", "/api/health")
         req = urlopen.call_args.args[0]
         self.assertEqual(req.get_header("Authorization"), "Bearer sekret")
+
+    def test_bridge_token_wins_over_a_host_operator_token(self):
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BRIDGE_TOKEN": "kbt_launch", "KRONN_AUTH_TOKEN": "operator"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        self.assertEqual(urlopen.call_args.args[0].get_header("Authorization"), "Bearer kbt_launch")
+
+    def test_host_session_operator_token_still_works(self):
+        with mock.patch.dict(os.environ, {"KRONN_AUTH_TOKEN": "operator"}, clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        self.assertEqual(urlopen.call_args.args[0].get_header("Authorization"), "Bearer operator")
 
     def test_http_omits_auth_when_no_token(self):
         with mock.patch.dict(os.environ,
@@ -7377,7 +7390,7 @@ class HttpAuthHeaderTests(unittest.TestCase):
         cm.__exit__.return_value = False
         with mock.patch.dict(os.environ,
                              {"KRONN_BACKEND_URL": "http://127.0.0.1:3140",
-                              "KRONN_AUTH_TOKEN": "sekret",
+                              "KRONN_BRIDGE_TOKEN": "sekret",
                               "KRONN_DISCUSSION_ID": "d-1"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
@@ -7391,7 +7404,7 @@ class HttpAuthHeaderTests(unittest.TestCase):
         cm.__enter__.return_value.read.return_value = b'{"kind":"kronn.workflow"}'
         cm.__exit__.return_value = False
         with mock.patch.dict(os.environ,
-                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "tok2"},
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_BRIDGE_TOKEN": "tok2"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
             self.mod._http_text("GET", "/api/workflows/x/export")
@@ -8339,6 +8352,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
                 "KRONN_TASK_WORKER_CONTEXT",
                 "KRONN_DISCUSSION_ID",
                 "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             ):
                 env.pop(key, None)
             process = subprocess.Popen(
@@ -8408,6 +8422,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             shutil.copy2(_SCRIPT, bridge)
             env = {key: value for key, value in os.environ.items() if key not in {
                 "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             }}
             process = subprocess.Popen(
                 [sys.executable, str(bridge)], stdin=subprocess.PIPE,
@@ -8455,6 +8470,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             shutil.copy2(_SCRIPT, bridge)
             env = {key: value for key, value in os.environ.items() if key not in {
                 "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             }}
             process = subprocess.Popen(
                 [sys.executable, str(bridge)], stdin=subprocess.PIPE,

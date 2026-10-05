@@ -141,6 +141,8 @@ if [ "$1" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
   exit 0
 fi
+# Agents get a built environment: the fixture's path rides in a name each owns.
+KRONN_EFFORT_ARGV="${CLAUDE_EFFORT_ARGV:-$CODEX_EFFORT_ARGV}"
 printf '%s\n' "$@" > "$KRONN_EFFORT_ARGV"
 cat >/dev/null
 case "$0" in
@@ -221,7 +223,8 @@ esac
                 tier.default = Some("effort-model".into());
                 tier.default_effort = preset.map(str::to_owned);
                 let argv_file = dir.path().join(format!("argv-{count}"));
-                env.set("KRONN_EFFORT_ARGV", &argv_file);
+                env.set("CLAUDE_EFFORT_ARGV", &argv_file);
+                env.set("CODEX_EFFORT_ARGV", &argv_file);
                 let worker_context = TaskWorkerBridgeContext {
                     execution_id: "fake-execution".into(),
                     discussion_id: "fake-discussion".into(),
@@ -307,7 +310,8 @@ esac
             }
         }
         let forbidden = dir.path().join(format!("forbidden-{binary}"));
-        env.set("KRONN_EFFORT_ARGV", &forbidden);
+        env.set("CLAUDE_EFFORT_ARGV", &forbidden);
+        env.set("CODEX_EFFORT_ARGV", &forbidden);
         let result = start_agent_with_config(AgentStartConfig {
             model_override: Some("other-model"),
             reasoning_effort_override: Some("high"),

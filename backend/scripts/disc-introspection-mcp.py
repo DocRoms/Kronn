@@ -13,7 +13,7 @@ that Kronn writes for `summary_strategy != Off` discussions:
           "env": {
             "KRONN_DISCUSSION_ID": "abc-123",
             "KRONN_BACKEND_URL":   "http://127.0.0.1:3140",
-            "KRONN_AUTH_TOKEN":    "<bearer>"  # optional, only for non-localhost
+            "KRONN_BRIDGE_TOKEN":  "<per-launch token>"  # set by Kronn per launch
           }
         }
       }
@@ -2762,6 +2762,12 @@ def _backend_url():
     return os.environ.get("KRONN_BACKEND_URL", "http://127.0.0.1:3140").rstrip("/")
 
 
+def _bearer_token():
+    """The bearer this bridge presents: the scoped token Kronn mints for the
+    launch, else an operator token a host session exported (compatibility)."""
+    return os.environ.get("KRONN_BRIDGE_TOKEN") or os.environ.get("KRONN_AUTH_TOKEN")
+
+
 # 0.8.6 phase 2 — Captured MCP `clientInfo` from initialize handshake.
 #
 # Every MCP client sends `{name, version}` in its `initialize` request.
@@ -4161,7 +4167,7 @@ def _current_disc_meta():
         req = urllib.request.Request(url, method="GET")
         # Same bearer as _http(): without it, an auth-enforced instance 401s
         # this read and the silent fallback drops project/agent inheritance.
-        token = os.environ.get("KRONN_AUTH_TOKEN")
+        token = _bearer_token()
         if token:
             req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -4196,7 +4202,7 @@ def _http(method, path, body=None, timeout=180):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, method=method, data=data)
     req.add_header("Content-Type", "application/json")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -4253,7 +4259,7 @@ def _http_text(method, path):
     which returns the embedded `text/markdown` spec verbatim."""
     url = f"{_backend_url()}{path}"
     req = urllib.request.Request(url, method=method)
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -4369,7 +4375,7 @@ def _http_upload_context_file(disc_id, file_path):
         data=payload,
     )
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -9381,7 +9387,7 @@ def _audit_open_sse(path, body):
     req = urllib.request.Request(url, method="POST", data=json.dumps(body).encode())
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310

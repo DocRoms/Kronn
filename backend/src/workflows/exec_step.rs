@@ -61,14 +61,34 @@ pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to G
 /// Truncation suffix appended when stdout / stderr exceeds [`MAX_OUTPUT_BYTES`].
 const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]";
 
+/// An Exec step child (setup or main command): the program with its built
+/// environment (KT-1006) and the project's GitHub variables only when the
+/// project is connected (D2); callers only add argv, cwd and stdio.
+fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process::Command {
+    let mut command = async_cmd(program);
+    crate::core::child_env::isolate_with_github(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        github_env,
+    );
+    command
+}
+
 pub async fn execute_exec_step(
     step: &WorkflowStep,
     workflow_allowlist: &[String],
     work_dir: &str,
     ctx: &TemplateContext,
 ) -> StepOutcome {
-    execute_exec_step_with_output_limit(step, workflow_allowlist, work_dir, ctx, MAX_OUTPUT_BYTES)
-        .await
+    execute_exec_step_with_output_limit(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        MAX_OUTPUT_BYTES,
+        None,
+    )
+    .await
 }
 
 pub async fn execute_exec_step_with_output_limit(
@@ -77,14 +97,16 @@ pub async fn execute_exec_step_with_output_limit(
     work_dir: &str,
     ctx: &TemplateContext,
     output_limit_bytes: usize,
+    project_id: Option<&str>,
 ) -> StepOutcome {
+    let github_env = crate::core::github_connection::env_for_launch(project_id).await;
     execute_exec_step_inner(
         step,
         workflow_allowlist,
         work_dir,
         ctx,
         output_limit_bytes,
-        None,
+        &github_env,
     )
     .await
 }
@@ -106,17 +128,13 @@ pub async fn execute_exec_step_for_project(
         work_dir,
         ctx,
         MAX_OUTPUT_BYTES,
-        Some(&github_env),
+        &github_env,
     )
     .await
 }
 
-fn needs_gh_hint(
-    raw_command: &str,
-    success: bool,
-    github_env: Option<&[(String, String)]>,
-) -> bool {
-    !success && raw_command == "gh" && github_env.is_some_and(<[_]>::is_empty)
+fn needs_gh_hint(raw_command: &str, success: bool, github_env: &[(String, String)]) -> bool {
+    !success && raw_command == "gh" && github_env.is_empty()
 }
 
 async fn execute_exec_step_inner(
@@ -125,7 +143,7 @@ async fn execute_exec_step_inner(
     work_dir: &str,
     ctx: &TemplateContext,
     output_limit_bytes: usize,
-    github_env: Option<&[(String, String)]>,
+    github_env: &[(String, String)],
 ) -> StepOutcome {
     let start = Instant::now();
     let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
@@ -334,7 +352,7 @@ async fn execute_exec_step_inner(
             setup_argc = setup_args.len(),
             "executing setup phase"
         );
-        let mut sc = async_cmd(setup_cmd);
+        let mut sc = exec_child(setup_cmd, github_env);
         sc.args(&setup_args)
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
@@ -434,7 +452,7 @@ async fn execute_exec_step_inner(
         _ => None,
     };
 
-    let mut cmd = async_cmd(raw_command);
+    let mut cmd = exec_child(raw_command, github_env);
     cmd.args(&rendered_args)
         .current_dir(work_dir)
         .stdin(if stdin_bytes.is_some() {
@@ -450,9 +468,6 @@ async fn execute_exec_step_inner(
         // when the runner drops the step-dispatch future. Without this,
         // the child gets reparented to PID 1 and keeps running.
         .kill_on_drop(true);
-    if let Some(github_env) = github_env {
-        crate::core::github_connection::apply_launch_env(cmd.as_std_mut(), github_env);
-    }
 
     // 2026-06-11 — setup + main share ONE deadline. The setup phase above
     // consumed `start.elapsed()` of the budget; the main command gets the
@@ -716,6 +731,52 @@ fn destructive_reason(cmd: &str, args: &[String]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_exec_step_child_gets_a_built_environment() {
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin"),
+                ("CARGO_HOME", "/home/u/.cargo"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("KRONN_ENCRYPTION_KEK", "raw"),
+                ("ANTHROPIC_API_KEY", "sk-ant"),
+                ("GH_TOKEN", "ghp"),
+            ],
+            || exec_child("cargo", &[]),
+        );
+        let env: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for kept in ["PATH", "CARGO_HOME"] {
+            assert!(env.iter().any(|name| name == kept), "{kept} missing");
+        }
+        assert!(
+            !env.iter().any(|name| name == "GH_TOKEN"),
+            "an unconnected project's step never inherits the backend's GitHub token"
+        );
+        let connected = exec_child("gh", &[("GH_TOKEN".into(), "project-token".into())]);
+        assert!(
+            connected
+                .as_std()
+                .get_envs()
+                .any(|(name, value)| name == "GH_TOKEN"
+                    && value.is_some_and(|v| v == "project-token"))
+        );
+        for gone in [
+            "KRONN_AUTH_TOKEN",
+            "KRONN_ENCRYPTION_KEK",
+            "ANTHROPIC_API_KEY",
+        ] {
+            assert!(
+                !env.iter().any(|name| name == gone),
+                "{gone} reached the step"
+            );
+        }
+    }
+
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
     }
@@ -864,14 +925,10 @@ mod tests {
     #[test]
     fn a_failed_gh_step_without_a_token_says_why() {
         let token = vec![("GH_TOKEN".to_string(), "t".to_string())];
-        assert!(needs_gh_hint("gh", false, Some(&[])));
-        assert!(!needs_gh_hint("gh", true, Some(&[])));
-        assert!(!needs_gh_hint("gh", false, Some(&token)));
-        assert!(
-            !needs_gh_hint("gh", false, None),
-            "callers that inherit are not judged"
-        );
-        assert!(!needs_gh_hint("git", false, Some(&[])));
+        assert!(needs_gh_hint("gh", false, &[]));
+        assert!(!needs_gh_hint("gh", true, &[]));
+        assert!(!needs_gh_hint("gh", false, &token));
+        assert!(!needs_gh_hint("git", false, &[]));
     }
 
     #[tokio::test]

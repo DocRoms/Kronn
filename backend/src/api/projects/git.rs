@@ -703,10 +703,12 @@ pub async fn project_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let result =
-        tokio::task::spawn_blocking(move || crate::api::git_ops::run_exec(&repo_path, &cmd))
-            .await
-            .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let github_env = crate::core::github_connection::env_for_launch(Some(&id)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_exec(&repo_path, &cmd, &github_env)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),

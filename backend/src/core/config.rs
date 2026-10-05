@@ -351,6 +351,29 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 }
 
 /// Create default config (used during setup wizard)
+/// Mirror an operator-set `KRONN_AUTH_TOKEN` into the config the auth
+/// middleware reads, and enable auth: setting it is asking for auth. The
+/// caller removes the variable from the process environment, so no child
+/// process inherits the admin token (KT-1006).
+pub fn adopt_env_auth_token(server: &mut ServerConfig, env_token: Option<String>) {
+    let Some(token) = env_token.filter(|token| !token.is_empty()) else {
+        return;
+    };
+    match &server.auth_token {
+        None => server.auth_token = Some(token),
+        Some(configured) if *configured != token => tracing::warn!(
+            "KRONN_AUTH_TOKEN env differs from the token in config.toml; the API \
+             validates the CONFIG token. Align them (unset the env var, or clear \
+             server.auth_token in config.toml)."
+        ),
+        Some(_) => {}
+    }
+    if !server.auth_enabled {
+        tracing::info!("KRONN_AUTH_TOKEN set: enabling API authentication (was disabled)");
+        server.auth_enabled = true;
+    }
+}
+
 pub fn default_config() -> AppConfig {
     AppConfig {
         server: ServerConfig {
@@ -1145,5 +1168,37 @@ mod tests {
 
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_env_auth_token_enables_auth_through_the_config() {
+        let mut server = default_config().server;
+        server.auth_token = None;
+        server.auth_enabled = false;
+        adopt_env_auth_token(&mut server, Some("op-token".into()));
+        assert_eq!(server.auth_token.as_deref(), Some("op-token"));
+        assert!(server.auth_enabled);
+
+        // The configured token wins over a differing env one.
+        adopt_env_auth_token(&mut server, Some("other".into()));
+        assert_eq!(server.auth_token.as_deref(), Some("op-token"));
+
+        // Empty or absent: nothing changes.
+        let mut untouched = default_config().server;
+        untouched.auth_enabled = false;
+        let before = untouched.auth_token.clone();
+        adopt_env_auth_token(&mut untouched, Some(String::new()));
+        adopt_env_auth_token(&mut untouched, None);
+        assert_eq!(untouched.auth_token, before);
+        assert!(!untouched.auth_enabled);
+    }
+
+    /// The backend no longer puts its admin token into its own environment,
+    /// where every child process would inherit it (KT-1006).
+    #[test]
+    fn main_never_exports_the_admin_token() {
+        let main = include_str!("../main.rs");
+        assert!(!main.contains("set_var(\"KRONN_AUTH_TOKEN\""));
+        assert!(main.contains("remove_var(\"KRONN_AUTH_TOKEN\")"));
     }
 }

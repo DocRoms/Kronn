@@ -38,11 +38,18 @@ pub async fn discover_in(agent_type: &AgentType, dir: &Path) -> DiscoveryOutcome
     let cwd = dir.to_string_lossy().into_owned();
 
     let scope = AcpSessionScope::new(None, "model-catalog-discovery");
-    let transport =
-        match AcpJsonRpcTransport::spawn_native(acp_agent_id, &cwd, false, None, scope).await {
-            Ok(transport) => Arc::new(transport) as Arc<dyn AcpTransport>,
-            Err(error) => return classify_acp_error(error),
-        };
+    let transport = match AcpJsonRpcTransport::spawn_native(
+        acp_agent_id,
+        &cwd,
+        false,
+        Default::default(),
+        scope,
+    )
+    .await
+    {
+        Ok(transport) => Arc::new(transport) as Arc<dyn AcpTransport>,
+        Err(error) => return classify_acp_error(error),
+    };
     discover_with_transport(transport, cwd).await
 }
 
