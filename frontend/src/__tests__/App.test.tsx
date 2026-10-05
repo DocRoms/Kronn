@@ -55,6 +55,7 @@ vi.mock('../lib/api', () => ({
   // "backend slow" from "backend down".
   config: {
     getLanguage: vi.fn(),
+    getRecoveryStatus: vi.fn().mockResolvedValue({ key_locked: true }),
   },
   // UpdateBanner is rendered inside Dashboard via App's tree and calls
   // version.check on mount. The Dashboard component is itself mocked

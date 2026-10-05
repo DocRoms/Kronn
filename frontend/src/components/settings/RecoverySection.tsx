@@ -11,6 +11,8 @@ import { config as configApi } from '../../lib/api';
 import { triggerDownload } from '../../lib/downloadBlob';
 import type { ToastFn } from '../../hooks/useToast';
 import { KeyRound, Copy, Download, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { RecoveryRestorePanel } from '../RecoveryRestorePanel';
+import type { RecoveryStatus } from '../../types/generated';
 import '../../pages/SettingsPage.css';
 
 interface RecoverySectionProps {
@@ -25,6 +27,7 @@ const MIN_PASSPHRASE_LEN = 12;
 
 export function RecoverySection({ toast, t }: RecoverySectionProps) {
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<RecoveryStatus | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [confirm, setConfirm] = useState('');
   // Replacing an existing passphrase must prove the current one (backend refuses otherwise).
@@ -36,7 +39,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
 
   useEffect(() => {
     configApi.getRecoveryStatus()
-      .then(s => setConfigured(s.configured))
+      .then(s => { setConfigured(s.configured); setStatus(s); })
       .catch(() => setConfigured(null));
   }, []);
 
@@ -81,13 +84,37 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         <div className="flex-row gap-4 set-section-header-lg">
           <KeyRound size={14} className="text-accent" />
           <span className="font-semibold text-lg">{t('settings.recovery.title')}</span>
-          {configured === true && (
+          {configured === true && status?.matches_key !== false && (
             <span className="set-hint-xs flex-row gap-3" data-testid="recovery-configured-badge">
               <ShieldCheck size={12} /> {t('settings.recovery.configured')}
             </span>
           )}
         </div>
         <p className="set-hint">{t('settings.recovery.hint')}</p>
+
+        {/* KT-1007: a locked key is restored here; a blob for another key, or
+            a key store holding another key, is said plainly. */}
+        {status?.key_locked && (
+          <div className="set-expose-warn" data-testid="recovery-locked">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.lockedHint')}</span>
+          </div>
+        )}
+        {status?.key_locked && (
+          <RecoveryRestorePanel toast={toast} t={t} mode="restore" initiallyOpen onRestored={() => window.location.reload()} />
+        )}
+        {status && !status.key_locked && status.configured && !status.matches_key && (
+          <div className="set-expose-warn" data-testid="recovery-mismatch">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.mismatchWarning')}</span>
+          </div>
+        )}
+        {status && (status.stale_sources ?? []).length > 0 && (
+          <div className="set-expose-warn" data-testid="recovery-stale">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.staleWarning', (status.stale_sources ?? []).join(', '))}</span>
+          </div>
+        )}
 
         {configured === false && !recoveryCode && (
           <div className="set-expose-warn" data-testid="recovery-nudge">
@@ -96,7 +123,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
           </div>
         )}
 
-        {recoveryCode ? (
+        {status?.key_locked ? null : recoveryCode ? (
           // One-time reveal of the code — the ONLY moment it's shown.
           <div data-testid="recovery-code-block">
             <div className="set-expose-warn">

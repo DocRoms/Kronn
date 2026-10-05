@@ -14,6 +14,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
 import { LoadingState } from './components/LoadingState';
 import { AuthLockedScreen } from './components/AuthLockedScreen';
+import { KeyLockedBanner } from './components/KeyLockedBanner';
 import { ApiRequestError } from './lib/apiRequestError';
 import { armBootScreen } from './lib/bootScreen';
 import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
@@ -231,6 +232,7 @@ export function App() {
       <Suspense fallback={<LoadingState fullscreen />}>
         <UpdateBanner />
         <BackendStatus />
+        <KeyLockedBanner />
         <Dashboard onReset={() => {
           clearCachedSetupStatus();
           setupStatusRef.current = null;
