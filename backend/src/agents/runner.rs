@@ -2271,7 +2271,7 @@ impl AgentIo for AgentProcess {
                     "Terminating process tree for agent PID {} with taskkill",
                     pid
                 );
-                if let Ok(output) = async_cmd("taskkill")
+                if let Ok(output) = crate::core::cmd::tool_cmd("taskkill")
                     .args(&["/PID", &pid.to_string(), "/T", "/F"])
                     .output()
                     .await
@@ -2491,7 +2491,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     // Skip if container user already matches the desired UID (expected when
     // APP_UID build arg matches KRONN_HOST_UID — the normal case after the fix).
-    if let Ok(output) = sync_cmd("id")
+    if let Ok(output) = crate::core::cmd::sync_tool_cmd("id")
         .arg("-u")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2505,7 +2505,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     let ownership = format!("{}:{}", uid, gid);
     // Only fix files in the work directory, not system files
-    let status = sync_cmd("chown")
+    let status = crate::core::cmd::sync_tool_cmd("chown")
         .args(["-R", &ownership])
         .arg(work_dir)
         .stdout(Stdio::null())
@@ -4950,7 +4950,7 @@ async fn run_acp_session(
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
-    let mut lifeline = match async_cmd("sh")
+    let mut lifeline = match crate::core::cmd::tool_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -5294,7 +5294,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
     }
 
     tracing::info!("kiro-cli not found, installing Linux kiro-cli...");
-    let output = async_cmd("sh")
+    let output = crate::core::cmd::tool_cmd("sh")
         .args([
             "-c",
             "command -v unzip >/dev/null 2>&1 || { echo 'Missing dependency: unzip' >&2; exit 127; }; \
@@ -5580,7 +5580,7 @@ pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
 pub(crate) fn total_system_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
-        let output = crate::core::cmd::sync_cmd("sysctl")
+        let output = crate::core::cmd::sync_tool_cmd("sysctl")
             .args(["-n", "hw.memsize"])
             .output()
             .ok()?;
@@ -8702,7 +8702,7 @@ async fn start_ollama_http_with_idle(
     // with truncated/empty output. Now: task writes "0\n" on a clean `done`,
     // "1\n" on stream/in-band errors, and if the task dies without writing
     // anything, `read` hits EOF and the lifeline exits 1 — fail-safe.
-    let mut dummy_child = crate::core::cmd::async_cmd("sh")
+    let mut dummy_child = crate::core::cmd::tool_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())

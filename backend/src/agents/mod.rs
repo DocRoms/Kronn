@@ -1,6 +1,4 @@
 use crate::core::cmd::async_cmd;
-#[cfg(target_os = "windows")]
-use crate::core::cmd::sync_cmd;
 use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -11,11 +9,17 @@ use std::time::Instant;
 async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     #[cfg(unix)]
     {
-        Ok(async_cmd("sh").args(["-c", cmd]).output().await?)
+        Ok(crate::core::cmd::tool_cmd("sh")
+            .args(["-c", cmd])
+            .output()
+            .await?)
     }
     #[cfg(windows)]
     {
-        Ok(async_cmd("cmd").args(["/C", cmd]).output().await?)
+        Ok(crate::core::cmd::tool_cmd("cmd")
+            .args(["/C", cmd])
+            .output()
+            .await?)
     }
 }
 
@@ -1184,7 +1188,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         // Login-shell lookup. We pass the binary name through `command -v` rather
         // than `which` so it works even when which is not installed inside the
         // WSL distro. Single-quoted to avoid shell interpolation surprises.
-        let mut cmd = sync_cmd("wsl.exe");
+        let mut cmd = crate::core::cmd::sync_tool_cmd("wsl.exe");
         cmd.args(["-e", "bash", "-lc", &format!("command -v '{}'", name)]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {
@@ -1214,7 +1218,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             .map(|p| format!("test -x {} && echo {}", p, p))
             .collect::<Vec<_>>()
             .join(" || ");
-        let mut cmd = sync_cmd("wsl.exe");
+        let mut cmd = crate::core::cmd::sync_tool_cmd("wsl.exe");
         cmd.args(["-e", "bash", "-c", &test_script]);
         if let Ok(output) = cmd.output() {
             if output.status.success() {

@@ -69,7 +69,7 @@ impl SleepInhibitor for Caffeinate {
     fn engage(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            self.child = crate::core::cmd::sync_cmd("caffeinate")
+            self.child = crate::core::cmd::sync_tool_cmd("caffeinate")
                 .arg("-i")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

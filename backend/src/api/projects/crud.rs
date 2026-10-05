@@ -99,7 +99,6 @@ pub fn discover_wsl_homes() -> Vec<String> {
     let mut homes = Vec::new();
     #[cfg(target_os = "windows")]
     {
-        use crate::core::cmd::sync_cmd;
         use std::time::{Duration, Instant};
 
         /// Max wait per `wsl.exe` invocation. wsl.exe -l -q normally answers
@@ -109,7 +108,7 @@ pub fn discover_wsl_homes() -> Vec<String> {
 
         /// Spawn a wsl.exe child, kill it if it overruns `timeout`, return its output.
         fn run_with_timeout(args: &[&str], timeout: Duration) -> Option<std::process::Output> {
-            let mut child = sync_cmd("wsl.exe")
+            let mut child = crate::core::cmd::sync_tool_cmd("wsl.exe")
                 .args(args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())

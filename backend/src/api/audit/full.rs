@@ -15,7 +15,6 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::agents::runner;
-use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -3254,12 +3253,12 @@ pub async fn cancel_audit(
                 project_id
             );
             // Kill the process tree: first try killing the process group, then the process itself
-            let _ = sync_cmd("kill")
+            let _ = crate::core::cmd::sync_tool_cmd("kill")
                 .args(["-9", &format!("-{}", pid)]) // negative PID = process group
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            let _ = sync_cmd("kill")
+            let _ = crate::core::cmd::sync_tool_cmd("kill")
                 .args(["-9", &pid.to_string()])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

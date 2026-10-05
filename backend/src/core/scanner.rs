@@ -241,7 +241,13 @@ async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Out
             // Run git inside WSL for WSL filesystem paths
             if let Some(linux_path) = unc_to_wsl_linux_path(path) {
                 let git_cmd = format!("git -C '{}' {}", linux_path, args.join(" "));
-                return async_cmd("wsl.exe")
+                let mut command = async_cmd("wsl.exe");
+                // git runs the repository's hooks: git's own environment.
+                crate::core::child_env::isolate(
+                    command.as_std_mut(),
+                    crate::core::child_env::ChildRoute::Git,
+                );
+                return command
                     .args(["-e", "bash", "-lc", &git_cmd])
                     .output()
                     .await
