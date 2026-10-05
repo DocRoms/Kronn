@@ -11,8 +11,18 @@ use kronn::{
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
+    // leaves this process's environment before any thread exists (removing a
+    // variable is not thread-safe): children never inherit the admin token.
+    let env_token = kronn::core::config::take_env_auth_token();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env_token))
+}
+
+async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // Exactly ONE backend per data dir, taken before `config::load()` (which
     // may rewrite config.toml): a second process must not write anything.
     // Held for the whole process lifetime.
@@ -127,11 +137,6 @@ async fn main() -> anyhow::Result<()> {
         // setups override this via the env.
         std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
     }
-
-    // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
-    // leaves this process's environment: children never inherit the admin
-    // token. Kronn-launched agents receive a scoped bridge token per launch.
-    let env_token = kronn::core::config::take_env_auth_token();
 
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));

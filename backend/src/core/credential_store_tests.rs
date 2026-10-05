@@ -72,6 +72,18 @@ impl Drop for DataDir {
 /// A config.toml exactly as 0.14.2 wrote it: key, auth token and provider
 /// keys (one of them an External API connection credential) in plaintext.
 fn write_0142_config(dir: &Path, key: &str) -> String {
+    let text = write_0142_config_text(key);
+    std::fs::write(dir.join("config.toml"), &text).unwrap();
+    // The DB migration runner's copy: credentials already out, key still in.
+    std::fs::write(
+        dir.join("config.toml.backup"),
+        without_credentials(&text).unwrap(),
+    )
+    .unwrap();
+    text
+}
+
+fn write_0142_config_text(key: &str) -> String {
     let mut cfg = config::default_config();
     cfg.server.auth_token = Some(AUTH_TOKEN.into());
     cfg.server.auth_enabled = true;
@@ -91,18 +103,10 @@ fn write_0142_config(dir: &Path, key: &str) -> String {
             active: true,
         },
     ];
-    let text = format!(
+    format!(
         "encryption_secret = \"{key}\"\n{}",
         toml::to_string_pretty(&cfg).unwrap()
-    );
-    std::fs::write(dir.join("config.toml"), &text).unwrap();
-    // The DB migration runner's copy: credentials already out, key still in.
-    std::fs::write(
-        dir.join("config.toml.backup"),
-        without_credentials(&text).unwrap(),
     )
-    .unwrap();
-    text
 }
 
 /// Ciphertext in every pre-existing encrypted column.
@@ -160,9 +164,16 @@ async fn boot_like_main(
     let outcome = keystore::reconcile_with(&mut cfg, db, &dir.sidecar(), dir.path())
         .await
         .unwrap();
-    let result = boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap();
+    let result = boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
     (cfg, outcome, result)
 }
 
@@ -364,9 +375,16 @@ async fn the_key_stays_in_config_toml_when_no_vault_can_hold_it() {
         keystore::reconcile_with(&mut cfg, &db, &KeyStore::from_vaults(vec![]), dir.path())
             .await
             .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
     let text = dir.config_text();
     assert!(text.contains(&key), "the only durable copy must stay");
     assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
@@ -386,6 +404,7 @@ async fn a_locked_key_leaves_config_toml_untouched() {
         dir.path(),
         &KeyOutcome::Locked { encrypted_rows: 1 },
         None,
+        BootMode::Startup,
     )
     .await
     .unwrap();
@@ -742,10 +761,17 @@ async fn a_sidecar_only_install_keeps_a_second_copy_of_the_key() {
     let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
         .await
         .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap()
-        .expect("armed");
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap()
+    .expect("armed");
     let text = dir.config_text();
     assert!(text.contains(&key), "config.toml keeps the second copy");
     assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
@@ -837,9 +863,16 @@ async fn an_env_token_while_locked_is_session_only() {
     )
     .await
     .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
     assert_eq!(cfg.server.auth_token.as_deref(), Some(AUTH_TOKEN));
     assert!(!cfg.server.auth_token_session_only);
     assert!(!dir.config_text().contains("session-env-token"));
@@ -903,9 +936,16 @@ async fn a_failed_credential_boot_locks_auth() {
     let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
         .await
         .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
     dir.restart();
     std::fs::remove_file(dir.path().join(BACKUP_FILENAME)).unwrap();
     // The backup temp path is blocked: writing the backup fails.
@@ -960,9 +1000,16 @@ async fn reset_never_removes_a_needed_key_copy_and_clears_every_encrypted_table(
     let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
         .await
         .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
-        .await
-        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
     assert!(config::retained_disk_key(dir.path()).is_some());
 
     let after = reset_via_api(&db, cfg).await;
@@ -973,13 +1020,17 @@ async fn reset_never_removes_a_needed_key_copy_and_clears_every_encrypted_table(
     );
     assert!(config::is_first_run().await.unwrap());
     for col in keystore::ENCRYPTED_COLUMNS {
+        // The API auth token survives a reset (C2-20); every other row goes.
+        let expected = i64::from(col.table == "stored_credentials");
         assert_eq!(
             rows_in(&db, col.table).await,
-            0,
+            expected,
             "{} not cleared",
             col.table
         );
     }
+    let left = db.with_conn(rows::list).await.unwrap();
+    assert!(left.iter().all(|r| r.kind == KIND_AUTH_TOKEN));
     // The next start reads the key back from the key-only file.
     dir.restart();
     let reloaded = config::load().await.unwrap().unwrap();
@@ -1038,7 +1089,18 @@ fn both_mains_lock_before_loading_and_drop_the_env_token() {
     let lock = backend.find("acquire_data_dir_lock()").unwrap();
     let load = backend.find("config::load().await").unwrap();
     assert!(lock < load, "backend: lock before config::load()");
-    assert!(backend.contains("take_env_auth_token()"));
+    // C2-29: read and removed before the multi-threaded runtime is built.
+    let take = backend.find("take_env_auth_token()").unwrap();
+    let runtime = backend.find("new_multi_thread()").unwrap();
+    assert!(
+        take < runtime,
+        "backend: env token removed before any thread"
+    );
+    assert!(!backend.contains("#[tokio::main]"));
+    // C2-30: the desktop applies the same LAN guard; C2-36: full error chain.
+    let desktop_src = include_str!("../../../desktop/src-tauri/src/main.rs");
+    assert!(desktop_src.contains("insecure_lan_boot_error("));
+    assert!(desktop_src.contains("stopped during startup: {e:#}"));
 
     let desktop = include_str!("../../../desktop/src-tauri/src/main.rs");
     let main_fn = desktop.find("fn main()").unwrap();
@@ -1065,6 +1127,16 @@ async fn json_of(
     path: &str,
     body: serde_json::Value,
 ) -> (axum::http::StatusCode, serde_json::Value) {
+    json_from(router, method, path, body, [127, 0, 0, 1]).await
+}
+
+async fn json_from(
+    router: axum::Router,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+    from: [u8; 4],
+) -> (axum::http::StatusCode, serde_json::Value) {
     use tower::ServiceExt;
     let mut req = axum::http::Request::builder()
         .method(method)
@@ -1074,8 +1146,7 @@ async fn json_of(
         .unwrap();
     req.extensions_mut()
         .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            40000,
+            from, 40000,
         ))));
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
@@ -1146,4 +1217,346 @@ async fn a_locked_store_never_writes_credentials_to_config_toml() {
     assert!(!text.contains("sk-locked-new-value") && !text.contains("sk-should-never-land"));
     assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
     let _ = key;
+}
+
+fn state_with(cfg: AppConfig, db: &Arc<Database>) -> crate::AppState {
+    crate::AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(cfg)),
+        db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    )
+}
+
+/// Migrated install whose auth row is now under another key, booted again.
+async fn auth_row_under_another_key(dir: &DataDir, db: &Arc<Database>) -> (AppConfig, String) {
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    seed_ciphertext(db, &key).await;
+    boot_like_main(dir, db).await;
+    let other = crypto::parse_secret(&crypto::generate_secret()).unwrap();
+    let foreign = crypto::encrypt("old-token", &other).unwrap();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE stored_credentials SET value_encrypted = ?1 WHERE kind = 'auth_token'",
+            [foreign],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    dir.restart();
+    let (cfg, _, _) = boot_like_main(dir, db).await;
+    (cfg, key)
+}
+
+/// C2-03 — a restore whose credential loading fails does not answer success.
+#[tokio::test]
+#[serial]
+async fn a_restore_whose_credentials_fail_to_load_reports_the_failure() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let key = migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.server.auth_locked);
+    // The credential boot after the restore will fail writing its backup.
+    std::fs::write(dir.path().join("config.toml"), write_0142_config_text(&key)).unwrap();
+    let _ = std::fs::remove_file(dir.path().join(BACKUP_FILENAME));
+    std::fs::create_dir(dir.path().join(format!(".{BACKUP_FILENAME}.tmp"))).unwrap();
+    let code = crate::core::recovery::to_code(
+        &crate::core::recovery::wrap_key(&key, "pass phrase").unwrap(),
+    );
+    let state = state_with(cfg, &db);
+    let (_, body) = json_of(
+        crate::build_router_with_auth(state.clone(), true),
+        "POST",
+        "/api/config/recovery/restore",
+        serde_json::json!({"passphrase": "pass phrase", "recovery_code": code}),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert!(state.config.read().await.server.auth_token.is_none());
+}
+
+/// C2-04 — a restore keeps the operator's session token and auth stays on,
+/// even where the platform default is off (Docker).
+#[tokio::test]
+#[serial]
+async fn a_restore_keeps_the_session_token_and_auth_enabled() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let key = migrated_then_key_lost(&dir, &db).await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "DELETE FROM stored_credentials WHERE kind = 'auth_token'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    std::env::set_var("KRONN_IN_DOCKER", "1");
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, Some("operator-token".into()))
+        .await
+        .unwrap();
+    assert!(cfg.server.auth_token_session_only && cfg.server.auth_enabled);
+    let code = crate::core::recovery::to_code(
+        &crate::core::recovery::wrap_key(&key, "pass phrase").unwrap(),
+    );
+    let state = state_with(cfg, &db);
+    let (_, body) = json_from(
+        crate::build_router_with_auth(state.clone(), true),
+        "POST",
+        "/api/config/recovery/restore",
+        serde_json::json!({"passphrase": "pass phrase", "recovery_code": code}),
+        [127, 0, 0, 1],
+    )
+    .await;
+    std::env::remove_var("KRONN_IN_DOCKER");
+    assert_eq!(body["success"], true, "{body}");
+    let after = state.config.read().await.clone();
+    assert_eq!(after.server.auth_token.as_deref(), Some("operator-token"));
+    assert!(after.server.auth_enabled, "a restore never turns auth off");
+}
+
+/// C2-06 — with the key in use but the auth row under another key, a local
+/// caller replaces the token through the real router; the row then decrypts.
+#[tokio::test]
+#[serial]
+async fn a_locked_token_row_is_replaced_through_the_router() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, key) = auth_row_under_another_key(&dir, &db).await;
+    assert!(cfg.server.auth_locked && cfg.encryption_secret.is_some());
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (status, _) = json_of(
+        router.clone(),
+        "GET",
+        "/api/projects",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::LOCKED);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/auth-token/regenerate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let token = body["data"].as_str().unwrap().to_string();
+    let stored = db.with_conn(rows::list).await.unwrap();
+    let row = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN).unwrap();
+    assert_eq!(decrypt_value(&row.value_encrypted, &key).unwrap(), token);
+    let (status, _) = json_of(router, "GET", "/api/projects", serde_json::json!({})).await;
+    assert_ne!(status, axum::http::StatusCode::LOCKED);
+}
+
+/// C2-07 — strict localhost does not block the recovery routes while locked.
+#[tokio::test]
+#[serial]
+async fn strict_localhost_keeps_recovery_reachable_while_locked() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    cfg.server.auth_strict_localhost = true;
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
+    let (status, _) = json_of(
+        router,
+        "POST",
+        "/api/config/recovery/restore",
+        serde_json::json!({"passphrase": "x"}),
+    )
+    .await;
+    assert_ne!(status, axum::http::StatusCode::LOCKED);
+}
+
+/// C2-15 — with the auth row unreadable, KRONN_AUTH_TOKEN serves the session
+/// and an unrelated save leaves the row untouched.
+#[tokio::test]
+#[serial]
+async fn an_env_token_never_replaces_an_unreadable_token_row() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (_, _) = auth_row_under_another_key(&dir, &db).await;
+    let before = db.with_conn(rows::list).await.unwrap();
+    dir.restart();
+    let mut cfg = config::load().await.unwrap().unwrap();
+    // The vaults hold the key (two copies), so the store arms.
+    let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar(), dir.path())
+        .await
+        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        Some("env-token"),
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
+    assert!(cfg.server.auth_locked);
+    // resolve's adoption step, as in production.
+    cfg.server.auth_token = Some("env-token".into());
+    cfg.server.auth_token_session_only = true;
+    cfg.language = "es".into();
+    config::save(&cfg).await.unwrap();
+    let after = db.with_conn(rows::list).await.unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .find(|r| r.kind == KIND_AUTH_TOKEN)
+            .unwrap()
+            .value_encrypted,
+        after
+            .iter()
+            .find(|r| r.kind == KIND_AUTH_TOKEN)
+            .unwrap()
+            .value_encrypted
+    );
+    assert!(!dir.config_text().contains("env-token"));
+}
+
+/// C2-16 — a token in config.toml wins over an unreadable stored row (the file
+/// is newer), as the key-management doc states.
+#[tokio::test]
+#[serial]
+async fn a_config_token_replaces_an_unreadable_token_row() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (_, key) = auth_row_under_another_key(&dir, &db).await;
+    dir.restart();
+    let mut cfg = config::load().await.unwrap().unwrap();
+    cfg.server.auth_token = Some("downgrade-minted".into());
+    let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar(), dir.path())
+        .await
+        .unwrap();
+    boot(
+        &mut cfg,
+        db.clone(),
+        dir.path(),
+        &outcome,
+        None,
+        BootMode::Startup,
+    )
+    .await
+    .unwrap();
+    let stored = db.with_conn(rows::list).await.unwrap();
+    let row = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN).unwrap();
+    assert_eq!(
+        decrypt_value(&row.value_encrypted, &key).unwrap(),
+        "downgrade-minted"
+    );
+}
+
+/// C2-20 — after a reset, a non-local request without a token is still refused
+/// and the credential backups are gone.
+#[tokio::test]
+#[serial]
+async fn a_reset_keeps_auth_and_removes_the_credential_backups() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    assert!(dir.path().join(BACKUP_FILENAME).exists());
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/setup/reset",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let (status, _) = json_from(
+        router,
+        "GET",
+        "/api/projects",
+        serde_json::json!({}),
+        [192, 168, 1, 9],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    assert!(!dir.path().join(BACKUP_FILENAME).exists());
+    assert!(!dir.path().join("config.toml.backup").exists());
+}
+
+/// C2-22 — config.toml lost after the migration, key lost too: the stored
+/// token row still says auth is on, so the API is locked, not open.
+#[tokio::test]
+#[serial]
+async fn a_lost_config_toml_does_not_turn_auth_off() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    migrated_then_key_lost(&dir, &db).await;
+    std::fs::remove_file(dir.path().join("config.toml")).unwrap();
+    let mut cfg = config::load()
+        .await
+        .unwrap()
+        .unwrap_or_else(config::default_config_without_key);
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    let (status, _) = json_from(
+        crate::build_router_with_auth(state_with(cfg, &db), true),
+        "GET",
+        "/api/projects",
+        serde_json::json!({}),
+        [192, 168, 1, 9],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::LOCKED);
+}
+
+/// C2-28 — a failed save leaves the live token unchanged.
+#[tokio::test]
+#[serial]
+async fn a_failed_token_save_leaves_the_live_token_unchanged() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let (mut cfg, _, _) = boot_like_main(&dir, &db).await;
+    // Armed, but no key in memory: storing a credential fails.
+    cfg.encryption_secret = None;
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/auth-token/regenerate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert_eq!(
+        state.config.read().await.server.auth_token.as_deref(),
+        Some(AUTH_TOKEN)
+    );
+    let (_, body) = json_of(
+        router,
+        "POST",
+        "/api/config/network-exposure",
+        serde_json::json!({"exposed": true}),
+    )
+    .await;
+    let _ = body;
+    assert_eq!(
+        state.config.read().await.server.auth_token.as_deref(),
+        Some(AUTH_TOKEN)
+    );
 }

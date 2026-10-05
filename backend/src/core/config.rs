@@ -250,7 +250,6 @@ fn write_config_atomic(
     path: &std::path::Path,
     content: &[u8],
 ) -> std::io::Result<()> {
-    use std::io::Write;
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(
         ".{}.{}.{}.tmp",
@@ -258,16 +257,9 @@ fn write_config_atomic(
         std::process::id(),
         seq
     ));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        f.sync_all()?;
-    }
+    // Owner-only from creation, never through a planted symlink, and removed
+    // when the write or fsync fails.
+    super::keyvault::write_private_temp(&tmp, content)?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -573,7 +565,9 @@ pub fn default_config_without_key() -> AppConfig {
 /// the file a reset writes when config.toml carries a needed copy of the key.
 fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
     let table: toml::Table = content.parse().context("Failed to parse config file")?;
-    if table.contains_key("server") {
+    // Only an empty file or one holding just the key: anything else (a
+    // `[tokens]` table, say) is a real config whose content must not be dropped.
+    if !table.keys().all(|k| k == "encryption_secret") {
         return Ok(None);
     }
     Ok(Some(
@@ -709,6 +703,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// C2-17 — the temp file is created owner-only and never follows a
+    /// symlink planted at its name.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_atomic_never_follows_a_planted_temp_symlink() {
+        let dir = scratch_dir("atomic-symlink");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let seq = TMP_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+        for next in seq..seq + 64 {
+            let name = format!(".{}.{}.{}.tmp", CONFIG_FILE, std::process::id(), next);
+            let _ = std::os::unix::fs::symlink(&victim, dir.join(name));
+        }
+        write_config_atomic(&dir, &dir.join(CONFIG_FILE), b"secret = 1\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap(),
+            "secret = 1\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C2-31 — only an empty or key-only file counts as "key only".
+    #[test]
+    fn only_a_key_only_file_is_read_as_key_only() {
+        assert_eq!(key_only_file("").unwrap(), Some(None));
+        assert_eq!(
+            key_only_file("encryption_secret = \"ab\"\n").unwrap(),
+            Some(Some("ab".into()))
+        );
+        assert_eq!(
+            key_only_file("[tokens]\nanthropic = \"sk\"\n").unwrap(),
+            None
+        );
+        assert_eq!(key_only_file("language = \"fr\"\n").unwrap(), None);
     }
 
     #[test]

@@ -2247,39 +2247,68 @@ pub async fn import_data(
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // Remove the settings; a needed copy of the key stays in a key-only file.
-    if let Err(e) = config::reset_to_key_only().await {
+    // Clear the data first: a failure reports, and nothing else changes.
+    if let Err(e) = state
+        .db
+        .with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("DELETE FROM mcp_config_projects;")?;
+            // Every table holding ciphertext, except the credential store,
+            // whose auth token survives (below).
+            for col in crate::core::keystore::ENCRYPTED_COLUMNS {
+                if col.table != "stored_credentials" {
+                    tx.execute(&format!("DELETE FROM {}", col.table), [])?;
+                }
+            }
+            tx.execute_batch(
+                "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    {
         return Json(ApiResponse::err(format!(
             "Reset failed, nothing was cleared: {e}"
         )));
     }
+    let Ok(dir) = config::config_dir() else {
+        return Json(ApiResponse::err("Reset failed: no data directory"));
+    };
+    if let Err(e) = crate::core::credential_store::forget_provider_keys(&dir, &state.db).await {
+        return Json(ApiResponse::err(format!(
+            "Reset cleared the data but not the stored keys: {e}"
+        )));
+    }
+    // Remove the settings; a needed copy of the key stays in a key-only file.
+    if let Err(e) = config::reset_to_key_only().await {
+        return Json(ApiResponse::err(format!(
+            "Reset could not rewrite config.toml: {e}"
+        )));
+    }
+    // The old encrypted credentials go; an older config backup may hold
+    // another key, so it is set aside, not deleted.
+    let _ = std::fs::remove_file(dir.join(crate::core::credential_store::BACKUP_FILENAME));
+    let backup = dir.join("config.toml.backup");
+    if backup.exists() {
+        if let Err(e) = crate::db::migrations::rotate_config_backup(&dir, &backup) {
+            tracing::warn!("Reset could not set config.toml.backup aside: {e}");
+        }
+    }
     tracing::info!("Config reset");
 
-    // Reset in-memory config to defaults, keeping the active key: a fresh
-    // random one would encrypt new secrets under a key no vault holds.
+    // Defaults in memory, keeping the active key (a fresh one would encrypt new
+    // secrets under a key no vault holds) and the API auth, so a LAN-bound
+    // instance never answers unauthenticated after a reset.
     let mut cfg = state.config.write().await;
-    let active_key = cfg.encryption_secret.clone();
+    let previous = cfg.clone();
     *cfg = config::default_config();
-    cfg.encryption_secret = active_key;
-    if let Ok(dir) = config::config_dir() {
-        if let Err(e) = crate::core::credential_store::forget_all(&dir, &state.db).await {
-            tracing::error!("Failed to clear stored credentials during reset: {e}");
-        }
-    }
-
-    // Clear all data from DB, every encrypted column's table included.
-    if let Err(e) = state.db.with_conn(|conn| {
-        conn.execute_batch("DELETE FROM mcp_config_projects;")?;
-        for col in crate::core::keystore::ENCRYPTED_COLUMNS {
-            conn.execute(&format!("DELETE FROM {}", col.table), [])?;
-        }
-        conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;"
-        )?;
-        Ok(())
-    }).await {
-        tracing::error!("Failed to clear database during reset: {e}");
-    }
+    cfg.encryption_secret = previous.encryption_secret;
+    cfg.server.auth_token = previous.server.auth_token;
+    cfg.server.auth_enabled = previous.server.auth_enabled;
+    cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
+    cfg.server.auth_locked = previous.server.auth_locked;
+    cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
 
     Json(ApiResponse::ok(()))
 }
@@ -2428,17 +2457,28 @@ pub async fn restore_recovery(
     .await
     {
         Ok(outcome) => {
-            // The key is back: load the stored credentials it unlocks.
+            // The key is back: load the stored credentials it unlocks, keeping
+            // the operator's session token and whether auth is on.
+            let session_token = config
+                .server
+                .auth_token
+                .clone()
+                .filter(|_| config.server.auth_token_session_only);
             if let Err(e) = crate::core::credential_store::boot(
                 &mut config,
                 state.db.clone(),
                 &dir,
                 &outcome,
-                None,
+                session_token.as_deref(),
+                crate::core::credential_store::BootMode::Restore,
             )
             .await
             {
                 tracing::error!("Credential store after key restore: {e:#}");
+                return Json(ApiResponse::err(format!(
+                    "The key was restored, but loading the stored credentials failed: {e:#}. \
+                     Restart Kronn; nothing was deleted."
+                )));
             }
             if config.server.auth_token.is_some() {
                 config.server.auth_locked = false;

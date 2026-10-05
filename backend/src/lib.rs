@@ -61,6 +61,7 @@ pub async fn resolve_key_and_credentials(
         &dir,
         &key_outcome,
         env_auth_token.as_deref(),
+        crate::core::credential_store::BootMode::Startup,
     )
     .await
     {
@@ -81,12 +82,16 @@ pub async fn resolve_key_and_credentials(
             }
         }
     }
-    if crate::core::credential_store::is_armed(&dir) {
+    // A stored token that cannot be read (row under another key) is never
+    // replaced by the env token: that one then serves this session only.
+    let stored_token_unreadable = config.server.auth_locked && config.server.auth_token.is_none();
+    if crate::core::credential_store::is_armed(&dir) && !stored_token_unreadable {
         // A different stored token wins (with a warning), as config.toml did before.
         crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
     } else if let Some(token) = env_auth_token.filter(|t| !t.is_empty()) {
-        // Store not armed (key locked): the operator's token serves this session
-        // only, never written in plaintext nor replacing the stored one.
+        // Store not armed (key locked), or its token unreadable: the operator's
+        // token serves this session only, never written in plaintext nor
+        // replacing the stored one.
         if config.server.auth_token.is_none() {
             config.server.auth_token = Some(token);
             config.server.auth_token_session_only = true;
@@ -568,19 +573,21 @@ async fn auth_middleware(
     let expected_token = config.server.auth_token.clone();
     let strict_localhost = config.server.auth_strict_localhost;
     let auth_locked = config.server.auth_locked && auth_enabled && expected_token.is_none();
+    let key_in_use = config.encryption_secret.is_some();
     drop(config);
 
     // A stored token that cannot be decrypted is not "auth off": only the routes
-    // that bring the key back stay open, and only to a local caller.
+    // that bring the key or a token back stay open, and only to a local caller.
+    // Strict-localhost is ignored here: no token can be checked anyway.
     if auth_locked {
-        let local = !strict_localhost && request_is_local_ip(&headers, &request);
+        let local = request_is_local_ip(&headers, &request);
         let bridge_bearer = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .is_some_and(|token| token.starts_with(crate::core::bridge_token::TOKEN_PREFIX));
         // A bridge token never reaches the recovery routes, locked or not.
-        if !bridge_bearer && auth_locked_allows(request.uri().path(), local) {
+        if !bridge_bearer && auth_locked_allows(request.uri().path(), local, key_in_use) {
             return Ok(next.run(request).await);
         }
         return Ok(auth_locked_refusal());
@@ -632,8 +639,14 @@ const AUTH_LOCKED_ROUTES: &[&str] = &[
     "/api/config/recovery/restore",
 ];
 
-fn auth_locked_allows(path: &str, local_caller: bool) -> bool {
-    local_caller && AUTH_LOCKED_ROUTES.contains(&path)
+/// With the key in use (only the token row is unreadable), a local caller may
+/// also set a new token: the explicit replacement of that row.
+const AUTH_LOCKED_ROUTES_WITH_KEY: &[&str] = &["/api/config/auth-token/regenerate"];
+
+fn auth_locked_allows(path: &str, local_caller: bool, key_in_use: bool) -> bool {
+    local_caller
+        && (AUTH_LOCKED_ROUTES.contains(&path)
+            || (key_in_use && AUTH_LOCKED_ROUTES_WITH_KEY.contains(&path)))
 }
 
 fn auth_locked_refusal() -> axum::response::Response {
@@ -3050,11 +3063,30 @@ mod auth_tests {
 
     #[test]
     fn locked_auth_opens_only_the_recovery_routes_to_a_local_caller() {
-        assert!(auth_locked_allows("/api/config/recovery/status", true));
-        assert!(auth_locked_allows("/api/config/recovery/restore", true));
-        assert!(!auth_locked_allows("/api/config/recovery/restore", false));
-        assert!(!auth_locked_allows("/api/config/recovery/set", true));
-        assert!(!auth_locked_allows("/api/projects", true));
+        assert!(auth_locked_allows(
+            "/api/config/recovery/status",
+            true,
+            false
+        ));
+        assert!(auth_locked_allows(
+            "/api/config/recovery/restore",
+            true,
+            false
+        ));
+        assert!(!auth_locked_allows(
+            "/api/config/recovery/restore",
+            false,
+            true
+        ));
+        assert!(!auth_locked_allows("/api/config/recovery/set", true, true));
+        assert!(!auth_locked_allows("/api/projects", true, true));
+        let regen = "/api/config/auth-token/regenerate";
+        assert!(auth_locked_allows(regen, true, true));
+        assert!(
+            !auth_locked_allows(regen, true, false),
+            "no key: no new token"
+        );
+        assert!(!auth_locked_allows(regen, false, true));
     }
 
     // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────

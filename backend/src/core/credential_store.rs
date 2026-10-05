@@ -83,7 +83,12 @@ fn from_config(config: &AppConfig) -> Vec<PlainCredential> {
         .clone()
         .filter(|t| !t.is_empty() && !config.server.auth_token_session_only)
     {
-        out.push(PlainCredential::auth_token(token));
+        // `active` stores whether auth is enabled, so a lost config.toml does
+        // not turn auth off silently.
+        out.push(PlainCredential {
+            active: config.server.auth_enabled,
+            ..PlainCredential::auth_token(token)
+        });
     }
     out
 }
@@ -359,6 +364,38 @@ pub async fn forget_all(dir: &Path, db: &Database) -> Result<()> {
     Ok(())
 }
 
+/// Delete every stored provider key of `dir`, keeping the API auth token: a
+/// reset must not leave a LAN-bound instance without auth.
+pub async fn forget_provider_keys(dir: &Path, db: &Database) -> Result<()> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM stored_credentials WHERE kind = ?1",
+            [KIND_PROVIDER_KEY],
+        )?)
+    })
+    .await?;
+    if let Some(armed) = armed_for(dir) {
+        armed
+            .persisted
+            .lock()
+            .await
+            .retain(|c| c.kind != KIND_PROVIDER_KEY);
+        armed
+            .preserve
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(kind, _)| kind != KIND_PROVIDER_KEY);
+    }
+    Ok(())
+}
+
+/// Why [`boot`] runs: at startup, or after the key was restored at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootMode {
+    Startup,
+    Restore,
+}
+
 /// What [`boot`] did, for the boot log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialBoot {
@@ -380,14 +417,19 @@ pub async fn boot(
     dir: &Path,
     key_outcome: &KeyOutcome,
     env_auth_token: Option<&str>,
+    mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
     // Until armed below, saves may only keep what config.toml holds now.
     note_file_credentials(dir, config);
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
-        // A stored token we cannot read is "auth locked", never "no auth".
+        // A stored token we cannot read is "auth locked", never "no auth"; its
+        // row still says whether auth was enabled.
         if config.server.auth_token.is_none() {
             let stored = db.with_conn(rows::list).await?;
-            config.server.auth_locked = stored.iter().any(|r| r.kind == KIND_AUTH_TOKEN);
+            if let Some(row) = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN) {
+                config.server.auth_locked = true;
+                config.server.auth_enabled |= row.active;
+            }
         }
         tracing::warn!(
             "credentials: the encryption key is locked — stored provider keys and the auth token \
@@ -400,6 +442,10 @@ pub async fn boot(
     };
 
     let stored = db.with_conn(rows::list).await?;
+    // The stored token row remembers that auth was enabled (config.toml lost).
+    if stored.iter().any(|r| r.kind == KIND_AUTH_TOKEN && r.active) {
+        config.server.auth_enabled = true;
+    }
     let mut table = Vec::new();
     let mut preserve = HashSet::new();
     for row in stored {
@@ -445,7 +491,10 @@ pub async fn boot(
         merged.push(PlainCredential::auth_token(
             uuid::Uuid::new_v4().to_string(),
         ));
-        config.server.auth_enabled = crate::core::env::auth_on_by_default();
+        // A restore never changes whether auth is on.
+        if mode == BootMode::Startup {
+            config.server.auth_enabled = crate::core::env::auth_on_by_default();
+        }
         generated_auth_token = true;
         tracing::info!(
             "Generated auth token (auth_enabled={}, docker={})",

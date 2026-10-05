@@ -873,7 +873,7 @@ fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Move `backup` to `config.toml.backup.<UTC timestamp>` (owner-only).
-fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result<()> {
+pub(crate) fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result<()> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
     let mut target = dir.join(format!("config.toml.backup.{stamp}"));
     let mut n = 1;

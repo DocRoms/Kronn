@@ -595,6 +595,21 @@ async fn start_backend(
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
 
+    // Same LAN guard as the standalone backend: never serve the network with
+    // an unauthenticated API.
+    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
+        bind_host == "0.0.0.0",
+        app_config.server.auth_enabled,
+        app_config.server.auth_token_or_lock(),
+        ack_insecure,
+    ) {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg));
+    }
+
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(
         &database,
@@ -1049,7 +1064,7 @@ fn main() {
                         {
                             tracing::error!("Backend failed: {}", e);
                             let message =
-                                format!("Kronn's local service stopped during startup: {e}");
+                                format!("Kronn's local service stopped during startup: {e:#}");
                             *app_handle
                                 .state::<BackendInfo>()
                                 .startup_error
