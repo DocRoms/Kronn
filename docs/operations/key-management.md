@@ -49,7 +49,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:268-338]
+   [src: file: backend/src/core/keystore.rs:298-381]
 3. The resolved key is mirrored into the writable vaults. A vault whose read
    failed is never written. `config.toml` drops its copy only when a vault
    reads the key back, the key decrypts at least one row of every non-empty
@@ -58,11 +58,11 @@ the previous file untouched.
    kept. Without a recovery passphrase, nothing deletes a local copy of the
    key (vault, sidecar); `GET /api/config/recovery/status` reports it
    (`key_copies_kept`, `config_holds_key`) and the boot log warns.
-   [src: file: backend/src/core/keystore.rs:201-241]
+   [src: file: backend/src/core/keystore.rs:231-271]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
-   as it is. [src: file: backend/src/core/credential_store.rs:272-379]
+   as it is. [src: file: backend/src/core/credential_store.rs:272-391]
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4
@@ -102,7 +102,7 @@ Safe to interrupt at any point; a rerun converges:
    failed credential boot cannot leave them in plaintext there.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:441-444]
+[src: file: backend/src/core/credential_store.rs:453-456]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -113,7 +113,7 @@ are kept untouched (logged as locked) and never deleted by later saves.
 When `recovery.key` already exists, the request must carry
 `current_passphrase`, which must unwrap it; an unreadable `recovery.key` is
 never replaced from the API (move it out of the data directory by hand).
-[src: file: backend/src/core/keystore.rs:375-410]
+[src: file: backend/src/core/keystore.rs:418-453]
 
 ## Testing the Keychain path from a dev build
 
