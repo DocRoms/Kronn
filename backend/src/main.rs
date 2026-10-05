@@ -16,6 +16,8 @@ fn main() -> anyhow::Result<()> {
     // leaves this process's environment before any thread exists (removing a
     // variable is not thread-safe): children never inherit the admin token.
     let env_token = kronn::core::config::take_env_auth_token();
+    // Same for the operator's raw key: kept in memory, never inherited.
+    kronn::core::keyvault::take_env_kek();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

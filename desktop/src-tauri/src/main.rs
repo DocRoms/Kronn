@@ -872,7 +872,35 @@ async fn wait_for_backend(info: tauri::State<'_, BackendInfo>) -> Result<String,
 /// devices" toggle, whose host change only takes effect on a re-bind.
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    app.restart();
+    match self_restart_command() {
+        Ok(mut command) => {
+            if let Err(error) = command.spawn() {
+                tracing::error!("failed to restart the desktop app: {error}");
+                return;
+            }
+        }
+        Err(error) => {
+            tracing::error!("failed to restart the desktop app: {error}");
+            return;
+        }
+    }
+    app.cleanup_before_exit();
+    std::process::exit(0);
+}
+
+/// The relaunched app: a declared exception (design note §9), its own
+/// environment without the forbidden names, and the operator's key override
+/// handed back, since it left this process's environment at start.
+fn self_restart_command() -> std::io::Result<std::process::Command> {
+    let mut command = kronn::core::cmd::full_env_sync_cmd(
+        std::env::current_exe()?,
+        kronn::core::cmd::FullEnvReason::SelfRestart,
+    );
+    command.args(std::env::args_os().skip(1));
+    if let Some(key) = kronn::core::keyvault::KeyStore::env_override() {
+        command.env(kronn::core::keyvault::ENV_KEK, key);
+    }
+    Ok(command)
 }
 
 /// Open the native folder picker. Dismissal returns an empty list.
@@ -937,6 +965,7 @@ fn main() {
     // An operator-set KRONN_AUTH_TOKEN leaves the environment before any thread
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
+    kronn::core::keyvault::take_env_kek();
     // Initialize tracing
     // stdout plus the data directory's kronn.log, the log the user can read.
     {
@@ -1076,15 +1105,14 @@ fn main() {
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) =
-                            start_backend(
-                                backend_port,
-                                reserved,
-                                dist_dir,
-                                data_dir_lock,
-                                env_token,
-                            )
-                            .await
+                        if let Err(e) = start_backend(
+                            backend_port,
+                            reserved,
+                            dist_dir,
+                            data_dir_lock,
+                            env_token,
+                        )
+                        .await
                         {
                             tracing::error!("Backend failed: {}", e);
                             let message =
@@ -1398,5 +1426,27 @@ mod enrich_path_tests {
             Some(s) => std::env::set_var("SHELL", s),
             None => std::env::remove_var("SHELL"),
         }
+    }
+}
+
+#[cfg(test)]
+mod self_restart_tests {
+    /// The relaunched app never inherits the admin token or the raw key from
+    /// this process's environment (B4-08).
+    #[test]
+    fn the_relaunch_drops_the_forbidden_names() {
+        let command = super::self_restart_command().unwrap();
+        for name in kronn::core::child_env::FORBIDDEN {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == *name && value.is_none()),
+                "{name} is not removed from the relaunch"
+            );
+        }
+        assert_eq!(
+            command.get_program(),
+            std::env::current_exe().unwrap().as_os_str()
+        );
     }
 }

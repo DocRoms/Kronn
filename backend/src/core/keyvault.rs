@@ -25,6 +25,33 @@ use std::path::{Path, PathBuf};
 
 /// Env var an operator can set to pin the key (highest priority). Read-only.
 pub const ENV_KEK: &str = "KRONN_ENCRYPTION_KEK";
+/// The operator's key override, kept in memory once taken out of the
+/// process environment.
+static TAKEN_ENV_KEK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn read_env_kek() -> Option<String> {
+    std::env::var(ENV_KEK)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the operator's `KRONN_ENCRYPTION_KEK` and remove it (and the legacy
+/// `KRONN_KEK`) from this process's environment, so no child can inherit the
+/// raw key (KT-1006). Call before any thread exists: removing a variable is
+/// not thread-safe.
+fn take_env_kek_from_process() -> Option<String> {
+    let value = read_env_kek();
+    std::env::remove_var(ENV_KEK);
+    std::env::remove_var("KRONN_KEK");
+    value
+}
+
+/// [`take_env_kek_from_process`], keeping the value for [`KeyStore::env_override`].
+pub fn take_env_kek() {
+    let _ = TAKEN_ENV_KEK.set(take_env_kek_from_process());
+}
+
 /// Keychain service. Account is versioned so a future key scheme can coexist.
 pub const KEYCHAIN_SERVICE: &str = "com.kronn.kronn";
 pub const KEYCHAIN_ACCOUNT: &str = "encryption_secret_v1";
@@ -257,11 +284,12 @@ impl KeyStore {
     }
 
     /// The env override, if set and non-empty. Read-only, highest priority.
+    /// Once [`take_env_kek`] ran, the value it kept in memory.
     pub fn env_override() -> Option<String> {
-        std::env::var(ENV_KEK)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        if let Some(taken) = TAKEN_ENV_KEK.get() {
+            return taken.clone();
+        }
+        read_env_kek()
     }
 
     /// Highest-priority key currently present: env → vaults in order.
@@ -448,6 +476,35 @@ mod tests {
         let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value("keychain", "otherkey"))]);
         assert_eq!(ks.primary(), Some(("envkey".to_string(), "env")));
         std::env::remove_var(ENV_KEK);
+    }
+
+    #[test]
+    #[serial]
+    fn the_key_override_leaves_the_process_environment() {
+        std::env::set_var(ENV_KEK, " envkey \n");
+        std::env::set_var("KRONN_KEK", "legacy");
+        assert_eq!(take_env_kek_from_process(), Some("envkey".to_string()));
+        assert!(std::env::var_os(ENV_KEK).is_none());
+        assert!(std::env::var_os("KRONN_KEK").is_none());
+    }
+
+    /// Both entry points take the key out before any thread starts.
+    #[test]
+    fn both_binaries_take_the_key_override_first() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for (file, before) in [
+            (root.join("src/main.rs"), "tokio::runtime::Builder"),
+            (
+                root.join("../desktop/src-tauri/src/main.rs"),
+                "tracing_subscriber::fmt()",
+            ),
+        ] {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let take = text
+                .find("keyvault::take_env_kek()")
+                .unwrap_or_else(|| panic!("{} never takes the key override", file.display()));
+            assert!(take < text.find(before).unwrap(), "{}", file.display());
+        }
     }
 
     #[test]
