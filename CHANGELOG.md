@@ -511,7 +511,13 @@ Release notes for 0.9.3 and earlier are available in the
   `exec_stdin` value when the program runs its stdin as code (a shell or an
   interpreter without a script or inline code). A config restore imports a
   workflow that fails these rules disabled and leaves such a Quick Exec out,
-  and its report names each one and why.
+  and its report names each one and why. Option clusters of launchers
+  (`sudo -Eu`, `env -iS`), `docker compose`, git options and subcommands
+  that run commands (`rebase --exec`, `submodule foreach`, `bisect run`,
+  `git config` values), more launchers (`watch`, `flock`, `kubectl exec`,
+  `chroot`, `strace`, `parallel`…) and package fetchers (`pip install`,
+  `pipx run`, `uvx`, `go run`, `cargo install`, `gem install`,
+  `deno run`/`eval`) follow the same rule.
 
 ### Changed
 
