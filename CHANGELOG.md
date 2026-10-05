@@ -76,7 +76,8 @@ Release notes for 0.9.3 and earlier are available in the
   (Claude Code's `total_cost_usd`, OpenRouter's `usage.cost`), summed over the
   step's attempts, and the audit's total: exact when every step reported,
   "≥ x $" naming the unknown steps otherwise. A step whose agent reported no
-  cost reads "cost ?", never 0. Each run records the model its agent served,
+  cost reads "cost ?", never 0, and so does an HTTP step where any response
+  came without a cost, instead of showing a partial sum. Each run records the model its agent served,
   or the configured one labelled as such, and `step_done` carries the step's
   cost (KT-997).
 

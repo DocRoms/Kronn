@@ -1832,6 +1832,9 @@ struct AgentUsage {
     /// Cost the provider or CLI reported itself, summed over the run's
     /// responses, in micro-USD. `None` when never reported.
     cost_usd_micros: Option<u64>,
+    /// At least one response reported no cost: the sum is then only a part of
+    /// the run's cost, so the run's cost is unknown.
+    cost_incomplete: bool,
     /// The last native tool an HTTP agent called (with its path when it has
     /// one) and how many it has called: what a CLI's stream-json shows.
     last_tool: Option<String>,
@@ -1945,7 +1948,8 @@ impl AgentProcess {
     /// The run's cost as the provider or CLI reported it (KT-997), in
     /// micro-USD. `None` when nothing reported one: unknown, never zero.
     pub fn reported_cost_usd_micros(&self) -> Option<u64> {
-        self.usage.lock().unwrap().cost_usd_micros
+        let usage = self.usage.lock().unwrap();
+        usage.cost_usd_micros.filter(|_| !usage.cost_incomplete)
     }
 
     pub fn reported_usage_counters(&self) -> Option<ReportedUsage> {
@@ -5034,6 +5038,7 @@ async fn run_acp_session(
                             output_tokens,
                             prompt_cache,
                             cost_usd_micros: usage.cost_usd_micros,
+                            cost_incomplete: usage.cost_incomplete,
                             ..AgentUsage::default()
                         };
                     }
@@ -9035,9 +9040,12 @@ async fn start_ollama_http_with_idle(
                             .saturating_add(written),
                     );
                 }
-                if let Some(cost) = tally.cost_usd_micros {
-                    usage.cost_usd_micros =
-                        Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));
+                match tally.cost_usd_micros {
+                    Some(cost) => {
+                        usage.cost_usd_micros =
+                            Some(usage.cost_usd_micros.unwrap_or(0).saturating_add(cost));
+                    }
+                    None => usage.cost_incomplete = true,
                 }
             }
             let worker_repair_stage_for_turn = worker_repair_stage;
