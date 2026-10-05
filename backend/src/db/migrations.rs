@@ -823,6 +823,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "213_workflow_run_payload_retention",
         include_str!("sql/213_workflow_run_payload_retention.sql"),
     ),
+    (
+        "214_workflow_project_scope",
+        include_str!("sql/214_workflow_project_scope.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

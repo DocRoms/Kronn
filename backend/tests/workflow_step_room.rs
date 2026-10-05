@@ -159,6 +159,7 @@ fn workflow() -> Workflow {
     .unwrap();
     assert!(matches!(steps[1].step_type, StepType::Agent));
     Workflow {
+        project_scope: None,
         pinned: false,
         id: "wf-793".into(),
         name: "autoCode".into(),

@@ -1497,6 +1497,20 @@ pub async fn unsafe_steps(
 }
 
 /// POST /api/workflows
+/// KT-851 — a listed project scope names existing projects.
+async fn validate_project_scope_db(
+    state: &AppState,
+    scope: Option<crate::models::WorkflowProjectScope>,
+) -> Result<(), String> {
+    state
+        .db
+        .with_read_conn(move |conn| {
+            crate::workflows::project_scope::validate_scope(conn, scope.as_ref())
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+}
+
 /// Save-time half of KT-917: a structured field written as `ref:<kind>:<slug>`
 /// is stored as the local id it names, so graph validation reads literal ids.
 async fn resolve_saved_references(
@@ -1504,6 +1518,7 @@ async fn resolve_saved_references(
     project_id: Option<String>,
     steps: &mut Vec<WorkflowStep>,
     on_failure: &mut Vec<WorkflowStep>,
+    keep_resource_refs: bool,
 ) -> Result<(), String> {
     let mut owned = (std::mem::take(steps), std::mem::take(on_failure));
     let result = state
@@ -1513,14 +1528,14 @@ async fn resolve_saved_references(
                 conn,
                 &mut owned.0,
                 project_id.as_deref(),
-                false,
+                keep_resource_refs,
             )
             .and_then(|()| {
                 crate::core::resource_refs::resolve_structured_references(
                     conn,
                     &mut owned.1,
                     project_id.as_deref(),
-                    false,
+                    keep_resource_refs,
                 )
             });
             Ok::<_, anyhow::Error>((owned, outcome))
@@ -1537,11 +1552,16 @@ pub async fn create(
     State(state): State<AppState>,
     Json(mut req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
+    if let Err(e) = validate_project_scope_db(&state, req.project_scope.clone()).await {
+        return Json(ApiResponse::err(e));
+    }
+    let keep_resource_refs = req.project_scope.is_some();
     if let Err(e) = resolve_saved_references(
         &state,
         req.project_id.clone(),
         &mut req.steps,
         &mut req.on_failure,
+        keep_resource_refs,
     )
     .await
     {
@@ -1691,6 +1711,7 @@ pub async fn create(
         // to preserve back-compat with every UI-driven save. Cf.
         // [[project_mcp_draft_creation_0_8_5]].
         enabled: req.enabled.unwrap_or(true),
+        project_scope: req.project_scope,
         created_at: now,
         updated_at: now,
     };
@@ -1839,8 +1860,19 @@ pub async fn update(
             .unwrap_or_else(|| existing.project_id.clone());
         let mut steps = req.steps.clone().unwrap_or_default();
         let mut on_failure = req.on_failure.clone().unwrap_or_default();
-        if let Err(e) =
-            resolve_saved_references(&state, project_id, &mut steps, &mut on_failure).await
+        let keep_resource_refs = req
+            .project_scope
+            .clone()
+            .unwrap_or_else(|| existing.project_scope.clone())
+            .is_some();
+        if let Err(e) = resolve_saved_references(
+            &state,
+            project_id,
+            &mut steps,
+            &mut on_failure,
+            keep_resource_refs,
+        )
+        .await
         {
             return Json(ApiResponse::err(e));
         }
@@ -1849,6 +1881,11 @@ pub async fn update(
         }
         if req.on_failure.is_some() {
             req.on_failure = Some(on_failure);
+        }
+    }
+    if let Some(scope) = req.project_scope.clone() {
+        if let Err(e) = validate_project_scope_db(&state, scope).await {
+            return Json(ApiResponse::err(e));
         }
     }
     // Child targets are re-read only when what they depend on changes, so a
@@ -1979,6 +2016,7 @@ pub async fn update(
         variables: req.variables.unwrap_or(existing.variables),
         enabled: req.enabled.unwrap_or(existing.enabled),
         pinned: req.pinned.unwrap_or(existing.pinned),
+        project_scope: req.project_scope.unwrap_or(existing.project_scope),
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -2900,8 +2938,19 @@ pub(crate) async fn create_manual_run_with_id(
     // that project's environment/worktree exactly like one declared on the
     // project directly (KT-476 LaunchContext). A workflow's own declared
     // project always wins.
-    if wf.project_id.is_none() {
-        wf.project_id = launch.project_id.clone();
+    // KT-851 — a multi-project workflow runs for the project resolved here;
+    // the run carries it, `wf` is only this launch's copy.
+    wf.project_id = crate::workflows::project_scope::resolve_run_project(&wf, &launch)?;
+    if let (Some(_), Some(project_id)) = (wf.project_scope.as_ref(), wf.project_id.clone()) {
+        let exists = state
+            .db
+            .with_read_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+            .await
+            .map_err(|error| format!("DB error: {error}"))?
+            .is_some();
+        if !exists {
+            return Err("The project this workflow should run for no longer exists".into());
+        }
     }
     let (secret, retention_days) = {
         let config = state.config.read().await;
@@ -3066,8 +3115,8 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let (provided_vars, initial_state) = body
-        .map(|Json(b)| (b.variables, b.state))
+    let (provided_vars, initial_state, requested_project_id) = body
+        .map(|Json(b)| (b.variables, b.state, b.project_id))
         .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
@@ -3076,7 +3125,10 @@ pub async fn trigger(
         provided_vars,
         initial_state,
         Some(tx),
-        crate::core::launch_context::LaunchContext::default(),
+        crate::core::launch_context::LaunchContext {
+            requested_project_id,
+            ..Default::default()
+        },
     )
     .await
     {
@@ -6348,6 +6400,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
             name: name.into(),

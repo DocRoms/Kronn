@@ -1954,13 +1954,33 @@ fn import_document(
                     }
                 }
             }
+            // Project ids are this instance's: another machine's are dropped,
+            // and a list left empty makes the workflow single-project (KT-851).
+            if let Some(crate::models::WorkflowProjectScope::Projects { project_ids }) =
+                resource.project_scope.as_mut()
+            {
+                let mut known = Vec::new();
+                for id in project_ids.drain(..) {
+                    if crate::db::projects::get_project(conn, &id)?.is_some() {
+                        known.push(id);
+                    }
+                }
+                *project_ids = known;
+            }
+            if matches!(
+                &resource.project_scope,
+                Some(crate::models::WorkflowProjectScope::Projects { project_ids }) if project_ids.is_empty()
+            ) {
+                resource.project_scope = None;
+            }
             // The repository names other resources by slug (KT-917).
+            let keep_resource_refs = resource.project_scope.is_some();
             for steps in [&mut resource.steps, &mut resource.on_failure] {
                 crate::core::resource_refs::resolve_structured_references(
                     conn,
                     steps,
                     Some(project_id),
-                    false,
+                    keep_resource_refs,
                 )
                 .map_err(anyhow::Error::msg)?;
             }

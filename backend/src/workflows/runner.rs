@@ -765,7 +765,25 @@ async fn execute_run_body(
             .map_err(anyhow::Error::msg)
         })
         .await?;
-    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let mut workflow_in_project = workflow_in_run_project(workflow, run);
+    // KT-851 — a multi-project workflow keeps Quick Prompt/API references
+    // symbolic; they resolve in this run's project.
+    if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
+        let mut resolved = workflow_in_project.into_owned();
+        let project_id = resolved.project_id.clone();
+        let resolved_steps = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::resource_refs::resolve_run_structured_references(
+                    conn,
+                    &mut resolved,
+                    project_id.as_deref(),
+                )?;
+                Ok(resolved)
+            })
+            .await?;
+        workflow_in_project = std::borrow::Cow::Owned(resolved_steps);
+    }
     let workflow: &Workflow = &workflow_in_project;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
@@ -5005,6 +5023,7 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            project_scope: None,
             pinned: false,
             id: "test".into(),
             name: "test".into(),
@@ -7276,6 +7295,111 @@ mod tests {
         let output = &run.step_results.last().unwrap().output;
         assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
         assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    // ─── KT-851 — one workflow, several projects ─────────────────────────
+
+    async fn git_project(state: &crate::AppState, id: &str) -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().unwrap();
+        git_in(repo.path(), &["init", "-q", "-b", "main"]).await;
+        git_in(repo.path(), &["config", "user.email", "test@kronn.local"]).await;
+        git_in(repo.path(), &["config", "user.name", "test"]).await;
+        std::fs::write(repo.path().join("README.md"), id).unwrap();
+        git_in(repo.path(), &["add", "."]).await;
+        git_in(repo.path(), &["commit", "-q", "-m", "init"]).await;
+        insert_project_at(state, id, repo.path()).await;
+        repo
+    }
+
+    #[tokio::test]
+    async fn one_workflow_triggered_for_two_projects_runs_isolated_in_each_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo_a = git_project(&state, "proj-multi-a").await;
+        let repo_b = git_project(&state, "proj-multi-b").await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-multi".into();
+        workflow.name = "multi".into();
+        workflow.project_id = None;
+        workflow.project_scope = Some(crate::models::WorkflowProjectScope::Projects {
+            project_ids: vec!["proj-multi-a".into(), "proj-multi-b".into()],
+        });
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["cat".into()];
+        workflow.steps = vec![exec_step("which", "cat", &["README.md"])];
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        let mut finished = Vec::new();
+        for project in ["proj-multi-a", "proj-multi-b"] {
+            let (wf, mut run) = crate::api::workflows::create_manual_run(
+                &state,
+                &workflow.id,
+                Default::default(),
+                Default::default(),
+                crate::core::launch_context::LaunchContext {
+                    requested_project_id: Some(project.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("admitted");
+            assert_eq!(run.project_id.as_deref(), Some(project));
+            execute_run(
+                state.clone(),
+                &wf,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("run");
+            finished.push(run);
+        }
+        let refused = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                requested_project_id: Some("proj-elsewhere".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("does not serve"), "{refused}");
+
+        for (run, repo, readme) in [
+            (&finished[0], &repo_a, "proj-multi-a"),
+            (&finished[1], &repo_b, "proj-multi-b"),
+        ] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            assert!(
+                run.step_results[0].output.contains(readme),
+                "{:?}",
+                run.step_results
+            );
+            let workspace = run.workspace_path.as_deref().expect("an isolated worktree");
+            let canonical_repo = repo.path().canonicalize().unwrap();
+            assert!(
+                std::path::Path::new(workspace).starts_with(repo.path())
+                    || std::path::Path::new(workspace).starts_with(&canonical_repo),
+                "{workspace} is not under its project's repository"
+            );
+        }
+        assert_ne!(finished[0].workspace_path, finished[1].workspace_path);
     }
 
     // ─── KT-1015 — the run's launch project ──────────────────────────────

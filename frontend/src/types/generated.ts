@@ -1085,7 +1085,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1692,7 +1692,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -7952,7 +7952,11 @@ export type TriggerWorkflowRequest = { variables?: Record<string, string>,
  * ticket a run is about, so the run list can be filtered on them even if
  * the run fails before any step writes its state.
  */
-state?: Record<string, string>, };
+state?: Record<string, string>,
+/**
+ * The project to run a multi-project workflow for (KT-851).
+ */
+project_id?: string, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
@@ -8124,7 +8128,11 @@ variables?: Array<PromptVariable> | null, enabled?: boolean | null,
 /**
  * Pin/unpin as favorite; omit to leave untouched.
  */
-pinned?: boolean | null, };
+pinned?: boolean | null,
+/**
+ * `null` makes the workflow single-project again; omitted keeps it.
+ */
+project_scope?: WorkflowProjectScope | null, };
 
 /**
  * Response after uploading a context file.
@@ -8447,7 +8455,13 @@ variables?: Array<PromptVariable>, enabled: boolean,
  * User-pinned / favorite workflow — surfaces first in the Workflows
  * page list, same affordance as `Discussion::pinned`.
  */
-pinned: boolean, created_at: string, updated_at: string, };
+pinned: boolean,
+/**
+ * KT-851 — the projects this workflow may run for besides `project_id`
+ * (its home project, whose repository carries it). `None` keeps the
+ * single-project behaviour; the project is then resolved at trigger time.
+ */
+project_scope?: WorkflowProjectScope, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -8606,6 +8620,11 @@ max_llm_calls?: number | null,
  * Defaults to 10. Triggers `RunStatus::StoppedByGuard`.
  */
 loop_detection_max_revisits?: number | null, };
+
+/**
+ * Which projects a multi-project workflow serves (KT-851).
+ */
+export type WorkflowProjectScope = { "type": "All" } | { "type": "Projects", project_ids: Array<string>, };
 
 export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**

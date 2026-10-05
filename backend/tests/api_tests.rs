@@ -1579,6 +1579,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 [&now],
             )?;
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
                 project_id: None,
@@ -1728,6 +1729,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             )?;
 
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
                 project_id: None,
@@ -4977,6 +4979,7 @@ async fn optional_variable_http_run(
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
         project_id: Some("optional-input-project".into()),
@@ -5163,6 +5166,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
         project_id: Some("goto-fallback-project".into()),
@@ -5297,6 +5301,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
         project_id: None,
@@ -5910,6 +5915,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
         project_id: Some("required-input-project".into()),
@@ -21884,6 +21890,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "DisabledWF".into(),
@@ -21943,6 +21950,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "VarsWF".into(),
@@ -22404,6 +22412,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "TestWF".into(),
@@ -25205,6 +25214,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
                 project_id: None,
@@ -25414,6 +25424,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
                 project_id: None,

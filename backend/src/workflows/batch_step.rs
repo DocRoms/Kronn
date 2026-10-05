@@ -1861,6 +1861,7 @@ mod tests {
         use chrono::Utc;
         let wf_id = "wf-e2e".to_string();
         let workflow = Workflow {
+            project_scope: None,
             pinned: false,
             id: wf_id.clone(),
             name: "E2E parent workflow".into(),

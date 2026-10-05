@@ -20,6 +20,7 @@ pub mod gate_step;
 pub mod interrupted_worktrees;
 pub mod json_data_step;
 pub mod notify_step;
+pub mod project_scope;
 pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
@@ -186,9 +187,10 @@ impl WorkflowEngine {
     async fn fire_trigger(&self, wf: &Workflow) -> anyhow::Result<()> {
         // Advisory per-workflow check; a keyed limit is only known once the
         // run's variables are resolved, so spawn_run enforces it.
+        // A multi-project workflow counts per project: spawn_run decides.
         if let Some(limit) = wf
             .concurrency_limit
-            .filter(|_| wf.concurrency_key.is_none())
+            .filter(|_| wf.concurrency_key.is_none() && wf.project_scope.is_none())
         {
             let wf_id = wf.id.clone();
             let active = self
@@ -208,15 +210,28 @@ impl WorkflowEngine {
 
         match &wf.trigger {
             WorkflowTrigger::Cron { .. } => {
-                self.spawn_run(
-                    wf,
-                    serde_json::json!({
+                let scoped = wf.clone();
+                let projects = self
+                    .db()
+                    .with_read_conn(move |conn| project_scope::scheduled_projects(conn, &scoped))
+                    .await?;
+                // One run per served project; one refusal never skips the others.
+                for project_id in projects {
+                    let trigger_ctx = serde_json::json!({
                         "type": "cron",
                         "triggered_at": Utc::now().to_rfc3339(),
-                    }),
-                    None,
-                )
-                .await?;
+                    });
+                    if let Err(error) = self
+                        .spawn_run(wf, trigger_ctx, None, project_id.clone())
+                        .await
+                    {
+                        tracing::warn!(
+                            workflow_id = %wf.id,
+                            project_id = ?project_id,
+                            "scheduled run not admitted: {error:#}"
+                        );
+                    }
+                }
             }
             WorkflowTrigger::Tracker {
                 source,
@@ -258,8 +273,21 @@ impl WorkflowEngine {
             }
         };
 
+        let scoped = wf.clone();
+        let source = source.clone();
+        let project = self
+            .db()
+            .with_read_conn(move |conn| project_scope::tracker_project(conn, &scoped, &source))
+            .await?;
+        let project_id = match project {
+            Ok(project_id) => project_id,
+            Err(reason) => {
+                tracing::warn!(workflow_id = %wf.id, "tracker trigger skipped: {reason}");
+                return Ok(());
+            }
+        };
         let issues = tracker.poll_new_items(query, labels).await?;
-        self.admit_tracker_issues(wf, issues).await
+        self.admit_tracker_issues(wf, issues, project_id).await
     }
 
     /// One run per issue not processed yet. An issue is marked processed in
@@ -269,6 +297,7 @@ impl WorkflowEngine {
         &self,
         wf: &Workflow,
         issues: Vec<tracker::TrackedIssue>,
+        project_id: Option<String>,
     ) -> anyhow::Result<()> {
         for issue in issues {
             // Check reconciliation — skip already-processed issues
@@ -296,7 +325,7 @@ impl WorkflowEngine {
             });
 
             if let Err(error) = self
-                .spawn_run(wf, trigger_ctx, Some(issue.id.clone()))
+                .spawn_run(wf, trigger_ctx, Some(issue.id.clone()), project_id.clone())
                 .await
             {
                 tracing::warn!(
@@ -317,6 +346,7 @@ impl WorkflowEngine {
         wf: &Workflow,
         mut trigger_ctx: serde_json::Value,
         tracker_issue: Option<String>,
+        run_project_id: Option<String>,
     ) -> anyhow::Result<bool> {
         let now = Utc::now();
         let config = self.config().read().await;
@@ -329,7 +359,7 @@ impl WorkflowEngine {
         drop(config);
         let run_id = Uuid::new_v4().to_string();
         let declarations = wf.variables.clone();
-        let project_id = wf.project_id.clone();
+        let project_id = run_project_id.clone();
         let context = crate::core::execution_variables::scalar_context(&trigger_ctx);
         let snapshot_run_id = run_id.clone();
         let secret_for_prepare = encryption_secret.clone();
@@ -395,7 +425,7 @@ impl WorkflowEngine {
             produced_branches: vec![],
             concurrency_key,
             triggered_by_run_id: None,
-            project_id: wf.project_id.clone(),
+            project_id: run_project_id,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -560,6 +590,7 @@ mod tests {
     fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
+            project_scope: None,
             id: id.into(),
             name: id.into(),
             project_id: None,
@@ -708,7 +739,7 @@ mod tests {
             .unwrap();
 
         engine
-            .admit_tracker_issues(&wf, vec![issue("gh-7")])
+            .admit_tracker_issues(&wf, vec![issue("gh-7")], wf.project_id.clone())
             .await
             .unwrap();
         assert!(!processed(&engine, &wf.id, "gh-7").await);
@@ -724,7 +755,7 @@ mod tests {
             .unwrap();
 
         engine
-            .admit_tracker_issues(&wf, vec![issue("gh-7")])
+            .admit_tracker_issues(&wf, vec![issue("gh-7")], wf.project_id.clone())
             .await
             .unwrap();
         assert!(processed(&engine, &wf.id, "gh-7").await);
@@ -744,13 +775,134 @@ mod tests {
             .unwrap();
 
         engine
-            .admit_tracker_issues(&wf, vec![issue("gh-8"), issue("gh-9")])
+            .admit_tracker_issues(
+                &wf,
+                vec![issue("gh-8"), issue("gh-9")],
+                wf.project_id.clone(),
+            )
             .await
             .expect("one refused issue does not stop the poll");
 
         assert!(!processed(&engine, &wf.id, "gh-8").await);
         assert!(!processed(&engine, &wf.id, "gh-9").await);
         assert_eq!(run_count(&engine, &wf.id).await, 0);
+    }
+
+    // ─── KT-851 — the project of a scheduled or tracker run ──────────────
+
+    async fn insert_project(engine: &WorkflowEngine, id: &str, repo_url: Option<&str>) {
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "path": format!("/nonexistent/{id}"),
+            "repo_url": repo_url, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+
+    async fn run_projects(engine: &WorkflowEngine, workflow_id: &str) -> Vec<Option<String>> {
+        let id = workflow_id.to_string();
+        let mut projects: Vec<Option<String>> = engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::list_runs(conn, &id))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| run.project_id)
+            .collect();
+        projects.sort();
+        projects
+    }
+
+    #[tokio::test]
+    async fn a_multi_project_cron_runs_once_for_each_served_project() {
+        let engine = engine_for_tests();
+        for id in ["proj-a", "proj-b", "proj-unserved"] {
+            insert_project(&engine, id, None).await;
+        }
+        let mut wf = scheduled_workflow(
+            "wf-cron-multi",
+            WorkflowTrigger::Cron {
+                schedule: "* * * * *".into(),
+            },
+            0,
+        );
+        wf.project_scope = Some(WorkflowProjectScope::Projects {
+            project_ids: vec!["proj-b".into(), "proj-a".into()],
+        });
+        wf.concurrency_limit = Some(1);
+        let wf_db = wf.clone();
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        engine.fire_trigger(&wf).await.unwrap();
+
+        assert_eq!(
+            run_projects(&engine, &wf.id).await,
+            vec![Some("proj-a".into()), Some("proj-b".into())],
+            "a limit of one is counted per project"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tracker_issue_runs_for_the_served_project_linked_to_its_repository() {
+        let engine = engine_for_tests();
+        insert_project(
+            &engine,
+            "proj-front",
+            Some("https://github.com/Acme/Front.git"),
+        )
+        .await;
+        insert_project(&engine, "proj-api", Some("git@github.com:acme/api")).await;
+        let source = TrackerSourceConfig::GitHub {
+            owner: "acme".into(),
+            repo: "api".into(),
+        };
+        let mut wf = scheduled_workflow("wf-tracker-multi", WorkflowTrigger::Manual, 0);
+        wf.project_id = Some("proj-front".into());
+        wf.project_scope = Some(WorkflowProjectScope::All);
+        let wf_db = wf.clone();
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+        let (scoped, tracked) = (wf.clone(), source.clone());
+        let project = engine
+            .db()
+            .with_conn(move |conn| project_scope::tracker_project(conn, &scoped, &tracked))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(project.as_deref(), Some("proj-api"));
+
+        engine
+            .admit_tracker_issues(&wf, vec![issue("gh-11")], project)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_projects(&engine, &wf.id).await,
+            vec![Some("proj-api".into())]
+        );
+
+        // A repository no served project is linked to is not guessed.
+        wf.project_scope = Some(WorkflowProjectScope::Projects {
+            project_ids: vec!["proj-front".into()],
+        });
+        let unlinked = engine
+            .db()
+            .with_conn(move |conn| project_scope::tracker_project(conn, &wf, &source))
+            .await
+            .unwrap();
+        assert!(unlinked.unwrap_err().contains("github.com/acme/api"));
     }
 
     // ─── Healing pass (heal_steps_in_place) ──────────────────────────────

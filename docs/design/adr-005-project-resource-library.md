@@ -141,7 +141,43 @@ is written as a runbook whose steps an agent can follow without Kronn, while
 the Kronn engine automates the same file.
 
 A workflow meant for several projects resolves its project at trigger time and
-isolates the run in that project's worktree.
+isolates the run in that project's worktree (KT-851):
+
+- `project_scope` declares it: `{"type":"All"}` or
+  `{"type":"Projects","project_ids":[…]}`; the home project (`project_id`)
+  is always served. Without it, nothing changes
+  [src: file: backend/src/models/workflows.rs:92].
+- Manual launch: the request's `project_id`, refused when not served; else
+  the launching discussion's or page's project when served; else the home
+  project. Cron: one run per served project. Tracker: the served project
+  whose `repo_url` is the tracked GitHub repository (home project first when
+  several are linked); none linked skips the poll with a warning
+  [src: file: backend/src/workflows/project_scope.rs:1].
+- The run records its project (`workflow_runs.project_id`, KT-1015) and runs
+  in that project's checkout or worktree, with its environment. A
+  multi-project sub-workflow follows its parent run's project when it serves
+  it.
+- `concurrency_limit` (and `concurrency_key`) count each project's runs
+  apart for a multi-project workflow.
+- Quick Prompt and Quick API references written `ref:<kind>:<slug>` stay
+  symbolic in a multi-project workflow and resolve in each run's project;
+  a literal id is the same resource for every project. Quick Exec and
+  workflow targets are always stored as literal ids (allowlist and graph
+  checks need them).
+- Project ids are instance-local: importing a listed scope from `kronn/`
+  keeps only the projects this instance has, and an empty list makes the
+  workflow single-project.
+
+**Carrying repository vs target project (decided for KT-918 and KT-920).**
+The repository that carries a multi-project workflow is its home project's:
+`kronn/workflows/<slug>.yaml` is published there and its approval (per
+content hash) covers the definition for every target. The target project is
+where the run executes: its worktree, its environment and secrets, and its
+own repository profile. Approved scripts (KT-918) are therefore read from the
+carrying repository at the approved content and copied into the run's
+artifacts directory before execution, never read from the target worktree;
+the profile (KT-920) is the target project's, read from its base branch, not
+from the run's worktree a pull request can modify.
 
 ### Other resources
 
@@ -318,7 +354,8 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
    shared with the Plugins page health probes (KT-829).
 7. Repository profile `project.toml`, proposed by the audit and consumed by
    task_exec validations and generic workflows.
-8. Workflows shared across projects, project resolved at trigger time.
+8. Workflows shared across projects, project resolved at trigger time
+   (KT-851, see §Workflows).
 9. Later: portable workflows (N1 runbooks), prompt promotion to native skills,
    Agent Plugin export.
 

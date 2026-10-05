@@ -84,8 +84,37 @@ pub struct Workflow {
     /// page list, same affordance as `Discussion::pinned`.
     #[serde(default)]
     pub pinned: bool,
+    /// KT-851 — the projects this workflow may run for besides `project_id`
+    /// (its home project, whose repository carries it). `None` keeps the
+    /// single-project behaviour; the project is then resolved at trigger time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_scope: Option<WorkflowProjectScope>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Which projects a multi-project workflow serves (KT-851).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum WorkflowProjectScope {
+    /// Every project of this instance.
+    All,
+    /// These projects, plus the home project when the workflow has one.
+    Projects { project_ids: Vec<String> },
+}
+
+impl WorkflowProjectScope {
+    /// Whether a run of a workflow homed in `home` may target `project_id`.
+    pub fn allows(&self, home: Option<&str>, project_id: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Projects { project_ids } => {
+                home == Some(project_id) || project_ids.iter().any(|id| id == project_id)
+            }
+        }
+    }
 }
 
 /// Declared artifact in a workflow. Phase-3 minimal model — only
@@ -1680,6 +1709,9 @@ pub struct CreateWorkflowRequest {
     /// adoption of Kronn by drafting common patterns autonomously.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_scope: Option<WorkflowProjectScope>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1720,6 +1752,10 @@ pub struct UpdateWorkflowRequest {
     /// Pin/unpin as favorite; omit to leave untouched.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// `null` makes the workflow single-project again; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional)]
+    pub project_scope: Option<Option<WorkflowProjectScope>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1864,6 +1900,10 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub state: ::std::collections::HashMap<String, String>,
+    /// The project to run a multi-project workflow for (KT-851).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_id: Option<String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.

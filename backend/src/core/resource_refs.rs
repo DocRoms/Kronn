@@ -188,9 +188,10 @@ fn structured_fields(step: &mut WorkflowStep) -> Vec<(&'static str, &mut String)
 /// Rewrites every `ref:` held by a structured step field into the local id it
 /// names, first in `project_id`. Every unknown or ambiguous reference is
 /// reported, by step and reference, and nothing is half-applied. With
-/// `keep_resource_refs`, Quick Prompt/API/Exec references stay symbolic so a
-/// multi-project workflow resolves them in each run's project; a workflow
-/// target is always made literal for graph validation.
+/// `keep_resource_refs`, Quick Prompt and Quick API references stay symbolic
+/// so a multi-project workflow resolves them in each run's project. A
+/// workflow target is always made literal (graph validation), and so is a
+/// Quick Exec (its command is checked against the allowlist at save).
 pub fn resolve_structured_references(
     conn: &Connection,
     steps: &mut [WorkflowStep],
@@ -212,7 +213,7 @@ pub fn resolve_structured_references(
                 ));
                 continue;
             }
-            if keep_resource_refs && field_kind != "workflow" {
+            if keep_resource_refs && matches!(field_kind, "prompt" | "qa") {
                 let canonical = format!("{REF_PREFIX}{kind}:{slug}");
                 *value = canonical;
                 continue;
@@ -232,6 +233,36 @@ pub fn resolve_structured_references(
     } else {
         Err(errors.join("\n"))
     }
+}
+
+/// Run-time half for a multi-project workflow: every structured `ref:` that
+/// resolves in the run's project becomes its local id. One that does not
+/// stays symbolic, so the step that loads it fails before launch, naming it.
+pub fn resolve_run_structured_references(
+    conn: &Connection,
+    workflow: &mut Workflow,
+    project_id: Option<&str>,
+) -> anyhow::Result<()> {
+    for step in workflow
+        .steps
+        .iter_mut()
+        .chain(workflow.on_failure.iter_mut())
+    {
+        for (field_kind, value) in structured_fields(step) {
+            let Some((kind, slug)) = parse_reference(value) else {
+                continue;
+            };
+            if kind != field_kind {
+                continue;
+            }
+            match resolve_symbolic_reference(conn, &format!("{kind}:{slug}"), project_id) {
+                Ok(Some(id)) => *value = id,
+                Ok(None) => {}
+                Err(error) => tracing::warn!(reference = %value, "not resolved: {error}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The slug a resource of `kind` is published under: its identity in the
@@ -451,5 +482,39 @@ mod tests {
             "{{ref:artifact:suivi}}"
         );
         assert!(has_structured_references(&workflow));
+    }
+
+    #[test]
+    fn a_kept_prompt_reference_resolves_in_each_runs_project() {
+        let conn = conn();
+        for id in ["proj-a", "proj-b"] {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?1, ?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [id],
+            )
+            .unwrap();
+        }
+        crate::db::resource_identities::tests::seed_prompt(&conn, "qp-a", "Review", Some("proj-a"));
+        crate::db::resource_identities::tests::seed_prompt(&conn, "qp-b", "Review", Some("proj-b"));
+        let mut workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "Multi", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "a", "step_type": {"type": "Agent"}, "quick_prompt_id": "ref:prompt:review"}],
+            "actions": [], "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": true, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        for (project, expected) in [("proj-a", "qp-a"), ("proj-b", "qp-b")] {
+            let mut run = workflow.clone();
+            resolve_run_structured_references(&conn, &mut run, Some(project)).unwrap();
+            assert_eq!(run.steps[0].quick_prompt_id.as_deref(), Some(expected));
+        }
+        workflow.steps[0].quick_prompt_id = Some("ref:prompt:absent".into());
+        resolve_run_structured_references(&conn, &mut workflow, Some("proj-a")).unwrap();
+        assert_eq!(
+            workflow.steps[0].quick_prompt_id.as_deref(),
+            Some("ref:prompt:absent"),
+            "left for the step to fail on, naming it"
+        );
     }
 }
