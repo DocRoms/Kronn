@@ -7096,3 +7096,9 @@
 .set-agent-access-row {
   padding: var(--kr-sp-3) var(--kr-sp-7) var(--kr-sp-4);
 }
+
+.set-desktop-port {
+  display: grid;
+  gap: var(--kr-sp-3);
+  margin: var(--kr-sp-4) var(--kr-sp-6) 0;
+}

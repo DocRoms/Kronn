@@ -13,6 +13,7 @@ pub mod context_audit;
 pub mod context_files;
 pub mod crypto;
 pub mod dependency_updates;
+pub mod desktop_port;
 pub mod directives;
 pub mod docs_migration;
 pub mod docs_sidecar;

@@ -270,8 +270,10 @@ Release notes for 0.9.3 and earlier are available in the
 - The desktop app keeps its local port from one launch to the next, so the
   interface settings stored by the browser no longer reset at every launch or
   after "Allow connections from other devices" restarts it (KT-972). The port
-  is saved in `desktop-port.json` in the data directory and can be pinned
-  there; a busy port is replaced for that launch only. The port is held from
+  is saved in `desktop-port.json` in the data directory and can be set from
+  Settings → Identity ("Desktop port", 1024 to 65535, desktop app only, with
+  a "Restart now" button) or pinned there by hand; a busy port is replaced for
+  that launch only. The port is held from
   the moment it is chosen, and the app only opens a backend that proves it is
   the one it just started, never another Kronn answering on the same port.
   Interface preferences (theme, tour progress, folds and sidebars, favourites,

@@ -874,6 +874,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_model_tiers).post(api::setup::set_model_tiers),
         )
         .route(
+            "/api/config/desktop-port",
+            get(api::desktop_port::get).post(api::desktop_port::set),
+        )
+        .route(
             "/api/config/server",
             get(api::setup::get_server_config).post(api::setup::set_server_config),
         )

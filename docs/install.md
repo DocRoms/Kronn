@@ -60,8 +60,9 @@ and keeps the same port across launches, because the browser storage of the
 interface is tied to it. The port is saved in `desktop-port.json` in the Kronn
 data directory (`~/Library/Application Support/com.kronn.kronn/` on macOS,
 `~/.config/kronn/` on Linux, `%APPDATA%\kronn\kronn\config\` on Windows, or
-`$KRONN_DATA_DIR`). To pin a port, quit Kronn, write `{"port": 47315}` (1024 to
-65535) in that file and relaunch. When the port is busy, that launch uses a
+`$KRONN_DATA_DIR`). To pin a port, use Settings → Identity → "Desktop port" (1024 to
+65535; it applies at the next launch, with a "Restart now" button), or quit
+Kronn, write `{"port": 47315}` in that file and relaunch. When the port is busy, that launch uses a
 free one and the saved value is kept for the next launch. Interface
 preferences (theme, tour, folds, favourites, dismissed update) are also kept
 by the backend (`/api/ui-preferences`), so a launch on another port restores

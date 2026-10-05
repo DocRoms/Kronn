@@ -791,6 +791,9 @@ export const health = {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
+/** Mirrors the backend `DesktopPortInfo` (api/desktop_port.rs). */
+export interface DesktopPortInfo { saved: number | null; current: number; min: number; max: number }
+
 /** LAN/Tailscale exposure state (the "Allow connections from other devices"
  *  toggle). Mirrors the backend `NetworkExposure` (api/setup.rs) — defined here
  *  rather than generated because the struct carries a qualified-path field that
@@ -884,6 +887,8 @@ export const config = {
     return json.data;
   },
   getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
+  getDesktopPort: () => api<DesktopPortInfo>('GET', '/config/desktop-port'),
+  setDesktopPort: (port: number) => api<DesktopPortInfo>('POST', '/config/desktop-port', { port }),
   setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */

@@ -11171,6 +11171,46 @@ async fn workflow_create_with_valid_payload_returns_ok() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn desktop_port_is_validated_saved_and_read_back() {
+    let app = test_app();
+    for bad in [0, 80, 1023, 65536, -5] {
+        let (status, json) = post_json(
+            app.clone(),
+            "/api/config/desktop-port",
+            serde_json::json!({ "port": bad }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false, "{bad}");
+        assert!(json["error"].as_str().unwrap().contains("1024"), "{bad}");
+    }
+
+    let (_, json) = post_json(
+        app.clone(),
+        "/api/config/desktop-port",
+        serde_json::json!({ "port": 47315 }),
+    )
+    .await;
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["saved"], 47315);
+    assert_eq!(json["data"]["min"], 1024);
+    assert_eq!(json["data"]["max"], 65535);
+
+    let (_, json) = get_json(app, "/api/config/desktop-port").await;
+    assert_eq!(json["data"]["saved"], 47315);
+    assert!(json["data"]["current"].as_u64().unwrap() > 0);
+
+    // The desktop shell reads this exact file at launch.
+    let raw = std::fs::read_to_string(
+        kronn::core::config::config_dir()
+            .unwrap()
+            .join("desktop-port.json"),
+    )
+    .unwrap();
+    assert_eq!(kronn::core::desktop_port::parse_port(&raw), Some(47315));
+}
+
+#[tokio::test]
 async fn server_config_returns_defaults() {
     let app = test_app();
     let (status, json) = get_json(app, "/api/config/server").await;
