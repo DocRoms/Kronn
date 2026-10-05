@@ -336,7 +336,8 @@ export function SettingsPage({
   const [serverGlobalTimeout, setServerGlobalTimeout] = useState(30);
   const [serverLocalGlobalTimeout, setServerLocalGlobalTimeout] = useState(240);
   const [executionVariableRetentionDays, setExecutionVariableRetentionDays] = useState(30);
-  const [runPayloadRetentionDays, setRunPayloadRetentionDays] = useState(30);
+  // null until the server answered: the select never shows a guessed value.
+  const [runPayloadRetentionDays, setRunPayloadRetentionDays] = useState<number | null>(null);
   const [serverDebugMode, setServerDebugMode] = useState(false);
   const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
@@ -355,7 +356,7 @@ export function SettingsPage({
   // health hasn't resolved or the fetch fails — never block install on doubt.
   const { data: healthInfo } = useApi(() => healthApi.get(), []);
   const inDocker = healthInfo?.in_docker ?? false;
-  useApi(() => configApi.getServerConfig().then(cfg => {
+  const { error: serverConfigError } = useApi(() => configApi.getServerConfig().then(cfg => {
     if (cfg) {
       setServerDomain(cfg.domain ?? '');
       setServerMaxAgents(cfg.max_concurrent_agents);
@@ -365,7 +366,7 @@ export function SettingsPage({
       setServerDebugMode(cfg.debug_mode ?? false);
       setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
       setExecutionVariableRetentionDays(cfg.execution_variable_retention_days ?? 30);
-      setRunPayloadRetentionDays(cfg.run_payload_retention_days ?? 30);
+      setRunPayloadRetentionDays(cfg.run_payload_retention_days ?? 0);
     }
     return cfg;
   }), []);
@@ -1875,7 +1876,9 @@ export function SettingsPage({
             </div>
           )}
 
-          <RunRetentionBanner retentionDays={runPayloadRetentionDays} onOpenSetting={focusRetentionSetting} />
+          {runPayloadRetentionDays !== null && (
+            <RunRetentionBanner retentionDays={runPayloadRetentionDays} onOpenSetting={focusRetentionSetting} />
+          )}
 
           <DbUsageChart />
 
@@ -1912,7 +1915,8 @@ export function SettingsPage({
             <select
               className="set-input set-input-sm cursor-pointer"
               id={RETENTION_FOCUS_TARGET}
-              value={runPayloadRetentionDays}
+              value={runPayloadRetentionDays ?? ''}
+              disabled={runPayloadRetentionDays === null}
               aria-label={t('config.runPayloadRetention')}
               onChange={async event => {
                 const value = Number(event.target.value);
@@ -1926,12 +1930,16 @@ export function SettingsPage({
                 }
               }}
             >
+              {runPayloadRetentionDays === null && <option value="" />}
               <option value={7}>{t('config.executionVariableRetention.days', 7)}</option>
               <option value={30}>{t('config.runPayloadRetention.suggested', 30)}</option>
               <option value={90}>{t('config.executionVariableRetention.days', 90)}</option>
               <option value={365}>{t('config.executionVariableRetention.days', 365)}</option>
               <option value={0}>{t('config.runPayloadRetention.forever')}</option>
             </select>
+            {runPayloadRetentionDays === null && serverConfigError && (
+              <small className="text-error" role="alert">{t('config.runPayloadRetentionLoadError')}</small>
+            )}
             <small>{t('config.runPayloadRetentionHint')}</small>
           </label>
 
