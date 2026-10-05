@@ -26,6 +26,7 @@ pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod run_artifacts;
 pub mod runner;
+pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;
 pub mod steps;

@@ -778,6 +778,13 @@ async fn execute_run_body(
         })
         .await?;
     let mut workflow_in_project = workflow_in_run_project(workflow, run);
+    // KT-1025 — the agents chosen at launch live on the run, so a Gate approval
+    // or a resume, which reload the definition, still run on them.
+    if super::step_agents::from_run(run).is_some() {
+        let mut chosen = workflow_in_project.into_owned();
+        super::step_agents::apply_from_run(&mut chosen, run);
+        workflow_in_project = std::borrow::Cow::Owned(chosen);
+    }
     // KT-851 — a multi-project workflow keeps Quick Prompt/API references
     // symbolic; they resolve in this run's project.
     if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
@@ -1341,19 +1348,8 @@ async fn execute_run_body(
                 .iter()
                 .filter(|s| matches!(s.step_type, StepType::Agent))
             {
-                // A LiteLLM proxy is a server the user declares, reachable
-                // anywhere: it needs no local `litellm` binary.
-                let declared_proxy = matches!(step.agent, crate::models::AgentType::LiteLlm)
-                    && agents_config
-                        .lite_llm
-                        .base_url
-                        .as_deref()
-                        .is_some_and(|url| !url.trim().is_empty());
                 let ok = routed
-                    || declared_proxy
-                    || usable
-                        .iter()
-                        .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
+                    || super::step_agents::agent_can_launch(&step.agent, &usable, agents_config);
                 if !ok {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
                 }
@@ -7621,6 +7617,329 @@ mod tests {
             output.contains(&dir_name(repo.path())),
             "the step ran in the launch project, not in the server's cwd: {output}"
         );
+    }
+
+    // ─── KT-1025 — agents chosen at launch ───────────────────────────────
+
+    /// An ACP turn that answers at once, whatever agent it stands in for.
+    struct AnsweringTurn;
+
+    #[async_trait::async_trait]
+    impl crate::acp::AcpTransport for AnsweringTurn {
+        async fn initialize(
+            &self,
+            _: crate::acp::AcpInitialize,
+        ) -> Result<crate::acp::AcpNegotiatedCapabilities, crate::acp::AcpError> {
+            Ok(crate::acp::AcpNegotiatedCapabilities {
+                protocol_version: 1,
+                capabilities: std::collections::BTreeSet::from([
+                    crate::acp::AcpCapability::Sessions,
+                    crate::acp::AcpCapability::Streaming,
+                    crate::acp::AcpCapability::Cancellation,
+                    crate::acp::AcpCapability::McpInjection,
+                ]),
+            })
+        }
+        async fn create_session(
+            &self,
+        ) -> Result<crate::acp::AcpSessionTarget, crate::acp::AcpError> {
+            crate::acp::AcpSessionTarget::new(crate::acp::AcpAgent::ClaudeCode, "answering-turn")
+        }
+        async fn config_options(&self) -> Vec<crate::acp::AcpConfigOption> {
+            Vec::new()
+        }
+        async fn set_config_option(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            _: &str,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn resume_session(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn prompt(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+            _: &str,
+            events: tokio::sync::mpsc::Sender<crate::acp::AcpSessionEvent>,
+        ) -> Result<(), crate::acp::AcpError> {
+            use crate::acp::AcpSessionEvent;
+            let _ = events.send(AcpSessionEvent::TextDelta("done".into())).await;
+            let _ = events.send(AcpSessionEvent::Completed).await;
+            Ok(())
+        }
+        async fn cancel(
+            &self,
+            _: &crate::acp::AcpSessionTarget,
+        ) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+        async fn shutdown(&self) -> Result<(), crate::acp::AcpError> {
+            Ok(())
+        }
+    }
+
+    /// A project with an answering agent route, and a workflow whose Agent
+    /// steps all run on Claude Code: `draft`, a Gate, then `final`.
+    async fn launch_choice_fixture(
+        state: &crate::AppState,
+        id: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::agents::runner::test_acp_routes::RouteGuard,
+        Workflow,
+    ) {
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(state, &format!("proj-{id}"), repo.path()).await;
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
+        let route = crate::agents::runner::test_acp_routes::route(
+            &work_dir,
+            std::sync::Arc::new(AnsweringTurn),
+        );
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{id}");
+        workflow.project_id = Some(format!("proj-{id}"));
+        let mut draft = fake_step("draft");
+        draft.id = Some(STEP_DRAFT.into());
+        draft.prompt_template = "Draft".into();
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        let mut last = fake_step("final");
+        last.id = Some(STEP_FINAL.into());
+        last.prompt_template = "Finish".into();
+        workflow.steps = vec![draft, gate, last];
+        (repo, route, workflow)
+    }
+
+    // Stored workflows keep only UUID step ids.
+    const STEP_DRAFT: &str = "6f1c2a1e-0d6b-4f0e-9a51-1025000000d1";
+    const STEP_FINAL: &str = "6f1c2a1e-0d6b-4f0e-9a51-1025000000f1";
+
+    fn launch_choice_trigger(model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "manual",
+            crate::workflows::step_agents::TRIGGER_CONTEXT_KEY: {
+                STEP_DRAFT: { "agent": "Codex", "model": model },
+                STEP_FINAL: { "agent": "Codex", "model": model },
+            }
+        })
+    }
+
+    async fn stored_workflow(state: &crate::AppState, id: &str) -> Workflow {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn stored_run(state: &crate::AppState, id: &str) -> WorkflowRun {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &id))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_launch_agent_choice_survives_a_gate_pause_reloaded_from_the_database() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, _route, workflow) = launch_choice_fixture(&state, "launch-gate").await;
+        let mut run = pending_run("run-launch-gate", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        run.trigger_context = Some(launch_choice_trigger("gpt-test-b"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("runs to the gate");
+        assert_eq!(
+            run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        assert_eq!(run.step_results[0].step_agent, Some(AgentType::Codex));
+
+        // What the gate decide route does: claim, then both reloaded from the database.
+        let claimed_id = run.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap();
+        let reloaded_workflow = stored_workflow(&state, &workflow.id).await;
+        let mut reloaded_run = stored_run(&state, &run.id).await;
+        reloaded_run.status = RunStatus::Running;
+        resume_run(
+            state.clone(),
+            &reloaded_workflow,
+            &mut reloaded_run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+
+        assert_eq!(
+            reloaded_run.status,
+            RunStatus::Success,
+            "{:?}",
+            reloaded_run.step_results
+        );
+        let last = reloaded_run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "final");
+        assert_eq!(last.step_agent, Some(AgentType::Codex));
+        let attempt = last
+            .agent_provenance
+            .as_ref()
+            .and_then(|provenance| provenance.attempts.last())
+            .expect("the step records its attempt");
+        assert_eq!(attempt.agent, AgentType::Codex);
+        assert_eq!(attempt.requested_model.as_deref(), Some("gpt-test-b"));
+
+        let unchanged = stored_workflow(&state, &workflow.id).await;
+        assert!(unchanged
+            .steps
+            .iter()
+            .filter(|step| matches!(step.step_type, StepType::Agent))
+            .all(|step| step.agent == AgentType::ClaudeCode));
+        assert_eq!(
+            unchanged.steps[0]
+                .agent_settings
+                .as_ref()
+                .and_then(|s| s.model.clone()),
+            None,
+            "the workflow keeps its own model"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_launch_agent_choice_survives_an_interrupted_resume() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, _route, mut workflow) = launch_choice_fixture(&state, "launch-resume").await;
+        workflow.steps.remove(1);
+        let mut run = pending_run("run-launch-resume", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        run.status = RunStatus::Interrupted;
+        run.trigger_context = Some(launch_choice_trigger("gpt-test-r"));
+        run.step_results.push(fake_result("draft"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let reloaded_workflow = stored_workflow(&state, &workflow.id).await;
+        let mut reloaded_run = stored_run(&state, &run.id).await;
+        claim_interrupted_run(&state, &mut reloaded_run, false)
+            .await
+            .expect("claim");
+        resume_interrupted_run(
+            state.clone(),
+            &reloaded_workflow,
+            &mut reloaded_run,
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("resume");
+
+        assert_eq!(
+            reloaded_run.status,
+            RunStatus::Success,
+            "{:?}",
+            reloaded_run.step_results
+        );
+        let last = reloaded_run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "final");
+        assert_eq!(last.step_agent, Some(AgentType::Codex));
+    }
+
+    #[tokio::test]
+    async fn a_manual_launch_stores_its_agent_choice_on_the_run_and_refuses_a_wrong_one() {
+        let (state, _, _) = test_state_and_configs();
+        // A declared LiteLLM proxy needs no local binary, so the check passes anywhere.
+        state.config.write().await.agents.lite_llm.base_url = Some("http://127.0.0.1:9".into());
+        let (_repo, _route, workflow) = launch_choice_fixture(&state, "launch-store").await;
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+        let choice = |agent: AgentType| crate::models::StepAgentOverride {
+            agent,
+            model: Some("m-1".into()),
+            reasoning_effort: None,
+        };
+
+        let (_, run) = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                step_agents: [("final".to_string(), choice(AgentType::LiteLlm))].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        let stored = stored_run(&state, &run.id).await;
+        let chosen = crate::workflows::step_agents::from_run(&stored).expect("stored on the run");
+        assert_eq!(chosen[STEP_FINAL].agent, AgentType::LiteLlm);
+        assert_eq!(chosen[STEP_FINAL].model.as_deref(), Some("m-1"));
+        assert_eq!(
+            stored_workflow(&state, &workflow.id).await.steps[2].agent,
+            AgentType::ClaudeCode
+        );
+
+        for (key, expected) in [("review", "only Agent steps"), ("ghost", "no step `ghost`")] {
+            let refused = crate::api::workflows::create_manual_run(
+                &state,
+                &workflow.id,
+                Default::default(),
+                Default::default(),
+                crate::core::launch_context::LaunchContext {
+                    step_agents: [(key.to_string(), choice(AgentType::LiteLlm))].into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(refused.contains(expected), "{refused}");
+        }
+        let workflow_id = workflow.id.clone();
+        let runs = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::list_runs_paginated(conn, &workflow_id, None, None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1, "a refused choice creates no run");
     }
 
     #[tokio::test]

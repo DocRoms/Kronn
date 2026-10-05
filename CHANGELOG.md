@@ -140,6 +140,19 @@ Release notes for 0.9.3 and earlier are available in the
   first. Loopback requests without a token keep today's trust until the
   per-action human proof ships in 0.15 (KT-1006).
 
+- Launching a workflow, you can see and change the agent, model and effort of
+  each Agent step, for that run only (KT-1025). The launch card, in a
+  discussion or on a Live Page, has a folded "Details" block that lists the
+  Agent steps with what is planned and the agent and model selectors; without a
+  change the launch request is the same as before. The trigger route, the
+  discussion and Live Page action launches and the MCP `workflow_trigger` tool
+  accept `step_agents`. An unknown or non-Agent step, an agent that is not
+  installed or enabled, or tools or a token budget the chosen agent cannot use
+  is refused before the run starts, with a message that says why. The choice
+  is stored on the run, so it still applies after a Gate approval or a resume,
+  and the step shows the agent it really ran on; the workflow is never
+  modified.
+
 ### Fixed
 
 - Processes Kronn starts for a caller no longer inherit the backend's

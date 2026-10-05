@@ -163,6 +163,10 @@ pub struct LaunchDiscussionActionRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: std::collections::HashMap<String, String>,
+    /// A workflow action's agents for some Agent steps, this launch only (KT-1025).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step_agents: Option<crate::models::StepAgents>,
 }
 
 pub enum ClaimLaunchOutcome {

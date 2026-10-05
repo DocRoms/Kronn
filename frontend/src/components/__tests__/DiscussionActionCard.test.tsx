@@ -9,8 +9,15 @@ const mocks = vi.hoisted(() => ({
   launch: vi.fn(),
 }));
 
+const catalog = vi.hoisted(() => ({
+  getWorkflow: vi.fn(),
+  detect: vi.fn(),
+}));
+
 vi.mock('../../lib/api', () => ({
   discussionActions: mocks,
+  workflows: { get: catalog.getWorkflow },
+  agents: { detect: catalog.detect },
   runsApi: {
     outcome: vi.fn(() => Promise.resolve({ discussion_count: 0, discussions: [] })),
     discussionOutcome: vi.fn((id: string) => Promise.resolve({ discussion_count: 1, discussions: [{ id, title: 'Result', agent: 'ClaudeCode', agent_status: 'answered', answer_excerpt: null, answer_truncated: false, answered_at: null, diagnostic: null, updated_at: '2026-09-18T10:00:00Z' }] })),
@@ -21,6 +28,27 @@ vi.mock('../../lib/I18nContext', () => ({
     t: (key: string, ...args: (string | number)[]) =>
       args.length > 0 ? `${key}:${args.join('/')}` : key,
   }),
+}));
+// The shared catalogue selectors (KT-630) as plain controls, so a test can drive them.
+vi.mock('../AgentSwitchPicker', () => ({
+  AgentSwitchPicker: ({ currentAgent, availableAgents, onChange, ariaLabel }: {
+    currentAgent: string; availableAgents: string[]; onChange: (agent: string) => Promise<void>; ariaLabel: string;
+  }) => (
+    <select aria-label={ariaLabel} value={currentAgent} onChange={event => void onChange(event.target.value)}>
+      {availableAgents.map(agent => <option key={agent} value={agent}>{agent}</option>)}
+    </select>
+  ),
+}));
+vi.mock('../ModelCatalogPicker', () => ({
+  ModelCatalogPicker: ({ agent, value, onChange, reasoningEffort, onReasoningChange }: {
+    agent: string; value: string; onChange: (model: string) => void;
+    reasoningEffort: string; onReasoningChange: (effort: string) => void;
+  }) => (
+    <>
+      <input aria-label={`model for ${agent}`} value={value} onChange={event => onChange(event.target.value)} />
+      <input aria-label={`effort for ${agent}`} value={reasoningEffort} onChange={event => onReasoningChange(event.target.value)} />
+    </>
+  ),
 }));
 vi.mock('../RunStatusCard', () => ({
   RunStatusCard: ({ runId }: { runId?: string }) => <div data-testid="run-card">{runId}</div>,
@@ -288,5 +316,98 @@ describe('DiscussionActionCard — where it runs', () => {
     // The card itself survives: losing it would lose the trace of what was
     // proposed, which is the opposite of the point.
     expect(document.querySelector('.discussion-action-card__title-row')).not.toBeNull();
+  });
+});
+
+/// KT-1025 — a workflow launch card lists its Agent steps and can change their
+/// agent for this launch only; without a change the request is unchanged.
+describe('DiscussionActionCard — step agents', () => {
+  const draftId = '11111111-1111-4111-8111-111111111111';
+  const shipId = '22222222-2222-4222-8222-222222222222';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    catalog.getWorkflow.mockResolvedValue({
+      id: 'wf-1',
+      steps: [
+        { id: draftId, name: 'draft', step_type: { type: 'Agent' }, agent: 'ClaudeCode', agent_settings: { model: 'opus', reasoning_effort: 'high', max_tokens: 4000 } },
+        { id: 'gate', name: 'review', step_type: { type: 'Gate' }, agent: 'ClaudeCode' },
+        { id: shipId, name: 'ship', step_type: { type: 'Agent' }, agent: 'Codex' },
+      ],
+    });
+    catalog.detect.mockResolvedValue([
+      { agent_type: 'ClaudeCode', enabled: true, installed: true, runtime_available: false },
+      { agent_type: 'Codex', enabled: true, installed: true, runtime_available: false },
+      { agent_type: 'Vibe', enabled: false, installed: true, runtime_available: false },
+    ]);
+    mocks.launch.mockResolvedValue(action({ kind: 'workflow', state: 'launching' }));
+  });
+
+  const workflowAction = () => action({ kind: 'workflow', target_id: 'wf-1', values: [] });
+  const expand = () => fireEvent.click(screen.getByRole('button', { name: /Translate issue/ }));
+  const launch = () => fireEvent.click(screen.getByRole('button', { name: /disc\.action\.launch/ }));
+
+  it('lists only the Agent steps with their planned agent, folded, and launches unchanged without a change', async () => {
+    render(<DiscussionActionCard action={workflowAction()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    const details = await screen.findByTestId('action-card-step-agents');
+    expect(details.tagName).toBe('DETAILS');
+    expect(details).not.toHaveAttribute('open');
+    expect(details.querySelector('summary')).toHaveTextContent('disc.action.stepAgents.summary:2');
+    expect(screen.getByTestId(`step-agent-${draftId}`)).toHaveTextContent('disc.action.stepAgents.planned:Claude Code · opus · high');
+    expect(screen.queryByText('review')).not.toBeInTheDocument();
+    // Only agents the run preflight accepts are offered.
+    const picker = screen.getByRole('combobox', { name: 'disc.action.stepAgents.agentFor:draft' });
+    expect(Array.from((picker as HTMLSelectElement).options).map(option => option.value)).toEqual(['ClaudeCode', 'Codex']);
+
+    launch();
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledTimes(1));
+    expect(mocks.launch).toHaveBeenCalledWith('action:msg-1:0', { variables: {} });
+  });
+
+  it('sends the changed agent for that step only, a new agent starting from its default model', async () => {
+    render(<DiscussionActionCard action={workflowAction()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    fireEvent.change(await screen.findByRole('combobox', { name: 'disc.action.stepAgents.agentFor:draft' }), { target: { value: 'Codex' } });
+    expect(screen.getByTestId('action-card-step-agents').querySelector('summary')).toHaveTextContent('disc.action.stepAgents.changed:1');
+    launch();
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith('action:msg-1:0', {
+      variables: {},
+      step_agents: { [draftId]: { agent: 'Codex' } },
+    }));
+  });
+
+  it('keeps the planned agent and effort when only the model changes, and forgets a change put back', async () => {
+    render(<DiscussionActionCard action={workflowAction()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    const model = await screen.findByRole('textbox', { name: 'model for ClaudeCode' });
+    fireEvent.change(model, { target: { value: 'sonnet' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'effort for Codex' }), { target: { value: 'low' } });
+    launch();
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith('action:msg-1:0', {
+      variables: {},
+      step_agents: {
+        [draftId]: { agent: 'ClaudeCode', model: 'sonnet', reasoning_effort: 'high' },
+        [shipId]: { agent: 'Codex', reasoning_effort: 'low' },
+      },
+    }));
+  });
+
+  it('a reset step goes back to the planned agent and out of the request', async () => {
+    mocks.launch.mockClear();
+    render(<DiscussionActionCard action={workflowAction()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    fireEvent.change(await screen.findByRole('combobox', { name: 'disc.action.stepAgents.agentFor:ship' }), { target: { value: 'ClaudeCode' } });
+    fireEvent.click(screen.getByRole('button', { name: /disc\.action\.stepAgents\.reset/ }));
+    expect(screen.getByRole('combobox', { name: 'disc.action.stepAgents.agentFor:ship' })).toHaveValue('Codex');
+    launch();
+    await waitFor(() => expect(mocks.launch).toHaveBeenCalledWith('action:msg-1:0', { variables: {} }));
+  });
+
+  it('reads no workflow for another kind of action', () => {
+    render(<DiscussionActionCard action={action()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    expect(catalog.getWorkflow).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('action-card-step-agents')).not.toBeInTheDocument();
   });
 });

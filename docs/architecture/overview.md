@@ -747,3 +747,20 @@ WorkflowRunner (per run)
   → run workspace hooks: before_remove
   → emit SSE events throughout for real-time UI updates
 ```
+
+**Agents chosen at launch (KT-1025).** A manual launch (`POST
+/api/workflows/{id}/trigger`, a discussion or Live Page action launch, MCP
+`workflow_trigger`) may carry `step_agents`: step id or name → `{agent, model?,
+reasoning_effort?}`. It is checked before any snapshot or run row exists:
+unknown or non-Agent step, a step named twice, an agent that is not installed
+and enabled, a `Custom` agent (its named connection is chosen in the workflow),
+declared `tools` or a kept `max_tokens`/effort the agent cannot apply, or a
+model the catalogue refuses. The choice is stored in the run's
+`trigger_context.__step_agents__` (keyed by step id, unchanged steps dropped),
+never in the workflow. `execute_run` applies it to the run's copy after the
+approval check, so a Gate approval or an interrupted resume — which reload the
+definition from the database — keep it, and the step provenance names the agent
+actually used. Only agent, model and effort are replaced; tier, budget, tools
+stay, and a named connection stays only while the agent does.
+`[src: file: backend/src/workflows/step_agents.rs]`
+`[src: file: backend/src/api/workflows.rs]`

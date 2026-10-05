@@ -3717,7 +3717,11 @@ custom_prompt?: string | null,
  */
 resume_run_id?: string | null, };
 
-export type LaunchDiscussionActionRequest = { variables?: Record<string, string>, };
+export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
+/**
+ * A workflow action's agents for some Agent steps, this launch only (KT-1025).
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
 /**
@@ -3728,7 +3732,11 @@ export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
  * — a caller can choose which existing row to bind to, never inject an
  * arbitrary resolved value.
  */
-bindings?: Record<string, string>, };
+bindings?: Record<string, string>,
+/**
+ * A workflow action's agents for some Agent steps, this launch only (KT-1025).
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
@@ -7301,6 +7309,13 @@ user_bytes: number,
  */
 total_bytes: number, };
 
+/**
+ * The agent one Agent step runs on for a single run (KT-1025). It replaces
+ * the step's agent, model and effort; every other step setting is kept.
+ * `None` for model or effort means the agent's default.
+ */
+export type StepAgentOverride = { agent: AgentType, model?: string, reasoning_effort?: string, };
+
 export type StepConditionRule = { contains: string, action: ConditionAction, };
 
 export type StepMode = { "type": "Normal" };
@@ -8044,7 +8059,12 @@ state?: Record<string, string>,
 /**
  * The project to run a multi-project workflow for (KT-851).
  */
-project_id?: string, };
+project_id?: string,
+/**
+ * This run's agent for some Agent steps, keyed by step id or name
+ * (KT-1025). Stored on the run; the workflow is never modified.
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 

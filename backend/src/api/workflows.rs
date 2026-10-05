@@ -3021,6 +3021,12 @@ pub(crate) async fn create_manual_run_with_id(
             return Err("The project this workflow should run for no longer exists".into());
         }
     }
+    // KT-1025 — refused before any snapshot or run row exists.
+    let step_agents = if launch.step_agents.is_empty() {
+        Default::default()
+    } else {
+        admit_step_agents(state, &wf, &launch.step_agents).await?
+    };
     let (secret, retention_days) = {
         let config = state.config.read().await;
         let secret = config
@@ -3069,8 +3075,14 @@ pub(crate) async fn create_manual_run_with_id(
         )?,
         None => None,
     };
-    let trigger_obj =
+    let mut trigger_obj =
         build_secure_execution_trigger_obj(prepared.snapshot_id, prepared.resolved.resolved_at);
+    if !step_agents.is_empty() {
+        trigger_obj.insert(
+            crate::workflows::step_agents::TRIGGER_CONTEXT_KEY.into(),
+            serde_json::to_value(&step_agents).map_err(|error| error.to_string())?,
+        );
+    }
     let now = Utc::now();
     let run = WorkflowRun {
         id: run_id,
@@ -3108,6 +3120,85 @@ pub(crate) async fn create_manual_run_with_id(
         .await
         .map_err(|error| format!("DB error: {error}"))??;
     Ok((wf, run))
+}
+
+/// KT-1025 — a launcher's agent choices for `workflow`: each names an Agent
+/// step, and each chosen agent is installed, enabled and accepts the model.
+pub(crate) async fn admit_step_agents(
+    state: &AppState,
+    workflow: &Workflow,
+    requested: &StepAgents,
+) -> Result<crate::workflows::step_agents::ResolvedStepAgents, String> {
+    use crate::workflows::step_agents;
+    let resolved = step_agents::validate(workflow, requested)?;
+    if resolved.is_empty() {
+        return Ok(resolved);
+    }
+    let agents_config = state.config.read().await.agents.clone();
+    let usable: Vec<AgentType> = crate::agents::detect_all_cached(false)
+        .await
+        .into_iter()
+        .filter(|detection| {
+            (detection.installed || detection.runtime_available) && detection.enabled
+        })
+        .map(|detection| detection.agent_type)
+        .collect();
+    step_agents::check_available(workflow, &resolved, &usable, &agents_config)?;
+    let mut planned = workflow.clone();
+    step_agents::apply(&mut planned, &resolved);
+    for step in planned
+        .steps
+        .iter()
+        .filter(|step| resolved.contains_key(step.id.as_deref().unwrap_or(&step.name)))
+    {
+        let settings = step.agent_settings.clone().unwrap_or_default();
+        let runtime_target = settings
+            .connection_id
+            .as_deref()
+            .map(crate::db::model_catalog::http_runtime_target_id);
+        if let Err(failure) = crate::core::model_catalog::preflight_resolve(
+            &state.db,
+            runtime_target.as_deref(),
+            step.agent.clone(),
+            settings.tier.unwrap_or_default(),
+            settings.model.as_deref(),
+            Some(&agents_config.model_tiers),
+        )
+        .await
+        {
+            return Err(format!(
+                "`step_agents`: step `{}` cannot run on {:?}{}: {}",
+                step.name,
+                step.agent,
+                failure
+                    .model_id
+                    .as_deref()
+                    .map(|model| format!(" with model `{model}`"))
+                    .unwrap_or_default(),
+                failure.detail
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
+/// The same check for a launcher that has not created the run yet (a
+/// discussion or Live Page action), so a refusal leaves the card launchable.
+pub(crate) async fn precheck_step_agents(
+    state: &AppState,
+    workflow_id: &str,
+    requested: &StepAgents,
+) -> Result<(), String> {
+    let lookup_id = workflow_id.to_string();
+    let workflow = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &lookup_id))
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Workflow not found".to_string())?;
+    admit_step_agents(state, &workflow, requested)
+        .await
+        .map(|_| ())
 }
 
 const MAX_INITIAL_STATE_ENTRIES: usize = 16;
@@ -3184,8 +3275,15 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let (provided_vars, initial_state, requested_project_id) = body
-        .map(|Json(b)| (b.variables, b.state, b.project_id))
+    let (provided_vars, initial_state, requested_project_id, step_agents) = body
+        .map(|Json(b)| {
+            (
+                b.variables,
+                b.state,
+                b.project_id,
+                b.step_agents.unwrap_or_default(),
+            )
+        })
         .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
@@ -3196,6 +3294,7 @@ pub async fn trigger(
         Some(tx),
         crate::core::launch_context::LaunchContext {
             requested_project_id,
+            step_agents,
             ..Default::default()
         },
     )

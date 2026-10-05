@@ -50,7 +50,9 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
     exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
   },
-  workflows: { triggerStream: vi.fn() },
+  // The card reads a workflow's Agent steps (KT-1025); none here.
+  workflows: { triggerStream: vi.fn(), get: vi.fn(() => Promise.resolve({ steps: [] })) },
+  agents: { detect: vi.fn(() => Promise.resolve([])) },
 }));
 vi.mock('../../lib/downloadBlob', () => ({ triggerDownload: vi.fn() }));
 vi.mock('../../lib/I18nContext', () => ({

@@ -832,6 +832,19 @@ attempt list is preserved. The bridge does not look up today's model settings
 or infer attempts from output text.
 [src: file: backend/scripts/disc-introspection-mcp.py:7863]
 
+## Workflow trigger agents
+
+`workflow_trigger` takes an optional `step_agents`:
+`{"<step id or name>": {"agent": "Codex", "model": "…", "reasoning_effort": "…"}}`
+changes those Agent steps' agent for this run only (KT-1025). An omitted model
+or effort means the agent's default; the step keeps its budget and tools. The
+backend refuses, before creating the run, an unknown or non-Agent step, an
+agent that is not installed and enabled, and tools or a budget the agent cannot
+apply. A bridge token passes the field through; the workflow it names is still
+scope-checked. Details: `tool_manual({tool: "workflow_trigger"})`.
+[src: file: backend/scripts/disc-introspection-mcp.py]
+[src: file: backend/src/workflows/step_agents.rs]
+
 ## Joined CLI worktrees
 
 - Call `disc_workspace_get({})` before editing when several peers may be

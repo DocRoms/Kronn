@@ -137,6 +137,12 @@ pub async fn launch(
     Path(action_id): Path<String>,
     Json(request): Json<LaunchLivePageActionRequest>,
 ) -> Json<ApiResponse<LivePageAction>> {
+    let step_agents = request.step_agents.unwrap_or_default();
+    if !step_agents.is_empty() {
+        if let Err(error) = precheck_step_agents(&state, &action_id, &step_agents).await {
+            return Json(ApiResponse::err(error));
+        }
+    }
     let claim_id = action_id.clone();
     let supplied = request.variables;
     let bindings = request.bindings;
@@ -167,9 +173,35 @@ pub async fn launch(
 
     let action_for_run = action.clone();
     tokio::spawn(async move {
-        execute_claimed_action(state, action_for_run, variables).await;
+        execute_claimed_action(state, action_for_run, variables, step_agents).await;
     });
     Json(ApiResponse::ok(action))
+}
+
+/// KT-1025 — agent choices only fit a workflow action; checked before the
+/// claim so a refusal leaves the card on its offer.
+async fn precheck_step_agents(
+    state: &AppState,
+    action_id: &str,
+    step_agents: &crate::models::StepAgents,
+) -> Result<(), String> {
+    let lookup_id = action_id.to_string();
+    let action = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_page_actions::get(
+                crate::db::kronn_action_engine::Reconcile::Persisted,
+                conn,
+                &lookup_id,
+            )
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+        .ok_or_else(|| "Action not found".to_string())?;
+    if action.kind != DiscussionActionKind::Workflow {
+        return Err("`step_agents` applies only to a workflow action".into());
+    }
+    crate::api::workflows::precheck_step_agents(state, &action.target_id, step_agents).await
 }
 
 async fn persist_completion(state: &AppState, action_id: String, completion: ActionCompletion) {
@@ -215,12 +247,14 @@ async fn execute_claimed_action(
     state: AppState,
     action: LivePageAction,
     variables: HashMap<String, String>,
+    step_agents: crate::models::StepAgents,
 ) {
     // Same deterministic context contract as discussion-authored proposals
     // (KT-476): a GLOBAL target launched from this Page still resolves the
     // Page's own project environment/worktree, exactly like a human
     // triggering it directly from that project would.
-    let launch = LaunchContext::from_live_page(action.project_id.clone());
+    let mut launch = LaunchContext::from_live_page(action.project_id.clone());
+    launch.step_agents = step_agents;
     match action.kind {
         DiscussionActionKind::QuickPrompt => {
             let response = crate::api::mcp_remote::qp_run(

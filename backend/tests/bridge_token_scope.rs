@@ -749,3 +749,43 @@ async fn a_locked_instance_refuses_bridge_tokens_everywhere() {
     let (status, _) = call(&app, "GET", "/api/config/recovery/status", None, None).await;
     assert!(status != 423 && status != 401, "{status}");
 }
+
+/// KT-1025 — `step_agents` passes the bridge to the handler without changing
+/// what a token may reach: the workflow it names is still scope-checked.
+#[tokio::test]
+async fn step_agents_on_workflow_trigger_reach_the_handler_and_keep_the_scope() {
+    let (app, _repos) = fixture().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let step_agents = json!({"ghost": {"agent": "Codex", "model": "gpt-5"}});
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(guard.value()),
+        Some(json!({"workflow_id": "wf-b", "step_agents": step_agents})),
+    )
+    .await;
+    assert_eq!(
+        status, 403,
+        "another project's workflow stays refused: {body}"
+    );
+
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(guard.value()),
+        Some(json!({"workflow_id": "wf-a", "step_agents": step_agents})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("no step `ghost`"),
+        "the handler saw the field: {body}"
+    );
+}

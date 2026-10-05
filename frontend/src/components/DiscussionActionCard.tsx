@@ -3,10 +3,11 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loa
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useAsyncGuard } from '../hooks/useAsyncGuard';
-import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable } from '../types/generated';
+import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable, StepAgentOverride } from '../types/generated';
 import { PromptVariableInput } from './workflows/PromptVariableInput';
 import { RunStatusCard } from './RunStatusCard';
 import { RunOutcomePanel } from './RunOutcomePanel';
+import { WorkflowStepAgents, type StepAgentChoices } from './WorkflowStepAgents';
 import './DiscussionActionCard.css';
 
 interface Props {
@@ -23,6 +24,8 @@ export interface KronnActionOperations<T extends KronnAction> {
   launch: (actionId: string, request: {
     variables: Record<string, string>;
     bindings?: Record<string, string>;
+    /** Only present when the reader changed a step's agent (KT-1025). */
+    step_agents?: Record<string, StepAgentOverride>;
   }) => Promise<T>;
   /** Back to the offer once a run is over, to launch the same row again. Only
    * a Page provides it: a discussion fence is one intention, launched once. */
@@ -163,6 +166,7 @@ export function KronnActionCard<T extends KronnAction>({
       return next;
     });
   }, [prefill]);
+  const [stepAgents, setStepAgents] = useState<StepAgentChoices>({});
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -203,6 +207,7 @@ export function KronnActionCard<T extends KronnAction>({
       if (next.state === 'proposed') {
         touchedRef.current.clear();
         setValues(initialValues(next, prefill));
+        setStepAgents({});
       }
       update(next);
     } catch (cause) {
@@ -331,6 +336,15 @@ export function KronnActionCard<T extends KronnAction>({
         </div>
       )}
 
+      {expanded && current.state === 'proposed' && current.kind === 'workflow' && (
+        <WorkflowStepAgents
+          workflowId={current.target_id}
+          value={stepAgents}
+          onChange={setStepAgents}
+          disabled={busy}
+        />
+      )}
+
       {expanded && current.state === 'launching' && !current.shared_run_id && (
         <p className="discussion-action-card__starting" role="status" data-testid="action-card-starting">
           <Loader2 size={13} className="spin" aria-hidden /> {t('disc.action.starting')}
@@ -384,7 +398,12 @@ export function KronnActionCard<T extends KronnAction>({
               type="button"
               className="discussion-action-card__launch"
               disabled={busy || missingRequired || stalePageSource}
-              onClick={() => void runOnce(() => operations.launch(current.id, { variables: values, bindings }))}
+              onClick={() => void runOnce(() => operations.launch(current.id, {
+                variables: values,
+                bindings,
+                // Without a change the request stays exactly what it was before KT-1025.
+                ...(Object.keys(stepAgents).length > 0 ? { step_agents: stepAgents } : {}),
+              }))}
             >
               {busy ? <Loader2 size={13} className="spin" aria-hidden /> : <Play size={13} aria-hidden />}
               {t('disc.action.launch')}
@@ -419,7 +438,10 @@ export function KronnActionCard<T extends KronnAction>({
 const discussionActionOperations: KronnActionOperations<DiscussionAction> = {
   get: actionId => discussionActionsApi.get(actionId),
   cancel: actionId => discussionActionsApi.cancel(actionId),
-  launch: (actionId, request) => discussionActionsApi.launch(actionId, { variables: request.variables }),
+  launch: (actionId, request) => discussionActionsApi.launch(actionId, {
+    variables: request.variables,
+    ...(request.step_agents ? { step_agents: request.step_agents } : {}),
+  }),
 };
 
 export function DiscussionActionCard({ action, onChanged, onOpenDiscussion }: Props) {
