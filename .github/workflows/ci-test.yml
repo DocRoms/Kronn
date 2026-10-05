@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Unused on a manual dispatch (the selected ref is tested)"
+        description: "Commit, tag or branch to test (empty: the selected ref)"
         required: false
         default: ""
         type: string
