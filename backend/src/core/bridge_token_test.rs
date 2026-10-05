@@ -227,11 +227,58 @@ fn the_positive_list_has_no_secret_class_route_and_no_duplicate() {
 /// Each listed pattern is a real route: a typo would silently refuse a call.
 #[test]
 fn every_listed_pattern_is_registered_in_the_router() {
-    let router = include_str!("../lib.rs");
+    // (method, pattern) pairs of every `.route("…", get(..).post(..))` call.
+    fn registered(source: &str) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for chunk in source.split(".route(").skip(1) {
+            let mut depth = 1usize;
+            let mut end = chunk.len();
+            for (index, c) in chunk.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let call = &chunk[..end];
+            let Some(pattern) = call.split('"').nth(1) else {
+                continue;
+            };
+            let bytes = call.as_bytes();
+            for method in ["get", "post", "put", "patch", "delete"] {
+                let needle = format!("{method}(");
+                let used = call.match_indices(&needle).any(|(at, _)| {
+                    at == 0
+                        || !(bytes[at - 1].is_ascii_alphanumeric()
+                            || bytes[at - 1] == b'_'
+                            || bytes[at - 1] == b':')
+                });
+                if used {
+                    pairs.push((method.to_ascii_uppercase(), pattern.to_owned()));
+                }
+            }
+        }
+        pairs
+    }
+    let routes = registered(include_str!("../lib.rs"));
+    assert!(
+        routes.len() > 300,
+        "the parser reads the router: {}",
+        routes.len()
+    );
     for route in BRIDGE_ROUTES {
         assert!(
-            router.contains(&format!("\"{}\"", route.pattern)),
-            "{} is not a route in lib.rs",
+            routes
+                .iter()
+                .any(|(method, pattern)| method == route.method && pattern == route.pattern),
+            "{} {} is not a route in lib.rs",
+            route.method,
             route.pattern
         );
     }
@@ -987,8 +1034,44 @@ fn every_session_keyed_request_is_reviewed() {
         ("AcceptOfferRequest", "/api/orchestration/accept-offer"),
         ("DeliverRequest", "joined session's room + ids"),
         ("ReviewRequest", "joined session's room + ids"),
+        ("PlanningActor", "planning writes: forced to an agent actor"),
+        ("WsAuthQuery", "the WebSocket refuses a bridge token"),
+        (
+            "SendMessageRequest",
+            "human message routes: not on BRIDGE_ROUTES",
+        ),
+        ("TokenOverride", "secret-class: not on BRIDGE_ROUTES"),
+        (
+            "SetProjectGithubConnectionRequest",
+            "secret-class: not on BRIDGE_ROUTES",
+        ),
+        ("DiscSourceHistoryEntry", "a stored row, never a request"),
+        ("DiscSourceBinding", "a stored row, never a request"),
+        ("DiscSearchHit", "a stored row, never a request"),
+        ("WorkspaceHistoryLease", "a stored row, never a request"),
+        ("DiscussionSession", "a stored row, never a request"),
+        ("InviteTokenIssued", "a server answer, never a request"),
+        ("JoinViaTokenResult", "a server answer, never a request"),
+        ("WorkflowAgentAttempt", "a stored row, never a request"),
+        ("PlanningTaskEvent", "a stored row, never a request"),
+        ("TaskExecutionEvent", "a stored row, never a request"),
+        ("TaskExecutionAuditEvent", "a stored row, never a request"),
+        (
+            "TaskExecutionWorkerSession",
+            "a stored row, never a request",
+        ),
     ];
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api");
+    const KEYED_FIELDS: &[&str] = &[
+        "session_id",
+        "source_session_id",
+        "source_binding_session_id",
+        "actor_session_id",
+        "token",
+        "resume_token",
+        "session_credential",
+        "publication_grant",
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
@@ -998,23 +1081,40 @@ fn every_session_keyed_request_is_reviewed() {
                 stack.push(path);
                 continue;
             }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
             let source = std::fs::read_to_string(&path).unwrap();
-            for (index, chunk) in source.split("pub struct ").enumerate().skip(1) {
+            let pieces: Vec<&str> = source.split("struct ").collect();
+            for index in 1..pieces.len() {
+                let chunk = pieces[index];
                 let name: String = chunk
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
+                let rest = chunk[name.len()..].trim_start();
+                if name.is_empty() || !(rest.starts_with('{') || rest.starts_with('<')) {
+                    continue;
+                }
                 let body = chunk.split("\n}").next().unwrap_or("");
-                let before = source.split("pub struct ").nth(index - 1).unwrap_or("");
-                let derive = before.rsplit("#[derive(").next().unwrap_or("");
-                let keyed = [
-                    "pub session_id:",
-                    "pub source_session_id:",
-                    "pub token:",
-                    "pub resume_token:",
-                ]
-                .iter()
-                .any(|field| body.contains(field));
+                // The derive written right above this struct, not an earlier item's.
+                let before = pieces[index - 1];
+                let derive = before
+                    .rsplit_once("#[derive(")
+                    .map(|(_, after)| after)
+                    .filter(|after| !after.contains("\n}") && !after.contains(';'))
+                    .unwrap_or("");
+                let keyed = body.lines().any(|line| {
+                    let line = line.trim_start();
+                    let line = line
+                        .strip_prefix("pub(crate) ")
+                        .or_else(|| line.strip_prefix("pub(super) "))
+                        .or_else(|| line.strip_prefix("pub "))
+                        .unwrap_or(line);
+                    KEYED_FIELDS
+                        .iter()
+                        .any(|field| line.starts_with(&format!("{field}:")))
+                });
                 // A response is written by the server, never read from a caller.
                 if keyed && derive.contains("Deserialize") && !name.ends_with("Response") {
                     found.push(name);
@@ -1022,12 +1122,14 @@ fn every_session_keyed_request_is_reviewed() {
             }
         }
     }
-    for name in &found {
-        assert!(
-            REVIEWED.iter().any(|(reviewed, _)| reviewed == name),
-            "{name} carries a caller-supplied session: review it here"
-        );
-    }
+    let unreviewed: Vec<&String> = found
+        .iter()
+        .filter(|name| !REVIEWED.iter().any(|(reviewed, _)| reviewed == name))
+        .collect();
+    assert!(
+        unreviewed.is_empty(),
+        "these carry a caller-supplied session or credential: review them here: {unreviewed:?}"
+    );
     for (_, how) in REVIEWED {
         if how.starts_with("/api/") {
             assert!(

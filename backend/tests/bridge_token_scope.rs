@@ -2155,3 +2155,237 @@ async fn a_write_without_a_content_type_is_refused() {
     .await;
     assert_eq!(appended.as_deref(), Some("0"));
 }
+
+// ─── Layer B round 4 (review-layer-b4) ──────────────────────────────────────
+
+/// B4-02 — the plugin overview shows a token only what its project may use.
+#[tokio::test]
+async fn the_plugin_overview_is_scoped_to_the_token_s_project() {
+    let (app, repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        for (id, general) in [("cfg-general", 1), ("cfg-unlinked", 0), ("cfg-a", 0)] {
+            conn.execute(
+                "INSERT INTO mcp_configs(id, server_id, label, include_general) \
+                 VALUES (?1, 'synthetic-api', ?1, ?2)",
+                rusqlite::params![id, general],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-a', 'p1')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for (project, slug) in [("p2", "cfg-b"), ("p2", "c"), ("p1", "c")] {
+        let path = repos.path().join(project);
+        kronn::core::mcp_scanner::write_mcp_context(
+            path.to_str().unwrap(),
+            slug,
+            "A rule written for this project.",
+        )
+        .unwrap();
+    }
+    let guard = bridge_for("room-a");
+    let (status, response) = call(&app, "GET", "/api/mcps", Some(guard.value()), None).await;
+    assert_eq!(status, 200, "{response}");
+    let mut ids: Vec<&str> = response["data"]["configs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|config| config["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["c", "cfg-a"], "{response}");
+    let contexts = response["data"]["customized_contexts"].to_string();
+    assert!(!contexts.contains(":p2"), "{contexts}");
+    assert!(contexts.contains("c:p1"), "{contexts}");
+    assert!(!response.to_string().contains("\"p2\""), "{response}");
+}
+
+/// B4-03 — the workflows feeding a page are scoped like any workflow list.
+#[tokio::test]
+async fn a_page_s_feeding_workflows_are_scoped() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, current_revision_id, \
+             created_at, updated_at) VALUES ('page-shared', NULL, 'shared', 'page-shared', \
+             'rev-shared', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO live_page_revisions(id, page_id, revision, html, created_by_agent, \
+             created_at) VALUES ('rev-shared', 'page-shared', 1, '<p></p>', NULL, \
+             '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        let steps = json!([{"name": "publish", "step_type": {"type": "PublishPageData"},
+            "page_publish": {"page_id": "page-shared", "writes": []}}])
+        .to_string();
+        conn.execute(
+            "UPDATE workflows SET steps_json = ?1 WHERE id IN ('wf-a', 'wf-b')",
+            [&steps],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (_, all) = call(&app, "GET", "/api/pages/page-shared/workflows", None, None).await;
+    assert_eq!(all["data"].as_array().map(Vec::len), Some(2), "{all}");
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/pages/page-shared/workflows",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let ids: Vec<&str> = response["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workflow| workflow["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["wf-a"], "{response}");
+}
+
+/// B4-06 — a discussion the token created and a human moved kills the token.
+#[tokio::test]
+async fn an_adopted_discussion_moved_to_another_project_kills_the_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, created) = call(
+        &app,
+        "POST",
+        "/api/disc/create",
+        Some(&token),
+        Some(json!({"title": "child", "agent": "ClaudeCode"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    let child = created["data"]["disc_id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append(&child, "one")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let moved = child.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE discussions SET project_id = 'p2' WHERE id = ?1",
+            [&moved],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append(&child, "two")),
+    )
+    .await;
+    assert_eq!(status, 401, "{response}");
+}
+
+/// B4-06 — with several scope discussions, deleting any one kills the token.
+#[tokio::test]
+async fn deleting_any_scope_discussion_kills_the_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into(), "room-a2".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    db.with_conn(|conn| {
+        conn.execute("DELETE FROM discussions WHERE id = 'room-a2'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+}
+
+/// B4-07 — a token's planning write is recorded as an agent's.
+#[tokio::test]
+async fn a_token_s_planning_write_is_an_agent_s() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-a",
+        Some(guard.value()),
+        Some(json!({"title": "renamed", "actor": {"kind": "human", "id": "romu"}})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["success"], true, "{response}");
+    let kind = query_one(
+        &db,
+        "SELECT actor_kind FROM planning_task_events WHERE task_id = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+        "task-a".into(),
+    )
+    .await;
+    assert_eq!(kind.as_deref(), Some("agent"));
+}
+
+/// B4-10 — keys of a caller's own maps are names, not Kronn fields.
+#[tokio::test]
+async fn keys_of_a_caller_s_own_maps_are_not_id_fields() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(&token),
+        Some(
+            json!({"api_plugin_slug": "synthetic-api", "api_config_id": "c",
+            "endpoint_path": "/projects/{project_id}", "method": "GET",
+            "path_params": {"project_id": "123"}, "query": {"issue_ref": "x"}}),
+        ),
+    )
+    .await;
+    assert_ne!(status, 403, "{response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(&token),
+        Some(json!({"workflow_id": "wf-a", "variables": {"ticket_id": "X"}})),
+    )
+    .await;
+    assert_ne!(status, 403, "{response}");
+}
