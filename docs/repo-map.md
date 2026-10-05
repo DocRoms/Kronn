@@ -124,7 +124,7 @@ Kronn/
 │       │   ├── skills.rs      # Skills loader: builtin (embedded .md) + custom (~/.config/kronn/skills/). Frontmatter parsing, build_skills_prompt()
 │       │   ├── profiles.rs   # Profiles loader: builtin (embedded .md) + custom (~/.config/kronn/profiles/). Persona override system, build_profiles_prompt()
 │       │   ├── directives.rs # Directives loader: builtin (embedded .md) + custom (~/.config/kronn/directives/). build_directives_prompt()
-│       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. ALL Command::new() calls MUST use these helpers
+│       │   ├── cmd.rs        # Cross-platform command helpers: async_cmd()/sync_cmd() apply CREATE_NO_WINDOW on Windows + (0.6.0) resolve bare program names (npx, npm, git…) via which::which on Windows so .cmd/.bat wrappers are spawnable. they take a ChildRoute that builds the child's environment; ALL processes MUST use these helpers (clippy.toml)
 │       │   ├── sse_limits.rs # Global + per-client SSE concurrency caps (0.3.5)
 │       │   └── pricing.rs    # Per-model $/1M-token rates. message_cost()/price_reply() price the detailed counters (input, cache read/write, output) of the serving model; unknown, never guessed, when a counter or a rate is missing
 │       ├── profiles/          # Builtin profile Markdown files (16 profiles: architect, tech-lead, qa-engineer, product-owner, scrum-master, technical-writer, devils-advocate, mentor, entrepreneur, ux-designer, game-developer, data-analyst, data-engineer, seo-growth, sre, staff-engineer)

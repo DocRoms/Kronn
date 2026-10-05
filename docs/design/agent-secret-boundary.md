@@ -419,16 +419,21 @@ validations, probes) carry no project and get none.
 Native ACP agents now receive their configured key and their room and workflow
 contexts (KT-1013).
 
-*Spawn inventory.* Every child goes through `core::cmd::{async_cmd,sync_cmd}`
-(`lint-no-raw-command`), and every call site applies `child_env::` in the same
-function, starts a literal `git`, or uses `tool_cmd`/`sync_tool_cmd` (the
-`Tool` route by construction). `backend/scripts/ci/lint_child_env.py` enforces
-it in CI and fails on a stale exception. Routes beyond the agent and exec ones:
+*Spawn inventory.* The compiler enforces it. `core::cmd::{async_cmd,sync_cmd}`
+take a `ChildRoute` and build the environment before returning the command
+(`git_cmd`, `async_git_cmd`, `tool_cmd`, `sync_tool_cmd` are shorthands); a
+spawn without a route does not compile. `backend/clippy.toml` refuses
+`std::process::Command::new`, `tokio::process::Command::new`, the `open`
+crate's spawning functions and libc's `fork`/`exec*`/`posix_spawn*`/`system`
+outside `core/cmd.rs` (test code excepted), which also covers aliases and
+function pointers. The system opener goes through `cmd::open_in_system`
+(Tool route). A caller that adds values after construction seals again.
+Routes beyond the agent and exec ones:
 
 | Route | Inherits beyond the base allow-list | Used by |
 |---|---|---|
 | `Git` | git identity, config location, prompts | every `git`, git inside WSL (`scanner.rs`) |
-| `GitHost` | the above plus `GH_CONFIG_DIR`, `GH_HOST`, `GLAB_CONFIG_DIR`, `GITLAB_HOST`, `GL_HOST`; `gh` also gets the connected project's GitHub variables (`env_for_launch`) and the explicit PR token | PR creation and lookup (`api/git_ops.rs`), `gh auth token`, GitLab discovery |
+| `GitHost` | the above plus `GH_CONFIG_DIR`, `GH_HOST`, `GLAB_CONFIG_DIR`, `GITLAB_HOST`, `GL_HOST`; `gh` also gets the connected project's GitHub variables (`env_for_launch`), nothing else | PR creation and lookup (`api/git_ops.rs`), `gh auth token`, GitLab discovery |
 | `DependencyCheck` | Go, Bundler/rbenv, .NET/NuGet, Poetry and Composer locations (proxy, cache, home) | `core/dependency_updates.rs` package managers and Renovate |
 | `Docker` | `DOCKER_*`, `COMPOSE_*` that do not look like a credential | project `docker compose`, Composer through Docker |
 | `QuickExec` | nothing | Quick Exec, task validations and their `cargo metadata` |
@@ -438,14 +443,27 @@ No registry token is inherited by a dependency check, nor `GITLAB_TOKEN` by
 `glab`: a repository's config could print it. Both read their own config file
 or login instead, which the base allow-list keeps reachable (`HOME`, XDG).
 
-Declared exceptions (they keep the backend's environment): the document
+*Authenticated push.* `git push` takes its token from the project's §4.5
+connection (`env_for_launch`), never from an MCP config, and only for a
+GitHub remote, pushed to its credential-free HTTPS URL. The token travels as
+an `http.https://github.com/.extraHeader` through `GIT_CONFIG_*`, never in an
+argument or a variable named after it, and that push runs with hooks off
+(`core.hooksPath=/dev/null`, `--no-verify`), no credential helper (a
+repository's could receive it) and TLS verification forced. Other remotes,
+or a project not connected, push with the user's own credentials.
+
+Declared exceptions (they keep the backend's environment, through
+`cmd::full_env_cmd(program, FullEnvReason)`, which starts them in the
+temporary directory; the test `full_env_cmd_sites_are_exactly_the_declared_exceptions`
+lists every call site): the document
 sidecar (`core/docs_sidecar.rs::start`), model discovery
 (`model_catalog/claude_discovery.rs::discover`,
 `model_catalog/codex_discovery.rs::discover`), version discovery
 (`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
 and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`)
 and the MCP probe (`api/mcps.rs::probe_mcp_stdio_with_timeout`). None runs in
-a repository: each starts a binary Kronn found or the operator configured.
+a repository (all start in the temporary directory): each starts a binary
+Kronn found or the operator configured.
 
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse

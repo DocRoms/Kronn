@@ -205,9 +205,18 @@ Release notes for 0.9.3 and earlier are available in the
   agent installers, RTK, ccusage, WSL, Tailscale and system probes get the base
   allow-list. `glab` no longer reads a `GITLAB_TOKEN` exported to Kronn and a
   package manager no longer reads a registry token from Kronn's environment:
-  both use their own login or config file. A CI gate
-  (`scripts/ci/lint_child_env.py`) fails when a new spawn site skips the
-  builder outside the exceptions declared in the design note.
+  both use their own login or config file. Every process now names its
+  environment when it is built: a spawn without one does not compile, clippy
+  refuses any other way to start a process (the system opener included), and
+  the exceptions declared in the design note start in the temporary
+  directory, never in a repository. npm registry credentials
+  (`npm_config__auth` and its registry-scoped forms) are dropped like any
+  other secret.
+- `git push` and `gh` PR creation use the project's own GitHub connection,
+  never the first GitHub MCP token of any project. The token no longer
+  appears in the push URL or in a variable a repository hook can read: it is
+  sent as a header scoped to github.com, with hooks and credential helpers
+  off for that push (KT-1006).
 - The project and discussion terminal no longer runs `env` and no longer
   reads outside the project: `cat`, `head`, `tail`, `find`, `stat`, `grep`,
   `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
