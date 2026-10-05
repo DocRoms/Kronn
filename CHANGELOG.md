@@ -193,7 +193,16 @@ Release notes for 0.9.3 and earlier are available in the
   launches; every response, whatever the verb, is scoped at any depth with its
   counts; the token's project is frozen at first use; every launch gets a token,
   dies when cancelled or after 12 hours; the operator token is compared in
-  constant time (KT-1006).
+  constant time (KT-1006). An id field the gate cannot resolve is refused, in
+  the body and the query; an import hides only the resources it bundles;
+  every route that reaches a room through a session (workspace, history lease,
+  link, unlink, transfer, accept-offer, session lookups) checks that room
+  first, and a token cannot force a session reassignment; a saved Quick Exec
+  of another project is refused on import and at run time; a workflow export
+  that bundles another project's resource is refused; refusals no longer name
+  another project's ids; the bearer scheme is read case-insensitively and a
+  token never reaches the peer-only routes; a token's media discussion and
+  learning proposal land in its project.
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task

@@ -495,11 +495,24 @@ script; `backend/scripts/test_bridge_routes.py` fails on drift either way), and
 the agent library's write routes are listed but never granted. Every id is
 read wherever the request names it: declared path parameters (undecodable ones
 refused), the query, any depth of the JSON body, and the workflow an import
-carries in `content`. A non-JSON body is refused (only the context-file upload
-is multipart). Ids are resolved the way the handler resolves them (`KT-12`
-references, an execution named by its task, an offer through its execution, an
-invite or resume credential to its room) and an id that resolves to nothing is
-refused. Then:
+carries in `content`. *Default deny on id fields*: a key that looks like an id
+(`id`, `ref`, or a name ending in `_id`, `_ids`, `_ref`, `_refs`,
+`_reference`) is refused unless it is in `ID_KEYS` with a resolver, in the
+reviewed `PLAIN_ID_KEYS` (a caller's own session, idempotency keys, model and
+library ids, git refs), the own `id` of a step, option or DoD item, or inside a
+caller's own data (`OPAQUE_KEYS`: an external API body, a dataset, a schema);
+the query follows the same rule. In an import, only the resources the bundle
+lists are internal, per kind (`workflow.id` and `referenced_workflows` for
+workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
+`_pages`); a room, config or connection is never internal. A non-JSON body is
+refused, and so is a write with a body and no Content-Type (only the
+context-file upload is multipart). Ids are resolved the way the handler
+resolves them (`KT-12` references, an execution named by its task, an offer
+through its execution, an invite or resume credential to its room; a message,
+file, dispatch, CLI session, workspace, orchestration run or proposal as its
+discussion; a media job as its discussion or project; an audit run as its
+project) and an id that resolves to nothing is refused. A refusal names the
+kind, never the other project's id. Then:
 - *shared resources* (project-less, serving every project, or several projects)
   may be read, never written; a write needs a resource that belongs to the
   token's project and to no other; a project-less discussion is private to its
@@ -514,19 +527,36 @@ refused. Then:
   cannot clear, change or widen its project, and a workflow may be scoped to the
   token's project only (`null` or `Projects:[bound]`); an agent's workflow save
   stays in that project and never approves script content (KT-918);
-- *sessions and invites do not cross projects* (deliberate rule): peer-join,
-  peer-resume, orchestrator-return-resume and peer-leave resolve the room their
-  credential or session names and refuse one outside the token's project; an
-  invite for another instance's room is refused.
+- *sessions and invites do not cross projects* (deliberate rule): every route
+  in `SESSION_KEYED_ROUTES` (peer-join, peer-resume, orchestrator-return-resume,
+  peer-leave, the workspace and its history lease, link, unlink,
+  transfer-session, accept-offer, find_by_session, session-status) resolves the
+  room its credential or session names first and refuses one outside the
+  token's scope; a write whose session resolves to no room is refused, and a
+  token never forces a session reassignment. Any other route naming a joined
+  session needs that session's room visible. A test lists every request type
+  carrying a caller-supplied session; a new one fails until reviewed. An
+  invite for another instance's room is refused;
+- *a saved Quick Exec* (`quick_exec_id`) is a resource: an import validates the
+  ones it does not bundle like a create does, and a run refuses one of another
+  project; a token's learning proposal is forced into its project and never a
+  preference; its media generation without a discussion creates one in its
+  project, which the token then owns.
 
-*Responses.* Every response is scoped, whatever the verb: an object naming any
-resource outside the scope, at any depth, is dropped from its list (the counts
-beside the list follow) or refused when it is the response itself; an object
-naming an id that resolves to nothing is hidden. The discussion list, the task
+*Responses.* Every response is scoped, whatever the verb and its shape (an
+`ApiResponse` through its `data`, any other JSON body as a whole): an object
+naming any resource outside the scope, at any depth, is dropped from its list
+(only the count paired with that list follows) or refused when it is the
+response itself; an object naming an id that resolves to nothing is hidden. A
+workflow export is all or nothing: one bundled dependency outside the scope
+refuses it. The discussion list, the task
 list and the discussion search filter in the query, so pages stay full.
 
 The WebSocket bus refuses a bridge token (403) and any credential other than the
-operator token (401); without a credential it keeps loopback trust. Any bearer
+operator token (401); without a credential it keeps loopback trust. The bearer
+scheme is matched case-insensitively, a bridge token in any other
+Authorization form is refused, and the routes answered before the gate for
+remote peers (claim-by-token, fetch-file) refuse a bridge token. Any bearer
 that matches neither the operator token nor a live bridge token is refused
 outright, never downgraded to loopback trust. Not covered by an agent's
 environment any more but still inheriting the backend's: the declared exceptions
