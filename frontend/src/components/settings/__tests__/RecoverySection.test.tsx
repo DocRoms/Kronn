@@ -115,4 +115,41 @@ describe('RecoverySection', () => {
     await waitFor(() => expect(toast).toHaveBeenCalledWith('no active encryption key', 'error'));
     expect(screen.queryByTestId('recovery-code-block')).toBeNull();
   });
+
+  const fullStatus = (over: Record<string, unknown>) => ({
+    configured: true, matches_key: true, key_locked: false, key_copies_kept: false,
+    config_holds_key: false, copies: 2, stale_sources: [], invalid_sources: [],
+    locked_credentials: 0, kept_recovery_blobs: 0, ...over,
+  });
+
+  it('offers the restore form, not the set form, when the key is locked', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ key_locked: true }));
+    render(<RecoverySection toast={toast} t={t} />);
+    await waitFor(() => expect(screen.getByTestId('recovery-locked')).toBeTruthy());
+    expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
+    expect(screen.queryByTestId('recovery-save')).toBeNull();
+  });
+
+  it('warns when recovery.key does not protect the key in use, without the configured badge', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ matches_key: false }));
+    render(<RecoverySection toast={toast} t={t} />);
+    await waitFor(() => expect(screen.getByTestId('recovery-mismatch')).toBeTruthy());
+    expect(screen.queryByTestId('recovery-configured-badge')).toBeNull();
+  });
+
+  it('names a key store holding another key', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ stale_sources: ['keychain'] }));
+    render(<RecoverySection toast={toast} t={t} />);
+    await waitFor(() => expect(screen.getByTestId('recovery-stale').textContent).toContain('keychain'));
+  });
+
+  it('shows the computed warnings: invalid store, single copy, locked credentials (C3-11)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({
+      matches_key: false, copies: 1, invalid_sources: ['sidecar'], locked_credentials: 2,
+    }));
+    render(<RecoverySection toast={toast} t={t} />);
+    await waitFor(() => expect(screen.getByTestId('recovery-invalid').textContent).toContain('sidecar'));
+    expect(screen.getByTestId('recovery-single-copy')).toBeTruthy();
+    expect(screen.getByTestId('recovery-locked-credentials').textContent).toContain('2');
+  });
 });

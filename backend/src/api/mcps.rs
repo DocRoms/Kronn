@@ -513,6 +513,26 @@ async fn probe_mcp_stdio(
     probe_mcp_stdio_with_timeout(command, args, env, Duration::from_secs(15)).await
 }
 
+/// The MCP server a probe starts. Its command may come from a repository's
+/// `.mcp.json`, so it gets a built environment (KT-1006): the base allow-list
+/// and the server's own configured values, nothing else of the backend's.
+fn mcp_probe_command(
+    command: &str,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+) -> tokio::process::Command {
+    use crate::core::child_env::{self, AgentFamily, ChildRoute};
+    let route = ChildRoute::Agent(AgentFamily::Other);
+    let mut process = crate::core::cmd::async_cmd(command, route);
+    process
+        .args(args)
+        .envs(env)
+        .current_dir(std::env::temp_dir());
+    let granted: Vec<&str> = env.keys().map(String::as_str).collect();
+    child_env::seal(process.as_std_mut(), route, &granted);
+    process
+}
+
 async fn probe_mcp_stdio_with_timeout(
     command: &str,
     args: &[String],
@@ -520,11 +540,8 @@ async fn probe_mcp_stdio_with_timeout(
     deadline: Duration,
 ) -> Result<(), String> {
     let operation = async {
-        let mut process =
-            crate::core::cmd::full_env_cmd(command, crate::core::cmd::FullEnvReason::McpProbe);
+        let mut process = mcp_probe_command(command, args, env);
         process
-            .args(args)
-            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -3091,6 +3108,48 @@ pub async fn import_custom_plugin_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,
+    /// sees its own configured values and no backend secret (B4-04).
+    #[cfg(unix)]
+    #[test]
+    fn a_probed_mcp_server_sees_no_backend_secret() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let bin = tempfile::tempdir().unwrap();
+        let out = probe::env_dumping_program(bin.path(), "repo-mcp");
+        let path = format!("{}:/usr/bin:/bin", bin.path().display());
+        let mut parent = probe::parent_with_secrets(&path, "/home/u");
+        parent.push(("KRONN_KEK".into(), "sentinel-legacy-kek".into()));
+        let borrowed: Vec<(&str, &str)> = parent
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let env = std::collections::HashMap::from([(
+            "SERVER_API_TOKEN".to_string(),
+            "its-own".to_string(),
+        )]);
+        let command = bin.path().join("repo-mcp");
+        let _ = crate::core::child_env::with_parent_env(&borrowed, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(probe_mcp_stdio_with_timeout(
+                    command.to_str().unwrap(),
+                    &[],
+                    &env,
+                    Duration::from_secs(5),
+                ))
+        });
+        let seen = probe::read_dump(&out);
+        probe::assert_dump_without_secrets(&seen, &[]);
+        assert!(!seen.contains_key("KRONN_KEK"));
+        assert_eq!(
+            seen.get("SERVER_API_TOKEN").map(String::as_str),
+            Some("its-own")
+        );
+    }
     use crate::core::mcp_scanner::McpServerEntry;
 
     fn environment_config(

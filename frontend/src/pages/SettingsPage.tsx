@@ -1969,14 +1969,17 @@ export function SettingsPage({
               className="set-action-btn"
               onClick={async () => {
                 try {
-                  const blob = await configApi.exportData();
+                  const { blob, warning } = await configApi.exportData();
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement('a');
                   a.href = url;
                   a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.zip`;
                   a.click();
                   URL.revokeObjectURL(url);
-                } catch (err) { console.warn('Export failed:', err); }
+                  if (warning) toast(t('config.exportRecoveryWarning'), 'error');
+                } catch (err) {
+                  toast(err instanceof Error ? err.message : String(err), 'error');
+                }
               }}
             >
               <Download size={12} /> {t('config.export')}

@@ -141,18 +141,113 @@ fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
     if matches!(name, "echo" | "test" | "[" | "true" | "false") {
         return vec![Role::Data; args.len()];
     }
+    let code = data_only_code_options(name);
     let mut options_end = false;
-    let mut roles = Vec::with_capacity(args.len());
-    for (i, arg) in args.iter().enumerate() {
+    let mut roles = vec![Role::Data; args.len()];
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
         let value = is_tainted(tainted, i);
-        roles.push(if value && !options_end {
-            Role::RuntimeOption
-        } else {
-            Role::Data
-        });
-        options_end |= !value && arg == "--";
+        if options_end {
+            i += 1;
+            continue;
+        }
+        if value {
+            roles[i] = if !is_option(arg) {
+                Role::RuntimeOption
+            } else if attached_option_matches(arg, code) {
+                Role::Code
+            } else if attached_value(arg, data_only_values(name)) {
+                Role::Data
+            } else {
+                Role::Option
+            };
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            options_end = true;
+        } else if is_option(arg) && takes_code(arg, code) && i + 1 < args.len() {
+            roles[i + 1] = Role::Code;
+            i += 1;
+        }
+        i += 1;
     }
     roles
+}
+
+/// Whether `arg` (written by the author) is a code option of `options` whose
+/// value is the next argument: the option alone, or a short cluster ending
+/// with its letter (`jq -rf FILE`).
+fn takes_code(arg: &str, options: &[&str]) -> bool {
+    if arg.starts_with("--") {
+        return !arg.contains('=') && option_in(arg, options);
+    }
+    let cluster = arg.strip_prefix('-').unwrap_or_default();
+    cluster.chars().all(|c| c.is_ascii_alphabetic())
+        && cluster.chars().last().is_some_and(|last| {
+            options
+                .iter()
+                .any(|option| option.len() == 2 && option.ends_with(last))
+        })
+}
+
+/// Options of a data-only program whose value is code: jq reads its program
+/// from `-f` and its modules from `-L`.
+fn data_only_code_options(name: &str) -> &'static [&'static str] {
+    match name {
+        "jq" => &["-f", "--from-file", "-L", "--library-path"],
+        _ => &[],
+    }
+}
+
+/// Short options of a data-only program that take a value, so a templated
+/// `-n{{count}}` keeps the value attached instead of adding options.
+fn data_only_values(name: &str) -> &'static [char] {
+    match name {
+        "head" | "tail" => &['n', 'c'],
+        "cut" => &['d', 'f', 'c', 'b'],
+        "grep" | "egrep" | "fgrep" => &['e', 'f', 'm', 'A', 'B', 'C'],
+        "date" => &['d', 'r'],
+        "mkdir" | "mkfifo" => &['m'],
+        "cp" | "mv" | "ln" => &['t', 'S'],
+        "touch" => &['d', 'r', 't'],
+        "du" => &['d', 'B'],
+        "df" => &['B', 't'],
+        "stat" => &['c', 'f'],
+        "base64" => &['w'],
+        "seq" => &['f', 's'],
+        "paste" => &['d'],
+        "join" => &['t', 'j', 'o'],
+        "fold" => &['w'],
+        "column" => &['s', 'c'],
+        "nl" => &['b', 's', 'w', 'v', 'i'],
+        "od" => &['A', 'j', 'N', 't'],
+        "hexdump" => &['n', 's'],
+        "xxd" => &['c', 'g', 'l', 's'],
+        "iconv" => &['f', 't'],
+        "shasum" => &['a'],
+        "uniq" => &['f', 's', 'w'],
+        "basename" => &['s'],
+        "diff" => &['U', 'C', 'I'],
+        "ls" => &['w', 'I'],
+        "unzip" => &['d', 'P'],
+        _ => &[],
+    }
+}
+
+/// Whether a templated option argument keeps its value attached to an option
+/// the author wrote: `--name={{v}}`, or `-X{{v}}` where `X` takes a value.
+/// Otherwise the rendered text can add options (`-{{x}}`, `--{{x}}`, `-v{{x}}`).
+fn attached_value(arg: &str, short_values: &[char]) -> bool {
+    let prefix = arg.split("{{").next().unwrap_or_default();
+    if let Some(name) = prefix.strip_prefix("--") {
+        return name.find('=').is_some_and(|at| at > 0);
+    }
+    prefix
+        .strip_prefix('-')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|letter| short_values.contains(&letter))
 }
 
 fn is_tainted(tainted: &[bool], i: usize) -> bool {
@@ -899,8 +994,10 @@ fn git_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
                 // author wrote; code when that option runs a command.
                 if attached_option_matches(arg, code_options) {
                     Role::Code
-                } else {
+                } else if attached_value(arg, git_value_letters(subcommand)) {
                     Role::Data
+                } else {
+                    Role::Option
                 }
             } else {
                 Role::RuntimeOption
@@ -924,6 +1021,15 @@ fn git_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
         i += 1;
     }
     roles
+}
+
+/// Short options of a git subcommand that take a value (`commit -m{{msg}}`).
+fn git_value_letters(subcommand: &str) -> &'static [char] {
+    match subcommand {
+        "commit" | "tag" | "merge" | "notes" | "stash" => &['m'],
+        "log" | "shortlog" | "rev-list" | "whatchanged" => &['n'],
+        _ => &[],
+    }
 }
 
 /// Options of a git subcommand whose value is a command to run.
@@ -1233,6 +1339,8 @@ struct FlagSpec {
     /// `$(shell …)`).
     assignments_are_code: bool,
     operands: Operands,
+    /// Short options taking a plain value (`mysql -u{{user}}`).
+    values: &'static [char],
 }
 
 fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
@@ -1264,7 +1372,13 @@ fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
                             .chars()
                             .take_while(|c| c.is_ascii_alphabetic())
                             .any(|c| spec.short_code.contains(&c)));
-                roles[i] = if code { Role::Code } else { Role::Data };
+                roles[i] = if code {
+                    Role::Code
+                } else if attached_value(arg, spec.values) {
+                    Role::Data
+                } else {
+                    Role::Option
+                };
                 i += 1;
                 continue;
             }
@@ -1608,6 +1722,7 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
         plus_is_code: false,
         assignments_are_code: false,
         operands,
+        values: &[],
     };
     Some(match name {
         "make" | "gmake" | "bmake" => FlagSpec {
@@ -1616,6 +1731,7 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
             plus_is_code: false,
             assignments_are_code: true,
             operands: Operands::All(Role::RuntimeOption),
+            values: &[],
         },
         "gdb" => spec(
             &[
@@ -1639,21 +1755,30 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
             &[],
             Operands::ProgramThenData,
         ),
-        "tar" | "gtar" | "bsdtar" => spec(
-            &[
-                "--to-command",
-                "--checkpoint-action",
-                "--use-compress-program",
-                "-I",
-                "--rsh-command",
-                "--info-script",
-                "--new-volume-script",
-                "-F",
-            ],
-            &['I', 'F'],
-            Operands::All(Role::RuntimeOption),
+        "tar" | "gtar" | "bsdtar" => FlagSpec {
+            values: &['f', 'C', 'T', 'X', 'b'],
+            ..spec(
+                &[
+                    "--to-command",
+                    "--checkpoint-action",
+                    "--use-compress-program",
+                    "-I",
+                    "--rsh-command",
+                    "--info-script",
+                    "--new-volume-script",
+                    "-F",
+                ],
+                &['I', 'F'],
+                Operands::All(Role::RuntimeOption),
+            )
+        },
+        // BSD `script [opts] file [command ...]` runs the operands after the
+        // file, so only the first operand can be a value.
+        "script" => spec(
+            &["-c", "--command"],
+            &[],
+            Operands::FirstThenCode(Role::RuntimeOption),
         ),
-        "script" => spec(&["-c", "--command"], &[], Operands::All(Role::Data)),
         "su" => spec(
             &[
                 "-c",
@@ -1666,40 +1791,59 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
             &[],
             Operands::All(Role::Option),
         ),
-        "scp" => spec(&["-o", "-S", "-F", "-J"], &[], Operands::All(Role::Option)),
-        "sftp" => spec(
-            &["-o", "-S", "-F", "-b", "-D", "-J"],
-            &[],
-            Operands::All(Role::RuntimeOption),
-        ),
+        "scp" => FlagSpec {
+            values: &['P', 'i', 'l', 'c'],
+            ..spec(&["-o", "-S", "-F", "-J"], &[], Operands::All(Role::Option))
+        },
+        "sftp" => FlagSpec {
+            values: &['P', 'i', 'l', 'B', 'R'],
+            ..spec(
+                &["-o", "-S", "-F", "-b", "-D", "-J"],
+                &[],
+                Operands::All(Role::RuntimeOption),
+            )
+        },
         "rsync" => spec(
             &["--rsh", "--rsync-path"],
             &['e'],
             Operands::All(Role::RuntimeOption),
         ),
-        "curl" => spec(&["-K", "--config"], &[], Operands::All(Role::RuntimeOption)),
+        "curl" => FlagSpec {
+            values: &[
+                'H', 'd', 'u', 'o', 'A', 'X', 'e', 'b', 'F', 'T', 'm', 'x', 'w',
+            ],
+            ..spec(&["-K", "--config"], &[], Operands::All(Role::RuntimeOption))
+        },
         "vim" | "vi" | "nvim" | "ex" | "view" | "gvim" | "vimdiff" => FlagSpec {
             code: &["-c", "--cmd", "-S", "-u", "-U", "-s", "-w", "-W"],
             short_code: &[],
             plus_is_code: true,
             assignments_are_code: false,
             operands: Operands::All(Role::Option),
+            values: &[],
         },
+        // sqlite3 reads `-cmd` and `--cmd` alike.
         "sqlite" => spec(
-            &["-cmd", "-init"],
+            &["-cmd", "--cmd", "-init", "--init"],
             &[],
             Operands::FirstThenCode(Role::RuntimeOption),
         ),
-        "mysql" | "mariadb" => spec(
-            &["--execute", "--init-command", "--init-command-add"],
-            &['e'],
-            Operands::All(Role::RuntimeOption),
-        ),
-        "psql" => spec(
-            &["--command", "--file", "--set", "--variable"],
-            &['c', 'f', 'v'],
-            Operands::All(Role::RuntimeOption),
-        ),
+        "mysql" | "mariadb" => FlagSpec {
+            values: &['u', 'p', 'h', 'P', 'D', 'S'],
+            ..spec(
+                &["--execute", "--init-command", "--init-command-add"],
+                &['e'],
+                Operands::All(Role::RuntimeOption),
+            )
+        },
+        "psql" => FlagSpec {
+            values: &['U', 'h', 'p', 'd'],
+            ..spec(
+                &["--command", "--file", "--set", "--variable"],
+                &['c', 'f', 'v'],
+                Operands::All(Role::RuntimeOption),
+            )
+        },
         _ => return None,
     })
 }
@@ -2487,6 +2631,104 @@ mod tests {
         }
     }
 
+    /// A templated option argument keeps its value attached only to a known
+    /// value-taking option the author wrote; `-{{x}}`, `--{{x}}` or a flag
+    /// cluster (`-v{{x}}`) lets the rendered text add options.
+    #[test]
+    fn a_templated_option_is_data_only_when_its_value_stays_attached() {
+        for (cmd, items) in [
+            ("git", vec!["rebase", "-{{x}}"]),
+            ("git", vec!["fetch", "--{{opt}}"]),
+            ("git", vec!["rebase", "-v{{x}}"]),
+            ("git", vec!["log", "-{{x}}"]),
+            ("tar", vec!["-{{x}}", "a.tar"]),
+            ("tar", vec!["-v{{x}}", "a.tar"]),
+            ("rsync", vec!["-a{{x}}", "src", "dst"]),
+            ("mysql", vec!["-{{x}}"]),
+            ("mysql", vec!["-B{{x}}"]),
+            ("psql", vec!["--{{x}}"]),
+            ("gdb", vec!["-{{x}}"]),
+            ("vim", vec!["-{{x}}"]),
+            ("sqlite3", vec!["-{{x}}", "db"]),
+            ("make", vec!["-{{x}}"]),
+            ("rm", vec!["-{{x}}", "file"]),
+            ("rm", vec!["--{{x}}", "file"]),
+            ("cp", vec!["-r{{x}}", "a", "b"]),
+            ("grep", vec!["-v{{x}}", "pattern"]),
+            ("date", vec!["-{{x}}"]),
+        ] {
+            assert!(refused(cmd, &items), "{cmd} {items:?}");
+        }
+        for (cmd, items) in [
+            ("git", vec!["commit", "-m{{msg}}"]),
+            ("git", vec!["log", "-n{{count}}"]),
+            ("git", vec!["log", "--author={{who}}"]),
+            ("tar", vec!["-f{{archive}}", "-x"]),
+            ("mysql", vec!["-u{{user}}", "db"]),
+            ("psql", vec!["-U{{user}}", "-d{{db}}"]),
+            ("curl", vec!["-H{{header}}", "https://example.org"]),
+            ("head", vec!["-n{{count}}", "file"]),
+            ("grep", vec!["-e{{pattern}}", "file"]),
+            ("grep", vec!["--regexp={{pattern}}", "file"]),
+            ("rm", vec!["--", "-{{x}}"]),
+        ] {
+            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+        }
+        // An unmodelled program stays default-deny, option-shaped or not.
+        assert!(refused("terraform", &["-{{x}}"]));
+        assert!(refused("terraform", &["--var={{x}}"]));
+        // A known value option rendered without a value would take the next
+        // argument: refused at run time.
+        let templates = line(&["-u{{user}}", "-e", "select 1"]);
+        let empty = line(&["-u", "-e", "select 1"]);
+        assert!(rendered_refusal("s", "mysql", &templates, &empty, false).is_some());
+        let named = line(&["-uÉquipe 🦀", "-e", "select 1"]);
+        assert!(rendered_refusal("s", "mysql", &templates, &named, false).is_none());
+    }
+
+    /// sqlite3 reads `--cmd` and `--init` like `-cmd` and `-init`.
+    #[test]
+    fn sqlite_double_dash_code_options_are_code() {
+        for option in ["-cmd", "--cmd", "-init", "--init"] {
+            assert!(refused("sqlite3", &[option, "{{x}}", "db"]), "{option}");
+            assert!(
+                refused("sqlite3", &[&format!("{option}={{{{x}}}}"), "db"]),
+                "{option}="
+            );
+        }
+        assert!(!refused("sqlite3", &["db", "--cmd", ".mode csv"]));
+    }
+
+    /// BSD `script file command...` runs the operands after the file.
+    #[test]
+    fn script_operands_after_the_file_are_a_command() {
+        assert!(refused("script", &["-q", "out.log", "{{x}}"]));
+        assert!(refused("script", &["-q", "out.log", "bash", "-c", "{{x}}"]));
+        assert!(!refused("script", &["-q", "{{log}}"]));
+        let templates = line(&["-q", "{{log}}"]);
+        assert!(rendered_refusal("s", "script", &templates, &line(&["-q", "-c"]), false).is_some());
+    }
+
+    /// jq reads its program from `-f` and modules from `-L`.
+    #[test]
+    fn jq_program_and_module_paths_are_code() {
+        for items in [
+            vec!["-f", "{{x}}"],
+            vec!["--from-file", "{{x}}"],
+            vec!["--from-file={{x}}"],
+            vec!["-f{{x}}"],
+            vec!["-rf", "{{x}}"],
+            vec!["-L", "{{x}}", "."],
+            vec!["-L{{x}}", "."],
+            vec!["--library-path={{x}}", "."],
+        ] {
+            assert!(refused("jq", &items), "{items:?}");
+        }
+        assert!(!refused("jq", &["-r", ".name", "{{file}}"]));
+        assert!(!refused("jq", &["--arg", "name", "{{value}}", ".x"]));
+        assert!(!refused("jq", &["-L", "/usr/share/jq", ".", "{{file}}"]));
+    }
+
     /// A data-only program still reads options: a value rendering to one
     /// (`rm {{x}}` as `-rf`) is refused at run time, unless a literal `--`
     /// precedes it.
@@ -2502,8 +2744,14 @@ mod tests {
                 rendered_refusal("s", program, &templates, &line(rendered), false)
             };
             assert!(refusal(&["-rf", "target"]).is_some(), "{program} -rf");
-            assert!(refusal(&["--no-preserve-root", "target"]).is_some(), "{program} --");
-            assert!(refusal(&["Équipe 🦀", "target"]).is_none(), "{program} plain value");
+            assert!(
+                refusal(&["--no-preserve-root", "target"]).is_some(),
+                "{program} --"
+            );
+            assert!(
+                refusal(&["Équipe 🦀", "target"]).is_none(),
+                "{program} plain value"
+            );
 
             let templates = tainted(&["-v", "{{x}}", "{{y}}"]);
             let rendered = line(&["-v", "a", "-rf"]);

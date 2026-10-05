@@ -83,7 +83,12 @@ fn from_config(config: &AppConfig) -> Vec<PlainCredential> {
         .clone()
         .filter(|t| !t.is_empty() && !config.server.auth_token_session_only)
     {
-        out.push(PlainCredential::auth_token(token));
+        // `active` stores whether auth is enabled, so a lost config.toml does
+        // not turn auth off silently.
+        out.push(PlainCredential {
+            active: config.server.auth_enabled,
+            ..PlainCredential::auth_token(token)
+        });
     }
     out
 }
@@ -167,12 +172,14 @@ async fn write_and_verify(
     let preserve = preserve.clone();
     let key = key_hex.to_string();
     db.with_conn(move |conn| {
+        // Write and read back in one transaction: a mismatch commits nothing.
+        let tx = conn.unchecked_transaction()?;
         if replace {
-            rows::replace_all(conn, &encrypted, &preserve)?;
+            rows::replace_rows(&tx, &encrypted, &preserve)?;
         } else {
-            rows::upsert_all(conn, &encrypted)?;
+            rows::upsert_rows(&tx, &encrypted)?;
         }
-        let stored: HashMap<(String, String), StoredCredential> = rows::list(conn)?
+        let stored: HashMap<(String, String), StoredCredential> = rows::list(&tx)?
             .into_iter()
             .map(|r| (r.row_key(), r))
             .collect();
@@ -204,9 +211,85 @@ async fn write_and_verify(
                 );
             }
         }
+        tx.commit()?;
         Ok(())
     })
     .await
+}
+
+/// Why credentials cannot be changed while the store is not armed.
+pub const LOCKED_MESSAGE: &str = "The encryption key is locked: provider keys and the API token \
+     cannot be stored until it is restored (Settings → Recovery)";
+
+/// Per data directory, the credentials config.toml held when the boot found
+/// the store unarmable. Absent: no boot ran (tests), so saves stay as before.
+static FILE_AT_BOOT: LazyLock<std::sync::Mutex<HashMap<PathBuf, Vec<PlainCredential>>>> =
+    LazyLock::new(Default::default);
+
+fn file_credentials_at_boot(dir: &Path) -> Option<Vec<PlainCredential>> {
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(dir)
+        .cloned()
+}
+
+fn note_file_credentials(dir: &Path, config: &AppConfig) {
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(dir.to_path_buf(), from_config(config));
+}
+
+/// `Err(LOCKED_MESSAGE)` when a boot ran and the store is not armed: callers
+/// about to add or change a credential refuse before touching the config.
+pub fn refuse_if_locked(dir: &Path) -> std::result::Result<(), String> {
+    if !is_armed(dir) && file_credentials_at_boot(dir).is_some() {
+        return Err(locked_message(dir));
+    }
+    Ok(())
+}
+
+/// Why credentials cannot be stored now: the key is locked, or it is in use
+/// but the credential store failed to load at start (say so, and what to do).
+fn locked_message(dir: &Path) -> String {
+    match boot_failure(dir) {
+        Some(failure) => format!(
+            "The stored credentials could not be loaded at start ({failure}). Nothing was \
+             lost: fix the cause (free disk space, repair config.toml), then restart Kronn."
+        ),
+        None => LOCKED_MESSAGE.to_string(),
+    }
+}
+
+/// Per data directory, why the last credential boot failed with the key in use.
+static BOOT_FAILURES: LazyLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
+    LazyLock::new(Default::default);
+
+/// Remember why the credential boot of `dir` failed (or clear it).
+pub fn record_boot_failure(dir: &Path, failure: Option<String>) {
+    let mut map = BOOT_FAILURES.lock().unwrap_or_else(|p| p.into_inner());
+    match failure {
+        Some(f) => map.insert(dir.to_path_buf(), f),
+        None => map.remove(dir),
+    };
+}
+
+/// Why the credential boot of `dir` failed with the key in use, if it did.
+pub fn boot_failure(dir: &Path) -> Option<String> {
+    BOOT_FAILURES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(dir)
+        .cloned()
+}
+
+/// [`refuse_if_locked`] for the current data directory.
+pub fn refuse_credential_change() -> std::result::Result<(), String> {
+    match crate::core::config::config_dir() {
+        Ok(dir) => refuse_if_locked(&dir),
+        Err(_) => Ok(()),
+    }
 }
 
 struct Armed {
@@ -237,6 +320,10 @@ pub fn is_armed(dir: &Path) -> bool {
 /// Stop routing `dir`'s credentials to the store (tests, data-dir switch).
 pub fn disarm(dir: &Path) {
     armed_map().remove(dir);
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(dir);
 }
 
 /// Called by `config::save` before it writes `config.toml`. Returns `true`
@@ -244,6 +331,23 @@ pub fn disarm(dir: &Path) {
 /// leave them out; `false` when the store is not armed for `dir`.
 pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
     let Some(armed) = armed_for(dir) else {
+        // Not armed after a boot: config.toml may keep only what it already
+        // held; a credential it did not hold is refused, never written in clear.
+        if let Some(allowed) = file_credentials_at_boot(dir) {
+            let new_one = from_config(config).into_iter().find(|c| {
+                !allowed
+                    .iter()
+                    .any(|a| a.kind == c.kind && a.id == c.id && a.value == c.value)
+            });
+            if let Some(c) = new_one {
+                anyhow::bail!(
+                    "{} (refused to write {}:{} to config.toml in plaintext)",
+                    locked_message(dir),
+                    c.kind,
+                    c.id
+                );
+            }
+        }
         return Ok(false);
     };
     let desired = from_config(config);
@@ -282,6 +386,13 @@ pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool
     Ok(true)
 }
 
+/// Stored rows the key in use cannot decrypt (0 when not armed).
+pub fn locked_credential_count(dir: &Path) -> usize {
+    armed_for(dir)
+        .map(|a| a.preserve.lock().unwrap_or_else(|p| p.into_inner()).len())
+        .unwrap_or(0)
+}
+
 /// Delete every stored credential of `dir` (factory reset).
 pub async fn forget_all(dir: &Path, db: &Database) -> Result<()> {
     db.with_conn(rows::delete_all).await?;
@@ -289,6 +400,38 @@ pub async fn forget_all(dir: &Path, db: &Database) -> Result<()> {
         armed.persisted.lock().await.clear();
     }
     Ok(())
+}
+
+/// Delete every stored provider key of `dir`, keeping the API auth token: a
+/// reset must not leave a LAN-bound instance without auth.
+pub async fn forget_provider_keys(dir: &Path, db: &Database) -> Result<()> {
+    db.with_conn(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM stored_credentials WHERE kind = ?1",
+            [KIND_PROVIDER_KEY],
+        )?)
+    })
+    .await?;
+    if let Some(armed) = armed_for(dir) {
+        armed
+            .persisted
+            .lock()
+            .await
+            .retain(|c| c.kind != KIND_PROVIDER_KEY);
+        armed
+            .preserve
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(kind, _)| kind != KIND_PROVIDER_KEY);
+    }
+    Ok(())
+}
+
+/// Why [`boot`] runs: at startup, or after the key was restored at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootMode {
+    Startup,
+    Restore,
 }
 
 /// What [`boot`] did, for the boot log.
@@ -312,12 +455,19 @@ pub async fn boot(
     dir: &Path,
     key_outcome: &KeyOutcome,
     env_auth_token: Option<&str>,
+    mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
+    // Until armed below, saves may only keep what config.toml holds now.
+    note_file_credentials(dir, config);
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
-        // A stored token we cannot read is "auth locked", never "no auth".
+        // A stored token we cannot read is "auth locked", never "no auth"; its
+        // row still says whether auth was enabled.
         if config.server.auth_token.is_none() {
             let stored = db.with_conn(rows::list).await?;
-            config.server.auth_locked = stored.iter().any(|r| r.kind == KIND_AUTH_TOKEN);
+            if let Some(row) = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN) {
+                config.server.auth_locked = true;
+                config.server.auth_enabled |= row.active;
+            }
         }
         tracing::warn!(
             "credentials: the encryption key is locked — stored provider keys and the auth token \
@@ -330,6 +480,10 @@ pub async fn boot(
     };
 
     let stored = db.with_conn(rows::list).await?;
+    // The stored token row remembers that auth was enabled (config.toml lost).
+    if stored.iter().any(|r| r.kind == KIND_AUTH_TOKEN && r.active) {
+        config.server.auth_enabled = true;
+    }
     let mut table = Vec::new();
     let mut preserve = HashSet::new();
     for row in stored {
@@ -375,7 +529,10 @@ pub async fn boot(
         merged.push(PlainCredential::auth_token(
             uuid::Uuid::new_v4().to_string(),
         ));
-        config.server.auth_enabled = crate::core::env::auth_on_by_default();
+        // A restore never changes whether auth is on.
+        if mode == BootMode::Startup {
+            config.server.auth_enabled = crate::core::env::auth_on_by_default();
+        }
         generated_auth_token = true;
         tracing::info!(
             "Generated auth token (auth_enabled={}, docker={})",
@@ -429,15 +586,27 @@ pub async fn boot(
 
 /// Whether a config.toml text carries a key, token or credential value.
 fn toml_holds_secrets(text: &str) -> bool {
+    let key = text
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| {
+            t.get("encryption_secret")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty())
+        })
+        .unwrap_or(false);
+    key || toml_holds_credentials(text)
+}
+
+/// Whether a config.toml text carries a token or credential value (the key
+/// itself aside: a backup encrypted under that key would protect nothing).
+fn toml_holds_credentials(text: &str) -> bool {
     let Ok(table) = text.parse::<toml::Table>() else {
         // Unparseable: treat as sensitive rather than skip the backup.
         return true;
     };
     let non_empty =
         |v: Option<&toml::Value>| v.and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
-    if non_empty(table.get("encryption_secret")) {
-        return true;
-    }
     if let Some(server) = table.get("server").and_then(|v| v.as_table()) {
         if non_empty(server.get("auth_token")) {
             return true;
@@ -474,7 +643,7 @@ fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Optio
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).context("read config.toml"),
     };
-    if !toml_holds_secrets(&text) {
+    if !toml_holds_credentials(&text) {
         return Ok(None);
     }
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
@@ -484,6 +653,43 @@ fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Optio
         .context("write config backup")?;
     std::fs::rename(&tmp, &backup).context("move config backup into place")?;
     Ok(Some(backup))
+}
+
+/// Move the encrypted config.toml backup from `from_hex` to `to_hex` when a key
+/// is retired; untouched when it is under another key or absent.
+pub fn reencrypt_backup(dir: &Path, from_hex: &str, to_hex: &str) -> Result<bool> {
+    let path = dir.join(BACKUP_FILENAME);
+    let Ok(text) = read_backup(&path, from_hex) else {
+        return Ok(false);
+    };
+    let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
+    let encrypted = crypto::encrypt(&text, &to).map_err(anyhow::Error::msg)?;
+    let tmp = dir.join(format!(".{BACKUP_FILENAME}.reencrypt.tmp"));
+    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+        .context("write config backup")?;
+    std::fs::rename(&tmp, &path).context("move config backup into place")?;
+    Ok(true)
+}
+
+/// Make the encrypted config.toml backup readable with `key_hex`: when it is
+/// under another candidate (a retirement that stopped half-way, an older key),
+/// re-encrypt it. Untouched when absent, already current, or under no
+/// candidate.
+pub fn reencrypt_backup_to(
+    dir: &Path,
+    candidates: &[(String, &'static str)],
+    key_hex: &str,
+) -> Result<bool> {
+    let path = dir.join(BACKUP_FILENAME);
+    if !path.exists() || read_backup(&path, key_hex).is_ok() {
+        return Ok(false);
+    }
+    for (from, _) in candidates {
+        if from != key_hex && read_backup(&path, from).is_ok() {
+            return reencrypt_backup(dir, from, key_hex);
+        }
+    }
+    Ok(false)
 }
 
 /// Decrypt a backup written by [`back_up_config_if_it_holds_secrets`].
@@ -520,11 +726,34 @@ fn strip_credential_fields(table: &mut toml::Table) -> bool {
 /// `encryption_secret` goes only when it is the key in use and config.toml no
 /// longer needs one; any other key is kept, since rows may depend on it.
 fn scrub_migration_backup(dir: &Path, key_hex: &str) -> Result<()> {
-    let path = dir.join(MIGRATION_BACKUP_FILENAME);
-    let text = match std::fs::read_to_string(&path) {
+    for path in migration_backup_paths(dir) {
+        scrub_one_backup(dir, &path, key_hex)?;
+    }
+    Ok(())
+}
+
+/// config.toml.backup and every rotated `config.toml.backup.<ts>` copy (those
+/// rotated by an earlier boot may still hold 0.14.2 credentials in clear).
+fn migration_backup_paths(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name == MIGRATION_BACKUP_FILENAME
+                || name.starts_with(&format!("{MIGRATION_BACKUP_FILENAME}."))
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).context("read config.toml.backup"),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
     if !toml_holds_secrets(&text) {
         return Ok(());
@@ -533,21 +762,27 @@ fn scrub_migration_backup(dir: &Path, key_hex: &str) -> Result<()> {
         return Ok(());
     };
     let mut changed = strip_credential_fields(&mut table);
+    // Its key goes only when it is the key in use and config.toml no longer
+    // needs a copy (the two-copies rule); any other key is kept.
     let same_key = table
         .get("encryption_secret")
         .and_then(|v| v.as_str())
-        .is_some_and(|k| k == key_hex);
+        .is_some_and(|k| crate::core::keyvault::same_key(k, key_hex));
     if same_key && crate::core::config::retained_disk_key(dir).is_none() {
         changed |= table.remove("encryption_secret").is_some();
     }
     if !changed {
         return Ok(());
     }
-    let content = toml::to_string_pretty(&table).context("serialize config.toml.backup")?;
-    let tmp = dir.join(format!(".{MIGRATION_BACKUP_FILENAME}.tmp"));
+    let content = toml::to_string_pretty(&table).context("serialize config backup")?;
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = dir.join(format!(".{file}.scrub.tmp"));
     crate::core::keyvault::write_private_temp(&tmp, content.as_bytes())
-        .context("write config.toml.backup")?;
-    std::fs::rename(&tmp, &path).context("move config.toml.backup into place")?;
+        .with_context(|| format!("write {file}"))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("move {file} into place"))?;
     Ok(())
 }
 

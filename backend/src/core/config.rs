@@ -89,6 +89,29 @@ pub async fn load() -> Result<Option<AppConfig>> {
         .await
         .context("Failed to read config file")?;
     let dir = config_dir()?;
+    if toml::from_str::<AppConfig>(&content).is_err()
+        && key_only_file(&content).ok().flatten().is_none()
+    {
+        // Not a config Kronn can read (manual edit, foreign tool): keep it aside
+        // untouched, salvage its key, and start as a first run.
+        let kept = set_aside_unreadable_config(&dir, &path)?;
+        let key = salvage_key_line(&content);
+        tracing::error!(
+            "config.toml could not be parsed; it is kept as {kept} (it may hold your key). \
+             Kronn starts as a first run{}",
+            if key.is_some() {
+                " with the key it held"
+            } else {
+                ""
+            }
+        );
+        if let Some(key) = key.as_deref() {
+            retain_disk_key(&dir, key);
+        }
+        let mut config = default_config_without_key();
+        config.encryption_secret = key;
+        return Ok(Some(config));
+    }
     if let Some(key) = key_only_file(&content)? {
         // Left by a reset that had to keep the key: first run, with that key.
         if let Some(key) = key.as_deref() {
@@ -250,7 +273,6 @@ fn write_config_atomic(
     path: &std::path::Path,
     content: &[u8],
 ) -> std::io::Result<()> {
-    use std::io::Write;
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(
         ".{}.{}.{}.tmp",
@@ -258,16 +280,9 @@ fn write_config_atomic(
         std::process::id(),
         seq
     ));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        f.sync_all()?;
-    }
+    // Owner-only from creation, never through a planted symlink, and removed
+    // when the write or fsync fails.
+    super::keyvault::write_private_temp(&tmp, content)?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -562,6 +577,31 @@ pub fn default_config() -> AppConfig {
     }
 }
 
+/// Move an unreadable config.toml to `config.toml.corrupt.<ts>` (owner-only).
+fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) -> Result<String> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
+    let name = format!("{CONFIG_FILE}.corrupt.{stamp}");
+    std::fs::rename(path, dir.join(&name)).context("move the unreadable config.toml aside")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir.join(&name), std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(name)
+}
+
+/// A top-level `encryption_secret = "..."` line that parses on its own.
+fn salvage_key_line(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let table: toml::Table = line.trim().parse().ok()?;
+        table
+            .get("encryption_secret")
+            .and_then(|v| v.as_str())
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// `default_config()` without a key: a missing config.toml must not offer a
 /// random key to the reconciler, which could then keep it for good.
 pub fn default_config_without_key() -> AppConfig {
@@ -574,7 +614,9 @@ pub fn default_config_without_key() -> AppConfig {
 /// the file a reset writes when config.toml carries a needed copy of the key.
 fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
     let table: toml::Table = content.parse().context("Failed to parse config file")?;
-    if table.contains_key("server") {
+    // Only an empty file or one holding just the key: anything else (a
+    // `[tokens]` table, say) is a real config whose content must not be dropped.
+    if !table.keys().all(|k| k == "encryption_secret") {
         return Ok(None);
     }
     Ok(Some(
@@ -583,6 +625,38 @@ fn key_only_file(content: &str) -> Result<Option<Option<String>>> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
     ))
+}
+
+/// Write `dir`'s config.toml now so it carries the retained key: the settings
+/// in memory when the file is a real config, the key alone otherwise (a first
+/// run stays a first run). Used when no key store could take a new key.
+pub fn write_key_copy_now(dir: &std::path::Path, config: &AppConfig) -> Result<()> {
+    let path = dir.join(CONFIG_FILE);
+    let real_config = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| key_only_file(&text).ok())
+        .is_some_and(|key_only| key_only.is_none());
+    let content = if real_config {
+        disk_toml(config, dir, false)?
+    } else {
+        match retained_disk_key(dir) {
+            Some(key) => format!("encryption_secret = {}\n", toml::Value::String(key)),
+            None => return Ok(()),
+        }
+    };
+    std::fs::create_dir_all(dir)?;
+    write_config_atomic(dir, &path, content.as_bytes()).context("write config.toml")?;
+    Ok(())
+}
+
+/// The `encryption_secret` config.toml in `dir` holds, if any.
+pub fn read_disk_key(dir: &std::path::Path) -> Result<Option<String>> {
+    let text = std::fs::read_to_string(dir.join(CONFIG_FILE)).context("read config.toml")?;
+    let table: toml::Table = text.parse().context("parse config.toml")?;
+    Ok(table
+        .get("encryption_secret")
+        .and_then(|v| v.as_str())
+        .map(str::to_string))
 }
 
 /// Replace config.toml with a file holding only the retained key (reset).
@@ -710,6 +784,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// C2-17 — the temp file is created owner-only and never follows a
+    /// symlink planted at its name.
+    #[cfg(unix)]
+    #[test]
+    fn write_config_atomic_never_follows_a_planted_temp_symlink() {
+        let dir = scratch_dir("atomic-symlink");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let seq = TMP_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+        for next in seq..seq + 64 {
+            let name = format!(".{}.{}.{}.tmp", CONFIG_FILE, std::process::id(), next);
+            let _ = std::os::unix::fs::symlink(&victim, dir.join(name));
+        }
+        write_config_atomic(&dir, &dir.join(CONFIG_FILE), b"secret = 1\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap(),
+            "secret = 1\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C3-09 — an unparseable config.toml is kept aside, its key salvaged, and
+    /// the start continues as a first run.
+    #[tokio::test]
+    #[serial]
+    async fn an_unparseable_config_is_kept_aside_and_its_key_salvaged() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("corrupt");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let key = crate::core::crypto::generate_secret();
+        std::fs::write(
+            tmp.join(CONFIG_FILE),
+            format!("encryption_secret = \"{key}\"\nx = [broken\n"),
+        )
+        .unwrap();
+        let loaded = load()
+            .await
+            .unwrap()
+            .expect("first run with the salvaged key");
+        assert_eq!(loaded.encryption_secret.as_deref(), Some(key.as_str()));
+        assert_eq!(retained_disk_key(&tmp), Some(key.clone()));
+        assert!(!tmp.join(CONFIG_FILE).exists());
+        let kept: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.toml.corrupt.")
+            })
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert!(std::fs::read_to_string(kept[0].path())
+            .unwrap()
+            .contains("x = [broken"));
+        assert!(is_first_run().await.unwrap());
+        release_disk_key(&tmp);
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C2-31 — only an empty or key-only file counts as "key only".
+    #[test]
+    fn only_a_key_only_file_is_read_as_key_only() {
+        assert_eq!(key_only_file("").unwrap(), Some(None));
+        assert_eq!(
+            key_only_file("encryption_secret = \"ab\"\n").unwrap(),
+            Some(Some("ab".into()))
+        );
+        assert_eq!(
+            key_only_file("[tokens]\nanthropic = \"sk\"\n").unwrap(),
+            None
+        );
+        assert_eq!(key_only_file("language = \"fr\"\n").unwrap(), None);
     }
 
     #[test]

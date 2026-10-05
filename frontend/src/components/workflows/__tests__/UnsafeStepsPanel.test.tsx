@@ -7,12 +7,12 @@ vi.mock('../../../lib/api', () => ({
   workflows: { unsafeSteps: (...args: unknown[]) => unsafeSteps(...args) },
 }));
 vi.mock('../../../lib/I18nContext', () => ({
-  useT: () => ({ t: (key: string) => key }),
+  useT: () => ({ t: (key: string, ...args: unknown[]) => [key, ...args].join('|') }),
 }));
 
 import { UnsafeStepsPanel } from '../UnsafeStepsPanel';
 
-const workflow = { id: 'wf-1' } as Workflow;
+const workflow = { id: 'wf-1', name: 'PR review' } as Workflow;
 const fixable: UnsafeExecStep = {
   step_name: 'greet',
   on_failure: false,
@@ -61,7 +61,8 @@ describe('UnsafeStepsPanel', () => {
     unsafeSteps.mockResolvedValue([manual]);
     render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
     await screen.findByText('heredoc');
-    fireEvent.click(screen.getByText('wf.unsafeSuggest'));
+    expect(screen.queryByText('wf.unsafeSuggest')).toBeNull();
+    fireEvent.click(screen.getByText('wf.unsafeHow'));
     expect(screen.getByText('wf.unsafeManual')).toBeDefined();
     expect(screen.getByText(manual.manual_fix!)).toBeDefined();
     expect(screen.queryByText('wf.unsafeApply')).toBeNull();
@@ -76,5 +77,31 @@ describe('UnsafeStepsPanel', () => {
     fireEvent.click(screen.getByText('wf.unsafeSuggest'));
     fireEvent.click(screen.getByText('wf.unsafeApply'));
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ source_alias: 'ticket' })));
+  });
+
+  it('offers a prompt for an agent listing every step that needs a manual fix', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const second = { ...manual, step_name: 'write_ctx', phase: 'stdin' as const, placeholder: '{{steps.whoami.data.login}}' };
+    unsafeSteps.mockResolvedValue([fixable, manual, second]);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+
+    const prompt = await screen.findByLabelText('wf.unsafeAgentPromptLabel');
+    const text = prompt.textContent ?? '';
+    expect(text).toContain('wf.unsafeAgentPrompt|PR review|wf-1|2|');
+    expect(text).toContain(`- heredoc : {{issue.title}} — ${manual.manual_fix}`);
+    expect(text).toContain('- write_ctx (stdin) : {{steps.whoami.data.login}}');
+    expect(text).not.toContain('- greet');
+
+    fireEvent.click(screen.getByText('wf.unsafeAgentCopy'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(text));
+    expect(await screen.findByText('wf.unsafeAgentCopied')).toBeDefined();
+  });
+
+  it('offers no agent prompt when every step has an automatic fix', async () => {
+    unsafeSteps.mockResolvedValue([fixable]);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    await screen.findByText('greet');
+    expect(screen.queryByLabelText('wf.unsafeAgentPromptLabel')).toBeNull();
   });
 });

@@ -72,11 +72,23 @@ async function execRaw(call: Promise<unknown>, verb: string, urlRe: RegExp): Pro
 // ════════════════════════════════════════════════════════════════════════════
 describe('api.config (blob/form)', () => {
   it('exportData → GET /config/export, returns a Blob', async () => {
-    const blob = await config.exportData();
+    const { blob, warning } = await config.exportData();
     expect(blob).toBeInstanceOf(Blob);
+    expect(warning).toBeNull();
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/api\/config\/export$/);
     expect((opts as { method?: string }).method).toBeUndefined(); // defaults to GET
+  });
+
+  it('exportData returns the recovery warning header (C3-23)', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob(),
+      headers: new Headers({ 'X-Kronn-Export-Warning': 'recovery-not-bundled' }),
+    });
+    const { warning } = await config.exportData();
+    expect(warning).toBe('recovery-not-bundled');
   });
 
   it('exportData throws on non-ok response', async () => {

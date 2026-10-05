@@ -62,6 +62,13 @@ pub fn parse_secret(hex_str: &str) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
+/// The one spelling of a key: trimmed, parsed, re-encoded as lower-case hex.
+/// Compare, de-duplicate and fingerprint keys only in this form, so `ABCD…`
+/// and `abcd…` are one key.
+pub fn canonical_secret(hex_str: &str) -> Result<String, String> {
+    parse_secret(hex_str.trim()).map(|key| hex::encode(&key))
+}
+
 /// Mask a string for display: show first 2 and last 2 chars, counted in
 /// chars (never bytes). Values under 12 chars are fully masked so the hint
 /// never reveals a meaningful share of a short secret.
@@ -100,7 +107,7 @@ pub fn key_fingerprint(key: &[u8; 32]) -> String {
 /// KID from a hex-encoded secret string — convenience for the config / keystore
 /// call sites that hold the hex form. Errors if the hex isn't a valid 32-byte key.
 pub fn key_fingerprint_hex(hex_secret: &str) -> Result<String, String> {
-    let key = parse_secret(hex_secret)?;
+    let key = parse_secret(hex_secret.trim())?;
     Ok(key_fingerprint(&key))
 }
 
@@ -140,16 +147,24 @@ mod hex {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
+    /// Strict hex over bytes: any non-hex byte (multi-byte UTF-8, `+`, spaces)
+    /// is an error, never a slice panic.
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if !s.len().is_multiple_of(2) {
+        let bytes = s.as_bytes();
+        if !bytes.len().is_multiple_of(2) {
             return Err("Odd-length hex string".into());
         }
-        (0..s.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&s[i..i + 2], 16)
-                    .map_err(|e| format!("Invalid hex at {}: {}", i, e))
-            })
+        let nibble = |b: u8, i: usize| -> Result<u8, String> {
+            (b as char)
+                .to_digit(16)
+                .filter(|_| b.is_ascii_hexdigit())
+                .map(|d| d as u8)
+                .ok_or_else(|| format!("Invalid hex at {i}"))
+        };
+        bytes
+            .chunks(2)
+            .enumerate()
+            .map(|(n, pair)| Ok((nibble(pair[0], 2 * n)? << 4) | nibble(pair[1], 2 * n + 1)?))
             .collect()
     }
 }
@@ -164,6 +179,32 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_secret_rejects_non_ascii_and_signs_without_panicking() {
+        // 64 bytes of which a multi-byte char straddles a pair boundary.
+        let mut tricky = "a".repeat(61);
+        tricky.push('é');
+        tricky.push('b');
+        assert_eq!(tricky.len(), 64);
+        assert!(parse_secret(&tricky).is_err());
+        assert!(parse_secret("é").is_err());
+        assert!(parse_secret(&format!("+f{}", "0".repeat(62))).is_err());
+        assert!(parse_secret(&"日本".repeat(16)).is_err());
+    }
+
+    #[test]
+    fn canonical_secret_folds_case_and_whitespace_into_one_key() {
+        let key = generate_secret();
+        let upper = key.to_uppercase();
+        assert_eq!(canonical_secret(&upper).unwrap(), key);
+        assert_eq!(canonical_secret(&format!("  {key}\n")).unwrap(), key);
+        assert_eq!(
+            key_fingerprint_hex(&upper).unwrap(),
+            key_fingerprint_hex(&key).unwrap()
+        );
+        assert!(canonical_secret("not a key").is_err());
+    }
 
     fn make_key(seed: u8) -> [u8; 32] {
         let mut k = [0u8; 32];

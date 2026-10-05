@@ -876,12 +876,15 @@ export const config = {
   /** VACUUM: gives freed pages back to the disk. Pauses database writes for
    *  its duration and is refused while a workflow run is in progress. */
   dbCompact: () => api<DbCompaction>('POST', '/db/compact'),
-  exportData: async (): Promise<Blob> => {
+  /** `warning` is set when this machine's recovery.key could not be bundled
+   *  (it does not protect the key in use): the exported secrets then cannot be
+   *  read elsewhere. */
+  exportData: async (): Promise<{ blob: Blob; warning: string | null }> => {
     const res = await fetch(`${_apiBase}/api/config/export`, {
       headers: authHeaders(),
     });
     if (!res.ok) throw new Error(`Export failed: ${res.status}`);
-    return res.blob();
+    return { blob: await res.blob(), warning: res.headers?.get?.('X-Kronn-Export-Warning') ?? null };
   },
   importData: async (file: File): Promise<ImportResult> => {
     const form = new FormData();

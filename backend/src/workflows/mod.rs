@@ -359,6 +359,10 @@ impl WorkflowEngine {
         })?;
         let variable_retention_days = config.server.execution_variable_retention_days;
         drop(config);
+        crate::workflows::template::refuse_reserved_names(
+            wf.variables.iter().map(|variable| variable.name.as_str()),
+        )
+        .map_err(anyhow::Error::msg)?;
         let run_id = Uuid::new_v4().to_string();
         let declarations = wf.variables.clone();
         let project_id = run_project_id.clone();

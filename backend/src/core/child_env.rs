@@ -506,6 +506,28 @@ pub fn parent_var(name: &str) -> Option<OsString> {
         .find_map(|(key, value)| (key == name).then_some(value))
 }
 
+/// For a child that inherits the backend's environment (a declared
+/// exception): remove what no child may hold. `kronn_itself` (Kronn
+/// relaunching itself) keeps everything but the forbidden names; any other
+/// keeps no provider key, GitHub token or secret-looking name either.
+pub fn strip_inherited_secrets(command: &mut std::process::Command, kronn_itself: bool) {
+    for name in FORBIDDEN {
+        command.env_remove(name);
+    }
+    if kronn_itself {
+        return;
+    }
+    for (name, _) in parent_env() {
+        let Some(text) = name.to_str() else {
+            command.env_remove(&name);
+            continue;
+        };
+        if name_in(text, PROVIDER_KEYS) || name_in(text, GITHUB_ENV) || looks_secret(text) {
+            command.env_remove(&name);
+        }
+    }
+}
+
 /// Empty the child's environment and give it what its route inherits. Call
 /// before setting any per-launch value.
 pub fn reset(command: &mut std::process::Command, route: ChildRoute) {

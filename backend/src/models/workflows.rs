@@ -2269,6 +2269,9 @@ pub struct ExecLineCheckRequest {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    /// The step's `exec_stdin` template, when it has one.
+    #[serde(default)]
+    pub stdin: Option<String>,
 }
 
 /// What the editors need to know about one command line.

@@ -244,6 +244,9 @@ pub async fn save_api_key(
     if req.value.is_empty() || req.value.contains('*') {
         return Json(ApiResponse::err("Invalid key value"));
     }
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
 
     let key = if let Some(ref id) = req.id {
         // Update existing
@@ -1011,32 +1014,51 @@ pub async fn set_network_exposure(
 ) -> Json<ApiResponse<NetworkExposure>> {
     {
         let mut config = state.config.write().await;
-        config.server.host = if req.exposed {
+        // Change a copy, adopt it only once saved: a failed save must not leave
+        // a live token or host that was never stored.
+        let mut next = config.clone();
+        next.server.host = if req.exposed {
             "0.0.0.0".to_string()
         } else {
             "127.0.0.1".to_string()
         };
         if req.exposed {
-            config.server.auth_enabled = true;
-            if config.server.auth_token.as_deref().unwrap_or("").is_empty() {
-                config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+            next.server.auth_enabled = true;
+            if next.server.auth_token.as_deref().unwrap_or("").is_empty() {
+                if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+                    return Json(ApiResponse::err(locked));
+                }
+                next.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+                next.server.auth_token_session_only = false;
+                next.server.auth_locked = false;
             }
         }
-        if let Err(e) = config::save(&config).await {
+        if let Err(e) = config::save(&next).await {
             return Json(ApiResponse::err(format!("Failed to save: {}", e)));
         }
+        *config = next;
     }
     get_network_exposure(State(state)).await
 }
 
 /// POST /api/config/auth-token/regenerate
 pub async fn regenerate_auth_token(State(state): State<AppState>) -> Json<ApiResponse<String>> {
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
     let mut config = state.config.write().await;
     let new_token = uuid::Uuid::new_v4().to_string();
-    config.server.auth_token = Some(new_token.clone());
-    config.server.auth_enabled = true;
-    match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(new_token)),
+    // Change a copy, adopt it only once stored.
+    let mut next = config.clone();
+    next.server.auth_token = Some(new_token.clone());
+    next.server.auth_token_session_only = false;
+    next.server.auth_enabled = true;
+    match config::save(&next).await {
+        Ok(_) => {
+            next.server.auth_locked = false;
+            *config = next;
+            Json(ApiResponse::ok(new_token))
+        }
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -1206,6 +1228,9 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
 pub async fn discover_keys(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<DiscoverKeysResponse>> {
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
     let discovered = crate::core::key_discovery::discover_keys().await;
     let mut config = state.config.write().await;
     let mut imported_count = 0u32;
@@ -1691,24 +1716,47 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
     // used to carry undecryptable ciphertext only (the 2026-06-30 re-enter-
     // everything pain). Safe to ship: the blob is useless without the passphrase;
     // the raw key itself is still never exported.
-    let recovery_code = config::config_dir()
-        .ok()
-        .and_then(|d| crate::core::recovery::load_blob(&d))
-        .map(|b| crate::core::recovery::to_code(&b));
+    // Only a blob known to wrap the key in use can open the exported secrets
+    // elsewhere; any other is left out and the UI says so.
+    let active_key = state.config.read().await.encryption_secret.clone();
+    let (recovery_code, export_warning) =
+        export_recovery_code(config::config_dir().ok().as_deref(), active_key.as_deref());
 
     let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"kronn-export.zip\"",
-        )
-        .body(Body::from(bytes))
-        .unwrap()
+        );
+    if let Some(warning) = export_warning {
+        response = response.header("X-Kronn-Export-Warning", warning);
+    }
+    response.body(Body::from(bytes)).unwrap()
+}
+
+/// The recovery code to bundle (only a blob verified for the key in use) and,
+/// when a recovery.key exists but cannot be bundled, the warning code.
+fn export_recovery_code(
+    dir: Option<&std::path::Path>,
+    key: Option<&str>,
+) -> (Option<String>, Option<&'static str>) {
+    let (Some(dir), Some(key)) = (dir, key) else {
+        return (None, None);
+    };
+    use crate::core::recovery::{matches_key, RecoveryMatch};
+    match matches_key(dir, key) {
+        RecoveryMatch::Absent => (None, None),
+        RecoveryMatch::Matches => (
+            crate::core::recovery::load_blob(dir).map(|b| crate::core::recovery::to_code(&b)),
+            None,
+        ),
+        _ => (None, Some("recovery-not-bundled")),
+    }
 }
 
 /// Assemble the export ZIP: data.json + config.toml (+ recovery.key when the
@@ -1754,10 +1802,15 @@ fn build_export_zip(
 /// "re-encrypt imported secrets" with the source machine's passphrase.
 /// Returns user-facing warnings for the ImportResult.
 fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
-    let Ok(blob) = crate::core::recovery::from_code(code) else {
-        return vec![
-            "The backup carries a recovery blob but it is malformed — ignored.".to_string(),
-        ];
+    let blob = match crate::core::recovery::from_code(code) {
+        Ok(blob) => blob,
+        Err(reason) => {
+            return vec![format!(
+                "The backup's recovery data is damaged ({reason}) and was not kept (malformed): \
+                 the imported secrets cannot be re-encrypted with it. Use the recovery code saved \
+                 on the source machine, or re-enter the secrets."
+            )]
+        }
     };
     if crate::core::recovery::load_blob(dir).as_ref() == Some(&blob)
         || crate::core::recovery::imported_blobs(dir).contains(&blob)
@@ -1841,86 +1894,9 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         ));
     }
 
-    // Selective clear (replaces the old unconditional wipe): only clear the
-    // tables the payload actually carries — see `import_clear_statements`.
-    let stmts = import_clear_statements(data);
-    if !stmts.is_empty() {
-        let batch = format!("{};", stmts.join("; "));
-        state
-            .db
-            .with_conn(move |conn| {
-                conn.execute_batch(&batch)?;
-                Ok(())
-            })
-            .await
-            .map_err(|e| format!("Failed to clear DB: {}", e))?;
-    }
-
-    // Import projects (check path validity)
-    for project in &data.projects {
-        let p = project.clone();
-        let path = project.path.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::projects::insert_project(conn, &p))
-            .await
-        {
-            tracing::warn!("Import project error: {}", e);
-        }
-        if !std::path::Path::new(&path).exists() {
-            invalid_paths.push(path);
-        }
-    }
-
-    // Import discussions with their messages
-    for disc in &data.discussions {
-        let d = disc.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &d))
-            .await
-        {
-            tracing::warn!("Import discussion error: {}", e);
-        }
-        let did = disc.id.clone();
-        for msg in &disc.messages {
-            let m = msg.clone();
-            let id = did.clone();
-            if let Err(e) = state
-                .db
-                .with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m))
-                .await
-            {
-                tracing::error!("Failed to import discussion message: {e}");
-            }
-        }
-    }
-
-    // Import MCP servers & configs
-    for server in &data.mcp_servers {
-        let s = server.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s))
-            .await
-        {
-            tracing::error!("Failed to import MCP server: {e}");
-        }
-    }
-    for config_entry in &data.mcp_configs {
-        let c = config_entry.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::mcps::insert_config(conn, &c))
-            .await
-        {
-            tracing::error!("Failed to import MCP config: {e}");
-        }
-    }
-
-    // Import workflows. A restore keeps the user's own definitions, but one
-    // that fails the editor's Exec rules is imported disabled and named in
-    // the report, never silently (KT-1017); it stays refused at run time.
+    // Workflows failing the editor's Exec rules are imported disabled and named
+    // in the report (KT-1017); unsafe Quick Execs are left out, named too.
+    let mut workflows = Vec::new();
     for wf in &data.workflows {
         let mut w = wf.clone();
         if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
@@ -1930,13 +1906,156 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 w.name
             ));
         }
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w))
-            .await
-        {
-            tracing::error!("Failed to import workflow: {e}");
+        workflows.push(w);
+    }
+    let mut quick_execs = Vec::new();
+    for qe in &data.quick_execs {
+        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
+            &qe.name,
+            &qe.command,
+            &qe.args,
+            qe.unmodelled_args_approved == Some(true),
+        ) {
+            warnings.push(format!("Quick Exec « {} » non importé : {reason}", qe.name));
+            continue;
         }
+        quick_execs.push(qe.clone());
+    }
+    for project in &data.projects {
+        if !std::path::Path::new(&project.path).exists() {
+            invalid_paths.push(project.path.clone());
+        }
+    }
+
+    // Selective clear (only the tables the payload carries, see
+    // `import_clear_statements`) and every insert run in ONE transaction. A
+    // failing project or MCP insert rolls everything back, so local MCP
+    // secrets are never lost to a half import; other rows log and continue. GitHub connections are not
+    // exported: those of projects that come back by id are kept, never lost
+    // to the `projects` cascade.
+    let stmts = import_clear_statements(data);
+    let projects = data.projects.clone();
+    let discussions = data.discussions.clone();
+    let mcp_servers = data.mcp_servers.clone();
+    let mcp_configs = data.mcp_configs.clone();
+    let contacts = data.contacts.clone();
+    let quick_prompts = data.quick_prompts.clone();
+    let quick_prompt_versions = data.quick_prompt_versions.clone();
+    let quick_apis = data.quick_apis.clone();
+    let learnings = data.learnings.clone();
+    let learning_rejections = data.learning_rejections.clone();
+    let (pruned, dropped_github) = state
+        .db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let github = crate::db::github_connections::snapshot_rows(&tx)?;
+            if !stmts.is_empty() {
+                tx.execute_batch(&format!("{};", stmts.join("; ")))?;
+            }
+            let fail = |what: &str, e: anyhow::Error| {
+                anyhow::anyhow!("Import aborted, nothing was changed: {what}: {e}")
+            };
+            for p in &projects {
+                crate::db::projects::insert_project(&tx, p).map_err(|e| fail("project", e))?;
+            }
+            let dropped_github = crate::db::github_connections::restore_rows(&tx, &github)?;
+            for d in &discussions {
+                if let Err(e) = crate::db::discussions::insert_discussion(&tx, d) {
+                    tracing::warn!("Import discussion error: {e}");
+                }
+                for m in &d.messages {
+                    if let Err(e) = crate::db::discussions::insert_message(&tx, &d.id, m) {
+                        tracing::warn!("Import discussion message error: {e}");
+                    }
+                }
+            }
+            for srv in &mcp_servers {
+                crate::db::mcps::upsert_server(&tx, srv).map_err(|e| fail("MCP server", e))?;
+            }
+            for c in &mcp_configs {
+                crate::db::mcps::insert_config(&tx, c).map_err(|e| fail("MCP config", e))?;
+            }
+            for w in &workflows {
+                if let Err(e) = crate::db::workflows::insert_workflow(&tx, w) {
+                    tracing::warn!("Import workflow error: {e}");
+                }
+            }
+            for c in &contacts {
+                if let Err(e) = crate::db::contacts::insert_contact(&tx, c) {
+                    tracing::warn!("Import contact error: {e}");
+                }
+            }
+            for q in &quick_prompts {
+                if let Err(e) = crate::db::quick_prompts::insert_quick_prompt(&tx, q) {
+                    tracing::warn!("Import quick prompt error: {e}");
+                }
+            }
+            for v in &quick_prompt_versions {
+                if let Err(e) = crate::db::quick_prompts::insert_quick_prompt_version_row(&tx, v) {
+                    tracing::warn!("Import quick prompt version error: {e}");
+                }
+            }
+            for a in &quick_apis {
+                if let Err(e) = crate::db::quick_apis::insert_quick_api(&tx, a) {
+                    tracing::warn!("Import quick API error: {e}");
+                }
+            }
+            for e in &quick_execs {
+                if let Err(err) = crate::db::quick_execs::insert_quick_exec(&tx, e) {
+                    tracing::warn!("Import quick exec error: {err}");
+                }
+            }
+            for l in &learnings {
+                if let Err(e) = crate::db::learnings::insert(&tx, l) {
+                    tracing::warn!("Import learning error: {e}");
+                }
+            }
+            // Referential prune — local version rows whose parent QP no longer
+            // exists after the import (v4 archive: parents replaced).
+            let pruned = tx.execute(
+                "DELETE FROM quick_prompt_versions
+                 WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
+                [],
+            )?;
+            for r in &learning_rejections {
+                if let Err(e) = crate::db::learnings::insert_rejection_row(&tx, r) {
+                    tracing::warn!("Import learning rejection error: {e}");
+                }
+            }
+            tx.commit()?;
+            Ok((pruned, dropped_github))
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if pruned > 0 {
+        warnings.push(format!(
+            "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
+        ));
+    }
+    if dropped_github > 0 {
+        warnings.push(format!(
+            "{dropped_github} project GitHub connection(s) removed: their projects are not part of this import"
+        ));
+    }
+    // Only when imported MCP secrets really are under another key (an import
+    // from this machine is readable as it is), and point to the lossless path.
+    let active_key = state.config.read().await.encryption_secret.clone();
+    let foreign = data
+        .mcp_configs
+        .iter()
+        .filter(|c| !c.env_encrypted.is_empty())
+        .filter(|c| {
+            active_key
+                .as_deref()
+                .is_none_or(|k| crate::db::mcps::decrypt_env(&c.env_encrypted, k).is_err())
+        })
+        .count();
+    if foreign > 0 {
+        warnings.push(format!(
+            "{foreign} imported MCP configuration(s) hold secrets encrypted with another key: use \
+             Plugins → 'Re-encrypt imported secrets' with the source machine's recovery \
+             passphrase, or re-enter them"
+        ));
     }
 
     // Import custom skills/directives/profiles (file-based)
@@ -1973,129 +2092,6 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 persona_prompt: &profile.persona_prompt,
                 default_engine: profile.default_engine.as_deref(),
             });
-    }
-
-    // Import contacts
-    for contact in &data.contacts {
-        let c = contact.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
-            .await
-        {
-            tracing::warn!("Import contact error: {}", e);
-        }
-    }
-
-    // Import quick prompts
-    for qp in &data.quick_prompts {
-        let q = qp.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
-            .await
-        {
-            tracing::warn!("Import quick prompt error: {}", e);
-        }
-    }
-
-    // Import QP version history (v5) — verbatim rows, after their parents.
-    for v in &data.quick_prompt_versions {
-        let v = v.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| {
-                crate::db::quick_prompts::insert_quick_prompt_version_row(conn, &v)
-            })
-            .await
-        {
-            tracing::warn!("Import quick prompt version error: {}", e);
-        }
-    }
-
-    // Import quick APIs
-    for qa in &data.quick_apis {
-        let a = qa.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &a))
-            .await
-        {
-            tracing::warn!("Import quick API error: {}", e);
-        }
-    }
-
-    // Import saved Quick Execs after projects so project-scoped working
-    // directories keep their foreign-key bindings.
-    for qe in &data.quick_execs {
-        let e = qe.clone();
-        // A Quick Exec has no disabled state to mark it for review: an
-        // unsafe one is left out, and the report says which and why.
-        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
-            &e.name,
-            &e.command,
-            &e.args,
-            e.unmodelled_args_approved == Some(true),
-        ) {
-            warnings.push(format!("Quick Exec « {} » non importé : {reason}", e.name));
-            continue;
-        }
-        if let Err(error) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &e))
-            .await
-        {
-            tracing::warn!("Import quick exec error: {}", error);
-        }
-    }
-
-    // Import continual-learning candidates. `learnings::insert` rejects rows
-    // with empty evidence[] — every stored learning has at least one, so a
-    // failure here is a corrupt export, logged not fatal.
-    for learning in &data.learnings {
-        let l = learning.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::learnings::insert(conn, &l))
-            .await
-        {
-            tracing::warn!("Import learning error: {}", e);
-        }
-    }
-
-    // Referential prune — local version rows whose parent QP no longer
-    // exists after the import (v4 archive: parents replaced, lineage kept
-    // for same-id QPs, orphans dropped).
-    match state
-        .db
-        .with_conn(|conn| {
-            conn.execute(
-                "DELETE FROM quick_prompt_versions
-             WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
-                [],
-            )
-            .map_err(Into::into)
-        })
-        .await
-    {
-        Ok(n) if n > 0 => warnings.push(format!(
-            "{n} quick-prompt version row(s) dropped — their prompts are not part of this import"
-        )),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("Import version prune error: {}", e),
-    }
-
-    // Import rejection counters (v5) — verbatim, keeps the anti-repetition
-    // threshold armed across a migration.
-    for rej in &data.learning_rejections {
-        let r = rej.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::learnings::insert_rejection_row(conn, &r))
-            .await
-        {
-            tracing::warn!("Import learning rejection error: {}", e);
-        }
     }
 
     if !invalid_paths.is_empty() {
@@ -2148,13 +2144,6 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
             config.scan.paths.push(path.clone());
         }
     }
-
-    // Check for MCP secrets warning: if imported config has any MCP-related env vars,
-    // the encryption_secret is different so they need reconfiguration
-    warnings.push(
-        "MCP secrets are encrypted with a different key — reconfigure them in the Plugins page"
-            .to_string(),
-    );
 
     if let Err(e) = config::save(&config).await {
         tracing::error!("Failed to save merged config: {}", e);
@@ -2215,10 +2204,8 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
     // An oversized one is refused like the others.
     let recovery_code = if let Ok(mut f) = archive.by_name("recovery.key") {
         let contents = read_zip_entry_capped(&mut f, "recovery.key", ZIP_CAP_RECOVERY_KEY)?;
-        let trimmed = contents.trim().to_string();
-        crate::core::recovery::from_code(&trimmed)
-            .ok()
-            .map(|_| trimmed)
+        // Passed on raw: persist_imported_recovery reports a damaged blob.
+        Some(contents.trim().to_string())
     } else {
         None
     };
@@ -2297,39 +2284,76 @@ pub async fn import_data(
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // Remove the settings; a needed copy of the key stays in a key-only file.
-    if let Err(e) = config::reset_to_key_only().await {
+    // Clear the data first: a failure reports, and nothing else changes.
+    if let Err(e) = state
+        .db
+        .with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("DELETE FROM mcp_config_projects;")?;
+            // Every table holding ciphertext, except the credential store,
+            // whose auth token survives (below).
+            for col in crate::core::keystore::ENCRYPTED_COLUMNS {
+                if col.table != "stored_credentials" {
+                    tx.execute(&format!("DELETE FROM {}", col.table), [])?;
+                }
+            }
+            tx.execute_batch(
+                "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    {
         return Json(ApiResponse::err(format!(
             "Reset failed, nothing was cleared: {e}"
         )));
     }
+    let Ok(dir) = config::config_dir() else {
+        return Json(ApiResponse::err("Reset failed: no data directory"));
+    };
+    // With the key locked, no key can ever read the token row: it goes too, so
+    // the next start finds no ciphertext and mints a key and a token.
+    let key_locked = state.config.read().await.encryption_secret.is_none();
+    let forget = if key_locked {
+        crate::core::credential_store::forget_all(&dir, &state.db).await
+    } else {
+        crate::core::credential_store::forget_provider_keys(&dir, &state.db).await
+    };
+    if let Err(e) = forget {
+        return Json(ApiResponse::err(format!(
+            "Reset cleared the data but not the stored keys: {e}"
+        )));
+    }
+    // Remove the settings; a needed copy of the key stays in a key-only file.
+    if let Err(e) = config::reset_to_key_only().await {
+        return Json(ApiResponse::err(format!(
+            "Reset could not rewrite config.toml: {e}"
+        )));
+    }
+    // The old encrypted credentials go; an older config backup may hold
+    // another key, so it is set aside, not deleted.
+    let _ = std::fs::remove_file(dir.join(crate::core::credential_store::BACKUP_FILENAME));
+    let backup = dir.join("config.toml.backup");
+    if backup.exists() {
+        if let Err(e) = crate::db::migrations::rotate_config_backup(&dir, &backup) {
+            tracing::warn!("Reset could not set config.toml.backup aside: {e}");
+        }
+    }
     tracing::info!("Config reset");
 
-    // Reset in-memory config to defaults, keeping the active key: a fresh
-    // random one would encrypt new secrets under a key no vault holds.
+    // Defaults in memory, keeping the active key (a fresh one would encrypt new
+    // secrets under a key no vault holds) and the API auth, so a LAN-bound
+    // instance never answers unauthenticated after a reset.
     let mut cfg = state.config.write().await;
-    let active_key = cfg.encryption_secret.clone();
+    let previous = cfg.clone();
     *cfg = config::default_config();
-    cfg.encryption_secret = active_key;
-    if let Ok(dir) = config::config_dir() {
-        if let Err(e) = crate::core::credential_store::forget_all(&dir, &state.db).await {
-            tracing::error!("Failed to clear stored credentials during reset: {e}");
-        }
-    }
-
-    // Clear all data from DB, every encrypted column's table included.
-    if let Err(e) = state.db.with_conn(|conn| {
-        conn.execute_batch("DELETE FROM mcp_config_projects;")?;
-        for col in crate::core::keystore::ENCRYPTED_COLUMNS {
-            conn.execute(&format!("DELETE FROM {}", col.table), [])?;
-        }
-        conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;"
-        )?;
-        Ok(())
-    }).await {
-        tracing::error!("Failed to clear database during reset: {e}");
-    }
+    cfg.encryption_secret = previous.encryption_secret;
+    cfg.server.auth_token = previous.server.auth_token;
+    cfg.server.auth_enabled = previous.server.auth_enabled;
+    cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
+    cfg.server.auth_locked = previous.server.auth_locked;
+    cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
 
     Json(ApiResponse::ok(()))
 }
@@ -2361,12 +2385,27 @@ pub struct RecoveryStatus {
     pub matches_key: bool,
     /// No key in memory: restore is the way back (KT-1007).
     pub key_locked: bool,
-    /// No verified recovery passphrase: Kronn keeps every local copy of the key
-    /// (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
+    /// The retention rule keeps config.toml's copy: fewer than two persisted
+    /// vault copies, or one without a verified recovery passphrase (KT-1007).
     pub key_copies_kept: bool,
     /// config.toml still carries the key (no vault could hold it, or one copy
     /// alone would remain without a recovery passphrase).
     pub config_holds_key: bool,
+    /// Persisted vault copies of the key in use, at the last start.
+    pub copies: u32,
+    /// Key stores holding another key than the one in use (never overwritten;
+    /// set a recovery passphrase before downgrading).
+    pub stale_sources: Vec<String>,
+    /// Key stores holding a value that is not a key.
+    pub invalid_sources: Vec<String>,
+    /// Stored credentials the key in use cannot decrypt (kept untouched).
+    pub locked_credentials: u32,
+    /// Recovery data kept from imports or a replaced recovery.key, usable by
+    /// "Re-encrypt imported secrets".
+    pub kept_recovery_blobs: u32,
+    /// The key is in use but the stored credentials could not be loaded at
+    /// start (disk full, unreadable config.toml): why, to fix before a restart.
+    pub credentials_unavailable: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2397,12 +2436,36 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
         }
         _ => false,
     };
+    let report = dir
+        .map(crate::core::keystore::boot_report)
+        .unwrap_or_default();
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     RecoveryStatus {
         configured,
         matches_key,
         key_locked: key.is_none(),
-        key_copies_kept: !matches_key,
-        config_holds_key: dir.is_some_and(|d| config::retained_disk_key(d).is_some()),
+        // The boot's actual retention decision (two copies, every column
+        // readable), not a recomputation from part of its inputs.
+        key_copies_kept: report.file_keeps_key,
+        // Only the key in use counts: another value kept aside does not.
+        config_holds_key: match (dir, key) {
+            (Some(d), Some(k)) => config::retained_disk_key(d)
+                .is_some_and(|kept| crate::core::keyvault::same_key(&kept, k)),
+            _ => false,
+        },
+        credentials_unavailable: dir.and_then(crate::core::credential_store::boot_failure),
+        copies: report.copies as u32,
+        stale_sources: names(&report.stale_sources),
+        invalid_sources: names(&report.invalid_sources),
+        locked_credentials: dir
+            .map(crate::core::credential_store::locked_credential_count)
+            .unwrap_or(0) as u32,
+        kept_recovery_blobs: dir
+            .map(|d| {
+                crate::core::recovery::imported_blobs(d).len()
+                    + crate::core::recovery::previous_blobs(d).len()
+            })
+            .unwrap_or(0) as u32,
     }
 }
 
@@ -2413,7 +2476,8 @@ pub async fn set_recovery(
     State(state): State<AppState>,
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
-    let config = state.config.read().await;
+    // The write lock serializes concurrent sets: one recovery.key at a time.
+    let config = state.config.write().await;
     match crate::core::keystore::set_recovery_passphrase(
         &config,
         &req.passphrase,
@@ -2449,17 +2513,28 @@ pub async fn restore_recovery(
     .await
     {
         Ok(outcome) => {
-            // The key is back: load the stored credentials it unlocks.
+            // The key is back: load the stored credentials it unlocks, keeping
+            // the operator's session token and whether auth is on.
+            let session_token = config
+                .server
+                .auth_token
+                .clone()
+                .filter(|_| config.server.auth_token_session_only);
             if let Err(e) = crate::core::credential_store::boot(
                 &mut config,
                 state.db.clone(),
                 &dir,
                 &outcome,
-                None,
+                session_token.as_deref(),
+                crate::core::credential_store::BootMode::Restore,
             )
             .await
             {
                 tracing::error!("Credential store after key restore: {e:#}");
+                return Json(ApiResponse::err(format!(
+                    "The key was restored, but loading the stored credentials failed: {e:#}. \
+                     Restart Kronn; nothing was deleted."
+                )));
             }
             if config.server.auth_token.is_some() {
                 config.server.auth_locked = false;
@@ -3188,16 +3263,13 @@ mod tests {
         let err = extract_zip(&bytes).expect_err("oversized config.toml must refuse");
         assert!(err.contains("zip bomb"), "{err}");
 
-        // Within caps → the archive still imports (recovery dropped as
-        // non-parsing, config parsed, data ok).
+        // Within caps → the archive still imports (the damaged recovery entry
+        // is passed on for persist_imported_recovery to report, C3-20).
         let bytes = zip_with(&[("data.json", &data), ("recovery.key", b"not-a-code")]);
         let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
         assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         assert!(cfg.is_none());
-        assert!(
-            key.is_none(),
-            "non-parsing recovery code is dropped, not an error"
-        );
+        assert_eq!(key.as_deref(), Some("not-a-code"));
     }
 
     // ─── export round-trip (v5 fields: QP versions + rejection counters) ─────
@@ -3470,11 +3542,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::core::crypto::generate_secret();
         let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(!status.configured && status.key_copies_kept && !status.config_holds_key);
+        assert!(!status.configured && !status.config_holds_key);
         assert!(!status.matches_key && !status.key_locked);
 
         // A blob for another key: configured, but no recovery copy of this key.
-        config::retain_disk_key(dir.path(), "abcd");
         crate::core::recovery::save_blob(
             dir.path(),
             &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
@@ -3482,22 +3553,34 @@ mod tests {
         )
         .unwrap();
         let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(status.configured && !status.matches_key);
+
+        // C3-03: config.toml keeping ANOTHER value does not hold the key in use.
+        config::retain_disk_key(dir.path(), "abcd");
+        assert!(!recovery_status_in(Some(dir.path()), Some(&key)).config_holds_key);
+        config::retain_disk_key(dir.path(), &key.to_uppercase());
+        assert!(recovery_status_in(Some(dir.path()), Some(&key)).config_holds_key);
         config::release_disk_key(dir.path());
-        assert!(status.configured && !status.matches_key && status.key_copies_kept);
-        assert!(status.config_holds_key);
 
         crate::core::recovery::save_blob(
             dir.path(),
             &crate::core::recovery::wrap_key(&key, "pw").unwrap(),
         )
         .unwrap();
+        assert!(recovery_status_in(Some(dir.path()), Some(&key)).matches_key);
+        // C3-22: key_copies_kept is the boot's actual decision, whatever the
+        // copy count says (a column it cannot decrypt keeps the file copy).
+        crate::core::keystore::record_report_for_tests(dir.path(), 2, &["keychain"], true);
         let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(status.matches_key && !status.key_copies_kept);
+        assert!(status.key_copies_kept && status.copies == 2);
+        assert_eq!(status.stale_sources, vec!["keychain".to_string()]);
+        crate::core::keystore::record_report_for_tests(dir.path(), 2, &[], false);
+        assert!(!recovery_status_in(Some(dir.path()), Some(&key)).key_copies_kept);
 
         let locked = recovery_status_in(Some(dir.path()), None);
         assert!(locked.key_locked && !locked.matches_key);
         let none = recovery_status_in(None, None);
-        assert!(!none.configured && none.key_copies_kept);
+        assert!(!none.configured);
     }
 
     #[test]
@@ -3605,6 +3688,182 @@ mod tests {
     /// `core::config` tests. `tokio::sync::Mutex` because it's held across
     /// `.await` (clippy `await_holding_lock` rejects a std mutex).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Runs `f` with KRONN_DATA_DIR pointed at a fresh directory.
+    async fn with_data_dir<F, Fut>(f: F)
+    where
+        F: FnOnce(std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::set_var("KRONN_DATA_DIR", dir.path());
+        f(dir.path().to_path_buf()).await;
+        match previous {
+            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    async fn seed_project_with_github_token(state: &AppState, project: &str, cipher: &str) {
+        let (project, cipher) = (project.to_string(), cipher.to_string());
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, '/nowhere/' || ?1, datetime('now'), datetime('now'))",
+                    [&project],
+                )?;
+                crate::db::github_connections::set_mode(
+                    conn,
+                    &project,
+                    crate::models::GithubConnectionMode::StoredToken,
+                    Some(&cipher),
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    /// C2-01 — re-importing this machine's own backup keeps the stored GitHub
+    /// tokens of the projects it brings back (the export does not carry them).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reimporting_a_backup_keeps_the_github_tokens_of_its_projects() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            let key = crate::core::crypto::generate_secret();
+            let cipher =
+                crate::core::github_connection::encrypt_stored_token("github_pat_keep", &key)
+                    .unwrap();
+            seed_project_with_github_token(&state, "p1", &cipher).await;
+            seed_project_with_github_token(&state, "p-gone", &cipher).await;
+
+            let mut export = build_export(&state).await.unwrap();
+            export.projects.retain(|p| p.id == "p1");
+            let result = do_import_db(&state, &export).await.unwrap();
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("1 project GitHub connection")),
+                "{:?}",
+                result.warnings
+            );
+
+            let row = state
+                .db
+                .with_conn(|conn| crate::db::github_connections::get(conn, "p1"))
+                .await
+                .unwrap()
+                .expect("connection kept");
+            let token = crate::core::github_connection::decrypt_stored_token(
+                row.token_encrypted.as_deref().unwrap(),
+                &key,
+            )
+            .unwrap();
+            assert_eq!(token.as_str(), "github_pat_keep");
+        })
+        .await;
+    }
+
+    /// C3-13 — re-importing this machine's backup (same key) does not claim
+    /// that MCP secrets are under another key.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_same_key_import_raises_no_foreign_secret_warning() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            let key = state.config.read().await.encryption_secret.clone().unwrap();
+            let mut env = std::collections::HashMap::new();
+            env.insert("T".to_string(), "v".to_string());
+            let enc = crate::db::mcps::encrypt_env(&env, &key).unwrap();
+            state
+                .db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','github','stdio')",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json) \
+                         VALUES ('c1','s1','local', ?1, '[\"T\"]')",
+                        [enc],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let export = build_export(&state).await.unwrap();
+            let result = do_import_db(&state, &export).await.unwrap();
+            assert!(
+                !result.warnings.iter().any(|w| w.contains("another key")),
+                "{:?}",
+                result.warnings
+            );
+            // A foreign one is named, with the lossless path.
+            let mut foreign = build_export(&state).await.unwrap();
+            let other = crate::core::crypto::generate_secret();
+            foreign.mcp_configs[0].env_encrypted =
+                crate::db::mcps::encrypt_env(&env, &other).unwrap();
+            let result = do_import_db(&state, &foreign).await.unwrap();
+            assert!(
+                result.warnings.iter().any(|w| w.contains("Re-encrypt imported secrets")),
+                "{:?}",
+                result.warnings
+            );
+        })
+        .await;
+    }
+
+    /// C2-34 — a failing insert rolls the whole import back: the local MCP
+    /// configs (and their secrets) are still there.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failing_import_insert_changes_nothing() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','github','stdio')",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json) \
+                         VALUES ('c1','s1','local','ciphertext-local','[\"T\"]')",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let mut export = build_export(&state).await.unwrap();
+            // A config whose server does not exist: its insert fails (FK).
+            let mut broken = export.mcp_configs[0].clone();
+            broken.id = "c-broken".into();
+            broken.server_id = "missing-server".into();
+            export.mcp_configs.push(broken);
+
+            let err = do_import_db(&state, &export).await.unwrap_err();
+            assert!(err.contains("nothing was changed"), "{err}");
+            let kept: String = state
+                .db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT env_encrypted FROM mcp_configs WHERE id = 'c1'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(kept, "ciphertext-local");
+        })
+        .await;
+    }
 
     fn test_state() -> AppState {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
@@ -3970,14 +4229,53 @@ mod tests {
     }
 
     #[test]
-    fn extract_zip_drops_a_corrupt_recovery_entry_without_failing_import() {
+    fn extract_zip_passes_a_corrupt_recovery_entry_on_and_the_import_names_it() {
+        // C3-20: the damaged blob reaches persist_imported_recovery, which says so.
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", Some("not-a-valid-recovery-code")).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
-        assert!(
-            extracted.is_none(),
-            "garbage recovery.key must be dropped, not error"
+        let good = crate::core::recovery::to_code(
+            &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
+                .unwrap(),
         );
+        let damaged = format!("{}0", &good[..good.len() - 1]);
+        let damaged = if damaged == good {
+            format!("{}1", &good[..good.len() - 1])
+        } else {
+            damaged
+        };
+        let bytes = build_export_zip(&data_json, "", Some(&damaged)).unwrap();
+        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        assert_eq!(extracted.as_deref(), Some(damaged.as_str()));
+        let tmp = tempfile::tempdir().unwrap();
+        let warnings = persist_imported_recovery(tmp.path(), &damaged);
+        assert!(
+            warnings[0].contains("damaged") && warnings[0].contains("checksum"),
+            "{warnings:?}"
+        );
+    }
+
+    /// C3-23 — only a recovery.key verified for the key in use is bundled;
+    /// another one is left out with a warning code.
+    #[test]
+    fn export_bundles_only_a_recovery_key_for_the_key_in_use() {
+        use crate::core::recovery;
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::core::crypto::generate_secret();
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), Some(&key)),
+            (None, None)
+        );
+        recovery::save_blob(
+            dir.path(),
+            &recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), Some(&key)),
+            (None, Some("recovery-not-bundled"))
+        );
+        recovery::save_blob(dir.path(), &recovery::wrap_key(&key, "pw").unwrap()).unwrap();
+        let (code, warning) = export_recovery_code(Some(dir.path()), Some(&key));
+        assert!(code.is_some() && warning.is_none());
     }
 
     /// Import must NEVER touch local recovery material: the source blob is kept

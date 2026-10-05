@@ -15,10 +15,35 @@ use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Ut
 use chrono_tz::Tz;
 use std::collections::HashMap;
 
+/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`).
+/// No declared variable, trigger field or launch value may use it, since a
+/// built-in is trusted for what produced it, not for its name.
+pub fn is_reserved_name(name: &str) -> bool {
+    let base = name.split('|').next().unwrap_or_default().trim();
+    base == "run"
+        || base.starts_with("run.")
+        || base == "time"
+        || base.starts_with("time.")
+        || base.starts_with("now")
+}
+
+/// The first reserved name among `names`, as a user-facing refusal.
+pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    match names.into_iter().find(|name| is_reserved_name(name)) {
+        Some(name) => Err(format!(
+            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`) ; choisis un autre nom.",
+            name.trim()
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Template context holding all available variables.
 #[derive(Debug, Clone)]
 pub struct TemplateContext {
     values: HashMap<String, String>,
+    /// Values Kronn sets itself (`run.id`), looked up before anything else.
+    builtins: HashMap<String, String>,
     time_anchor: DateTime<Utc>,
 }
 
@@ -36,18 +61,32 @@ impl TemplateContext {
     pub fn with_time_anchor(time_anchor: DateTime<Utc>) -> Self {
         Self {
             values: HashMap::new(),
+            builtins: HashMap::new(),
             time_anchor,
         }
     }
 
     /// The flat value stored under `key`, if any.
     pub fn get(&self, key: &str) -> Option<&str> {
+        if is_reserved_name(key) {
+            return self.builtins.get(key).map(String::as_str);
+        }
         self.values.get(key).map(String::as_str)
     }
 
-    /// Set a simple variable: `key` → accessible as `{{key}}`
+    /// Set a simple variable: `key` → accessible as `{{key}}`. A reserved
+    /// name is ignored: only [`Self::set_builtin`] provides it.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.values.insert(key.into(), value.into());
+        let key = key.into();
+        if is_reserved_name(&key) {
+            return;
+        }
+        self.values.insert(key, value.into());
+    }
+
+    /// Set a value Kronn produces itself (`run.id`, `run.artifacts_dir`).
+    pub fn set_builtin(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.builtins.insert(key.into(), value.into());
     }
 
     /// Set an issue context (from tracker trigger).
@@ -210,7 +249,21 @@ impl TemplateContext {
         // yields the PARSED value, not the flat unwrapped string. Non-data keys
         // (launch vars, `current_task.<field>`, …) fall through to the flat
         // string value, preserving scalar-as-string behaviour.
-        let value = resolve_typed_path(&self.values, path)
+        let value = if is_reserved_name(path) {
+            self.builtins
+                .get(path)
+                .cloned()
+                .or_else(|| self.resolve_time_expression(path).ok().flatten())
+                .map(serde_json::Value::String)
+        } else {
+            None
+        };
+        let value = value
+            .or_else(|| {
+                (!is_reserved_name(path))
+                    .then(|| resolve_typed_path(&self.values, path))
+                    .flatten()
+            })
             .or_else(|| {
                 self.values
                     .get(path)
@@ -333,6 +386,16 @@ impl TemplateContext {
     }
 
     fn lookup(&self, key: &str, strict: bool) -> Result<Option<String>> {
+        if is_reserved_name(key) {
+            if let Some(value) = self.builtins.get(key) {
+                return Ok(Some(value.clone()));
+            }
+            return match self.resolve_time_expression(key) {
+                Ok(value) => Ok(value),
+                Err(error) if strict => Err(error),
+                Err(_) => Ok(None),
+            };
+        }
         if let Some(value) = self.values.get(key) {
             return Ok(Some(value.clone()));
         }
@@ -1856,16 +1919,59 @@ mod tests {
     }
 
     #[test]
-    fn time_formats_remain_vendor_neutral_and_static_now_variables_keep_precedence() {
+    fn time_formats_remain_vendor_neutral_and_the_built_in_time_always_wins() {
         let mut ctx = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
+        let clean = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
         ctx.set("now", "legacy-static-value");
-        assert_eq!(ctx.render_strict("{{now}}").unwrap(), "legacy-static-value");
+        ctx.set("time.now", "-c attacker");
+        for template in ["{{now}}", "{{time.now}}"] {
+            assert_eq!(
+                ctx.render_strict(template).unwrap(),
+                clean.render_strict(template).unwrap()
+            );
+        }
 
         let error = ctx
             .render_strict("{{time.now|fmt:adobe}}")
             .expect_err("vendor-specific formats must not enter the core grammar");
         assert!(error.to_string().contains("local_iso_ms"));
         assert!(error.to_string().contains("adobe"));
+    }
+
+    /// `run.id` and `time.now` are trusted for their origin: a variable,
+    /// trigger field or source variable of that name never shadows them.
+    #[test]
+    fn a_variable_named_like_a_built_in_never_shadows_it() {
+        let mut ctx = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 8, 5));
+        ctx.set("run.id", "$(id)");
+        ctx.set("run", "{\"id\": \"$(id)\"}");
+        assert!(ctx.render_strict("{{run.id}}").is_err(), "no built-in yet");
+        assert_eq!(ctx.get("run.id"), None);
+        ctx.set_builtin("run.id", "run-1");
+        ctx.set("run.id", "$(id)");
+        assert_eq!(ctx.render_strict("{{run.id}}").unwrap(), "run-1");
+        assert_eq!(ctx.get("run.id"), Some("run-1"));
+        assert_eq!(
+            ctx.resolve_value("run.id"),
+            Some(serde_json::Value::String("run-1".into()))
+        );
+        ctx.set("nowhere", "x");
+        assert!(ctx.render_strict("{{nowhere}}").is_err());
+        for name in [
+            "run.id",
+            "run",
+            "time.now",
+            "time.zone",
+            "now",
+            "now+1d",
+            "nowhere",
+        ] {
+            assert!(is_reserved_name(name), "{name}");
+            assert!(refuse_reserved_names([name]).is_err(), "{name}");
+        }
+        for name in ["ticket", "runner", "timeout", "known", "steps.run.id"] {
+            assert!(!is_reserved_name(name), "{name}");
+        }
     }
 
     #[test]

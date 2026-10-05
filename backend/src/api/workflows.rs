@@ -1210,6 +1210,15 @@ fn validate_exec_steps_keeping(
         if matches!(s.step_type, StepType::CollectApiData) {
             if let Some(config) = &s.collect_api_data {
                 for source in &config.sources {
+                    crate::workflows::template::refuse_reserved_names(
+                        source.variables.keys().map(String::as_str),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "Step CollectApiData « {} », source « {} » : {error}",
+                            s.name, source.alias
+                        )
+                    })?;
                     let Some(exec) = &source.quick_exec else {
                         continue;
                     };
@@ -1333,6 +1342,7 @@ fn validate_exec_steps_keeping(
                     cmd,
                     &s.exec_args,
                     stdin,
+                    s.exec_unmodelled_args_approved == Some(true),
                 ) {
                     return Err(error);
                 }
@@ -1496,12 +1506,18 @@ async fn pin_exec_script_files(
 pub async fn exec_line_check(
     Json(req): Json<ExecLineCheckRequest>,
 ) -> Json<ApiResponse<ExecLineCheck>> {
+    let command = req.command.trim();
     let unmodelled_program =
-        match crate::core::inline_code::first_unsafe_placeholder(req.command.trim(), &req.args) {
+        match crate::core::inline_code::first_unsafe_placeholder(command, &req.args) {
             Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(program, _)) => {
                 Some(program)
             }
-            _ => None,
+            _ => req.stdin.as_deref().and_then(|stdin| {
+                crate::core::inline_code::stdin_validation_error(
+                    "", command, &req.args, stdin, false,
+                )?;
+                crate::core::inline_code::stdin_unmodelled_program(command, &req.args)
+            }),
         };
     Json(ApiResponse::ok(ExecLineCheck { unmodelled_program }))
 }
@@ -2792,6 +2808,9 @@ pub(crate) fn validate_workflow_for_import_keeping(
     if wf.steps.len() > 20 {
         return Err(format!("Too many steps ({}, max 20)", wf.steps.len()));
     }
+    crate::workflows::template::refuse_reserved_names(
+        wf.variables.iter().map(|variable| variable.name.as_str()),
+    )?;
     crate::workflows::template::validate_step_references(&wf.steps)
         .map_err(|errors| format!("Références d'étapes invalides :\n- {}", errors.join("\n- ")))?;
     if let Some(ref guards) = wf.guards {
@@ -3147,6 +3166,32 @@ pub async fn import_workflow(
         prepared.push(w);
     }
 
+    // A Quick Exec the bundle does not carry is an existing one: the same
+    // project and allowlist rule as on create applies to it.
+    let bundled_qes: std::collections::HashSet<&String> = qe_id_remap.values().collect();
+    for w in &prepared {
+        for steps in [&w.steps, &w.on_failure] {
+            let mut existing_refs = steps.clone();
+            for step in existing_refs.iter_mut() {
+                if let Some(config) = step.collect_api_data.as_mut() {
+                    config
+                        .sources
+                        .retain(|source| !bundled_qes.contains(&source.quick_exec_id));
+                }
+            }
+            if let Err(e) = validate_saved_quick_exec_refs(
+                &state,
+                &existing_refs,
+                &w.exec_allowlist,
+                req.project_id.as_deref(),
+            )
+            .await
+            {
+                return Json(ApiResponse::err(e));
+            }
+        }
+    }
+
     // Every SubWorkflow ref must resolve within the bundle (fresh ids) OR to a
     // workflow already on this instance — else the graph would dangle.
     let new_ids: std::collections::HashSet<String> = wf_id_remap.values().cloned().collect();
@@ -3292,6 +3337,12 @@ pub(crate) async fn create_manual_run_with_id(
     if !wf.enabled {
         return Err("Workflow is disabled — enable it before triggering".into());
     }
+    crate::workflows::template::refuse_reserved_names(
+        wf.variables
+            .iter()
+            .map(|variable| variable.name.as_str())
+            .chain(provided_vars.keys().map(String::as_str)),
+    )?;
     // A GLOBAL workflow launched from a project-scoped discussion resolves
     // that project's environment/worktree exactly like one declared on the
     // project directly (KT-476 LaunchContext). A workflow's own declared
@@ -6669,6 +6720,133 @@ mod tests {
         )
         .await;
         assert!(!changed.success, "a changed line loses the approval");
+    }
+
+    /// `run.*`, `time.*` and `now*` belong to Kronn: a declared variable, a
+    /// CollectApiData source variable or a launch value of that name is
+    /// refused at save and at trigger.
+    #[tokio::test]
+    async fn a_variable_cannot_take_a_built_in_name() {
+        let state = agent_state();
+        let request = |variables: serde_json::Value, sources: serde_json::Value| {
+            serde_json::from_value::<CreateWorkflowRequest>(serde_json::json!({
+                "name": "collect", "project_id": null, "trigger": {"type": "Manual"},
+                "variables": variables,
+                "steps": [{"name": "collect", "step_type": {"type": "CollectApiData"},
+                           "collect_api_data": {"sources": sources}}]
+            }))
+            .unwrap()
+        };
+        let source = |variables: serde_json::Value| serde_json::json!([{"alias": "news", "quick_api_id": "qa-news", "variables": variables}]);
+        for name in ["time.now", "run.id", "now"] {
+            let Json(declared) = create(
+                State(state.clone()),
+                None,
+                Json(request(
+                    serde_json::json!([{"name": name, "label": "x", "placeholder": ""}]),
+                    source(serde_json::json!({})),
+                )),
+            )
+            .await;
+            assert!(!declared.success, "{name}");
+            assert!(
+                declared.error.unwrap_or_default().contains("réservé"),
+                "{name}"
+            );
+            let Json(sourced) = create(
+                State(state.clone()),
+                None,
+                Json(request(
+                    serde_json::json!([]),
+                    source(serde_json::json!({name: "x"})),
+                )),
+            )
+            .await;
+            assert!(!sourced.success, "source variable {name}");
+            assert!(
+                sourced.error.unwrap_or_default().contains("réservé"),
+                "source {name}"
+            );
+        }
+        let mut workflow = keyed_workflow("reserved");
+        workflow.concurrency_key = None;
+        let stored = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &stored))
+            .await
+            .unwrap();
+        let launch = |variables: std::collections::HashMap<String, String>| {
+            let state = state.clone();
+            async move {
+                create_manual_run(
+                    &state,
+                    "reserved",
+                    variables,
+                    std::collections::HashMap::new(),
+                    crate::core::launch_context::LaunchContext::default(),
+                )
+                .await
+                .map(|_| ())
+            }
+        };
+        let error = launch(std::collections::HashMap::from([(
+            "run.id".to_string(),
+            "x".to_string(),
+        )]))
+        .await
+        .expect_err("a launch value cannot take a built-in name");
+        assert!(error.contains("réservé"), "{error}");
+        workflow.id = "reserved-declared".into();
+        workflow.variables[0].name = "time.now".into();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &workflow))
+            .await
+            .unwrap();
+        let error = create_manual_run(
+            &state,
+            "reserved-declared",
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            crate::core::launch_context::LaunchContext::default(),
+        )
+        .await
+        .map(|_| ())
+        .expect_err("a stored built-in name is refused at trigger");
+        assert!(error.contains("réservé"), "{error}");
+    }
+
+    /// The editor offers the approval for a stdin-only line too.
+    #[tokio::test]
+    async fn the_line_check_names_an_unmodelled_program_reading_a_templated_stdin() {
+        let check = |command: &str, args: Vec<&str>, stdin: Option<&str>| {
+            let req = ExecLineCheckRequest {
+                command: command.into(),
+                args: args.into_iter().map(String::from).collect(),
+                stdin: stdin.map(String::from),
+            };
+            async move {
+                exec_line_check(Json(req))
+                    .await
+                    .0
+                    .data
+                    .unwrap()
+                    .unmodelled_program
+            }
+        };
+        assert_eq!(
+            check("duckdb", vec!["db.duckdb"], Some("{{issue.title}}"))
+                .await
+                .as_deref(),
+            Some("duckdb")
+        );
+        assert_eq!(
+            check("duckdb", vec!["db.duckdb"], Some("select 1")).await,
+            None
+        );
+        assert_eq!(check("cat", vec![], Some("{{issue.title}}")).await, None);
+        assert_eq!(check("duckdb", vec!["db.duckdb"], None).await, None);
     }
 
     #[test]

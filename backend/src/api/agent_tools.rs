@@ -2382,6 +2382,7 @@ impl KronnToolExecutor {
                 };
                 let response = crate::api::media::generate(
                     axum::extract::State(self.state.clone()),
+                    None,
                     axum::Json(request),
                 )
                 .await;
