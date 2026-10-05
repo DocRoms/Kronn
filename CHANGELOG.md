@@ -182,6 +182,21 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
+- The other processes Kronn starts get a built environment too (KT-1006):
+  dependency checks (`npm`, `cargo`, `go`, `bundle`, `dotnet`, `poetry`,
+  `composer`, Renovate through `npx`, and Composer through Docker) keep only
+  their registry, cache and toolchain settings; `gh` and `glab` (PR creation,
+  PR lookup, `gh auth token`, GitLab discovery) keep their own login and the
+  connected project's GitHub token, and the git they start inherits nothing
+  more; `docker compose` keeps only `DOCKER_*`/`COMPOSE_*` settings, so a
+  compose file can no longer interpolate a backend secret; the `cargo
+  metadata` run before a validation gets the Quick Exec environment; and the
+  agent installers, RTK, ccusage, WSL, Tailscale and system probes get the base
+  allow-list. `glab` no longer reads a `GITLAB_TOKEN` exported to Kronn and a
+  package manager no longer reads a registry token from Kronn's environment:
+  both use their own login or config file. A CI gate
+  (`scripts/ci/lint_child_env.py`) fails when a new spawn site skips the
+  builder outside the exceptions declared in the design note.
 - The project and discussion terminal no longer runs `env` and no longer
   reads outside the project: `cat`, `head`, `tail`, `find`, `stat`, `grep`,
   `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves

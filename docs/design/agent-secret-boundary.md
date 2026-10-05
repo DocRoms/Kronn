@@ -419,6 +419,34 @@ validations, probes) carry no project and get none.
 Native ACP agents now receive their configured key and their room and workflow
 contexts (KT-1013).
 
+*Spawn inventory.* Every child goes through `core::cmd::{async_cmd,sync_cmd}`
+(`lint-no-raw-command`), and every call site applies `child_env::` in the same
+function, starts a literal `git`, or uses `tool_cmd`/`sync_tool_cmd` (the
+`Tool` route by construction). `backend/scripts/ci/lint_child_env.py` enforces
+it in CI and fails on a stale exception. Routes beyond the agent and exec ones:
+
+| Route | Inherits beyond the base allow-list | Used by |
+|---|---|---|
+| `Git` | git identity, config location, prompts | every `git`, git inside WSL (`scanner.rs`) |
+| `GitHost` | the above plus `GH_CONFIG_DIR`, `GH_HOST`, `GLAB_CONFIG_DIR`, `GITLAB_HOST`, `GL_HOST`; `gh` also gets the connected project's GitHub variables (`env_for_launch`) and the explicit PR token | PR creation and lookup (`api/git_ops.rs`), `gh auth token`, GitLab discovery |
+| `DependencyCheck` | Go, Bundler/rbenv, .NET/NuGet, Poetry and Composer locations (proxy, cache, home) | `core/dependency_updates.rs` package managers and Renovate |
+| `Docker` | `DOCKER_*`, `COMPOSE_*` that do not look like a credential | project `docker compose`, Composer through Docker |
+| `QuickExec` | nothing | Quick Exec, task validations and their `cargo metadata` |
+| `Tool` | nothing (ccusage also gets `CLAUDE_CONFIG_DIR`) | agent install/uninstall and the Kiro installer, RTK, ccusage, `wsl.exe` lookups, Tailscale and network probes, `caffeinate`, `launchctl`/`sysctl`, `hostname`, `kill`/`taskkill`, `id`/`chown`, stream lifelines |
+
+No registry token is inherited by a dependency check, nor `GITLAB_TOKEN` by
+`glab`: a repository's config could print it. Both read their own config file
+or login instead, which the base allow-list keeps reachable (`HOME`, XDG).
+
+Declared exceptions (they keep the backend's environment): the document
+sidecar (`core/docs_sidecar.rs::start`), model discovery
+(`model_catalog/claude_discovery.rs::discover`,
+`model_catalog/codex_discovery.rs::discover`), version discovery
+(`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
+and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`)
+and the MCP probe (`api/mcps.rs::probe_mcp_stdio_with_timeout`). None runs in
+a repository: each starts a binary Kronn found or the operator configured.
+
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
 any path argument of `cat`, `head`, `tail`, `find`, `stat`, `grep`, `rg`, `wc`,
@@ -457,8 +485,8 @@ bridge token is refused on every other route, secret-class ones included, even
 from loopback. Any bearer that matches neither the operator token nor a live
 bridge token (dead, expired, mistyped) is refused outright, never downgraded to
 loopback trust. Not covered by an agent's environment any more but still
-inheriting the backend's: Kronn's own probes that take no caller input (CLI
-version and model discovery, the MCP probe, the document sidecar).
+inheriting the backend's: the declared exceptions of the spawn inventory above
+(CLI version and model discovery, the MCP probe, the document sidecar).
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its
