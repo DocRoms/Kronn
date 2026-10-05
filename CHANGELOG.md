@@ -74,7 +74,9 @@ Release notes for 0.9.3 and earlier are available in the
   `sys.argv[1]`, `process.argv[1]`), and applies it only when you click
   Apply. When no rewrite is provably equivalent (heredoc, single quotes,
   part of a longer string), it says a manual fix is required and gives the
-  recipe. Editing something else in such a workflow keeps working.
+  recipe. Editing something else in such a workflow keeps working. The
+  inline Quick Exec sources of a CollectApiData step are checked, counted and
+  fixable the same way.
 
 ### Fixed
 

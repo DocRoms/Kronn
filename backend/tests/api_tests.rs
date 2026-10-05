@@ -25358,3 +25358,120 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
     .await;
     assert_eq!(fixed["success"], true, "{fixed}");
 }
+
+/// KT-1017 — an inline Quick Exec source of a CollectApiData step gets the
+/// same check: counted in the list, reported with its alias, kept while
+/// unchanged, refused when changed to another unsafe line, fixable.
+#[tokio::test]
+async fn inline_quick_exec_sources_are_flagged_and_fixable() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let collect = |args: Vec<&str>| {
+        serde_json::json!([{
+            "name": "collect",
+            "step_type": {"type": "CollectApiData"},
+            "collect_api_data": {"sources": [{
+                "alias": "ticket",
+                "quick_exec": {"command": "python3", "args": args, "output_format": "text"},
+                "required": true
+            }]}
+        }])
+    };
+    let steps: Vec<kronn::models::WorkflowStep> =
+        serde_json::from_value(collect(vec!["-c", "print('{{issue.title}}')"])).unwrap();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                id: "workflow-collect-unsafe".into(),
+                name: "Collect".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps,
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["python3".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let summary = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wf| wf["id"] == "workflow-collect-unsafe")
+        .unwrap();
+    assert_eq!(summary["unsafe_step_count"], 1);
+
+    let (_, report) = get_json(
+        app.clone(),
+        "/api/workflows/workflow-collect-unsafe/unsafe-steps",
+    )
+    .await;
+    let issue = &report["data"][0];
+    assert_eq!(issue["phase"], "source");
+    assert_eq!(issue["source_alias"], "ticket");
+    let suggested = issue["suggested_args"].clone();
+    assert_eq!(
+        suggested,
+        serde_json::json!(["-c", "import sys\nprint(sys.argv[1])", "{{issue.title}}"])
+    );
+
+    let uri = "/api/workflows/workflow-collect-unsafe";
+    let (_, kept) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"name": "Renamed", "steps": collect(vec!["-c", "print('{{issue.title}}')"])}),
+    )
+    .await;
+    assert_eq!(kept["success"], true, "{kept}");
+
+    let (_, refused) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"steps": collect(vec!["-c", "print('{{issue.body}}')"])}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("ticket"),
+        "{refused}"
+    );
+
+    let fixed_args: Vec<&str> = suggested
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    let (_, fixed) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"steps": collect(fixed_args)}),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+    let (_, report) = get_json(app, "/api/workflows/workflow-collect-unsafe/unsafe-steps").await;
+    assert_eq!(report["data"], serde_json::json!([]));
+}

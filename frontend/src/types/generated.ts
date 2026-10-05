@@ -7967,9 +7967,14 @@ export type UnsafeExecStep = { step_name: string,
  */
 on_failure: boolean,
 /**
- * `main` (`exec_command`) or `setup` (`exec_setup_command`).
+ * `main` (`exec_command`), `setup` (`exec_setup_command`) or `source`
+ * (an inline Quick Exec of a CollectApiData step).
  */
-phase: string, command: string, args: Array<string>,
+phase: string,
+/**
+ * The CollectApiData source alias when `phase` is `source`.
+ */
+source_alias?: string, command: string, args: Array<string>,
 /**
  * The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).
  */

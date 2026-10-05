@@ -192,14 +192,12 @@ fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
     }
 }
 
-/// Every unsafe command line of a saved step (main, then setup), with a
-/// suggested rewrite when one is provably equivalent.
+/// Every unsafe command line of a saved step (main, then setup, or each
+/// inline Quick Exec source of a CollectApiData step), with a suggested
+/// rewrite when one is provably equivalent.
 pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecStep> {
-    if !matches!(step.step_type, crate::models::StepType::Exec) {
-        return Vec::new();
-    }
     let mut found = Vec::new();
-    let mut check = |phase: &str, cmd: Option<&str>, args: &[String]| {
+    let mut check = |phase: &str, alias: Option<&str>, cmd: Option<&str>, args: &[String]| {
         let Some(cmd) = cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) else {
             return;
         };
@@ -218,6 +216,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             step_name: step.name.clone(),
             on_failure,
             phase: phase.to_string(),
+            source_alias: alias.map(str::to_string),
             command: cmd.to_string(),
             args: args.to_vec(),
             placeholder,
@@ -229,12 +228,34 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             manual_fix,
         });
     };
-    check("main", step.exec_command.as_deref(), &step.exec_args);
-    check(
-        "setup",
-        step.exec_setup_command.as_deref(),
-        &step.exec_setup_args,
-    );
+    match step.step_type {
+        crate::models::StepType::Exec => {
+            check("main", None, step.exec_command.as_deref(), &step.exec_args);
+            check(
+                "setup",
+                None,
+                step.exec_setup_command.as_deref(),
+                &step.exec_setup_args,
+            );
+        }
+        crate::models::StepType::CollectApiData => {
+            for source in step
+                .collect_api_data
+                .iter()
+                .flat_map(|config| &config.sources)
+            {
+                if let Some(exec) = &source.quick_exec {
+                    check(
+                        "source",
+                        Some(&source.alias),
+                        Some(&exec.command),
+                        &exec.args,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
     found
 }
 
@@ -954,6 +975,47 @@ mod tests {
         assert_eq!(
             suggest_args("node", &args(&["-e", "console.log(\"{{x}}\")"])).unwrap(),
             args(&["-e", "console.log(process.argv[1])", "{{x}}"])
+        );
+    }
+
+    #[test]
+    fn inline_quick_exec_sources_of_a_collect_step_are_classified() {
+        let source = |alias: &str, args: &[&str]| crate::models::CollectApiDataSource {
+            alias: alias.into(),
+            quick_api_id: String::new(),
+            quick_exec_id: String::new(),
+            quick_exec: Some(crate::models::CollectQuickExecSource {
+                command: "python3".into(),
+                args: args.iter().map(|arg| arg.to_string()).collect(),
+                timeout_secs: None,
+                output_format: Default::default(),
+            }),
+            required: true,
+            variables: Default::default(),
+        };
+        let step = crate::models::WorkflowStep {
+            name: "collect".into(),
+            step_type: crate::models::StepType::CollectApiData,
+            collect_api_data: Some(crate::models::CollectApiDataConfig {
+                sources: vec![
+                    source("safe", &["-c", "import sys; print(sys.argv[1])", "{{x}}"]),
+                    source("ticket", &["-c", "print('{{issue.title}}')"]),
+                ],
+                concurrent_limit: None,
+            }),
+            ..Default::default()
+        };
+        let found = classify_step(&step, false);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].phase, "source");
+        assert_eq!(found[0].source_alias.as_deref(), Some("ticket"));
+        assert_eq!(
+            found[0].suggested_args,
+            Some(args(&[
+                "-c",
+                "import sys\nprint(sys.argv[1])",
+                "{{issue.title}}"
+            ]))
         );
     }
 

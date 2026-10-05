@@ -66,4 +66,15 @@ describe('UnsafeStepsPanel', () => {
     expect(screen.getByText(manual.manual_fix!)).toBeDefined();
     expect(screen.queryByText('wf.unsafeApply')).toBeNull();
   });
+
+  it('names the CollectApiData source of an inline Quick Exec', async () => {
+    unsafeSteps.mockResolvedValue([{ ...fixable, step_name: 'collect', phase: 'source', source_alias: 'ticket' }]);
+    const onApply = vi.fn().mockResolvedValue(undefined);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={onApply} />);
+    await screen.findByText('collect');
+    expect(screen.getByText(/wf\.unsafeSource/)).toBeDefined();
+    fireEvent.click(screen.getByText('wf.unsafeSuggest'));
+    fireEvent.click(screen.getByText('wf.unsafeApply'));
+    await waitFor(() => expect(onApply).toHaveBeenCalledWith(expect.objectContaining({ source_alias: 'ticket' })));
+  });
 });

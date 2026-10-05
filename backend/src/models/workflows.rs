@@ -1757,8 +1757,13 @@ pub struct UnsafeExecStep {
     pub step_name: String,
     /// The step belongs to the `on_failure` chain.
     pub on_failure: bool,
-    /// `main` (`exec_command`) or `setup` (`exec_setup_command`).
+    /// `main` (`exec_command`), `setup` (`exec_setup_command`) or `source`
+    /// (an inline Quick Exec of a CollectApiData step).
     pub phase: String,
+    /// The CollectApiData source alias when `phase` is `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_alias: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     /// The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).

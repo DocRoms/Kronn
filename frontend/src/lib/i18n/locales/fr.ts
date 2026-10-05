@@ -4090,6 +4090,7 @@ const fr: TranslationDict = {
   'wf.unsafeTitle': 'Interpolation dangereuse : ces étapes ne s\'exécuteront pas',
   'wf.unsafeIntro': 'Une valeur comme un titre de ticket ou la sortie d\'une étape est placée dans du code inline, où elle pourrait s\'exécuter. Kronn refuse ces étapes à l\'exécution. La correction passe la valeur en argument séparé, que l\'interpréteur ne lit jamais comme du code.',
   'wf.unsafeSetup': 'setup',
+  'wf.unsafeSource': 'source « {0} »',
   'wf.unsafeSuggest': 'Proposer une correction',
   'wf.unsafeDiff': 'Modification proposée',
   'wf.unsafeApply': 'Appliquer',

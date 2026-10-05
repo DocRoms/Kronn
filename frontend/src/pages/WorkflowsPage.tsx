@@ -999,6 +999,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (!workflow || !fixed) return;
     const rewrite = (chain: WorkflowStep[]) => chain.map(step => {
       if (step.name !== issue.step_name) return step;
+      if (issue.phase === 'source') {
+        const config = step.collect_api_data;
+        if (!config) return step;
+        return {
+          ...step,
+          collect_api_data: {
+            ...config,
+            sources: config.sources.map(source =>
+              source.alias === issue.source_alias && source.quick_exec
+                ? { ...source, quick_exec: { ...source.quick_exec, args: fixed } }
+                : source),
+          },
+        };
+      }
       return issue.phase === 'setup'
         ? { ...step, exec_setup_args: fixed }
         : { ...step, exec_args: fixed };

@@ -1095,12 +1095,24 @@ fn is_grandfathered(grandfathered: &[UnsafeExecStep], step: &WorkflowStep, phase
     } else {
         (step.exec_command.as_deref(), &step.exec_args)
     };
+    is_grandfathered_line(grandfathered, &step.name, phase, None, cmd, args)
+}
+
+fn is_grandfathered_line(
+    grandfathered: &[UnsafeExecStep],
+    step_name: &str,
+    phase: &str,
+    alias: Option<&str>,
+    cmd: Option<&str>,
+    args: &[String],
+) -> bool {
     let cmd = cmd.map(str::trim).unwrap_or_default();
     grandfathered.iter().any(|known| {
-        known.step_name == step.name
+        known.step_name == step_name
             && known.phase == phase
+            && known.source_alias.as_deref() == alias
             && known.command == cmd
-            && &known.args == args
+            && known.args == args
     })
 }
 
@@ -1152,6 +1164,23 @@ fn validate_exec_steps_keeping(
                             "Step CollectApiData « {} », source « {} » : timeout hors limites (1-{} s).",
                             s.name, source.alias, MAX_TIMEOUT_SECS
                         ));
+                    }
+                    let kept = is_grandfathered_line(
+                        grandfathered,
+                        &s.name,
+                        "source",
+                        Some(&source.alias),
+                        Some(cmd),
+                        &exec.args,
+                    );
+                    if !kept {
+                        if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
+                            &format!("{} » / source « {}", s.name, source.alias),
+                            cmd,
+                            &exec.args,
+                        ) {
+                            return Err(error);
+                        }
                     }
                 }
             }
