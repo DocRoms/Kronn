@@ -239,8 +239,10 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    `config.toml` is the one `config::retain_disk_key` keeps until the key
    decrypts every non-empty column and two independent copies remain without
    it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
-   whose fingerprint matches); a different legacy key is kept. `mirror()`
-   never writes a vault holding another key; two keys that each decrypt data
+   whose fingerprint matches); a different legacy value is moved to
+   `config.toml.retired-key.<ts>` and the key in use gets the file copy.
+   Config backups and retired-key files are read-only candidates of every
+   decision. `mirror()` never writes a vault holding another key; two keys that each decrypt data
    stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
    Keys compare in one canonical spelling; the env variable is not counted as
    a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no

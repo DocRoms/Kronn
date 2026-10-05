@@ -298,6 +298,13 @@ Release notes for 0.9.3 and earlier are available in the
   token is ever written to `config.toml` in clear: such changes are refused,
   key auto-discovery waits, and an operator's `KRONN_AUTH_TOKEN` serves the
   session only (KT-1007).
+- A key kept only in a `config.toml` backup or a set-aside file is now found
+  when it still decrypts some rows, instead of leaving them unreadable; a
+  recovery passphrase that protects another key can be replaced without it;
+  re-encrypted provider keys appear without a restart; an export of secrets
+  without a recovery passphrase warns; a `config.toml` set aside at start is
+  shown in the setup wizard; every backup copy is scrubbed even when one
+  fails; and key files are synced to disk with their directory (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
