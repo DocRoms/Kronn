@@ -46,6 +46,7 @@ describe('RecoveryRestorePanel', () => {
     render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} />);
     fireEvent.click(screen.getByTestId('recovery-restore-cta'));
     fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'my-pass' } });
+    await waitFor(() => expect((screen.getByTestId('recovery-restore-submit') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId('recovery-restore-submit'));
 
     await waitFor(() => expect(onRestored).toHaveBeenCalled());
@@ -59,6 +60,7 @@ describe('RecoveryRestorePanel', () => {
     fireEvent.click(screen.getByTestId('recovery-restore-cta'));
     fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'my-pass' } });
     fireEvent.change(screen.getByTestId('recovery-restore-code'), { target: { value: '  KRECOV1.a.b  ' } });
+    await waitFor(() => expect((screen.getByTestId('recovery-restore-submit') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId('recovery-restore-submit'));
 
     await waitFor(() => expect(config.restoreRecovery).toHaveBeenCalledWith('my-pass', 'KRECOV1.a.b'));
@@ -69,6 +71,7 @@ describe('RecoveryRestorePanel', () => {
     render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} />);
     fireEvent.click(screen.getByTestId('recovery-restore-cta'));
     fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'bad' } });
+    await waitFor(() => expect((screen.getByTestId('recovery-restore-submit') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId('recovery-restore-submit'));
 
     await waitFor(() =>
@@ -83,6 +86,7 @@ describe('RecoveryRestorePanel', () => {
     await waitFor(() => expect(screen.getByText('mcp.recovery.reencryptCta')).toBeTruthy());
     fireEvent.click(screen.getByTestId('recovery-restore-cta'));
     fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'source pass' } });
+    await waitFor(() => expect((screen.getByTestId('recovery-restore-submit') as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId('recovery-restore-submit'));
     await waitFor(() => expect(config.reencryptImported).toHaveBeenCalledWith('source pass', undefined));
     expect(config.restoreRecovery).not.toHaveBeenCalled();
@@ -94,5 +98,18 @@ describe('RecoveryRestorePanel', () => {
     render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} mode="restore" initiallyOpen />);
     expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
     expect(config.getRecoveryStatus).not.toHaveBeenCalled();
+  });
+
+  it('keeps submit disabled until the backend says which flow applies', async () => {
+    let answer: (v: unknown) => void = () => {};
+    config.getRecoveryStatus.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+    render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} initiallyOpen />);
+    fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'pw' } });
+    const submit = screen.getByTestId('recovery-restore-submit') as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(config.restoreRecovery).not.toHaveBeenCalled();
+    answer({ key_locked: false });
+    await waitFor(() => expect(submit.disabled).toBe(false));
   });
 });

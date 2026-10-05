@@ -25,6 +25,33 @@ use std::path::{Path, PathBuf};
 
 /// Env var an operator can set to pin the key (highest priority). Read-only.
 pub const ENV_KEK: &str = "KRONN_ENCRYPTION_KEK";
+/// The operator's key override, kept in memory once taken out of the
+/// process environment.
+static TAKEN_ENV_KEK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn read_env_kek() -> Option<String> {
+    std::env::var(ENV_KEK)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Read the operator's `KRONN_ENCRYPTION_KEK` and remove it (and the legacy
+/// `KRONN_KEK`) from this process's environment, so no child can inherit the
+/// raw key (KT-1006). Call before any thread exists: removing a variable is
+/// not thread-safe.
+fn take_env_kek_from_process() -> Option<String> {
+    let value = read_env_kek();
+    std::env::remove_var(ENV_KEK);
+    std::env::remove_var("KRONN_KEK");
+    value
+}
+
+/// [`take_env_kek_from_process`], keeping the value for [`KeyStore::env_override`].
+pub fn take_env_kek() {
+    let _ = TAKEN_ENV_KEK.set(take_env_kek_from_process());
+}
+
 /// Keychain service. Account is versioned so a future key scheme can coexist.
 pub const KEYCHAIN_SERVICE: &str = "com.kronn.kronn";
 pub const KEYCHAIN_ACCOUNT: &str = "encryption_secret_v1";
@@ -43,6 +70,9 @@ pub enum VaultError {
     /// The store could not be reached or read (backend failure, I/O error).
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The store answered but its content is not text (damaged file).
+    #[error("corrupted: {0}")]
+    Corrupted(String),
 }
 
 /// A place the encryption key can be persisted to and read from.
@@ -100,6 +130,9 @@ fn keychain_read_result(read: keyring::Result<String>) -> Result<Option<String>>
         Ok(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::NoStorageAccess(e)) => Err(VaultError::Denied(e.to_string()).into()),
+        Err(e @ (keyring::Error::BadEncoding(_) | keyring::Error::Ambiguous(_))) => {
+            Err(VaultError::Corrupted(e.to_string()).into())
+        }
         Err(e) => Err(VaultError::Unavailable(e.to_string()).into()),
     }
 }
@@ -139,6 +172,9 @@ impl KeyVault for SidecarFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 Err(VaultError::Denied(format!("{}: {e}", self.path.display())).into())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                Err(VaultError::Corrupted(format!("{}: {e}", self.path.display())).into())
             }
             Err(e) => Err(VaultError::Unavailable(format!("{}: {e}", self.path.display())).into()),
         }
@@ -186,11 +222,25 @@ pub(crate) fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()
     Ok(())
 }
 
+/// Whether two key strings are the same key, whatever their case or
+/// surrounding whitespace; values that are not keys compare as written.
+pub fn same_key(a: &str, b: &str) -> bool {
+    match (
+        crate::core::crypto::canonical_secret(a),
+        crate::core::crypto::canonical_secret(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// A vault that could not be read during [`KeyStore::snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultReadFailure {
     pub vault: &'static str,
     pub error: String,
+    /// The vault content is damaged (not merely unreadable).
+    pub corrupted: bool,
 }
 
 /// The ordered ladder of writable vaults (keychain → sidecar), plus the
@@ -234,11 +284,12 @@ impl KeyStore {
     }
 
     /// The env override, if set and non-empty. Read-only, highest priority.
+    /// Once [`take_env_kek`] ran, the value it kept in memory.
     pub fn env_override() -> Option<String> {
-        std::env::var(ENV_KEK)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        if let Some(taken) = TAKEN_ENV_KEK.get() {
+            return taken.clone();
+        }
+        read_env_kek()
     }
 
     /// Highest-priority key currently present: env → vaults in order.
@@ -270,6 +321,10 @@ impl KeyStore {
                 Err(error) => {
                     return Err(VaultReadFailure {
                         vault: v.name(),
+                        corrupted: matches!(
+                            error.downcast_ref::<VaultError>(),
+                            Some(VaultError::Corrupted(_))
+                        ),
                         error: format!("{error:#}"),
                     })
                 }
@@ -280,22 +335,21 @@ impl KeyStore {
 
     /// Whether `secret` can be read back from a durable tier (env or a vault).
     pub fn holds(&self, secret: &str) -> bool {
-        Self::env_override().as_deref() == Some(secret)
+        Self::env_override().is_some_and(|env| same_key(&env, secret))
             || self
                 .vaults
                 .iter()
-                .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+                .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
     }
 
-    /// How many distinct durable copies read `secret` back: the env override and
-    /// each vault count once (config.toml is not counted here).
+    /// How many persisted copies read `secret` back: each vault counts once.
+    /// The env override is not counted (a one-off variable is not durable), nor
+    /// is config.toml.
     pub fn copies_of(&self, secret: &str) -> usize {
-        usize::from(Self::env_override().as_deref() == Some(secret))
-            + self
-                .vaults
-                .iter()
-                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
-                .count()
+        self.vaults
+            .iter()
+            .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
+            .count()
     }
 
     /// Whether the vault called `name` reads `secret` back.
@@ -303,7 +357,7 @@ impl KeyStore {
         self.vaults
             .iter()
             .filter(|v| v.name() == name)
-            .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+            .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
     }
 
     /// Persist `secret` into every EMPTY writable vault. A vault holding another
@@ -315,7 +369,7 @@ impl KeyStore {
             .iter()
             .map(|v| {
                 let res = match v.retrieve() {
-                    Ok(Some(cur)) if cur == secret => Ok(()),
+                    Ok(Some(cur)) if same_key(&cur, secret) => Ok(()),
                     Ok(Some(_)) => Err(anyhow::anyhow!(
                         "not written: the vault holds a different key"
                     )),
@@ -426,6 +480,38 @@ mod tests {
 
     #[test]
     #[serial]
+    fn the_key_override_leaves_the_process_environment() {
+        std::env::set_var(ENV_KEK, " envkey \n");
+        std::env::set_var("KRONN_KEK", "legacy");
+        assert_eq!(take_env_kek_from_process(), Some("envkey".to_string()));
+        assert!(std::env::var_os(ENV_KEK).is_none());
+        assert!(std::env::var_os("KRONN_KEK").is_none());
+    }
+
+    /// Both entry points take the key out before any thread starts.
+    #[test]
+    fn both_binaries_take_the_key_override_first() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for (file, before) in [
+            (root.join("src/main.rs"), "tokio::runtime::Builder"),
+            (
+                root.join("../desktop/src-tauri/src/main.rs"),
+                "tracing_subscriber::",
+            ),
+        ] {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let take = text
+                .find("keyvault::take_env_kek()")
+                .unwrap_or_else(|| panic!("{} never takes the key override", file.display()));
+            let marker = text
+                .find(before)
+                .unwrap_or_else(|| panic!("{} has no `{before}`", file.display()));
+            assert!(take < marker, "{}", file.display());
+        }
+    }
+
+    #[test]
+    #[serial]
     fn env_override_ignores_whitespace_only_value() {
         std::env::set_var(ENV_KEK, " \n\t ");
         assert_eq!(KeyStore::env_override(), None);
@@ -522,7 +608,7 @@ mod tests {
         assert!(!ks.holds_in("keychain", "KEY"));
         std::env::set_var(ENV_KEK, "OTHER");
         assert!(ks.holds("OTHER"));
-        assert_eq!(ks.copies_of("OTHER"), 1, "env only");
+        assert_eq!(ks.copies_of("OTHER"), 0, "env is not a persisted copy");
         std::env::remove_var(ENV_KEK);
     }
 
@@ -542,6 +628,12 @@ mod tests {
         assert!(matches!(
             denied.downcast_ref::<VaultError>(),
             Some(VaultError::Denied(_))
+        ));
+        let damaged =
+            keychain_read_result(Err(keyring::Error::BadEncoding(vec![0xff]))).unwrap_err();
+        assert!(matches!(
+            damaged.downcast_ref::<VaultError>(),
+            Some(VaultError::Corrupted(_))
         ));
         let failed =
             keychain_read_result(Err(keyring::Error::PlatformFailure("boom".into()))).unwrap_err();

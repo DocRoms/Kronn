@@ -79,10 +79,16 @@ fn upsert(conn: &Connection, row: &StoredCredential) -> Result<()> {
 /// Insert or update `rows` without deleting anything (migration merge).
 pub fn upsert_all(conn: &Connection, rows: &[StoredCredential]) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    for row in rows {
-        upsert(&tx, row)?;
-    }
+    upsert_rows(&tx, rows)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// [`upsert_all`] inside the caller's transaction.
+pub fn upsert_rows(conn: &Connection, rows: &[StoredCredential]) -> Result<()> {
+    for row in rows {
+        upsert(conn, row)?;
+    }
     Ok(())
 }
 
@@ -94,11 +100,22 @@ pub fn replace_all(
     preserve: &HashSet<(String, String)>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    replace_rows(&tx, rows, preserve)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`replace_all`] inside the caller's transaction.
+pub fn replace_rows(
+    conn: &Connection,
+    rows: &[StoredCredential],
+    preserve: &HashSet<(String, String)>,
+) -> Result<()> {
     let wanted: HashSet<(String, String)> = rows.iter().map(StoredCredential::row_key).collect();
-    for existing in list(&tx)? {
+    for existing in list(conn)? {
         let key = existing.row_key();
         if !wanted.contains(&key) && !preserve.contains(&key) {
-            tx.execute(
+            conn.execute(
                 "DELETE FROM stored_credentials WHERE kind = ?1 AND id = ?2",
                 params![key.0, key.1],
             )?;
@@ -106,10 +123,9 @@ pub fn replace_all(
     }
     for row in rows {
         if !preserve.contains(&row.row_key()) {
-            upsert(&tx, row)?;
+            upsert(conn, row)?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
 

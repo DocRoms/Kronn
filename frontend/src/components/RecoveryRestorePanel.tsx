@@ -26,13 +26,16 @@ export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', init
   // Restoring another key on a running instance would split the data between
   // two keys; there the imported secrets are re-encrypted under the live key.
   const [reencrypt, setReencrypt] = useState(false);
+  // In auto mode nothing is submitted before the backend says which flow applies.
+  const [modeKnown, setModeKnown] = useState(mode !== 'auto');
   useEffect(() => {
     if (mode !== 'auto') return;
     let live = true;
     Promise.resolve()
       .then(() => configApi.getRecoveryStatus())
       .then(status => { if (live) setReencrypt(!status.key_locked); })
-      .catch(() => { if (live) setReencrypt(false); });
+      .catch(() => { if (live) setReencrypt(false); })
+      .finally(() => { if (live) setModeKnown(true); });
     return () => { live = false; };
   }, [mode]);
   const [passphrase, setPassphrase] = useState('');
@@ -40,7 +43,7 @@ export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', init
   const [busy, setBusy] = useState(false);
 
   const restore = async () => {
-    if (!passphrase || busy) return;
+    if (!passphrase || busy || !modeKnown) return;
     setBusy(true);
     try {
       if (reencrypt) {
@@ -100,7 +103,7 @@ export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', init
         <button
           type="button"
           className="set-action-btn"
-          disabled={!passphrase || busy}
+          disabled={!passphrase || busy || !modeKnown}
           onClick={restore}
           data-testid="recovery-restore-submit"
         >

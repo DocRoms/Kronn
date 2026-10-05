@@ -3129,7 +3129,11 @@ unmodelled_program: string | null, };
 /**
  * A command line to check for the step editor and the Quick Exec form.
  */
-export type ExecLineCheckRequest = { command: string, args?: Array<string>, };
+export type ExecLineCheckRequest = { command: string, args?: Array<string>,
+/**
+ * The step's `exec_stdin` template, when it has one.
+ */
+stdin?: string | null, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -6124,15 +6128,42 @@ matches_key: boolean,
  */
 key_locked: boolean,
 /**
- * No verified recovery passphrase: Kronn keeps every local copy of the key
- * (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
+ * The retention rule keeps config.toml's copy: fewer than two persisted
+ * vault copies, or one without a verified recovery passphrase (KT-1007).
  */
 key_copies_kept: boolean,
 /**
  * config.toml still carries the key (no vault could hold it, or one copy
  * alone would remain without a recovery passphrase).
  */
-config_holds_key: boolean, };
+config_holds_key: boolean,
+/**
+ * Persisted vault copies of the key in use, at the last start.
+ */
+copies: number,
+/**
+ * Key stores holding another key than the one in use (never overwritten;
+ * set a recovery passphrase before downgrading).
+ */
+stale_sources: Array<string>,
+/**
+ * Key stores holding a value that is not a key.
+ */
+invalid_sources: Array<string>,
+/**
+ * Stored credentials the key in use cannot decrypt (kept untouched).
+ */
+locked_credentials: number,
+/**
+ * Recovery data kept from imports or a replaced recovery.key, usable by
+ * "Re-encrypt imported secrets".
+ */
+kept_recovery_blobs: number,
+/**
+ * The key is in use but the stored credentials could not be loaded at
+ * start (disk full, unreadable config.toml): why, to fix before a restart.
+ */
+credentials_unavailable: string | null, };
 
 export type RedactedField = {
 /**

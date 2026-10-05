@@ -111,9 +111,11 @@ pub fn sync_tool_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
     sync_cmd(program, ChildRoute::Tool)
 }
 
-/// Why a process keeps the backend's whole environment. Each variant is a
-/// declared exception of the design note (§9); `full_env_cmd_sites` lists the
-/// call sites.
+/// Why a process inherits the backend's environment instead of a route's.
+/// Each variant is a declared exception of the design note (§9); the test
+/// `full_env_cmd_sites_are_exactly_the_declared_exceptions` lists the call
+/// sites in both crates. No exception ever receives a secret: see
+/// [`child_env::strip_inherited_secrets`](crate::core::child_env::strip_inherited_secrets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FullEnvReason {
     /// The document sidecar Kronn ships.
@@ -122,23 +124,44 @@ pub enum FullEnvReason {
     ModelDiscovery,
     /// A CLI asked for its version.
     VersionDiscovery,
-    /// An MCP server started once to check that it answers.
-    McpProbe,
+    /// The desktop app relaunching itself: it keeps its own environment but
+    /// the forbidden names (the caller hands the key override back).
+    SelfRestart,
 }
 
-/// A process that inherits the backend's environment: only for a declared
-/// [`FullEnvReason`]. It starts in the temporary directory, never in a
-/// repository (the backend's own directory may be one).
+/// A process that inherits the backend's environment, for a declared
+/// [`FullEnvReason`] only, with every secret removed. It starts in the
+/// temporary directory, never in a repository (the backend's own directory
+/// may be one).
 pub fn full_env_cmd<S: AsRef<OsStr>>(program: S, reason: FullEnvReason) -> tokio::process::Command {
-    let _ = reason;
     let mut cmd = raw_async(program.as_ref());
-    cmd.current_dir(std::env::temp_dir());
+    crate::core::child_env::strip_inherited_secrets(
+        cmd.as_std_mut(),
+        reason == FullEnvReason::SelfRestart,
+    );
+    if reason != FullEnvReason::SelfRestart {
+        cmd.current_dir(std::env::temp_dir());
+    }
+    cmd
+}
+
+/// [`full_env_cmd`] for a `std::process::Command`.
+pub fn full_env_sync_cmd<S: AsRef<OsStr>>(
+    program: S,
+    reason: FullEnvReason,
+) -> std::process::Command {
+    let mut cmd = raw_sync(program.as_ref());
+    crate::core::child_env::strip_inherited_secrets(&mut cmd, reason == FullEnvReason::SelfRestart);
+    if reason != FullEnvReason::SelfRestart {
+        cmd.current_dir(std::env::temp_dir());
+    }
     cmd
 }
 
 /// The system opener (`open`, `xdg-open`, `start`) for `target`, with the
 /// base allow-list only. The `open` crate's own spawning entry points are
-/// refused by clippy.
+/// refused by clippy; its commands are taken here and rebuilt.
+#[allow(clippy::disallowed_methods)] // open::commands: each command is isolated below
 pub fn open_in_system<T: AsRef<OsStr>>(target: T) -> std::io::Result<()> {
     let mut last = Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -267,57 +290,81 @@ mod tests {
         }
     }
 
-    /// Exactly the exceptions design §9 declares keep the backend's
-    /// environment; any other process needs a route to compile.
+    /// Every Rust file of the backend (sources and integration tests) and of
+    /// the desktop crate, as (`crate/relative/path`, text).
+    fn rust_sources() -> Vec<(String, String)> {
+        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let roots = [
+            ("backend/src", backend.join("src")),
+            ("backend/tests", backend.join("tests")),
+            ("desktop/src", backend.join("../desktop/src-tauri/src")),
+        ];
+        let mut files = Vec::new();
+        for (label, root) in roots {
+            assert!(root.is_dir(), "{} is missing", root.display());
+            let mut stack = vec![root.clone()];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
+                        let rel = path.strip_prefix(&root).unwrap().to_string_lossy();
+                        files.push((
+                            format!("{label}/{}", rel.replace('\\', "/")),
+                            std::fs::read_to_string(&path).unwrap(),
+                        ));
+                    }
+                }
+            }
+        }
+        files
+    }
+
+    /// Exactly the exceptions design §9 declares inherit the environment,
+    /// in either crate; any other process needs a route to compile.
     #[test]
     fn full_env_cmd_sites_are_exactly_the_declared_exceptions() {
         let expected: &[(&str, &str, usize)] = &[
-            ("agents/mod.rs", "VersionDiscovery", 4),
-            ("api/mcps.rs", "McpProbe", 1),
-            ("core/docs_sidecar.rs", "DocsSidecar", 2),
+            ("backend/src/agents/mod.rs", "VersionDiscovery", 4),
+            ("backend/src/core/docs_sidecar.rs", "DocsSidecar", 2),
             (
-                "core/model_catalog/claude_discovery.rs",
+                "backend/src/core/model_catalog/claude_discovery.rs",
                 "ModelDiscovery",
                 2,
             ),
-            ("core/model_catalog/codex_discovery.rs", "ModelDiscovery", 1),
-            ("core/versions.rs", "VersionDiscovery", 1),
+            (
+                "backend/src/core/model_catalog/codex_discovery.rs",
+                "ModelDiscovery",
+                1,
+            ),
+            ("backend/src/core/versions.rs", "VersionDiscovery", 1),
+            ("desktop/src/main.rs", "SelfRestart", 1),
         ];
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut found: std::collections::BTreeMap<(String, String), usize> = Default::default();
-        let mut stack = vec![root.clone()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
+        for (rel, text) in rust_sources() {
+            if rel == "backend/src/core/cmd.rs" {
+                continue;
+            }
+            for (at, _) in text.match_indices("full_env_") {
+                let rest = &text[at..];
+                let call = ["full_env_cmd", "full_env_sync_cmd"]
+                    .into_iter()
+                    .find(|name| rest.starts_with(name))
+                    .unwrap_or_else(|| panic!("{rel}: unknown full_env_ name"));
+                let after = &rest[call.len()..];
+                if after.starts_with(',') || after.starts_with('}') {
+                    continue; // an import
                 }
-                let rel = path
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if path.extension().is_none_or(|ext| ext != "rs") || rel == "core/cmd.rs" {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).unwrap();
-                for (at, _) in text.match_indices("full_env_cmd") {
-                    let rest = &text[at + "full_env_cmd".len()..];
-                    if rest.starts_with(',') || rest.starts_with('}') {
-                        continue; // the import
-                    }
-                    assert!(rest.starts_with('('), "{rel}: full_env_cmd used as a value");
-                    let close = rest.find(')').unwrap();
-                    let reason = rest[..close]
-                        .rsplit("FullEnvReason::")
-                        .next()
-                        .unwrap()
-                        .trim()
-                        .trim_end_matches(',')
-                        .to_string();
-                    *found.entry((rel.clone(), reason)).or_default() += 1;
-                }
+                assert!(after.starts_with('('), "{rel}: {call} used as a value");
+                let reason_at = after
+                    .find("FullEnvReason::")
+                    .unwrap_or_else(|| panic!("{rel}: {call} without a FullEnvReason"));
+                let reason: String = after[reason_at + "FullEnvReason::".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                *found.entry((rel.clone(), reason)).or_default() += 1;
             }
         }
         let expected: std::collections::BTreeMap<(String, String), usize> = expected
@@ -325,10 +372,59 @@ mod tests {
             .map(|(file, reason, n)| ((file.to_string(), reason.to_string()), *n))
             .collect();
         assert_eq!(found, expected);
+    }
+
+    /// The places allowed to bypass clippy's spawn ban are exactly these.
+    #[test]
+    fn clippy_spawn_ban_bypasses_are_exactly_these() {
+        let needle = concat!("allow(clippy::", "disallowed_methods)");
+        let found: std::collections::BTreeMap<String, usize> = rust_sources()
+            .into_iter()
+            .map(|(rel, text)| (rel, text.matches(needle).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        let expected: std::collections::BTreeMap<String, usize> = [
+            // raw_async, raw_sync, open_in_system (open::commands, isolated)
+            ("backend/src/core/cmd.rs", 3),
+            // test builds only: fixtures
+            ("backend/src/lib.rs", 1),
+            ("backend/tests/api_tests.rs", 1),
+        ]
+        .into_iter()
+        .map(|(file, n)| (file.to_string(), n))
+        .collect();
+        assert_eq!(found, expected);
+    }
+
+    /// No exception receives a secret; only Kronn relaunching itself keeps
+    /// its provider keys, never the forbidden names (B4-04).
+    #[test]
+    fn full_env_commands_never_carry_a_secret() {
+        use crate::core::child_env::{probe, FORBIDDEN};
+        let removed = |command: &std::process::Command, name: &str| {
+            command
+                .get_envs()
+                .any(|(key, value)| key == name && value.is_none())
+        };
+        let (sidecar, restart) = probe::with_secret_parent("/usr/bin", "/home/u", || {
+            (
+                full_env_cmd("x", FullEnvReason::DocsSidecar),
+                full_env_sync_cmd("x", FullEnvReason::SelfRestart),
+            )
+        });
+        for name in probe::SECRET_NAMES {
+            assert!(
+                removed(sidecar.as_std(), name),
+                "{name} reaches an exception"
+            );
+        }
+        for name in FORBIDDEN {
+            assert!(removed(sidecar.as_std(), name), "{name}");
+            assert!(removed(&restart, name), "{name} reaches the relaunch");
+        }
+        assert!(!removed(&restart, "ANTHROPIC_API_KEY"));
         assert_eq!(
-            full_env_cmd("x", FullEnvReason::McpProbe)
-                .as_std()
-                .get_current_dir(),
+            sidecar.as_std().get_current_dir(),
             Some(std::env::temp_dir().as_path())
         );
     }

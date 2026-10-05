@@ -590,10 +590,29 @@ async fn start_backend(
     };
 
     // Open database
-    let database = Arc::new(Database::open().expect("Failed to open database"));
+    // An error (disk too full for the pre-migration backup, a failed migration)
+    // reaches the startup screen instead of panicking the backend thread.
+    let database = Arc::new(Database::open().map_err(|e| {
+        anyhow::anyhow!("Kronn could not open its database: {e:#}")
+    })?);
 
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
+
+    // Same LAN guard as the standalone backend: never serve the network with
+    // an unauthenticated API.
+    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
+        bind_host == "0.0.0.0",
+        app_config.server.auth_enabled,
+        app_config.server.auth_token_or_lock(),
+        ack_insecure,
+    ) {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg));
+    }
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(
@@ -704,8 +723,9 @@ async fn start_backend(
 
     kronn::api::discussions::start_agent_dispatcher(state.clone());
 
-    // Auto-discover API keys
-    {
+    // Auto-discover API keys (skipped while the credential store is locked:
+    // they would go to config.toml in clear).
+    if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
         let mut cfg = state.config.write().await;
         let mut imported = 0u32;
@@ -852,7 +872,35 @@ async fn wait_for_backend(info: tauri::State<'_, BackendInfo>) -> Result<String,
 /// devices" toggle, whose host change only takes effect on a re-bind.
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
-    app.restart();
+    match self_restart_command() {
+        Ok(mut command) => {
+            if let Err(error) = command.spawn() {
+                tracing::error!("failed to restart the desktop app: {error}");
+                return;
+            }
+        }
+        Err(error) => {
+            tracing::error!("failed to restart the desktop app: {error}");
+            return;
+        }
+    }
+    app.cleanup_before_exit();
+    std::process::exit(0);
+}
+
+/// The relaunched app: a declared exception (design note §9), its own
+/// environment without the forbidden names, and the operator's key override
+/// handed back, since it left this process's environment at start.
+fn self_restart_command() -> std::io::Result<std::process::Command> {
+    let mut command = kronn::core::cmd::full_env_sync_cmd(
+        std::env::current_exe()?,
+        kronn::core::cmd::FullEnvReason::SelfRestart,
+    );
+    command.args(std::env::args_os().skip(1));
+    if let Some(key) = kronn::core::keyvault::KeyStore::env_override() {
+        command.env(kronn::core::keyvault::ENV_KEK, key);
+    }
+    Ok(command)
 }
 
 /// Open the native folder picker. Dismissal returns an empty list.
@@ -917,14 +965,35 @@ fn main() {
     // An operator-set KRONN_AUTH_TOKEN leaves the environment before any thread
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
+    kronn::core::keyvault::take_env_kek();
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stdout)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kronn=info".into()),
-        )
-        .init();
+    // stdout plus the data directory's kronn.log, the log the user can read.
+    {
+        use tracing_subscriber::prelude::*;
+        let file_layer = config::config_dir()
+            .ok()
+            .and_then(|dir| {
+                std::fs::create_dir_all(&dir).ok()?;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("kronn.log"))
+                    .ok()
+            })
+            .map(|file| {
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Arc::new(file))
+            });
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "kronn=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .with(file_layer)
+            .init();
+    }
 
     // Acquire ownership before constructing the UI. Reusing another process's
     // HTTP listener is unsafe even when versions match: that server can have a
@@ -1036,19 +1105,18 @@ fn main() {
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {
-                        if let Err(e) =
-                            start_backend(
-                                backend_port,
-                                reserved,
-                                dist_dir,
-                                data_dir_lock,
-                                env_token,
-                            )
-                            .await
+                        if let Err(e) = start_backend(
+                            backend_port,
+                            reserved,
+                            dist_dir,
+                            data_dir_lock,
+                            env_token,
+                        )
+                        .await
                         {
                             tracing::error!("Backend failed: {}", e);
                             let message =
-                                format!("Kronn's local service stopped during startup: {e}");
+                                format!("Kronn's local service stopped during startup: {e:#}");
                             *app_handle
                                 .state::<BackendInfo>()
                                 .startup_error
@@ -1358,5 +1426,27 @@ mod enrich_path_tests {
             Some(s) => std::env::set_var("SHELL", s),
             None => std::env::remove_var("SHELL"),
         }
+    }
+}
+
+#[cfg(test)]
+mod self_restart_tests {
+    /// The relaunched app never inherits the admin token or the raw key from
+    /// this process's environment (B4-08).
+    #[test]
+    fn the_relaunch_drops_the_forbidden_names() {
+        let command = super::self_restart_command().unwrap();
+        for name in kronn::core::child_env::FORBIDDEN {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == *name && value.is_none()),
+                "{name} is not removed from the relaunch"
+            );
+        }
+        assert_eq!(
+            command.get_program(),
+            std::env::current_exe().unwrap().as_os_str()
+        );
     }
 }

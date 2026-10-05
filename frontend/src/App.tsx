@@ -14,6 +14,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
 import { LoadingState } from './components/LoadingState';
 import { AuthLockedScreen } from './components/AuthLockedScreen';
+import { KeyLockedBanner } from './components/KeyLockedBanner';
 import { ApiRequestError } from './lib/apiRequestError';
 import { armBootScreen } from './lib/bootScreen';
 import { standaloneLivePageMosaic, standaloneLivePageRoute } from './lib/live-page-navigation';
@@ -35,6 +36,8 @@ export function App() {
   const [slowStart, setSlowStart] = useState(false);
   // The API refuses everything but key recovery (stored auth token unreadable).
   const [authLocked, setAuthLocked] = useState(false);
+  // A failed reset is said on screen (the backend names what was not done).
+  const [resetError, setResetError] = useState<string | null>(null);
   // Under Docker, agent installs land in the container (not the host) → the
   // wizard disables Install and points to the host `kronn` CLI. Default false
   // (native/Tauri) until health resolves; a failed probe leaves it false.
@@ -231,6 +234,13 @@ export function App() {
       <Suspense fallback={<LoadingState fullscreen />}>
         <UpdateBanner />
         <BackendStatus />
+        <KeyLockedBanner />
+        {resetError && (
+          <div className="set-expose-warn" role="alert" data-testid="reset-error">
+            <span>{resetError}</span>
+            <button type="button" className="btn btn-ghost" onClick={() => setResetError(null)}>×</button>
+          </div>
+        )}
         <Dashboard onReset={() => {
           clearCachedSetupStatus();
           setupStatusRef.current = null;
@@ -238,7 +248,10 @@ export function App() {
             setSetupStatus(null);
             setLoading(true);
             setupApi.getStatus().then(applySetupStatus).finally(() => setLoading(false));
-          }).catch(e => console.warn('Setup reset failed:', e));
+          }).catch(e => {
+            setResetError(e instanceof Error ? e.message : String(e));
+            fetchStatus(true);
+          });
         }} />
       </Suspense>
     </ErrorBoundary>

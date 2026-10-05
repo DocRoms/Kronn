@@ -12,6 +12,7 @@ Release notes for 0.9.3 and earlier are available in the
 ## [Unreleased]
 
 ### Added
+- When a dangerous Exec step needs a manual fix, its warning now offers a ready prompt to copy and hand to an agent: it names the workflow, each step and value to fix, and the safe pattern (KT-1017).
 
 - Each project now decides whether its agents receive a GitHub token (KT-1006,
   D2). A "GitHub" row on the project's Overview, and a chip in the discussion
@@ -192,7 +193,16 @@ Release notes for 0.9.3 and earlier are available in the
   launches; every response, whatever the verb, is scoped at any depth with its
   counts; the token's project is frozen at first use; every launch gets a token,
   dies when cancelled or after 12 hours; the operator token is compared in
-  constant time (KT-1006).
+  constant time (KT-1006). An id field the gate cannot resolve is refused, in
+  the body and the query; an import hides only the resources it bundles;
+  every route that reaches a room through a session (workspace, history lease,
+  link, unlink, transfer, accept-offer, session lookups) checks that room
+  first, and a token cannot force a session reassignment; a saved Quick Exec
+  of another project is refused on import and at run time; a workflow export
+  that bundles another project's resource is refused; refusals no longer name
+  another project's ids; the bearer scheme is read case-insensitively and a
+  token never reaches the peer-only routes; a token's media discussion and
+  learning proposal land in its project.
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task
@@ -224,7 +234,13 @@ Release notes for 0.9.3 and earlier are available in the
   the exceptions declared in the design note start in the temporary
   directory, never in a repository. The desktop app follows the same rule:
   its sleep inhibitor and its login-shell PATH probe no longer pass the
-  desktop's whole environment on. npm registry credentials
+  desktop's whole environment on, and its restart relaunches it without the
+  admin token or the raw key in its environment. The declared exceptions
+  (document sidecar, model and version discovery) no longer receive any
+  secret, and testing an MCP server, which may come from a repository's
+  `.mcp.json`, starts it with only its own configured values. An
+  operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
+  start, like the admin token. npm registry credentials
   (`npm_config__auth` and its registry-scoped forms) are dropped like any
   other secret.
 - `git push` and `gh` PR creation use the project's own GitHub connection,
@@ -263,9 +279,35 @@ Release notes for 0.9.3 and earlier are available in the
   machine's recovery data beside this machine's, and Plugins → "Re-encrypt
   imported secrets" re-encrypts the imported secrets under this machine's key
   (KT-1007).
-- Reset keeps a copy of the key that `config.toml` still has to hold and now
-  also clears execution-variable snapshots, stored credentials and GitHub
-  tokens (KT-1007).
+- Reset keeps a copy of the key that `config.toml` still has to hold, keeps
+  the API token so a network-exposed instance stays authenticated, clears
+  execution-variable snapshots, provider keys and GitHub tokens, and reports
+  a failure instead of answering success (KT-1007).
+- Re-importing this machine's own backup no longer deletes the stored GitHub
+  tokens of its projects, and an import runs in one transaction: a failing
+  project or MCP insert leaves the previous data in place (KT-1007).
+- While the encryption key is locked, no provider key, connection key or API
+  token is ever written to `config.toml` in clear: such changes are refused,
+  key auto-discovery waits, and an operator's `KRONN_AUTH_TOKEN` serves the
+  session only (KT-1007).
+- The same key written in upper and lower case is one key (it used to stop
+  the start-up as "several keys"), a damaged key value no longer crashes the
+  start-up, and an older `config.toml.backup` is kept under a timestamped
+  name instead of being overwritten (KT-1007).
+- A first start that cannot keep a durable copy of the new key (disk full,
+  read-only data directory) stops with what to do instead of encrypting
+  under a key that would be gone at the next start; an invalid or retired
+  `encryption_secret` in `config.toml` is set aside in a side file and never
+  keeps the key in use from being saved; a reset while the key is locked
+  lets the next start begin fresh; `config.toml.backup` copies rotated from
+  0.14.2 lose their plaintext credentials; an unreadable `config.toml` is
+  kept aside and its key salvaged (KT-1007).
+- The locked screen tells a remote visitor to open Kronn on its machine,
+  restores a lost key, or sets a new API token when only the stored token is
+  unreadable (even with strict localhost); Settings → Recovery restores a
+  locked key and warns when `recovery.key` protects another key or a key
+  store holds another key, and a banner appears when secrets are locked
+  (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
   listed in `WSLENV` (appended to the user's own list), and the Windows paths
@@ -556,6 +598,18 @@ Release notes for 0.9.3 and earlier are available in the
   `cp`, `mv`, `chmod`, `date`, `grep`…) is refused at run time when it renders
   to an option (`rm {{x}}` as `-rf`), unless a literal `--` precedes it
   (KT-1017).
+- A template value glued to an option (`-{{x}}`, `--{{x}}`, `-v{{x}}`) is
+  refused unless the option before it is one the program reads a value from
+  (`mysql -u{{user}}`, `git commit -m{{msg}}`, `--name={{value}}`) (KT-1017).
+  `sqlite3 --cmd`/`--init`, the command after BSD `script FILE`, and jq's
+  `-f`/`-L` files are code like `-cmd`, `script -c` and an inline program.
+- An `exec_stdin` value reaching a program Kronn does not model is refused
+  unless a human approved the step, as for its arguments (KT-1017).
+- `run.*`, `time.*` and `now*` are reserved: a workflow, launch, trigger or
+  CollectApiData variable of that name is refused at save and at trigger, and
+  `{{run.id}}` / `{{time.now}}` always resolve to Kronn's own values
+  (KT-1017). An approved CollectApiData source is no longer refused at run
+  time.
 
 ### Changed
 

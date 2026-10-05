@@ -55,6 +55,7 @@ vi.mock('../lib/api', () => ({
   // "backend slow" from "backend down".
   config: {
     getLanguage: vi.fn(),
+    getRecoveryStatus: vi.fn().mockResolvedValue({ key_locked: true }),
   },
   // UpdateBanner is rendered inside Dashboard via App's tree and calls
   // version.check on mount. The Dashboard component is itself mocked
@@ -124,6 +125,25 @@ describe('App', () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeDefined());
+  });
+
+  it('shows a failed reset with the backend message (C3-14)', async () => {
+    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+    (setupApi.reset as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Reset cleared the data but not the stored keys: disk full'),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByText('Reset'));
+    await waitFor(() =>
+      expect(screen.getByTestId('reset-error').textContent).toContain('not the stored keys'),
+    );
   });
 
   it('shows Dashboard when setup is complete', async () => {

@@ -360,6 +360,11 @@ pub async fn test(
     if base == "http://" {
         return Json(ApiResponse::err("Endpoint requis"));
     }
+    if req.api_key.is_some() {
+        if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+            return Json(ApiResponse::err(locked));
+        }
+    }
 
     // An omitted key means "keep what is stored"; an empty one means "clear".
     let effective_key: Option<String> = match req.api_key.as_deref() {

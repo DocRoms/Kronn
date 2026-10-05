@@ -32,4 +32,15 @@ describe('UnmodelledApproval', () => {
     fireEvent.click(box);
     expect(onChange).toHaveBeenCalledWith(true);
   });
+
+  it('sends the stdin template so a stdin-only line can be approved', async () => {
+    execLineCheck.mockResolvedValue({ unmodelled_program: 'duckdb' });
+    render(
+      <UnmodelledApproval command="duckdb" args={['db.duckdb']} stdin="{{issue.title}}" approved={false} onChange={vi.fn()} />,
+    );
+    await waitFor(() => expect(execLineCheck).toHaveBeenCalledWith({
+      command: 'duckdb', args: ['db.duckdb'], stdin: '{{issue.title}}',
+    }));
+    expect(await screen.findByText('exec.unmodelledApprove:duckdb')).toBeDefined();
+  });
 });

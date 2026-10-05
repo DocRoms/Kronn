@@ -57,6 +57,8 @@ pub async fn execute_collect_api_data_step(
         work_dir.to_string()
     };
 
+    // An inline source is approved with its step, a saved Quick Exec with itself.
+    let step_approved = step.exec_unmodelled_args_approved;
     for (index, source) in config.sources.iter().cloned().enumerate() {
         let source_id = if source.quick_exec.is_some() {
             None
@@ -89,6 +91,10 @@ pub async fn execute_collect_api_data_step(
                 .with_kind(source_kind);
             }
             for (name, template) in &source.variables {
+                if let Err(error) = super::template::refuse_reserved_names([name.as_str()]) {
+                    return SourceResult::failed(index, source.alias, source.required, error)
+                        .with_kind(source_kind);
+                }
                 let rendered = match child_context.render_strict(template) {
                     Ok(value) => value,
                     Err(error) => {
@@ -121,6 +127,22 @@ pub async fn execute_collect_api_data_step(
                     })
                     .await
                 {
+                    // A Quick Exec of another project never runs in this one,
+                    // whatever the saved workflow says.
+                    Ok(Some(exec))
+                        if exec
+                            .project_id
+                            .as_deref()
+                            .is_some_and(|owner| Some(owner) != project_id.as_deref()) =>
+                    {
+                        return SourceResult::failed(
+                            index,
+                            source.alias,
+                            source.required,
+                            "Saved Quick Exec belongs to another project".to_string(),
+                        )
+                        .with_kind(source_kind)
+                    }
                     Ok(Some(exec)) => Some(exec),
                     Ok(None) => {
                         return SourceResult::failed(
@@ -152,6 +174,7 @@ pub async fn execute_collect_api_data_step(
                         exec.args,
                         exec.timeout_secs,
                         exec.output_format,
+                        step_approved,
                     )
                 })
                 .or_else(|| {
@@ -161,12 +184,13 @@ pub async fn execute_collect_api_data_step(
                             exec.args,
                             Some(exec.timeout_secs),
                             exec.output_format,
+                            exec.unmodelled_args_approved,
                         )
                     })
                 });
 
             let (outcome, output_format, quick_exec_identity) =
-                if let Some((command, args, timeout_secs, output_format)) = exec_config {
+                if let Some((command, args, timeout_secs, output_format, approved)) = exec_config {
                     let quick_exec_identity = Some((command.clone(), args.clone()));
                     let child_step = WorkflowStep {
                         name: source.alias.clone(),
@@ -174,6 +198,7 @@ pub async fn execute_collect_api_data_step(
                         exec_command: Some(command),
                         exec_args: args,
                         exec_timeout_secs: timeout_secs,
+                        exec_unmodelled_args_approved: approved,
                         ..WorkflowStep::default()
                     };
                     (
@@ -894,6 +919,150 @@ mod tests {
         let summary = envelope["summary"].as_str().unwrap();
         assert!(summary.contains("news (qa-deleted)"), "{summary}");
         assert!(summary.contains("does not exist"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn a_saved_quick_exec_of_another_project_never_runs() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            for id in ["p1", "p2"] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            crate::db::quick_execs::insert_quick_exec(
+                conn,
+                &crate::models::QuickExec {
+                    id: "qe-p2".into(),
+                    name: "echo".into(),
+                    icon: String::new(),
+                    description: String::new(),
+                    project_id: Some("p2".into()),
+                    command: "echo".into(),
+                    args: vec!["p2".into()],
+                    timeout_secs: 5,
+                    output_format: CollectQuickExecOutputFormat::Text,
+                    variables: Vec::new(),
+                    pinned: false,
+                    unmodelled_args_approved: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut foreign = source("foreign", true);
+        foreign.quick_api_id = String::new();
+        foreign.quick_exec_id = "qe-p2".into();
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            collect_api_data: Some(CollectApiDataConfig {
+                sources: vec![foreign],
+                concurrent_limit: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let result = execute_collect_api_data_step(
+            &step,
+            Some("p1"),
+            &state,
+            &TemplateContext::new(),
+            ApiCallLogContext::workflow(),
+            &["echo".to_string()],
+            "",
+        )
+        .await
+        .result;
+        assert_eq!(result.status, RunStatus::Failed);
+        let envelope = super::super::step_output_format::parse_envelope_for_test(&result.output);
+        let error = envelope["data"]["meta"]["sources"][0]["error"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(error.contains("another project"), "{error}");
+    }
+
+    fn collect_state() -> crate::AppState {
+        crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            Arc::new(crate::db::Database::open_in_memory().unwrap()),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    async fn collect_one(
+        source: CollectApiDataSource,
+        approved: Option<bool>,
+    ) -> serde_json::Value {
+        let step = WorkflowStep {
+            name: "collect".into(),
+            step_type: StepType::CollectApiData,
+            collect_api_data: Some(CollectApiDataConfig {
+                sources: vec![source],
+                concurrent_limit: None,
+            }),
+            exec_unmodelled_args_approved: approved,
+            ..WorkflowStep::default()
+        };
+        let mut context = TemplateContext::new();
+        context.set("name", "hello");
+        let result = execute_collect_api_data_step(
+            &step,
+            None,
+            &collect_state(),
+            &context,
+            ApiCallLogContext::workflow(),
+            &["expr".to_string()],
+            "",
+        )
+        .await
+        .result;
+        super::super::step_output_format::parse_envelope_for_test(&result.output)
+    }
+
+    /// An inline source runs with its step's approval: approved at save, it
+    /// is not refused at run time.
+    #[tokio::test]
+    async fn an_approved_inline_source_runs_its_unmodelled_program() {
+        let mut source = exec_source("greet", CollectQuickExecOutputFormat::Text);
+        let exec = source.quick_exec.as_mut().unwrap();
+        exec.command = "expr".into();
+        exec.args = vec!["{{name}}".into()];
+        let refused = collect_one(source.clone(), None).await;
+        let error = refused["data"]["meta"]["sources"][0]["error"].to_string();
+        assert!(error.contains("expr"), "{refused}");
+        let approved = collect_one(source, Some(true)).await;
+        assert_eq!(approved["data"]["sources"]["greet"], "hello", "{approved}");
+    }
+
+    /// A source variable cannot take a built-in's name.
+    #[tokio::test]
+    async fn a_source_variable_named_like_a_built_in_fails_the_source() {
+        let mut source = exec_source("greet", CollectQuickExecOutputFormat::Text);
+        let exec = source.quick_exec.as_mut().unwrap();
+        exec.command = "expr".into();
+        exec.args = vec!["{{time.now}}".into()];
+        source
+            .variables
+            .insert("time.now".into(), "-c attacker".into());
+        let envelope = collect_one(source, Some(true)).await;
+        let error = envelope["data"]["meta"]["sources"][0]["error"].to_string();
+        assert!(error.contains("réservé"), "{envelope}");
     }
 
     #[test]

@@ -147,6 +147,34 @@ fn the_operator_token_comparison_is_exact() {
     assert!(!operator_token_matches(None, "anything"));
 }
 
+/// B3-16 — the helper compares digests, never the strings themselves.
+#[test]
+fn the_operator_token_helper_compares_digests_only() {
+    let source = include_str!("bridge_token.rs");
+    let start = source
+        .find("pub fn operator_token_matches(")
+        .expect("helper present");
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    assert!(
+        body.contains("(digest(expected), digest(presented))"),
+        "{body}"
+    );
+    assert!(
+        body.contains(".fold(0u8"),
+        "accumulated, not short-circuited: {body}"
+    );
+    for raw in [
+        "expected == presented",
+        "presented == expected",
+        "expected.as_bytes() ==",
+        "== presented",
+        "left == right",
+        "starts_with",
+    ] {
+        assert!(!body.contains(raw), "raw comparison `{raw}` in {body}");
+    }
+}
+
 /// E-03 — both the HTTP and the WebSocket paths go through the helper.
 #[test]
 fn both_auth_paths_compare_the_operator_token_in_constant_time() {
@@ -260,10 +288,11 @@ fn ids_are_read_from_path_query_and_body_at_any_depth() {
         (Kind::Project, "p-b"),
         (Kind::Project, "p-nested"),
         (Kind::QuickPrompt, "qp-deep"),
+        (Kind::Project, "7"),
     ] {
         assert!(has(&ids, kind, id), "{kind:?} {id} missing from {ids:?}");
     }
-    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert_eq!(ids.len(), 10, "{ids:?}");
 }
 
 /// B-01 / B-02 / F-01 — nested step refs and a workflow scope are collected.
@@ -327,6 +356,102 @@ fn an_import_s_content_is_walked() {
     assert!(collect_ids(route, &[], None, Some(&not_json)).is_err());
 }
 
+/// B3-01 — only what the bundle lists is internal, per kind: a step's own
+/// `id` or a room id never hides a reference.
+#[test]
+fn an_import_skips_only_the_resources_it_bundles() {
+    let route = route("POST", "/api/workflows/import");
+    let envelope = json!({
+        "kind": "kronn.workflow",
+        "version": 2,
+        "workflow": {"id": "w-root", "steps": [
+            {"id": "wf-p2", "sub_workflow_id": "wf-p2"},
+            {"id": "s2", "options": [{"id": "room-p2"}], "room_id": "room-p2"},
+            {"sub_workflow_id": "w-child", "quick_prompt_id": "w-child"}
+        ]},
+        "referenced_workflows": [{"id": "w-child", "steps": []}],
+        "referenced_pages": [{"id": "page-old", "slug": "page-slug"}]
+    });
+    let body = json!({"content": envelope.to_string()});
+    let ids = collect_ids(route, &[], None, Some(&body)).unwrap();
+    assert!(has(&ids, Kind::Workflow, "wf-p2"), "{ids:?}");
+    assert!(has(&ids, Kind::Discussion, "room-p2"), "{ids:?}");
+    assert!(!has(&ids, Kind::Workflow, "w-child"), "bundled: {ids:?}");
+    assert!(
+        has(&ids, Kind::QuickPrompt, "w-child"),
+        "a workflow id is not a bundled prompt: {ids:?}"
+    );
+}
+
+/// B3-02 — a saved Quick Exec is a resource, at any depth.
+#[test]
+fn a_nested_quick_exec_reference_is_collected() {
+    let route = route("PUT", "/api/workflows/{id}");
+    let body = json!({"steps": [{"id": "s", "collect_api_data": {"sources": [
+        {"alias": "a", "quick_exec_id": "qe-p2"}
+    ]}}]});
+    let ids = collect_ids(route, &[("id".into(), "a-wf".into())], None, Some(&body)).unwrap();
+    assert!(has(&ids, Kind::QuickExec, "qe-p2"), "{ids:?}");
+}
+
+/// Default deny — an id-shaped key the gate cannot resolve is refused, in the
+/// body at any depth, in an import's content and in the query.
+#[test]
+fn an_unknown_id_field_is_refused() {
+    let put = route("PUT", "/api/workflows/{id}");
+    let path = [("id".to_string(), "a-wf".to_string())];
+    for body in [
+        json!({"foo_id": "b-thing"}),
+        json!({"steps": [{"widget_ids": ["b-thing"]}]}),
+        json!({"steps": [{"thing_ref": "b-thing"}]}),
+        json!({"steps": [{"task_references": ["KT-1"]}]}),
+        json!({"nested": {"id": "b-thing"}}),
+        json!({"parent_id": "msg-1"}),
+    ] {
+        assert!(
+            collect_ids(put, &path, None, Some(&body)).is_err(),
+            "{body} accepted"
+        );
+    }
+    let refusal =
+        collect_ids(put, &path, None, Some(&json!({"foo_id": "b-secret-id"}))).unwrap_err();
+    assert!(!refusal.0.contains("b-secret-id"), "{}", refusal.0);
+    // Reviewed plain keys, own ids and user data pass.
+    let fine = json!({
+        "id": "a-wf",
+        "session_id": "s",
+        "steps": [{"id": "s1", "skill_ids": ["x"], "api_body": {"user_id": 3},
+                   "definition_of_done": [{"id": "d1"}]}]
+    });
+    assert!(collect_ids(put, &path, None, Some(&fine)).is_ok());
+    let import = route("POST", "/api/workflows/import");
+    let content = json!({"kind": "kronn.workflow",
+        "workflow": {"id": "w", "steps": [{"foo_id": "b-thing"}]}});
+    let body = json!({"content": content.to_string()});
+    assert!(collect_ids(import, &[], None, Some(&body)).is_err());
+    let list = route("GET", "/api/discussions");
+    assert!(collect_ids(list, &[], Some("foo_id=b-thing"), None).is_err());
+    assert!(collect_ids(list, &[], Some("limit=5&session_id=s"), None).is_ok());
+    assert!(looks_like_id("ref") && looks_like_id("a_refs") && !looks_like_id("identity"));
+}
+
+/// B3-13 — only the count of the filtered list follows it.
+#[test]
+fn only_the_count_of_the_filtered_list_is_recomputed() {
+    let grant = grant(&["a-room"]);
+    let get = route("GET", "/api/workflows/{id}/runs/{run_id}");
+    let mut data = json!({
+        "batch_total": 12,
+        "step_results_count": 2,
+        "step_results": [{"discussion_id": "a-1"}, {"discussion_id": "b-1"}],
+    });
+    let known = residences(&[(Kind::Discussion, "a-1"), (Kind::Discussion, "b-1")]);
+    scope_response(get, &mut data, &grant, Some("p1"), &known).unwrap();
+    assert_eq!(data["step_results"].as_array().unwrap().len(), 1);
+    assert_eq!(data["step_results_count"], 1);
+    assert_eq!(data["batch_total"], 12, "{data}");
+}
+
 /// B-08 / B-18 / B-11 — task parents, task references and offers.
 #[test]
 fn task_parents_references_and_offers_are_collected() {
@@ -340,10 +465,9 @@ fn task_parents_references_and_offers_are_collected() {
     .unwrap();
     assert!(ids.contains(&target(Kind::Task, "b-task")), "{ids:?}");
     let disc = route("POST", "/api/disc/create");
-    let ids = collect_ids(disc, &[], None, Some(&json!({"parent_id": "msg-1"}))).unwrap();
     assert!(
-        ids.is_empty(),
-        "parent_id is a task only on planning routes: {ids:?}"
+        collect_ids(disc, &[], None, Some(&json!({"parent_id": "msg-1"}))).is_err(),
+        "parent_id is a task only on planning routes, unknown elsewhere"
     );
     let prepare = route("POST", "/api/orchestration/tool/prepare");
     let ids = collect_ids(
@@ -700,7 +824,13 @@ fn a_failed_lookup_refuses() {
 fn residences(entries: &[(Kind, &str)]) -> Residences {
     entries
         .iter()
-        .map(|(kind, id)| ((*kind, id.to_string()), world(*kind, id).unwrap()))
+        .map(|(kind, id)| {
+            let place = world(*kind, id).unwrap();
+            (
+                (*kind, id.to_string()),
+                place.map(|place| (*kind, id.to_string(), place)),
+            )
+        })
         .collect()
 }
 
@@ -808,4 +938,131 @@ fn workflow_scopes_are_read_from_their_json() {
         workflow_residence(Some("p1".into()), None),
         in_project("p1")
     );
+}
+
+/// B-10 / B3-04 / B3-05 — every request type carrying a caller-supplied
+/// session, invite or resume credential is reviewed here, with how the gate
+/// resolves the discussion it reaches. A new one fails until it is listed.
+#[test]
+fn every_session_keyed_request_is_reviewed() {
+    const REVIEWED: &[(&str, &str)] = &[
+        (
+            "ReportTelemetryRequest",
+            "Own route: the discussion in the path",
+        ),
+        ("PeerJoinRequest", "/api/discussions/peer-join"),
+        ("PeerResumeRequest", "/api/discussions/peer-resume"),
+        (
+            "OrchestratorReturnResumeRequest",
+            "/api/discussions/orchestrator-return-resume",
+        ),
+        (
+            "WorkflowStepJoinRequest",
+            "discussion_id and run_id checked",
+        ),
+        ("PeerLeaveRequest", "/api/discussions/peer-leave"),
+        ("WaitForPeerQuery", "Own route: the discussion in the path"),
+        (
+            "ClaimByTokenRequest",
+            "remote peers only: refused for a token",
+        ),
+        ("DiscCreateRequest", "only a fresh discussion is adopted"),
+        ("DiscAppendRequest", "Own route: disc_id"),
+        ("DiscLinkRequest", "/api/disc/link"),
+        ("DiscTransferSessionRequest", "/api/disc/transfer-session"),
+        ("DiscSessionStatusQuery", "/api/disc/session-status"),
+        ("DiscUnlinkRequest", "/api/disc/unlink"),
+        ("DiscFindBySessionQuery", "/api/disc/find_by_session"),
+        ("DiscWorkspaceQuery", "/api/disc/workspace"),
+        ("DiscWorkspaceSetRequest", "/api/disc/workspace"),
+        (
+            "DiscWorkspaceHistoryLeaseRequest",
+            "/api/disc/workspace/history-lease",
+        ),
+        ("TaskExecPrepareRequest", "joined session's room + ids"),
+        ("TaskExecLaunchRequest", "joined session's room + ids"),
+        ("TaskExecCallerRequest", "joined session's room + ids"),
+        ("TaskExecCancelRequest", "joined session's room + ids"),
+        ("TaskExecReassignRequest", "joined session's room + ids"),
+        ("AcceptOfferRequest", "/api/orchestration/accept-offer"),
+        ("DeliverRequest", "joined session's room + ids"),
+        ("ReviewRequest", "joined session's room + ids"),
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api");
+    let mut found = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (index, chunk) in source.split("pub struct ").enumerate().skip(1) {
+                let name: String = chunk
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                let body = chunk.split("\n}").next().unwrap_or("");
+                let before = source.split("pub struct ").nth(index - 1).unwrap_or("");
+                let derive = before.rsplit("#[derive(").next().unwrap_or("");
+                let keyed = [
+                    "pub session_id:",
+                    "pub source_session_id:",
+                    "pub token:",
+                    "pub resume_token:",
+                ]
+                .iter()
+                .any(|field| body.contains(field));
+                // A response is written by the server, never read from a caller.
+                if keyed && derive.contains("Deserialize") && !name.ends_with("Response") {
+                    found.push(name);
+                }
+            }
+        }
+    }
+    for name in &found {
+        assert!(
+            REVIEWED.iter().any(|(reviewed, _)| reviewed == name),
+            "{name} carries a caller-supplied session: review it here"
+        );
+    }
+    for (_, how) in REVIEWED {
+        if how.starts_with("/api/") {
+            assert!(
+                SESSION_KEYED_ROUTES
+                    .iter()
+                    .any(|(_, pattern)| pattern == how),
+                "{how} must resolve its session's discussion"
+            );
+        }
+    }
+    for (method, pattern) in SESSION_KEYED_ROUTES {
+        assert!(route_for(method, pattern).is_some(), "{method} {pattern}");
+    }
+}
+
+/// B3-14 — a token's learning proposal is its project's; a preference, which
+/// applies to every project, is refused.
+#[test]
+fn a_learning_proposal_is_forced_into_the_bound_project() {
+    let propose = route("POST", "/api/learnings/propose");
+    let body = json!({"claim": "c", "kind": "fact", "evidence": []});
+    let forced = prepare_body(propose, Some("p1"), Some(&body))
+        .unwrap()
+        .unwrap();
+    assert_eq!(forced["project_id"], "p1");
+    let preference = json!({"claim": "c", "kind": "preference", "evidence": []});
+    assert!(prepare_body(propose, Some("p1"), Some(&preference)).is_err());
+    assert!(prepare_body(propose, None, Some(&body)).is_err());
+}
+
+/// B3-05 — a token never takes a session over from another discussion.
+#[test]
+fn a_token_cannot_force_a_session_reassignment() {
+    let link = route("POST", "/api/disc/link");
+    let body = json!({"disc_id": "a-room", "source_agent": "Codex",
+        "source_session_id": "s", "force_reassign": true});
+    assert!(prepare_body(link, Some("p1"), Some(&body)).is_err());
 }

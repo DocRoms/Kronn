@@ -241,7 +241,9 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
    whose fingerprint matches); a different legacy key is kept. `mirror()`
    never writes a vault holding another key; two keys that each decrypt data
-   stop the boot (resolved by `KRONN_REENCRYPT_FROM`). A locked boot keeps no
+   stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
+   Keys compare in one canonical spelling; the env variable is not counted as
+   a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no
    key in memory (fail closed); a stored auth token it cannot read locks the
    API (423 `auth_locked`, recovery screen).
 4. **Done.** `tokens.keys[]` and `server.auth_token` live in
@@ -424,11 +426,15 @@ take a `ChildRoute` and build the environment before returning the command
 (`git_cmd`, `async_git_cmd`, `tool_cmd`, `sync_tool_cmd` are shorthands); a
 spawn without a route does not compile. `backend/clippy.toml` refuses
 `std::process::Command::new`, `tokio::process::Command::new`, the `open`
-crate's spawning functions and libc's `fork`/`exec*`/`posix_spawn*`/`system`
+crate's functions (`open::commands`/`with_command` included) and libc's
+`fork`/`clone`/`exec*`/`fexecve`/`posix_spawn*`/`popen`/`system`/`syscall`
 outside `core/cmd.rs` (test code excepted), which also covers aliases and
 function pointers; `desktop/src-tauri/clippy.toml` holds the desktop crate to
-the same rule (its `caffeinate` and login-shell PATH probe use the Tool
-route), and CI runs clippy on both crates. The system opener goes through `cmd::open_in_system`
+the same rule, plus `tauri_plugin_shell::Shell::{command,sidecar,open}`,
+`AppHandle::restart` and `tauri::process::restart` (its `caffeinate` and
+login-shell PATH probe use the Tool route), and CI runs clippy on both
+crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
+`#[allow]` sites of both crates. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -454,18 +460,31 @@ argument or a variable named after it, and that push runs with hooks off
 repository's could receive it) and TLS verification forced. Other remotes,
 or a project not connected, push with the user's own credentials.
 
-Declared exceptions (they keep the backend's environment, through
-`cmd::full_env_cmd(program, FullEnvReason)`, which starts them in the
-temporary directory; the test `full_env_cmd_sites_are_exactly_the_declared_exceptions`
-lists every call site): the document
-sidecar (`core/docs_sidecar.rs::start`), model discovery
+Declared exceptions inherit the environment instead of a route's, through
+`cmd::full_env_cmd` / `full_env_sync_cmd(program, FullEnvReason)`; the test
+`full_env_cmd_sites_are_exactly_the_declared_exceptions` lists every call site
+in both crates. None receives a secret: the forbidden names, provider keys,
+GitHub variables and every secret-looking name are removed
+(`child_env::strip_inherited_secrets`), and they start in the temporary
+directory, never in a repository. They are the document sidecar
+(`core/docs_sidecar.rs::start`), model discovery
 (`model_catalog/claude_discovery.rs::discover`,
-`model_catalog/codex_discovery.rs::discover`), version discovery
+`model_catalog/codex_discovery.rs::discover`) and version discovery
 (`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
-and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`)
-and the MCP probe (`api/mcps.rs::probe_mcp_stdio_with_timeout`). None runs in
-a repository (all start in the temporary directory): each starts a binary
-Kronn found or the operator configured.
+and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`):
+each starts a binary Kronn found. A CLI authenticated only by a provider key
+exported to Kronn therefore reports no models; its configured key reaches it
+on a real launch. The one exception that keeps its provider keys is the
+desktop relaunching itself (`desktop/src-tauri/src/main.rs::self_restart_command`,
+`SelfRestart`): it is Kronn, keeps its own working directory, loses only the
+forbidden names, and gets the operator's key override handed back.
+
+The MCP probe is no longer an exception: a server's command may come from a
+repository's `.mcp.json`, so the probe starts it with a built environment (base
+allow-list plus that server's configured values, `api/mcps.rs::mcp_probe_command`).
+An operator-set `KRONN_ENCRYPTION_KEK` (and the legacy `KRONN_KEK`) leaves the
+process environment at start, like `KRONN_AUTH_TOKEN`; the key is kept in
+memory (`keyvault::take_env_kek`).
 
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
@@ -493,11 +512,24 @@ script; `backend/scripts/test_bridge_routes.py` fails on drift either way), and
 the agent library's write routes are listed but never granted. Every id is
 read wherever the request names it: declared path parameters (undecodable ones
 refused), the query, any depth of the JSON body, and the workflow an import
-carries in `content`. A non-JSON body is refused (only the context-file upload
-is multipart). Ids are resolved the way the handler resolves them (`KT-12`
-references, an execution named by its task, an offer through its execution, an
-invite or resume credential to its room) and an id that resolves to nothing is
-refused. Then:
+carries in `content`. *Default deny on id fields*: a key that looks like an id
+(`id`, `ref`, or a name ending in `_id`, `_ids`, `_ref`, `_refs`,
+`_reference`) is refused unless it is in `ID_KEYS` with a resolver, in the
+reviewed `PLAIN_ID_KEYS` (a caller's own session, idempotency keys, model and
+library ids, git refs), the own `id` of a step, option or DoD item, or inside a
+caller's own data (`OPAQUE_KEYS`: an external API body, a dataset, a schema);
+the query follows the same rule. In an import, only the resources the bundle
+lists are internal, per kind (`workflow.id` and `referenced_workflows` for
+workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
+`_pages`); a room, config or connection is never internal. A non-JSON body is
+refused, and so is a write with a body and no Content-Type (only the
+context-file upload is multipart). Ids are resolved the way the handler
+resolves them (`KT-12` references, an execution named by its task, an offer
+through its execution, an invite or resume credential to its room; a message,
+file, dispatch, CLI session, workspace, orchestration run or proposal as its
+discussion; a media job as its discussion or project; an audit run as its
+project) and an id that resolves to nothing is refused. A refusal names the
+kind, never the other project's id. Then:
 - *shared resources* (project-less, serving every project, or several projects)
   may be read, never written; a write needs a resource that belongs to the
   token's project and to no other; a project-less discussion is private to its
@@ -512,24 +544,41 @@ refused. Then:
   cannot clear, change or widen its project, and a workflow may be scoped to the
   token's project only (`null` or `Projects:[bound]`); an agent's workflow save
   stays in that project and never approves script content (KT-918);
-- *sessions and invites do not cross projects* (deliberate rule): peer-join,
-  peer-resume, orchestrator-return-resume and peer-leave resolve the room their
-  credential or session names and refuse one outside the token's project; an
-  invite for another instance's room is refused.
+- *sessions and invites do not cross projects* (deliberate rule): every route
+  in `SESSION_KEYED_ROUTES` (peer-join, peer-resume, orchestrator-return-resume,
+  peer-leave, the workspace and its history lease, link, unlink,
+  transfer-session, accept-offer, find_by_session, session-status) resolves the
+  room its credential or session names first and refuses one outside the
+  token's scope; a write whose session resolves to no room is refused, and a
+  token never forces a session reassignment. Any other route naming a joined
+  session needs that session's room visible. A test lists every request type
+  carrying a caller-supplied session; a new one fails until reviewed. An
+  invite for another instance's room is refused;
+- *a saved Quick Exec* (`quick_exec_id`) is a resource: an import validates the
+  ones it does not bundle like a create does, and a run refuses one of another
+  project; a token's learning proposal is forced into its project and never a
+  preference; its media generation without a discussion creates one in its
+  project, which the token then owns.
 
-*Responses.* Every response is scoped, whatever the verb: an object naming any
-resource outside the scope, at any depth, is dropped from its list (the counts
-beside the list follow) or refused when it is the response itself; an object
-naming an id that resolves to nothing is hidden. The discussion list, the task
+*Responses.* Every response is scoped, whatever the verb and its shape (an
+`ApiResponse` through its `data`, any other JSON body as a whole): an object
+naming any resource outside the scope, at any depth, is dropped from its list
+(only the count paired with that list follows) or refused when it is the
+response itself; an object naming an id that resolves to nothing is hidden. A
+workflow export is all or nothing: one bundled dependency outside the scope
+refuses it. The discussion list, the task
 list and the discussion search filter in the query, so pages stay full.
 
 The WebSocket bus refuses a bridge token (403) and any credential other than the
-operator token (401); without a credential it keeps loopback trust. Any bearer
+operator token (401); without a credential it keeps loopback trust. The bearer
+scheme is matched case-insensitively, a bridge token in any other
+Authorization form is refused, and the routes answered before the gate for
+remote peers (claim-by-token, fetch-file) refuse a bridge token. Any bearer
 that matches neither the operator token nor a live bridge token is refused
 outright, never downgraded to loopback trust. Not covered by an agent's
 environment any more but still inheriting the backend's: the declared exceptions
-of the spawn inventory above (CLI version and model discovery, the MCP probe, the
-document sidecar).
+of the spawn inventory above (CLI version and model discovery, the document
+sidecar), with every secret removed.
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its

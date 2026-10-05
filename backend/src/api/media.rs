@@ -91,6 +91,8 @@ pub struct GenerateMediaResponse {
     /// created. Without it a caller that passed no discussion cannot tell
     /// where its own generation went.
     pub discussion_id: String,
+    /// Whether this call created that discussion (never on a replay).
+    pub discussion_created: bool,
     /// Fresh message dedicated to this launch. The placeholder and eventual
     /// asset both render at this durable transcript slot.
     pub message_id: String,
@@ -121,6 +123,7 @@ pub struct MediaJobView {
 
 pub async fn generate(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<GenerateMediaRequest>,
 ) -> Json<ApiResponse<GenerateMediaResponse>> {
     let prompt = req.prompt.trim().to_string();
@@ -300,10 +303,13 @@ pub async fn generate(
         prompt: prompt.clone(),
         params: params.clone(),
         source_message_id: req.message_id.clone(),
+        // A bridge-token caller's new discussion lands in its own project.
+        new_discussion_project: bridge.and_then(|caller| caller.0.project),
         scheduled_at: now,
         deadline_at: deadline,
     };
     let requested_discussion_id = req.discussion_id.clone();
+    let discussion_created = requested_discussion_id.is_none();
     let (discussion_id, anchor) = match state
         .db
         .with_conn(move |conn| write_media_launch(conn, req.discussion_id, launch))
@@ -354,6 +360,7 @@ pub async fn generate(
         status: MediaJobStatus::Pending,
         model,
         discussion_id,
+        discussion_created,
         message_id: anchor,
         connection_id: connection.id.clone(),
         connection_name: connection.display_name.clone(),
@@ -456,6 +463,7 @@ fn idempotent_response(
         status: existing.status,
         model: existing.model.clone(),
         discussion_id,
+        discussion_created: false,
         message_id,
         connection_id: existing.connection_id.clone(),
         connection_name: connection_name.to_string(),
@@ -510,6 +518,8 @@ struct MediaLaunchWrite {
     prompt: String,
     params: MediaParams,
     source_message_id: Option<String>,
+    /// Project of the discussion created when the caller names none.
+    new_discussion_project: Option<String>,
     scheduled_at: chrono::DateTime<Utc>,
     deadline_at: chrono::DateTime<Utc>,
 }
@@ -571,8 +581,9 @@ fn write_media_launch(
                 &launch.prompt,
                 launch.scheduled_at,
                 &launch.job_id,
+                launch.new_discussion_project.clone(),
             )?;
-            (discussion_id, None, anchor)
+            (discussion_id, launch.new_discussion_project.clone(), anchor)
         }
     };
 
@@ -611,6 +622,7 @@ fn insert_media_discussion(
     prompt: &str,
     now: chrono::DateTime<Utc>,
     media_job_id: &str,
+    project_id: Option<String>,
 ) -> anyhow::Result<(String, String)> {
     use crate::models::{Discussion, SummaryStrategy};
 
@@ -630,7 +642,7 @@ fn insert_media_discussion(
         awaiting_agent: false,
         agent_running: false,
         id: id.clone(),
-        project_id: None,
+        project_id,
         title,
         agent: crate::models::AgentType::ClaudeCode,
         language: "fr".into(),
@@ -973,7 +985,8 @@ mod tests {
             connection("text-only", "Text only", "textonly", None, None),
         ])
         .await;
-        let Json(queued) = generate(State(state), Json(ask_without_a_connection("image"))).await;
+        let Json(queued) =
+            generate(State(state), None, Json(ask_without_a_connection("image"))).await;
         let data = queued.data.expect("queued");
         assert_eq!(data.connection_id, OPENROUTER);
         // The answer names what is billed: the caller did not choose it.
@@ -993,6 +1006,7 @@ mod tests {
         let state = media_state(vec![openrouter(), second]).await;
         let Json(refused) = generate(
             State(state.clone()),
+            None,
             Json(ask_without_a_connection("image")),
         )
         .await;
@@ -1023,7 +1037,8 @@ mod tests {
             None,
         )])
         .await;
-        let Json(refused) = generate(State(state), Json(ask_without_a_connection("video"))).await;
+        let Json(refused) =
+            generate(State(state), None, Json(ask_without_a_connection("video"))).await;
         let error = refused.error.expect("refused");
         assert!(error.contains("No connection has a video model"), "{error}");
         assert!(error.contains("Config > Agents"), "{error}");
@@ -1037,12 +1052,12 @@ mod tests {
         let state = media_state(vec![openrouter()]).await;
         let mut implicit = ask_without_a_connection("image");
         implicit.idempotency_key = Some("same-intention".into());
-        let Json(first) = generate(State(state.clone()), Json(implicit)).await;
+        let Json(first) = generate(State(state.clone()), None, Json(implicit)).await;
         let first = first.data.expect("queued");
 
         let mut explicit = ask(OPENROUTER, "image");
         explicit.idempotency_key = Some("same-intention".into());
-        let Json(second) = generate(State(state.clone()), Json(explicit)).await;
+        let Json(second) = generate(State(state.clone()), None, Json(explicit)).await;
         let second = second.data.expect("replayed");
 
         assert_eq!(first.job_id, second.job_id, "one intention, one job");
@@ -1062,7 +1077,12 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_connection_is_refused_with_what_can_be_used() {
         let state = media_state(vec![openrouter()]).await;
-        let Json(refused) = generate(State(state), Json(ask("google/veo-3.1-lite", "video"))).await;
+        let Json(refused) = generate(
+            State(state),
+            None,
+            Json(ask("google/veo-3.1-lite", "video")),
+        )
+        .await;
         let error = refused.error.unwrap();
         assert!(
             error.starts_with("unknown connection `google/veo-3.1-lite`"),
@@ -1077,7 +1097,8 @@ mod tests {
     async fn an_agent_may_name_a_connection_by_its_alias_or_its_name() {
         let state = media_state(vec![openrouter()]).await;
         for name in ["openrouter", "@OpenRouter", "OpenRouter"] {
-            let Json(accepted) = generate(State(state.clone()), Json(ask(name, "video"))).await;
+            let Json(accepted) =
+                generate(State(state.clone()), None, Json(ask(name, "video"))).await;
             let job = accepted
                 .data
                 .unwrap_or_else(|| panic!("{name}: {:?}", accepted.error));
@@ -1111,7 +1132,7 @@ mod tests {
             connection("conn-b", "Media", "media-b", None, Some("kling/v2")),
         ])
         .await;
-        let Json(refused) = generate(State(state), Json(ask("media", "video"))).await;
+        let Json(refused) = generate(State(state), None, Json(ask("media", "video"))).await;
         let error = refused.error.unwrap();
         assert!(error.contains("names several connections"), "{error}");
         assert!(
@@ -1133,7 +1154,7 @@ mod tests {
             openrouter(),
         ])
         .await;
-        let Json(refused) = generate(State(state), Json(ask("images", "video"))).await;
+        let Json(refused) = generate(State(state), None, Json(ask("images", "video"))).await;
         let error = refused.error.unwrap();
         assert!(error.contains("has no video model configured"), "{error}");
         assert!(error.contains(OPENROUTER), "{error}");
@@ -1150,7 +1171,7 @@ mod tests {
             None,
         )])
         .await;
-        let Json(refused) = generate(State(nothing), Json(ask("images", "video"))).await;
+        let Json(refused) = generate(State(nothing), None, Json(ask("images", "video"))).await;
         assert!(refused
             .error
             .unwrap()
@@ -1166,6 +1187,7 @@ mod tests {
             prompt: prompt.to_string(),
             params: MediaParams::default(),
             source_message_id: None,
+            new_discussion_project: None,
             scheduled_at: now,
             deadline_at: now + chrono::Duration::minutes(20),
         }

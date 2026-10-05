@@ -1770,6 +1770,11 @@ pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<UpsertConnectionRequest>,
 ) -> Json<ApiResponse<ConnectionView>> {
+    if req.api_key.is_some() {
+        if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+            return Json(ApiResponse::err(locked));
+        }
+    }
     let display_name = req.display_name.trim().to_string();
     if display_name.is_empty() {
         return Json(ApiResponse::err_coded(
@@ -1859,6 +1864,11 @@ pub async fn update(
     Path(id): Path<String>,
     Json(req): Json<UpsertConnectionRequest>,
 ) -> Json<ApiResponse<ConnectionView>> {
+    if req.api_key.is_some() {
+        if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+            return Json(ApiResponse::err(locked));
+        }
+    }
     let display_name = req.display_name.trim().to_string();
     if display_name.is_empty() {
         return Json(ApiResponse::err_coded(
