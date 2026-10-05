@@ -15478,4 +15478,37 @@ mod text_block_tests {
             "Réponse"
         );
     }
+
+    #[test]
+    fn declared_step_tools_narrow_the_acp_session_servers() {
+        let server = |id: &str| crate::acp::AcpMcpServer {
+            id: id.into(),
+            command: "python3".into(),
+            args: vec!["bridge.py".into()],
+            allowed_tools: vec![],
+        };
+        let servers = vec![server("kronn-internal"), server("project-safe")];
+        let undeclared = super::super::declared_mcp_servers(servers.clone(), None);
+        assert_eq!(undeclared.len(), 2, "an undeclared step keeps every server");
+        assert_eq!(undeclared[0].args, vec!["bridge.py".to_string()]);
+
+        let none = crate::models::StepTools::default();
+        assert!(super::super::declared_mcp_servers(servers.clone(), Some(&none)).is_empty());
+
+        let declared = crate::models::StepTools {
+            cli: vec![],
+            kronn_internal: vec!["task_get".into(), "plan_get".into()],
+        };
+        let narrowed = super::super::declared_mcp_servers(servers, Some(&declared));
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].id, "kronn-internal");
+        assert_eq!(
+            narrowed[0].args,
+            vec![
+                "bridge.py".to_string(),
+                "--step-tools=task_get,plan_get".to_string()
+            ]
+        );
+        assert_eq!(narrowed[0].allowed_tools, declared.kronn_internal);
+    }
 }

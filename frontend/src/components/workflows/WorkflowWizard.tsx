@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
-import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
+import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
@@ -4351,6 +4351,60 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           aria-label={t('wiz.readOnlyRepos')}
                         />
                         <p className="text-2xs text-muted">{t('wiz.readOnlyReposHint')}</p>
+                      </div>
+                    )}
+
+                    {/* KT-908 — the tools this step may call; undeclared keeps every tool. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.stepTools')}</label>
+                        <select
+                          className="wf-select"
+                          aria-label={t('wiz.stepTools')}
+                          value={step.agent_settings?.tools ? 'declared' : 'all'}
+                          onChange={e => updateStep(i, {
+                            agent_settings: {
+                              ...step.agent_settings,
+                              tools: e.target.value === 'declared' ? { cli: [], kronn_internal: [] } : undefined,
+                            },
+                          })}
+                        >
+                          <option value="all">{t('wiz.stepTools.all')}</option>
+                          <option value="declared">{t('wiz.stepTools.declared')}</option>
+                        </select>
+                        {step.agent_settings?.tools && (
+                          <div className="mt-2">
+                            {step.agent === 'ClaudeCode' && (
+                              <>
+                                <label className="wf-label text-2xs">{t('wiz.stepTools.cli')}</label>
+                                <input
+                                  className="wf-input"
+                                  aria-label={t('wiz.stepTools.cli')}
+                                  value={step.agent_settings.tools.cli.join(', ')}
+                                  onChange={e => updateStep(i, {
+                                    agent_settings: withStepTools(step, { cli: splitToolList(e.target.value) }),
+                                  })}
+                                  onBlur={e => updateStep(i, {
+                                    agent_settings: withStepTools(step, { cli: splitToolList(e.target.value, true) }),
+                                  })}
+                                />
+                              </>
+                            )}
+                            <label className="wf-label text-2xs">{t('wiz.stepTools.kronn')}</label>
+                            <input
+                              className="wf-input"
+                              aria-label={t('wiz.stepTools.kronn')}
+                              value={step.agent_settings.tools.kronn_internal.join(', ')}
+                              onChange={e => updateStep(i, {
+                                agent_settings: withStepTools(step, { kronn_internal: splitToolList(e.target.value) }),
+                              })}
+                              onBlur={e => updateStep(i, {
+                                agent_settings: withStepTools(step, { kronn_internal: splitToolList(e.target.value, true) }),
+                              })}
+                            />
+                            <p className="text-2xs text-muted">{t('wiz.stepTools.hint')}</p>
+                          </div>
+                        )}
                       </div>
                     )}
 

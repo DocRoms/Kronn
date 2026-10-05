@@ -2863,6 +2863,8 @@ pub struct AgentStartConfig<'a> {
     /// as `read_only_repos` but without a Git checkout (KT-910: the run's
     /// artifacts directory). Kronn-owned paths only, never user input.
     pub read_only_dirs: &'a [String],
+    /// KT-908 — the tools a workflow Agent step declared; `None` = unchanged.
+    pub step_tools: Option<&'a crate::models::StepTools>,
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -3031,6 +3033,7 @@ impl<'a> AgentStartConfig<'a> {
             work_dir: None,
             read_only_repos: &[],
             read_only_dirs: &[],
+            step_tools: None,
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -4057,6 +4060,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                step_tools: config.step_tools,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -4086,6 +4090,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                step_tools: config.step_tools,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -4142,6 +4147,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 workflow_step_context: config.workflow_step_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
+                step_tools: config.step_tools.cloned(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4152,6 +4158,14 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             .await;
         }
         _ => {}
+    }
+    // The direct CLI route has no declared-tools policy: refusing is honest,
+    // silently launching with every tool is not (KT-908).
+    if config.step_tools.is_some() {
+        return Err(format!(
+            "{:?}: `agent_settings.tools` needs the ACP route; it is not applied by the direct CLI fallback",
+            config.agent_type
+        ));
     }
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command_with_task_worker_policy(
@@ -4433,6 +4447,8 @@ pub(crate) struct AdapterLaunchOptions {
     /// Complete invocation policy for task workers or read-only workflow repos.
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
+    /// KT-908 — a workflow step's declared tools; `None` = today's argv.
+    pub(crate) step_tools: Option<crate::models::StepTools>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -4485,6 +4501,8 @@ struct AcpSessionRequest<'a> {
     activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
     idle_timeout: Option<Duration>,
+    /// KT-908 — narrows the MCP servers offered to the session.
+    step_tools: Option<&'a crate::models::StepTools>,
 }
 
 async fn start_native_acp(
@@ -4661,6 +4679,7 @@ async fn run_acp_session(
         provenance,
         activity,
         idle_timeout,
+        step_tools,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4668,7 +4687,10 @@ async fn run_acp_session(
     use tokio::io::AsyncWriteExt;
 
     let mut host = AcpHost::new(1, transport);
-    let mcp_servers = acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode);
+    let mcp_servers = declared_mcp_servers(
+        acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode),
+        step_tools,
+    );
     if let Err(error) = host
         .negotiate(AcpInitialize {
             protocol_version: 1,
@@ -5086,6 +5108,34 @@ async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> Strin
 /// `env_by_reference`: the agent's adapter turns an entry's env values into
 /// references it resolves from its own process (Claude, KT-1003), so an entry
 /// is kept unless a credential sits in its `args`.
+/// The command-line flag that narrows the internal bridge to a step's tools.
+pub(crate) fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String {
+    format!("--step-tools={}", tools.kronn_internal.join(","))
+}
+
+/// KT-908 — a step that declares its tools gets only Kronn's bridge, narrowed
+/// to them, or no server at all; an undeclared step keeps `servers` as is.
+fn declared_mcp_servers(
+    servers: Vec<crate::acp::AcpMcpServer>,
+    step_tools: Option<&crate::models::StepTools>,
+) -> Vec<crate::acp::AcpMcpServer> {
+    let Some(tools) = step_tools else {
+        return servers;
+    };
+    if tools.kronn_internal.is_empty() {
+        return Vec::new();
+    }
+    servers
+        .into_iter()
+        .filter(|server| server.id == "kronn-internal")
+        .map(|mut server| {
+            server.args.push(step_tools_bridge_arg(tools));
+            server.allowed_tools = tools.kronn_internal.clone();
+            server
+        })
+        .collect()
+}
+
 fn acp_project_mcp_servers(
     project_path: &str,
     env_by_reference: bool,
@@ -13633,6 +13683,7 @@ mod acp_resume_tests {
     ) -> AgentProcess {
         run_acp_session(
             AcpSessionRequest {
+                step_tools: None,
                 agent_type,
                 work_dir: Path::new("."),
                 prompt: "fixture prompt",
@@ -13978,6 +14029,7 @@ mod acp_resume_tests {
             let transport = transport(outcome, PromptOutcome::Complete);
             let result = run_acp_session(
                 AcpSessionRequest {
+                    step_tools: None,
                     agent_type: &AgentType::OpenCode,
                     work_dir: Path::new("."),
                     prompt: "delta only",
@@ -14209,6 +14261,7 @@ mod acp_resume_tests {
         model_flag: Option<&'a str>,
     ) -> AcpSessionRequest<'a> {
         AcpSessionRequest {
+            step_tools: None,
             agent_type,
             work_dir: Path::new("."),
             prompt: "fixture prompt",

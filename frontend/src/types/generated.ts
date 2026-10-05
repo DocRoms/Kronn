@@ -358,7 +358,13 @@ tier?: ModelTier | null,
  *
  * `None` for every other agent type, which resolve from their own config.
  */
-connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null, };
+connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null,
+/**
+ * KT-908 — the tools this Agent step declares. `None` keeps today's
+ * launch exactly; a declaration replaces the catalogue, the MCP servers
+ * and the CLI's skill listing with what it names.
+ */
+tools?: StepTools, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
@@ -7366,6 +7372,20 @@ cache_write_prompt_tokens?: number | null,
  * replaces the in-flight row, so it survives only an interrupted step.
  */
 last_activity?: AgentActivity | null, };
+
+/**
+ * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
+ */
+export type StepTools = {
+/**
+ * Built-in Claude Code tools (`Read`, `Bash`, `Edit`…). Claude Code only.
+ */
+cli: Array<string>,
+/**
+ * `kronn-internal` tools, loaded with their schemas at start; no other
+ * MCP server is mounted.
+ */
+kronn_internal: Array<string>, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
 

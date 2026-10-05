@@ -243,6 +243,35 @@ project path never reuses that identifier.
   resumed Codex adapter session keeps whatever sandbox policy its first turn
   set.
 
+## Declared tools of a workflow Agent step (KT-908)
+
+`agent_settings.tools` (`{cli: [...], kronn_internal: [...]}`) replaces what a
+workflow Agent step is launched with. Undeclared, the argv is unchanged.
+[src: file: backend/src/models/workflows.rs:1167]
+
+- Claude adapter: `--tools <cli list>` (empty string = no built-in tool),
+  `--disable-slash-commands` (no skill listing), and an MCP config holding
+  only `kronn-internal` started with `--step-tools=<list>`, with one
+  `--allowedTools mcp__kronn-internal__<tool>` per tool and
+  `ENABLE_TOOL_SEARCH=false` in the CLI's environment; no Kronn tool means
+  `{"mcpServers":{}}`. [src: file: backend/src/acp/claude_adapter.rs:168]
+- Codex adapter: the MCP override holds only `kronn-internal` with
+  `enabled_tools`, or `mcp_servers={}`; `cli` is refused at save.
+  [src: file: backend/src/acp/codex_adapter.rs:132]
+- Native ACP agents: `session/new` offers only the narrowed bridge, or no
+  server. [src: file: backend/src/agents/runner.rs:5110]
+- The bridge, given `--step-tools=`, lists and dispatches only those tools
+  and sends no catalogue instructions on `initialize`.
+  [src: file: backend/scripts/disc-introspection-mcp.py:5695]
+- The direct CLI fallback (`KRONN_ACP_ADAPTER_*=0`) refuses a declared step
+  rather than launch it with every tool.
+
+Not measured yet: the context size at the first call of a `tools: none`
+step, and whether `--disable-slash-commands` still adds tokens when combined
+with an empty MCP config (it did alone, KT-908). `ENABLE_TOOL_SEARCH` is
+Claude Code's documented switch for deferred MCP tools; check the transcript
+of a declared step shows no `ToolSearch` before relying on it.
+
 ## Troubleshooting
 
 - **Codex exits immediately for a project but works in a project-less room:**

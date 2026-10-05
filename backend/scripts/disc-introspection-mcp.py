@@ -5679,8 +5679,24 @@ def _spawned_task_worker_mode():
     return bool(os.environ.get(_TASK_WORKER_CONTEXT_ENV))
 
 
+_STEP_TOOLS_FLAG = "--step-tools="
+
+
+def _declared_step_tools():
+    """Tools a workflow Agent step declared (KT-908), passed by Kronn as
+    `--step-tools=a,b` on this bridge's own command line. `None` = undeclared:
+    the full surface, as before."""
+    for arg in sys.argv[1:]:
+        if arg.startswith(_STEP_TOOLS_FLAG):
+            return frozenset(name for name in arg[len(_STEP_TOOLS_FLAG):].split(",") if name)
+    return None
+
+
 def _visible_tools():
     if not _spawned_task_worker_mode():
+        declared = _declared_step_tools()
+        if declared is not None:
+            return [tool for tool in TOOLS if tool["name"] in declared]
         return TOOLS
     commit = {
         "name": "task_exec_commit",
@@ -10846,7 +10862,9 @@ def _perform_scheduled_bridge_reload():
         os.environ[_BRIDGE_ARTIFACT_FD_ENV] = str(_BRIDGE_ARTIFACT_FD)
         os.environ[_BRIDGE_ARTIFACT_SHA_ENV] = expected_sha256
         artifact_exec_path = f"/dev/fd/{_BRIDGE_ARTIFACT_FD}"
-        os.execv(sys.executable, [sys.executable, artifact_exec_path])
+        # A declared step tool list (KT-908) survives the reload.
+        step_tools = [arg for arg in sys.argv[1:] if arg.startswith(_STEP_TOOLS_FLAG)]
+        os.execv(sys.executable, [sys.executable, artifact_exec_path, *step_tools])
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         os.environ.pop(_BRIDGE_RELOAD_READY_ENV, None)
         os.environ.pop(_BRIDGE_RELOAD_HANDOFF_ENV, None)
@@ -11121,6 +11139,20 @@ def _handle(req):
                     ),
                 },
             }
+        if _declared_step_tools() is not None:
+            # A step that declared its tools gets them, not the catalogue map.
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": True}},
+                    "serverInfo": {
+                        "name": "kronn-internal",
+                        "version": BRIDGE_TOOL_SURFACE_VERSION,
+                    },
+                },
+            }
         client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
         first_contact = "" if _onboarding_done_for(client_name) else (
             "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
@@ -11202,6 +11234,16 @@ def _handle(req):
                 "error": {
                     "code": -32601,
                     "message": f"Tool unavailable in spawned task-worker mode: {name}",
+                },
+            }
+        declared = _declared_step_tools()
+        if declared is not None and name not in declared:
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {
+                    "code": -32601,
+                    "message": f"Tool not declared by this workflow step: {name}",
                 },
             }
         fn = DISPATCH.get(name)

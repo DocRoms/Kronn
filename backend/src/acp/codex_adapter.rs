@@ -129,7 +129,36 @@ impl CodexAcpAdapter {
 /// `None` only when the kronn-internal bridge script itself can't be located
 /// on this host — mirrors `codex_task_worker_mcp_override`'s fail-closed
 /// shape rather than silently omitting the bridge.
-fn codex_project_mcp_override(cwd: &Path, broker: &AcpPermissionBroker) -> Option<String> {
+fn codex_project_mcp_override(
+    cwd: &Path,
+    broker: &AcpPermissionBroker,
+    step_tools: Option<&crate::models::StepTools>,
+) -> Option<String> {
+    // KT-908 — a step that declared its tools gets only Kronn's bridge,
+    // narrowed to them, or no server at all.
+    if let Some(tools) = step_tools {
+        if tools.kronn_internal.is_empty() || broker.audit_excludes("kronn-internal") {
+            return Some("mcp_servers={}".into());
+        }
+        let mut launch = crate::agents::runner::disc_introspection_mcp_command()?;
+        launch
+            .args
+            .push(crate::agents::runner::step_tools_bridge_arg(tools));
+        broker.register_trusted_mcp_server(&AcpMcpServer {
+            id: "kronn-internal".to_owned(),
+            command: launch.command.clone(),
+            args: launch.args.clone(),
+            allowed_tools: tools.kronn_internal.clone(),
+        });
+        let command_json = serde_json::to_string(&launch.command).ok()?;
+        let args_json = serde_json::to_string(&launch.args).ok()?;
+        let env_vars_json =
+            serde_json::to_string(crate::agents::runner::KRONN_INTERNAL_CODEX_ENV_VARS).ok()?;
+        let enabled_json = serde_json::to_string(&tools.kronn_internal).ok()?;
+        return Some(format!(
+            "mcp_servers={{\"kronn-internal\"={{command={command_json},args={args_json},env_vars={env_vars_json},startup_timeout_sec=30,enabled_tools={enabled_json},default_tools_approval_mode=\"approve\"}}}}"
+        ));
+    }
     let mut project_servers: Vec<AcpMcpServer> =
         crate::core::mcp_scanner::read_mcp_json(&cwd.to_string_lossy())
             .map(|file| {
@@ -410,12 +439,13 @@ impl AcpTransport for CodexAcpAdapter {
         if self.launch.worker_context.is_none() {
             args.push("-c".into());
             args.push(
-                codex_project_mcp_override(&cwd, &self.broker).ok_or_else(|| {
-                    AcpError::Transport(
-                        "Codex ACP adapter cannot build its project-scoped MCP configuration"
-                            .into(),
-                    )
-                })?,
+                codex_project_mcp_override(&cwd, &self.broker, self.launch.step_tools.as_ref())
+                    .ok_or_else(|| {
+                        AcpError::Transport(
+                            "Codex ACP adapter cannot build its project-scoped MCP configuration"
+                                .into(),
+                        )
+                    })?,
             );
         }
         if let Some(model) = &self.model {
@@ -1014,7 +1044,7 @@ exec sleep 30"#,
             AcpSessionScope::new(Some(dir.path().to_path_buf()), "unbound-discussion"),
         );
         let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(dir.path());
-        let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+        let config = codex_project_mcp_override(dir.path(), &broker, None).unwrap();
         let parsed: toml::Value = toml::from_str(&config).expect("valid TOML");
         let servers = parsed["mcp_servers"].as_table().unwrap();
         assert_eq!(servers.keys().collect::<Vec<_>>(), ["Git"]);
@@ -1044,7 +1074,7 @@ exec sleep 30"#,
                     "project-with-internal-bridge",
                 ),
             );
-            let config = codex_project_mcp_override(dir.path(), &broker).unwrap();
+            let config = codex_project_mcp_override(dir.path(), &broker, None).unwrap();
             let parsed: toml::Value = toml::from_str(&config)
                 .expect("the project internal bridge must not duplicate the reserved TOML key");
             let servers = parsed["mcp_servers"].as_table().unwrap();

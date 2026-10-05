@@ -1110,6 +1110,7 @@ async fn execute_foreach(
                     Some(st) if st.tier.is_none() => st.tier = Some(tier),
                     None => {
                         s.agent_settings = Some(crate::models::AgentSettings {
+                            tools: None,
                             model: None,
                             tier: Some(tier),
                             reasoning_effort: None,

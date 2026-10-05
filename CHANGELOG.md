@@ -101,6 +101,12 @@ Release notes for 0.9.3 and earlier are available in the
   Codex Agent step whose prompt names it reads it without being able to
   write or delete anything in it (the `read_only_repos` policy). It is
   removed with the run (KT-910).
+- A workflow Agent step can declare its tools in `agent_settings.tools`:
+  Claude Code built-in tools and Kronn tools by name, or none. A declared
+  step starts with exactly those, without the other MCP servers, the skill
+  listing or the Kronn catalogue and its instructions; an undeclared step
+  launches exactly as before. The step editor and `workflow_step_schema`
+  expose the setting, validated at save (KT-908).
 
 ### Fixed
 

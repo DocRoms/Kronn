@@ -4296,6 +4296,7 @@ fn create_batch_run_persists_each_compare_target_tier() {
     let conn = test_db();
     let mut qp = sample_qp_for_batch("qp-compare-tier");
     qp.agent_settings = Some(crate::models::AgentSettings {
+        tools: None,
         model: Some("claude-provider-only-model".into()),
         tier: Some(crate::models::ModelTier::Default),
         reasoning_effort: None,

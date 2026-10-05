@@ -13,6 +13,7 @@ fn step() -> WorkflowStep {
         agent: AgentType::LiteLlm,
         prompt_template: "Return a result".into(),
         agent_settings: Some(AgentSettings {
+            tools: None,
             model: Some("proxy-alias".into()),
             tier: None,
             connection_id: None,

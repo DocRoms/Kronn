@@ -4674,6 +4674,7 @@ mod tests {
         let mut step = mk_step_for_snapshot(StepType::Agent);
         step.agent = AgentType::ClaudeCode;
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: Some(ModelTier::Reasoning),
             reasoning_effort: None,
@@ -4692,6 +4693,7 @@ mod tests {
         );
         // explicit model override wins, default tier → bare model
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: Some("o3".into()),
             tier: None,
             reasoning_effort: None,
@@ -6932,6 +6934,7 @@ mod tests {
         let mut step = fake_step("reason");
         step.agent = AgentType::Codex;
         step.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("gpt-5.6-sol".into()),
             tier: None,
             reasoning_effort: None,

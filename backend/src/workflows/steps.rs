@@ -1017,6 +1017,7 @@ fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
     let mut escalated = step.clone();
     escalated.agent = crate::models::AgentType::ClaudeCode;
     escalated.agent_settings = Some(crate::models::AgentSettings {
+        tools: step.agent_settings.as_ref().and_then(|s| s.tools.clone()),
         model: None,
         tier: Some(crate::models::ModelTier::Reasoning),
         reasoning_effort: None,
@@ -1189,6 +1190,7 @@ async fn run_agent_with_timeout(
             work_dir: Some(work_dir),
             read_only_repos: &step.read_only_repos,
             read_only_dirs,
+            step_tools: step.agent_settings.as_ref().and_then(|s| s.tools.as_ref()),
             full_access,
             skill_ids: &step.skill_ids,
             directive_ids: &step.directive_ids,
@@ -1729,6 +1731,7 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s.output_format = crate::models::StepOutputFormat::FreeText;
         s.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: cfg.reviewer_tier,
             reasoning_effort: None,
@@ -2106,6 +2109,7 @@ mod tests {
         let mut local = make_step("summarize {{x}}");
         local.agent = crate::models::AgentType::Ollama;
         local.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("qwen3:8b".into()),
             tier: Some(crate::models::ModelTier::Default),
             reasoning_effort: None,
@@ -2152,6 +2156,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: Some(ModelTier::Default),
             connection_id: Some("connection-b".into()),
@@ -2212,6 +2217,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: Some(ModelTier::Default),
             connection_id: Some("connection-b".into()),
@@ -2236,6 +2242,7 @@ mod tests {
         let mut step = make_step("anything");
         step.agent = AgentType::Custom;
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: Some(ModelTier::Default),
             connection_id: Some("deleted-connection".into()),
@@ -2251,6 +2258,7 @@ mod tests {
     fn explicit_workflow_model_remains_the_dispatch_and_preflight_model() {
         let mut step = make_step("anything");
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: Some("expert-model".into()),
             tier: Some(ModelTier::Default),
             connection_id: Some("connection-b".into()),
@@ -3104,6 +3112,7 @@ mod http_native_tool_step_tests {
             agent: AgentType::Custom,
             prompt_template: "Answer from the selected connection".into(),
             agent_settings: Some(AgentSettings {
+                tools: None,
                 model: model.map(str::to_string),
                 tier: Some(ModelTier::Default),
                 reasoning_effort: None,
@@ -3351,6 +3360,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::ClaudeCode,
             prompt_template: "Use the selected model".into(),
             agent_settings: Some(AgentSettings {
+                tools: None,
                 model: Some("retired-alias".into()),
                 tier: Some(ModelTier::Reasoning),
                 reasoning_effort: None,
@@ -3519,6 +3529,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::LiteLlm,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                tools: None,
                 model: Some("test-model".into()),
                 tier: None,
                 reasoning_effort: None,
@@ -3612,6 +3623,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             agent: AgentType::Ollama,
             prompt_template: "Which task is active?".into(),
             agent_settings: Some(AgentSettings {
+                tools: None,
                 model: Some("test-model".into()),
                 tier: None,
                 reasoning_effort: None,

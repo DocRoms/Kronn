@@ -624,6 +624,17 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
+        if !matches!(s.step_type, StepType::Agent) {
+            return Err(format!(
+                "Step « {} »: `agent_settings.tools` applies to Agent steps only",
+                s.name
+            ));
+        }
+        tools
+            .validate(&s.agent)
+            .map_err(|error| format!("Step « {} »: {error}", s.name))?;
+    }
     if !s.read_only_repos.is_empty() {
         if !matches!(s.step_type, StepType::Agent)
             || !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex)
@@ -7237,6 +7248,58 @@ mod tests {
         exec.room_id = Some("disc-1".into());
         let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");
         assert!(misplaced.contains("room_id"), "{misplaced}");
+    }
+
+    #[test]
+    fn declared_step_tools_are_validated_at_save() {
+        let mut step = mk_step("redaction", StepType::Agent);
+        step.prompt_template = "Write the verdict".into();
+        step.agent = AgentType::ClaudeCode;
+        let tools = |cli: &[&str], kronn: &[&str]| crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            connection_id: None,
+            reasoning_effort: None,
+            max_tokens: None,
+            tools: Some(crate::models::StepTools {
+                cli: cli.iter().map(|name| name.to_string()).collect(),
+                kronn_internal: kronn.iter().map(|name| name.to_string()).collect(),
+            }),
+        };
+        step.agent_settings = Some(tools(&[], &[]));
+        validate_step_required_fields(&step).expect("tools: none");
+        step.agent_settings = Some(tools(&["Read"], &["task_get"]));
+        validate_step_required_fields(&step).expect("declared tools");
+        let json = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            json["agent_settings"]["tools"],
+            serde_json::json!({"cli": ["Read"], "kronn_internal": ["task_get"]})
+        );
+
+        step.agent = AgentType::Codex;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("tools.cli"));
+        step.agent_settings = Some(tools(&[], &["task_get"]));
+        validate_step_required_fields(&step).expect("Codex takes Kronn tools");
+        step.agent = AgentType::Ollama;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("not Ollama"));
+        step.agent = AgentType::ClaudeCode;
+        for bad in ["mcp__kronn-internal__task_get", "Task Get", "", "tâche"] {
+            step.agent_settings = Some(tools(&[], &[bad]));
+            assert!(validate_step_required_fields(&step).is_err(), "{bad:?}");
+        }
+        step.agent_settings = Some(tools(&[], &[]));
+        step.step_type = StepType::ApiCall;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("Agent steps only"));
+
+        let legacy: crate::models::AgentSettings =
+            serde_json::from_value(serde_json::json!({"tier": "economy"})).unwrap();
+        assert!(legacy.tools.is_none(), "undeclared stays undeclared");
     }
 
     #[test]

@@ -276,6 +276,7 @@ fn agent_retry() -> Option<crate::models::workflows::RetryConfig> {
 
 fn blank_agent_settings() -> AgentSettings {
     AgentSettings {
+        tools: None,
         model: None,
         tier: None,
         reasoning_effort: None,
@@ -419,6 +420,7 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
     // « Deux cerveaux » (2026-06-12) — the PLAN must come from the strongest
     // reasoning tier; execution is then routed to cheap tiers per item.
     s.agent_settings = Some(AgentSettings {
+        tools: None,
         model: None,
         tier: Some(ModelTier::Reasoning),
         reasoning_effort: None,

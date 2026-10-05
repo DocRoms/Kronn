@@ -116,6 +116,54 @@ def _load_module(isolate=True, isolate_http=None, isolate_telemetry=True):
     return module
 
 
+class DeclaredStepToolsTests(unittest.TestCase):
+    """KT-908: a workflow step's `--step-tools=` list is the whole surface."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _handle(self, request, argv):
+        with mock.patch.object(self.mod.sys, "argv", argv), \
+             mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            return self.mod._handle(request)
+
+    def test_declared_tools_are_listed_alone_and_others_refused(self):
+        argv = ["bridge", "--step-tools=task_get,plan_get"]
+        listed = self._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, argv)
+        names = sorted(tool["name"] for tool in listed["result"]["tools"])
+        self.assertEqual(names, ["plan_get", "task_get"])
+        for tool in listed["result"]["tools"]:
+            self.assertIn("inputSchema", tool)
+        with mock.patch.object(self.mod, "_http") as http:
+            refused = self._handle({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "disc_append", "arguments": {}},
+            }, argv)
+        http.assert_not_called()
+        self.assertEqual(refused["error"]["code"], -32601)
+        self.assertIn("not declared", refused["error"]["message"])
+
+    def test_declared_tools_drop_the_catalogue_instructions(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        declared = self._handle(initialize, ["bridge", "--step-tools=task_get"])
+        self.assertNotIn("instructions", declared["result"])
+        empty = self._handle(initialize, ["bridge", "--step-tools="])
+        self.assertNotIn("instructions", empty["result"])
+        listed = self._handle(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, ["bridge", "--step-tools="]
+        )
+        self.assertEqual(listed["result"]["tools"], [])
+
+    def test_an_undeclared_bridge_keeps_its_full_surface(self):
+        listed = self._handle({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, ["bridge"])
+        self.assertEqual(len(listed["result"]["tools"]), len(self.mod.TOOLS))
+        with mock.patch.object(self.mod, "_onboarding_done_for", return_value=True):
+            initialize = self._handle(
+                {"jsonrpc": "2.0", "id": 6, "method": "initialize", "params": {}}, ["bridge"]
+            )
+        self.assertIn("instructions", initialize["result"])
+
+
 class BridgeHarnessIsolationTests(unittest.TestCase):
     def test_default_loader_isolates_bindings_http_and_telemetry(self):
         module = _load_module()
