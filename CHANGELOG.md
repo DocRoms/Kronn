@@ -491,7 +491,16 @@ Release notes for 0.9.3 and earlier are available in the
   Quick Exec import and the `kronn/` import apply it too. An unsafe line is
   kept on save only when it is exactly the stored one (same step, position,
   name and arguments), and an unquoted shell value no longer gets an
-  automatic fix, since `"$1"` would not print the same thing.
+  automatic fix, since `"$1"` would not print the same thing. It also knows
+  that a shell never glues its script to `-c` (`bash -cx SCRIPT`), covers
+  `make --eval` and `VAR=value`, `npm`/`pnpm`/`yarn exec`/`dlx`/`install`/`run`
+  and `bunx`, `gdb -ex`, `tar --to-command`, `rsync -e`, `curl -K`, `vim -c`
+  and `+cmd`, `sqlite3`, `mysql -e`, `psql -c`, `crontab` and `at`, refuses
+  any value given to an interpreter it does not model, and refuses an
+  `exec_stdin` value when the program runs its stdin as code (a shell or an
+  interpreter without a script or inline code). A config restore imports a
+  workflow that fails these rules disabled and leaves such a Quick Exec out,
+  and its report names each one and why.
 
 ### Changed
 
