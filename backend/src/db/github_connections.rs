@@ -57,6 +57,55 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GithubConnectionRow> {
 const COLUMNS: &str =
     "project_id, mode, token_encrypted, scope_json, connected_on_upgrade, updated_at";
 
+/// Every row exactly as stored (raw columns), for [`restore_rows`].
+pub struct RawRows(Vec<[Option<String>; 6]>);
+
+/// Read every connection row verbatim, ciphertext included.
+pub fn snapshot_rows(conn: &Connection) -> Result<RawRows> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT project_id, mode, token_encrypted, scope_json, CAST(connected_on_upgrade AS TEXT), updated_at \
+         FROM project_github_connections"
+    ))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok([
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ])
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(RawRows(rows))
+}
+
+/// Put back the snapshot rows whose project exists again (an import replaced
+/// the `projects` table, whose cascade dropped them). Returns how many rows
+/// could not come back because their project is gone.
+pub fn restore_rows(conn: &Connection, rows: &RawRows) -> Result<usize> {
+    let mut dropped = 0;
+    for row in &rows.0 {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            [&row[0]],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            dropped += 1;
+            continue;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO project_github_connections \
+             (project_id, mode, token_encrypted, scope_json, connected_on_upgrade, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, CAST(?5 AS INTEGER), ?6)",
+            params![row[0], row[1], row[2], row[3], row[4], row[5]],
+        )?;
+    }
+    Ok(dropped)
+}
+
 pub fn get(conn: &Connection, project_id: &str) -> Result<Option<GithubConnectionRow>> {
     Ok(conn
         .query_row(

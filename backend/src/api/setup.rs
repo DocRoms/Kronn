@@ -1866,86 +1866,9 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         ));
     }
 
-    // Selective clear (replaces the old unconditional wipe): only clear the
-    // tables the payload actually carries — see `import_clear_statements`.
-    let stmts = import_clear_statements(data);
-    if !stmts.is_empty() {
-        let batch = format!("{};", stmts.join("; "));
-        state
-            .db
-            .with_conn(move |conn| {
-                conn.execute_batch(&batch)?;
-                Ok(())
-            })
-            .await
-            .map_err(|e| format!("Failed to clear DB: {}", e))?;
-    }
-
-    // Import projects (check path validity)
-    for project in &data.projects {
-        let p = project.clone();
-        let path = project.path.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::projects::insert_project(conn, &p))
-            .await
-        {
-            tracing::warn!("Import project error: {}", e);
-        }
-        if !std::path::Path::new(&path).exists() {
-            invalid_paths.push(path);
-        }
-    }
-
-    // Import discussions with their messages
-    for disc in &data.discussions {
-        let d = disc.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &d))
-            .await
-        {
-            tracing::warn!("Import discussion error: {}", e);
-        }
-        let did = disc.id.clone();
-        for msg in &disc.messages {
-            let m = msg.clone();
-            let id = did.clone();
-            if let Err(e) = state
-                .db
-                .with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m))
-                .await
-            {
-                tracing::error!("Failed to import discussion message: {e}");
-            }
-        }
-    }
-
-    // Import MCP servers & configs
-    for server in &data.mcp_servers {
-        let s = server.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s))
-            .await
-        {
-            tracing::error!("Failed to import MCP server: {e}");
-        }
-    }
-    for config_entry in &data.mcp_configs {
-        let c = config_entry.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::mcps::insert_config(conn, &c))
-            .await
-        {
-            tracing::error!("Failed to import MCP config: {e}");
-        }
-    }
-
-    // Import workflows. A restore keeps the user's own definitions, but one
-    // that fails the editor's Exec rules is imported disabled and named in
-    // the report, never silently (KT-1017); it stays refused at run time.
+    // Workflows failing the editor's Exec rules are imported disabled and named
+    // in the report (KT-1017); unsafe Quick Execs are left out, named too.
+    let mut workflows = Vec::new();
     for wf in &data.workflows {
         let mut w = wf.clone();
         if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
@@ -1955,13 +1878,138 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 w.name
             ));
         }
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w))
-            .await
+        workflows.push(w);
+    }
+    let mut quick_execs = Vec::new();
+    for qe in &data.quick_execs {
+        if let Some(reason) =
+            crate::core::inline_code::quick_exec_validation_error(
+                &qe.name,
+                &qe.command,
+                &qe.args,
+                qe.unmodelled_args_approved == Some(true),
+            )
         {
-            tracing::error!("Failed to import workflow: {e}");
+            warnings.push(format!("Quick Exec « {} » non importé : {reason}", qe.name));
+            continue;
         }
+        quick_execs.push(qe.clone());
+    }
+    for project in &data.projects {
+        if !std::path::Path::new(&project.path).exists() {
+            invalid_paths.push(project.path.clone());
+        }
+    }
+
+    // Selective clear (only the tables the payload carries, see
+    // `import_clear_statements`) and every insert run in ONE transaction. A
+    // failing project or MCP insert rolls everything back, so local MCP
+    // secrets are never lost to a half import; other rows log and continue. GitHub connections are not
+    // exported: those of projects that come back by id are kept, never lost
+    // to the `projects` cascade.
+    let stmts = import_clear_statements(data);
+    let projects = data.projects.clone();
+    let discussions = data.discussions.clone();
+    let mcp_servers = data.mcp_servers.clone();
+    let mcp_configs = data.mcp_configs.clone();
+    let contacts = data.contacts.clone();
+    let quick_prompts = data.quick_prompts.clone();
+    let quick_prompt_versions = data.quick_prompt_versions.clone();
+    let quick_apis = data.quick_apis.clone();
+    let learnings = data.learnings.clone();
+    let learning_rejections = data.learning_rejections.clone();
+    let (pruned, dropped_github) = state
+        .db
+        .with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let github = crate::db::github_connections::snapshot_rows(&tx)?;
+            if !stmts.is_empty() {
+                tx.execute_batch(&format!("{};", stmts.join("; ")))?;
+            }
+            let fail = |what: &str, e: anyhow::Error| {
+                anyhow::anyhow!("Import aborted, nothing was changed: {what}: {e}")
+            };
+            for p in &projects {
+                crate::db::projects::insert_project(&tx, p).map_err(|e| fail("project", e))?;
+            }
+            let dropped_github = crate::db::github_connections::restore_rows(&tx, &github)?;
+            for d in &discussions {
+                if let Err(e) = crate::db::discussions::insert_discussion(&tx, d) {
+                    tracing::warn!("Import discussion error: {e}");
+                }
+                for m in &d.messages {
+                    if let Err(e) = crate::db::discussions::insert_message(&tx, &d.id, m) {
+                        tracing::warn!("Import discussion message error: {e}");
+                    }
+                }
+            }
+            for srv in &mcp_servers {
+                crate::db::mcps::upsert_server(&tx, srv).map_err(|e| fail("MCP server", e))?;
+            }
+            for c in &mcp_configs {
+                crate::db::mcps::insert_config(&tx, c).map_err(|e| fail("MCP config", e))?;
+            }
+            for w in &workflows {
+                if let Err(e) = crate::db::workflows::insert_workflow(&tx, w) {
+                    tracing::warn!("Import workflow error: {e}");
+                }
+            }
+            for c in &contacts {
+                if let Err(e) = crate::db::contacts::insert_contact(&tx, c) {
+                    tracing::warn!("Import contact error: {e}");
+                }
+            }
+            for q in &quick_prompts {
+                if let Err(e) = crate::db::quick_prompts::insert_quick_prompt(&tx, q) {
+                    tracing::warn!("Import quick prompt error: {e}");
+                }
+            }
+            for v in &quick_prompt_versions {
+                if let Err(e) = crate::db::quick_prompts::insert_quick_prompt_version_row(&tx, v) {
+                    tracing::warn!("Import quick prompt version error: {e}");
+                }
+            }
+            for a in &quick_apis {
+                if let Err(e) = crate::db::quick_apis::insert_quick_api(&tx, a) {
+                    tracing::warn!("Import quick API error: {e}");
+                }
+            }
+            for e in &quick_execs {
+                if let Err(err) = crate::db::quick_execs::insert_quick_exec(&tx, e) {
+                    tracing::warn!("Import quick exec error: {err}");
+                }
+            }
+            for l in &learnings {
+                if let Err(e) = crate::db::learnings::insert(&tx, l) {
+                    tracing::warn!("Import learning error: {e}");
+                }
+            }
+            // Referential prune — local version rows whose parent QP no longer
+            // exists after the import (v4 archive: parents replaced).
+            let pruned = tx.execute(
+                "DELETE FROM quick_prompt_versions
+                 WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
+                [],
+            )?;
+            for r in &learning_rejections {
+                if let Err(e) = crate::db::learnings::insert_rejection_row(&tx, r) {
+                    tracing::warn!("Import learning rejection error: {e}");
+                }
+            }
+            tx.commit()?;
+            Ok((pruned, dropped_github))
+        })
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if pruned > 0 {
+        warnings.push(format!(
+            "{pruned} quick-prompt version row(s) dropped — their prompts are not part of this import"
+        ));
+    }
+    if dropped_github > 0 {
+        warnings.push(format!(
+            "{dropped_github} project GitHub connection(s) removed: their projects are not part of this import"
+        ));
     }
 
     // Import custom skills/directives/profiles (file-based)
@@ -1998,129 +2046,6 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 persona_prompt: &profile.persona_prompt,
                 default_engine: profile.default_engine.as_deref(),
             });
-    }
-
-    // Import contacts
-    for contact in &data.contacts {
-        let c = contact.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
-            .await
-        {
-            tracing::warn!("Import contact error: {}", e);
-        }
-    }
-
-    // Import quick prompts
-    for qp in &data.quick_prompts {
-        let q = qp.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
-            .await
-        {
-            tracing::warn!("Import quick prompt error: {}", e);
-        }
-    }
-
-    // Import QP version history (v5) — verbatim rows, after their parents.
-    for v in &data.quick_prompt_versions {
-        let v = v.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| {
-                crate::db::quick_prompts::insert_quick_prompt_version_row(conn, &v)
-            })
-            .await
-        {
-            tracing::warn!("Import quick prompt version error: {}", e);
-        }
-    }
-
-    // Import quick APIs
-    for qa in &data.quick_apis {
-        let a = qa.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &a))
-            .await
-        {
-            tracing::warn!("Import quick API error: {}", e);
-        }
-    }
-
-    // Import saved Quick Execs after projects so project-scoped working
-    // directories keep their foreign-key bindings.
-    for qe in &data.quick_execs {
-        let e = qe.clone();
-        // A Quick Exec has no disabled state to mark it for review: an
-        // unsafe one is left out, and the report says which and why.
-        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
-            &e.name,
-            &e.command,
-            &e.args,
-            e.unmodelled_args_approved == Some(true),
-        ) {
-            warnings.push(format!("Quick Exec « {} » non importé : {reason}", e.name));
-            continue;
-        }
-        if let Err(error) = state
-            .db
-            .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &e))
-            .await
-        {
-            tracing::warn!("Import quick exec error: {}", error);
-        }
-    }
-
-    // Import continual-learning candidates. `learnings::insert` rejects rows
-    // with empty evidence[] — every stored learning has at least one, so a
-    // failure here is a corrupt export, logged not fatal.
-    for learning in &data.learnings {
-        let l = learning.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::learnings::insert(conn, &l))
-            .await
-        {
-            tracing::warn!("Import learning error: {}", e);
-        }
-    }
-
-    // Referential prune — local version rows whose parent QP no longer
-    // exists after the import (v4 archive: parents replaced, lineage kept
-    // for same-id QPs, orphans dropped).
-    match state
-        .db
-        .with_conn(|conn| {
-            conn.execute(
-                "DELETE FROM quick_prompt_versions
-             WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
-                [],
-            )
-            .map_err(Into::into)
-        })
-        .await
-    {
-        Ok(n) if n > 0 => warnings.push(format!(
-            "{n} quick-prompt version row(s) dropped — their prompts are not part of this import"
-        )),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("Import version prune error: {}", e),
-    }
-
-    // Import rejection counters (v5) — verbatim, keeps the anti-repetition
-    // threshold armed across a migration.
-    for rej in &data.learning_rejections {
-        let r = rej.clone();
-        if let Err(e) = state
-            .db
-            .with_conn(move |conn| crate::db::learnings::insert_rejection_row(conn, &r))
-            .await
-        {
-            tracing::warn!("Import learning rejection error: {}", e);
-        }
     }
 
     if !invalid_paths.is_empty() {
@@ -3630,6 +3555,133 @@ mod tests {
     /// `core::config` tests. `tokio::sync::Mutex` because it's held across
     /// `.await` (clippy `await_holding_lock` rejects a std mutex).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Runs `f` with KRONN_DATA_DIR pointed at a fresh directory.
+    async fn with_data_dir<F, Fut>(f: F)
+    where
+        F: FnOnce(std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::set_var("KRONN_DATA_DIR", dir.path());
+        f(dir.path().to_path_buf()).await;
+        match previous {
+            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    async fn seed_project_with_github_token(state: &AppState, project: &str, cipher: &str) {
+        let (project, cipher) = (project.to_string(), cipher.to_string());
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, '/nowhere/' || ?1, datetime('now'), datetime('now'))",
+                    [&project],
+                )?;
+                crate::db::github_connections::set_mode(
+                    conn,
+                    &project,
+                    crate::models::GithubConnectionMode::StoredToken,
+                    Some(&cipher),
+                )
+            })
+            .await
+            .unwrap();
+    }
+
+    /// C2-01 — re-importing this machine's own backup keeps the stored GitHub
+    /// tokens of the projects it brings back (the export does not carry them).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn reimporting_a_backup_keeps_the_github_tokens_of_its_projects() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            let key = crate::core::crypto::generate_secret();
+            let cipher =
+                crate::core::github_connection::encrypt_stored_token("github_pat_keep", &key)
+                    .unwrap();
+            seed_project_with_github_token(&state, "p1", &cipher).await;
+            seed_project_with_github_token(&state, "p-gone", &cipher).await;
+
+            let mut export = build_export(&state).await.unwrap();
+            export.projects.retain(|p| p.id == "p1");
+            let result = do_import_db(&state, &export).await.unwrap();
+            assert!(
+                result
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("1 project GitHub connection")),
+                "{:?}",
+                result.warnings
+            );
+
+            let row = state
+                .db
+                .with_conn(|conn| crate::db::github_connections::get(conn, "p1"))
+                .await
+                .unwrap()
+                .expect("connection kept");
+            let token = crate::core::github_connection::decrypt_stored_token(
+                row.token_encrypted.as_deref().unwrap(),
+                &key,
+            )
+            .unwrap();
+            assert_eq!(token.as_str(), "github_pat_keep");
+        })
+        .await;
+    }
+
+    /// C2-34 — a failing insert rolls the whole import back: the local MCP
+    /// configs (and their secrets) are still there.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failing_import_insert_changes_nothing() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','github','stdio')",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json) \
+                         VALUES ('c1','s1','local','ciphertext-local','[\"T\"]')",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let mut export = build_export(&state).await.unwrap();
+            // A config whose server does not exist: its insert fails (FK).
+            let mut broken = export.mcp_configs[0].clone();
+            broken.id = "c-broken".into();
+            broken.server_id = "missing-server".into();
+            export.mcp_configs.push(broken);
+
+            let err = do_import_db(&state, &export).await.unwrap_err();
+            assert!(err.contains("nothing was changed"), "{err}");
+            let kept: String = state
+                .db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT env_encrypted FROM mcp_configs WHERE id = 'c1'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .await
+                .unwrap();
+            assert_eq!(kept, "ciphertext-local");
+        })
+        .await;
+    }
 
     fn test_state() -> AppState {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
