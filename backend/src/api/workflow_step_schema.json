@@ -27,6 +27,7 @@
         "profile_ids",
         "directive_ids",
         "read_only_repos (array of absolute local Git repository paths; Claude Code/Codex on macOS/Linux only; grants reads including Git history and denies writes, even with full_access; no templates; missing paths or overlap with the working directory fail before launch)",
+        "agent_settings.tools ({cli:[...], kronn_internal:[...]}; omitted = today's launch with every tool, the project MCPs, the skill listing and the Kronn catalogue; declared = only these: `cli` lists Claude Code built-in tools (Read, Grep, Bash…, Claude Code only), `kronn_internal` lists Kronn tools loaded with their schemas and no other MCP server; both empty = no tool at all. Claude Code, Codex and ACP agents; the direct CLI fallback refuses it)",
         "multi_agent_review (bool — second agent debates the output)",
         "room_id (Claude Code/Codex only; template rendering to a discussion id — the step's agent is a member and principal of that room at every launch and resume, no kr-join token)"
       ],
@@ -164,7 +165,7 @@
         "exec_timeout_secs",
         "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)"
       ],
-      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or via exec_stdin. Saving refuses anything else, and a saved step that still does it is refused at run time.",
+      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{issue.title}}\"]` in Node (the `--` is required: Node, Perl, Ruby and PHP keep reading options after their code), or via exec_stdin. A value must never sit where the interpreter still reads options (before the inline code or a `--`): `[\"{{mode}}\", …]` is refused. Saving refuses anything else, and a saved step that still does it is refused at run time.",
       "example": {
         "name": "Tests",
         "step_type": {
@@ -343,6 +344,8 @@
       "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops. An Exec's markers are read from its raw stdout, where a value may span lines up to its closing `---`.",
       "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
       "run.id": "id of the current workflow run (a SubWorkflow child run has its own).",
+      "run.artifacts_dir": "absolute path of a directory Kronn creates for this run, outside every checkout (each run has its own; a SubWorkflow child too). Exec steps write files there (screenshots, logs, large reports); a Claude Code or Codex Agent step whose prompt names this path reads it read-only (same policy as read_only_repos: --add-dir, Edit denied, mandatory sandbox). Removed when the run ends; kept while it waits for approval or is interrupted.",
+      "ref:<kind>:<slug>": "local id of another resource, kind one of workflow, qe, qa, prompt, skill, plugin, artifact; resolved at run start in the run's project, then the global scope (identity of a kronn/ import, else the slug of the resource's name). Unknown or ambiguous fails the step before launch. Structured id fields (sub_workflow_id, quick_prompt_id, quick_api_id, batch_quick_prompt_id, CollectApiData quick_api_id/quick_exec_id) also accept `ref:<kind>:<slug>`, stored as the local id at save. Scripts: GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>.",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
       "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand unless a static/launch variable named `now` exists.",
       "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value."

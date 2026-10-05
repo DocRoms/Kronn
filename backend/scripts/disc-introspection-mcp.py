@@ -13,7 +13,7 @@ that Kronn writes for `summary_strategy != Off` discussions:
           "env": {
             "KRONN_DISCUSSION_ID": "abc-123",
             "KRONN_BACKEND_URL":   "http://127.0.0.1:3140",
-            "KRONN_AUTH_TOKEN":    "<bearer>"  # optional, only for non-localhost
+            "KRONN_BRIDGE_TOKEN":  "<per-launch token>"  # set by Kronn per launch
           }
         }
       }
@@ -2762,6 +2762,12 @@ def _backend_url():
     return os.environ.get("KRONN_BACKEND_URL", "http://127.0.0.1:3140").rstrip("/")
 
 
+def _bearer_token():
+    """The bearer this bridge presents: the scoped token Kronn mints for the
+    launch, else an operator token a host session exported (compatibility)."""
+    return os.environ.get("KRONN_BRIDGE_TOKEN") or os.environ.get("KRONN_AUTH_TOKEN")
+
+
 # 0.8.6 phase 2 — Captured MCP `clientInfo` from initialize handshake.
 #
 # Every MCP client sends `{name, version}` in its `initialize` request.
@@ -4161,7 +4167,7 @@ def _current_disc_meta():
         req = urllib.request.Request(url, method="GET")
         # Same bearer as _http(): without it, an auth-enforced instance 401s
         # this read and the silent fallback drops project/agent inheritance.
-        token = os.environ.get("KRONN_AUTH_TOKEN")
+        token = _bearer_token()
         if token:
             req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -4196,7 +4202,7 @@ def _http(method, path, body=None, timeout=180):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, method=method, data=data)
     req.add_header("Content-Type", "application/json")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -4253,7 +4259,7 @@ def _http_text(method, path):
     which returns the embedded `text/markdown` spec verbatim."""
     url = f"{_backend_url()}{path}"
     req = urllib.request.Request(url, method=method)
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -4369,7 +4375,7 @@ def _http_upload_context_file(disc_id, file_path):
         data=payload,
     )
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
@@ -5679,8 +5685,24 @@ def _spawned_task_worker_mode():
     return bool(os.environ.get(_TASK_WORKER_CONTEXT_ENV))
 
 
+_STEP_TOOLS_FLAG = "--step-tools="
+
+
+def _declared_step_tools():
+    """Tools a workflow Agent step declared (KT-908), passed by Kronn as
+    `--step-tools=a,b` on this bridge's own command line. `None` = undeclared:
+    the full surface, as before."""
+    for arg in sys.argv[1:]:
+        if arg.startswith(_STEP_TOOLS_FLAG):
+            return frozenset(name for name in arg[len(_STEP_TOOLS_FLAG):].split(",") if name)
+    return None
+
+
 def _visible_tools():
     if not _spawned_task_worker_mode():
+        declared = _declared_step_tools()
+        if declared is not None:
+            return [tool for tool in TOOLS if tool["name"] in declared]
         return TOOLS
     commit = {
         "name": "task_exec_commit",
@@ -9365,7 +9387,7 @@ def _audit_open_sse(path, body):
     req = urllib.request.Request(url, method="POST", data=json.dumps(body).encode())
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "text/event-stream")
-    token = os.environ.get("KRONN_AUTH_TOKEN")
+    token = _bearer_token()
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310
@@ -10853,7 +10875,9 @@ def _perform_scheduled_bridge_reload():
         os.environ[_BRIDGE_ARTIFACT_FD_ENV] = str(_BRIDGE_ARTIFACT_FD)
         os.environ[_BRIDGE_ARTIFACT_SHA_ENV] = expected_sha256
         artifact_exec_path = f"/dev/fd/{_BRIDGE_ARTIFACT_FD}"
-        os.execv(sys.executable, [sys.executable, artifact_exec_path])
+        # A declared step tool list (KT-908) survives the reload.
+        step_tools = [arg for arg in sys.argv[1:] if arg.startswith(_STEP_TOOLS_FLAG)]
+        os.execv(sys.executable, [sys.executable, artifact_exec_path, *step_tools])
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         os.environ.pop(_BRIDGE_RELOAD_READY_ENV, None)
         os.environ.pop(_BRIDGE_RELOAD_HANDOFF_ENV, None)
@@ -11128,6 +11152,20 @@ def _handle(req):
                     ),
                 },
             }
+        if _declared_step_tools() is not None:
+            # A step that declared its tools gets them, not the catalogue map.
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {"listChanged": True}},
+                    "serverInfo": {
+                        "name": "kronn-internal",
+                        "version": BRIDGE_TOOL_SURFACE_VERSION,
+                    },
+                },
+            }
         client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
         first_contact = "" if _onboarding_done_for(client_name) else (
             "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
@@ -11209,6 +11247,16 @@ def _handle(req):
                 "error": {
                     "code": -32601,
                     "message": f"Tool unavailable in spawned task-worker mode: {name}",
+                },
+            }
+        declared = _declared_step_tools()
+        if declared is not None and name not in declared:
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {
+                    "code": -32601,
+                    "message": f"Tool not declared by this workflow step: {name}",
                 },
             }
         fn = DISPATCH.get(name)

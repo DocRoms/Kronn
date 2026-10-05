@@ -2,6 +2,8 @@ import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, Arti
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
+  ProjectGithubConnection,
+  SetProjectGithubConnectionRequest,
   DiscussionWeightsResponse,
   DiscussionImportProvenance,
   SetupStatus,
@@ -791,6 +793,9 @@ export const health = {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
+/** Mirrors the backend `DesktopPortInfo` (api/desktop_port.rs). */
+export interface DesktopPortInfo { saved: number | null; current: number; min: number; max: number }
+
 /** LAN/Tailscale exposure state (the "Allow connections from other devices"
  *  toggle). Mirrors the backend `NetworkExposure` (api/setup.rs) — defined here
  *  rather than generated because the struct carries a qualified-path field that
@@ -888,6 +893,8 @@ export const config = {
     return json.data;
   },
   getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
+  getDesktopPort: () => api<DesktopPortInfo>('GET', '/config/desktop-port'),
+  setDesktopPort: (port: number) => api<DesktopPortInfo>('POST', '/config/desktop-port', { port }),
   setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
@@ -1197,6 +1204,13 @@ export const projects = {
    *  non-empty name + location, max 20 entries. Atomic replace —
    *  no per-row CRUD. */
   setLinkedRepos: (id: string, repos: LinkedRepo[]) => api<boolean>('PUT', `/projects/${id}/linked-repos`, repos),
+  /** Whether this project's agents receive a GitHub token (D2). Never returns a token. */
+  githubConnection: (id: string) =>
+    api<ProjectGithubConnection>('GET', `/projects/${encodeURIComponent(id)}/github`),
+  setGithubConnection: (id: string, body: SetProjectGithubConnectionRequest) =>
+    api<ProjectGithubConnection>('PUT', `/projects/${encodeURIComponent(id)}/github`, body),
+  refreshGithubScope: (id: string) =>
+    api<ProjectGithubConnection>('POST', `/projects/${encodeURIComponent(id)}/github/scope`),
   /** 0.8.6 (#27) — autocomplete picker source. Returns OTHER
    *  Kronn-known projects (excluding the current one) sorted by
    *  proximity (same-parent dir first, then alphabetical). Free-text

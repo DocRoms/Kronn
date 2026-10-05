@@ -38,7 +38,33 @@ fn extend(
     kind: ProjectRepositoryResourceKind,
     keys: impl IntoIterator<Item = String>,
 ) {
-    references.extend(keys.into_iter().map(|key| (kind, key)));
+    references.extend(keys.into_iter().map(|key| (kind, canonical_key(key))));
+}
+
+/// A symbolic reference (KT-917) in one spelling, `ref:<kind>:<slug>`, so the
+/// template form `{{ref:…}}` of a Page id meets the same alias.
+fn canonical_key(key: String) -> String {
+    match crate::core::resource_refs::parse_reference(&key) {
+        Some((kind, slug)) => format!("{}{kind}:{slug}", crate::core::resource_refs::REF_PREFIX),
+        None => key,
+    }
+}
+
+/// The alias a published definition names this resource by.
+fn reference_alias(resource: &ProjectRepositoryResource) -> String {
+    let kind = match resource.kind {
+        ProjectRepositoryResourceKind::Workflow => "workflow",
+        ProjectRepositoryResourceKind::QuickPrompt => "prompt",
+        ProjectRepositoryResourceKind::QuickApi => "qa",
+        ProjectRepositoryResourceKind::QuickExec => "qe",
+        ProjectRepositoryResourceKind::Artifact => "artifact",
+        ProjectRepositoryResourceKind::Skill => "skill",
+    };
+    format!(
+        "{}{kind}:{}",
+        crate::core::resource_refs::REF_PREFIX,
+        resource.slug
+    )
 }
 
 fn workflow_references(resource: &Value) -> Vec<Reference> {
@@ -175,6 +201,9 @@ pub(super) fn link_resources(
                 .entry((resource.kind.identity_kind(), alias.clone()))
                 .or_insert(position);
         }
+        index
+            .entry((resource.kind.identity_kind(), reference_alias(resource)))
+            .or_insert(position);
     }
 
     let mut uses: Vec<Vec<RepositoryResourceLink>> = vec![Vec::new(); resources.len()];

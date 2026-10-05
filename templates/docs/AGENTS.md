@@ -1,9 +1,5 @@
 <!-- kronn:doc-version="1.0" -->
 <!-- kronn:spec="https://github.com/DocRoms/Kronn/blob/main/docs/conventions/agents-md-format-v1.md" local="docs/conventions/agents-md-format-v1.md" -->
-<!-- This file follows the Kronn AGENTS.md convention v1. Sections marked
-     curated="ai" carry [src: …] provenance per assertion. Template v2 adds
-     owner="audit" / owner="human"; human-owned sections are never rewritten
-     by an audit. Legacy curated="human" sections receive the same protection. -->
 # AI agent context — Entry point
 
 > **TEMPLATE FILE.** Every `{{...}}` MUST be filled by the AI audit before use.
@@ -21,7 +17,7 @@ Set once during audit; apply to every `docs/` file.
 - Ticket IDs in code comments: {{COMMENT_TICKET_POLICY}}.
 - Test policy: {{TEST_POLICY}}.
 
-> **Rules:** Use the project parameters above; never force-translate an existing document. Never hallucinate — check docs, then ask the user. Update `docs/` after learning something new.
+> **Rules:** Use the project parameters above; never force-translate an existing document. Update `docs/` after learning something new.
 > **MCP:** Before calling any MCP tool, read [operations/mcp-servers/<name>.md](operations/mcp-servers/) if it exists.
 > **Skills and Kronn resources index:** `kronn/INDEX.md` (no-op if the project has none published yet).
 
@@ -80,8 +76,8 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 - {{DO_NOT_2}}
 - **Guess** when info is missing — say `NOT_FOUND` and ask the user.
 - **Invent file paths** — if you don't know where code goes, check [repo-map](repo-map.md) or ask.
-- **Guess tool versions** — if prerequisites are not filled below, ask. Do not assume "Node 18" or "Python 3.10".
-- **Guess languages or frameworks** — check § 6 Stack. Do not assume Express, Django, or Next.js.
+- **Guess tool versions** — if prerequisites are not filled below, ask.
+- **Guess languages or frameworks** — check § 6 Stack.
 - **Edit auto-generated files** — if a file is marked as generated (e.g., types exported from another language), never edit it by hand.
 - **Load all T2 files at once** — max 3, pick what you need.
 - **Modify business code** when the task is only about project documentation — edit `docs/` only.
@@ -91,7 +87,6 @@ If T0–T2 are insufficient, state which additional file you need and why. Never
 
 ## 3. Prerequisites
 
-<!-- Fill after audit. If empty, ask the user for build/run commands. -->
 {{PREREQUISITES}}
 
 ---
@@ -114,14 +109,12 @@ See the Test policy parameter above (§ Project parameters). Checklist: [testing
 |------|---------|
 | Project documentation | `docs/` |
 | Cross-repo context (companion repos) | `docs/linked-repos.md` — read ONLY when your task references something not in this repo |
-<!-- Fill after audit: data models, API routes, DB schema, config files -->
 {{SOURCES}}
 
 ---
 
 ## 6. Stack
 
-<!-- Fill after audit. DO NOT guess the stack — ask the user if empty. -->
 {{STACK}}
 
 ---
@@ -148,7 +141,7 @@ New code placement: see [repo-map](repo-map.md).
 
 Redirectors at the project root: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.kiro/steering/instructions.md`, `.vibe/instructions.md`, `.cursorrules`, `.cursor/rules/repo-instructions.mdc`, `.github/copilot-instructions.md`, `.windsurfrules`, `.clinerules`.
 
-**Maintenance rule**: all content lives in `docs/`. Redirectors are short stubs that point to [docs/AGENTS.md](AGENTS.md) as source of truth.
+Redirectors are stubs pointing to [docs/AGENTS.md](AGENTS.md); all content lives in `docs/`.
 
 ---
 

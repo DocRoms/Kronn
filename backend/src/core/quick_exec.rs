@@ -502,6 +502,18 @@ enum Outcome {
     Cancelled,
 }
 
+/// The process a validated spec starts, before stdio: the resolved binary,
+/// its argv and cwd, and a built environment (KT-1006). Nothing is inherited.
+fn build_command(spec: &ValidatedSpec) -> tokio::process::Command {
+    let mut command = async_cmd(resolve_binary(spec));
+    crate::core::child_env::isolate(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::QuickExec,
+    );
+    command.args(&spec.argv).current_dir(&spec.cwd);
+    command
+}
+
 /// Spawn a validated spec and return its bounded result.
 ///
 /// `artifact_dir` receives the full streams. When it is `None` the streams are
@@ -514,10 +526,8 @@ pub async fn run(
 ) -> Result<QuickExecResult> {
     let started = std::time::Instant::now();
 
-    let mut command = async_cmd(resolve_binary(spec));
+    let mut command = build_command(spec);
     command
-        .args(&spec.argv)
-        .current_dir(&spec.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if spec.stdin.is_some() {

@@ -358,7 +358,13 @@ tier?: ModelTier | null,
  *
  * `None` for every other agent type, which resolve from their own config.
  */
-connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null, };
+connection_id?: string | null, reasoning_effort?: string | null, max_tokens?: number | null,
+/**
+ * KT-908 — the tools this Agent step declares. `None` keeps today's
+ * launch exactly; a declaration replaces the catalogue, the MCP servers
+ * and the CLI's skill listing with what it names.
+ */
+tools?: StepTools, };
 
 export type AgentType = "ClaudeCode" | "Codex" | "OpenCode" | "Vibe" | "GeminiCli" | "Kiro" | "CopilotCli" | "Ollama" | "LiteLlm" | "Nvidia" | "Custom";
 
@@ -1118,7 +1124,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1725,7 +1731,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -3305,6 +3311,44 @@ export type GitDiffResponse = { path: string, diff: string, };
 export type GitFileStatus = { path: string, status: string, staged: boolean, };
 
 export type GitGraphCommit = { hash: string, short_hash: string, parents: Array<string>, refs: Array<string>, subject: string, author: string, committed_at: number, };
+
+/**
+ * What a project persists: whether its agents receive a GitHub token, and from where.
+ */
+export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
+
+/**
+ * What the UI shows: the persisted mode plus whether the machine has a token.
+ */
+export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
+
+export type GithubMachineTokenSource = "environment" | "gh_cli";
+
+/**
+ * The scope a token actually has, as GitHub reported it.
+ */
+export type GithubScope = {
+/**
+ * False when GitHub could not be asked or did not say; `reason` explains.
+ */
+verified: boolean, token_kind: GithubTokenKind, login: string | null,
+/**
+ * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
+ */
+scopes: Array<string>,
+/**
+ * Repositories a fine-grained token can reach (`owner/name`).
+ */
+repositories: Array<string>, repositories_truncated: boolean,
+/**
+ * The token reaches every repository of the account (e.g. classic `repo`).
+ */
+broad: boolean, reason: string | null, checked_at: string, };
+
+/**
+ * Read from the token prefix only; GitHub documents these prefixes.
+ */
+export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
 
 export type GitPushResponse = { success: boolean, message: string, };
 
@@ -5465,6 +5509,20 @@ export type ProjectDockerService = { service: string, container_name: string | n
  */
 export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
 
+export type ProjectGithubConnection = { project_id: string, mode: GithubConnectionMode, state: GithubConnectionState, machine_token_available: boolean, machine_token_source: GithubMachineTokenSource | null,
+/**
+ * The project's remote is on github.com.
+ */
+on_github: boolean,
+/**
+ * Scope of the token this project uses (or would use when it is off).
+ */
+scope: GithubScope | null,
+/**
+ * Kept connected by the upgrade that introduced this setting; drives a one-time notice.
+ */
+connected_on_upgrade: boolean, updated_at: string | null, };
+
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
 export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
@@ -6643,7 +6701,9 @@ run_retention_days: number,
 /**
  * KT-984 — blank the step outputs of workflow runs finished more than N
  * days ago, keeping every run row and its metadata. `0` keeps outputs
- * forever. Default 30; see `db::run_retention` for what is never touched.
+ * forever. A fresh install starts at 30 (`core::config::default_config`); a
+ * config.toml without the field, i.e. an existing install, reads 0 until
+ * the user turns it on. See `db::run_retention` for what is never touched.
  */
 run_payload_retention_days: number,
 /**
@@ -6940,6 +7000,11 @@ num_ctx: number | null,
 warnings: Array<string>, };
 
 export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
+
+/**
+ * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
+ */
+export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
 
 export type SetRecoveryResponse = {
 /**
@@ -7405,6 +7470,20 @@ cache_write_prompt_tokens?: number | null,
  * replaces the in-flight row, so it survives only an interrupted step.
  */
 last_activity?: AgentActivity | null, };
+
+/**
+ * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
+ */
+export type StepTools = {
+/**
+ * Built-in Claude Code tools (`Read`, `Bash`, `Edit`…). Claude Code only.
+ */
+cli: Array<string>,
+/**
+ * `kronn-internal` tools, loaded with their schemas at start; no other
+ * MCP server is mounted.
+ */
+kronn_internal: Array<string>, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
 
@@ -7991,7 +8070,11 @@ export type TriggerWorkflowRequest = { variables?: Record<string, string>,
  * ticket a run is about, so the run list can be filtered on them even if
  * the run fails before any step writes its state.
  */
-state?: Record<string, string>, };
+state?: Record<string, string>,
+/**
+ * The project to run a multi-project workflow for (KT-851).
+ */
+project_id?: string, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
@@ -8163,7 +8246,11 @@ variables?: Array<PromptVariable> | null, enabled?: boolean | null,
 /**
  * Pin/unpin as favorite; omit to leave untouched.
  */
-pinned?: boolean | null, };
+pinned?: boolean | null,
+/**
+ * `null` makes the workflow single-project again; omitted keeps it.
+ */
+project_scope?: WorkflowProjectScope | null, };
 
 /**
  * Response after uploading a context file.
@@ -8486,7 +8573,13 @@ variables?: Array<PromptVariable>, enabled: boolean,
  * User-pinned / favorite workflow — surfaces first in the Workflows
  * page list, same affordance as `Discussion::pinned`.
  */
-pinned: boolean, created_at: string, updated_at: string, };
+pinned: boolean,
+/**
+ * KT-851 — the projects this workflow may run for besides `project_id`
+ * (its home project, whose repository carries it). `None` keeps the
+ * single-project behaviour; the project is then resolved at trigger time.
+ */
+project_scope?: WorkflowProjectScope, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -8645,6 +8738,11 @@ max_llm_calls?: number | null,
  * Defaults to 10. Triggers `RunStatus::StoppedByGuard`.
  */
 loop_detection_max_revisits?: number | null, };
+
+/**
+ * Which projects a multi-project workflow serves (KT-851).
+ */
+export type WorkflowProjectScope = { "type": "All" } | { "type": "Projects", project_ids: Array<string>, };
 
 export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**

@@ -1763,6 +1763,8 @@ pub struct AgentProcess {
     /// agent type is what broke: the type says which CLI runs, not how its
     /// output is framed.
     token_fragments: bool,
+    /// The launch's scoped bridge token; dropping the process revokes it.
+    bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
 }
 
 /// Reads an HTTP agent's tool activity from outside its run.
@@ -1869,6 +1871,15 @@ impl PromptCacheUsage {
 }
 
 impl AgentProcess {
+    /// Keep the launch's bridge token alive exactly as long as this process.
+    fn holding_bridge_token(
+        mut self,
+        guard: Option<crate::core::bridge_token::BridgeTokenGuard>,
+    ) -> Self {
+        self.bridge_token = guard;
+        self
+    }
+
     /// True when `next_line()` yields RAW token fragments to concatenate as-is,
     /// not whole lines. Line-based consumers must skip their '\n' separator for
     /// these — joining fragments with newlines shreds the message, one piece per
@@ -2559,6 +2570,9 @@ pub struct TaskWorkerBridgeContext {
 pub(crate) const KRONN_INTERNAL_CODEX_ENV_VARS: &[&str] = &[
     "KRONN_DISCUSSION_ID",
     "KRONN_BACKEND_URL",
+    "KRONN_BRIDGE_TOKEN",
+    // A host session outside Kronn may still authenticate with the operator's
+    // token from its own shell; a Kronn-launched agent never holds it.
     "KRONN_AUTH_TOKEN",
     "KRONN_TASK_WORKER_CONTEXT",
     "KRONN_ROOM_AGENT_CONTEXT",
@@ -2856,9 +2870,18 @@ pub struct AgentStartConfig<'a> {
     pub activity: Option<super::activity::AgentActivitySink>,
     /// Used to read .mcp.json and resolve MCP context.
     pub project_path: &'a str,
+    /// The launch's project, when it has one. Decides whether the agent gets
+    /// a GitHub token (`core::github_connection`, D2).
+    pub project_id: Option<&'a str>,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
     pub work_dir: Option<&'a str>,
     pub read_only_repos: &'a [String],
+    /// Plain directories made readable, never writable, under the same policy
+    /// as `read_only_repos` but without a Git checkout (KT-910: the run's
+    /// artifacts directory). Kronn-owned paths only, never user input.
+    pub read_only_dirs: &'a [String],
+    /// KT-908 — the tools a workflow Agent step declared; `None` = unchanged.
+    pub step_tools: Option<&'a crate::models::StepTools>,
     pub prompt: &'a str,
     pub tokens: &'a TokensConfig,
     pub full_access: bool,
@@ -3022,10 +3045,13 @@ impl<'a> AgentStartConfig<'a> {
             provenance: None,
             activity: None,
             project_path,
+            project_id: None,
             prompt,
             tokens,
             work_dir: None,
             read_only_repos: &[],
+            read_only_dirs: &[],
+            step_tools: None,
             full_access: false,
             skill_ids: &[],
             repository_skills: &[],
@@ -3512,19 +3538,22 @@ pub fn task_worker_route_policy(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
-    if config.task_worker_context.is_some() && !config.read_only_repos.is_empty() {
+    let has_read_only_paths =
+        !config.read_only_repos.is_empty() || !config.read_only_dirs.is_empty();
+    if config.task_worker_context.is_some() && has_read_only_paths {
         return Err(
             "read_only_repos is a workflow Agent policy, not a task-worker override".into(),
         );
     }
-    let read_only_repos = if config.read_only_repos.is_empty() {
+    let read_only_repos = if !has_read_only_paths {
         None
     } else {
         let work_dir = resolve_agent_work_dir(config.work_dir, config.project_path)?;
-        super::read_only_repos::ReadOnlyRepos::resolve(
+        super::read_only_repos::ReadOnlyRepos::resolve_with_dirs(
             config.agent_type,
             &work_dir,
             config.read_only_repos,
+            config.read_only_dirs,
         )?
     };
     super::generation_settings::validate(
@@ -4026,6 +4055,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // rejected full transcript with a resumed native session and duplicate its
     // history.
     let acp_resume_id = (!task_worker).then_some(config.cli_resume_id).flatten();
+    let bridge = mint_launch_bridge_token(&config);
+    let bridge_value = bridge.as_ref().map(|guard| guard.value().to_owned());
     match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
             // Kiro ships as a host binary; the Linux container needs its own
@@ -4049,12 +4080,25 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                step_tools: config.step_tools,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
                 return run_acp_session(request, transport).await;
             }
-            return start_native_acp(request, launch_full_access).await;
+            let native_env = crate::acp::NativeLaunchEnv {
+                discussion_id: config.discussion_id.map(str::to_owned),
+                room_agent: config.room_agent_context.cloned(),
+                workflow_step: config.workflow_step_context.cloned(),
+                api_key: crate::core::child_env::AgentFamily::from_agent_type(config.agent_type)
+                    .provider_key_env()
+                    .and_then(|env_key| get_api_key(env_key, config.tokens)),
+                bridge_token: bridge_value.clone(),
+                github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
+            };
+            return start_native_acp(request, launch_full_access, native_env)
+                .await
+                .map(|process| process.holding_bridge_token(bridge));
         }
         crate::acp::AcpProductionRoute::AdaptedAcp => {
             tracing::info!(
@@ -4078,6 +4122,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                step_tools: config.step_tools,
             };
             #[cfg(test)]
             if let Some(transport) = test_acp_routes::transport_for(&config, &work_dir) {
@@ -4134,6 +4179,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 workflow_step_context: config.workflow_step_context.cloned(),
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
+                step_tools: config.step_tools.cloned(),
+                github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
+                bridge_token: bridge_value.clone(),
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4141,9 +4189,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 launch_full_access && read_only_repos.is_none(),
                 launch,
             )
-            .await;
+            .await
+            .map(|process| process.holding_bridge_token(bridge));
         }
         _ => {}
+    }
+    // The direct CLI route has no declared-tools policy: refusing is honest,
+    // silently launching with every tool is not (KT-908).
+    if config.step_tools.is_some() {
+        return Err(format!(
+            "{:?}: `agent_settings.tools` needs the ACP route; it is not applied by the direct CLI fallback",
+            config.agent_type
+        ));
     }
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command_with_task_worker_policy(
@@ -4251,6 +4308,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     }
 
+    let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(
         binary,
@@ -4264,6 +4322,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.task_worker_context,
         config.room_agent_context,
         config.workflow_step_context,
+        &github_env,
+        bridge_value.as_deref(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4281,6 +4341,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.task_worker_context,
                     config.room_agent_context,
                     config.workflow_step_context,
+                    &github_env,
+                    bridge_value.as_deref(),
                 )?
             } else {
                 return Err(e);
@@ -4402,6 +4464,43 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         http_cancel: None,
         pgid,
         token_fragments: false,
+        bridge_token: bridge,
+    })
+}
+
+/// Mint the launch's bridge token, bound to its own discussions, its task
+/// execution and its workflow run. `None` when the launch names none of them.
+fn mint_launch_bridge_token(
+    config: &AgentStartConfig<'_>,
+) -> Option<crate::core::bridge_token::BridgeTokenGuard> {
+    let mut discussion_ids: Vec<String> = Vec::new();
+    for id in [
+        config.discussion_id,
+        config
+            .task_worker_context
+            .map(|context| context.discussion_id.as_str()),
+        config
+            .room_agent_context
+            .map(|context| context.discussion_id.as_str()),
+        config
+            .workflow_step_context
+            .map(|context| context.discussion_id.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !discussion_ids.iter().any(|known| known == id) {
+            discussion_ids.push(id.to_owned());
+        }
+    }
+    crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
+        discussion_ids,
+        task_execution_id: config
+            .task_worker_context
+            .map(|context| context.execution_id.clone()),
+        workflow_run_id: config
+            .workflow_step_context
+            .map(|context| context.run_id.clone()),
     })
 }
 
@@ -4425,6 +4524,12 @@ pub(crate) struct AdapterLaunchOptions {
     /// Complete invocation policy for task workers or read-only workflow repos.
     pub(crate) worker_args: Option<Vec<String>>,
     pub(crate) api_key: Option<String>,
+    /// KT-908 — a workflow step's declared tools; `None` = today's argv.
+    pub(crate) step_tools: Option<crate::models::StepTools>,
+    /// `core::github_connection::env_for_launch` for this launch's project.
+    pub(crate) github_env: Vec<(String, String)>,
+    /// The launch's scoped bridge token (layer B); revoked with the launch.
+    pub(crate) bridge_token: Option<String>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -4477,11 +4582,14 @@ struct AcpSessionRequest<'a> {
     activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
     idle_timeout: Option<Duration>,
+    /// KT-908 — narrows the MCP servers offered to the session.
+    step_tools: Option<&'a crate::models::StepTools>,
 }
 
 async fn start_native_acp(
     request: AcpSessionRequest<'_>,
     full_access: bool,
+    native_env: crate::acp::NativeLaunchEnv,
 ) -> Result<AgentProcess, String> {
     use crate::acp::{acp_agent, AcpJsonRpcTransport, AcpSessionScope, AcpTransport};
 
@@ -4498,7 +4606,7 @@ async fn start_native_acp(
             acp_agent_kind,
             &request.work_dir.to_string_lossy(),
             full_access,
-            request.discussion_id,
+            native_env,
             scope,
         )
         .await
@@ -4653,6 +4761,7 @@ async fn run_acp_session(
         provenance,
         activity,
         idle_timeout,
+        step_tools,
     } = request;
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4660,7 +4769,10 @@ async fn run_acp_session(
     use tokio::io::AsyncWriteExt;
 
     let mut host = AcpHost::new(1, transport);
-    let mcp_servers = acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode);
+    let mcp_servers = declared_mcp_servers(
+        acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode),
+        step_tools,
+    );
     if let Err(error) = host
         .negotiate(AcpInitialize {
             protocol_version: 1,
@@ -5045,6 +5157,7 @@ async fn run_acp_session(
         http_cancel: Some(cancel),
         pgid: None,
         token_fragments: true,
+        bridge_token: None,
     })
 }
 
@@ -5078,6 +5191,34 @@ async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> Strin
 /// `env_by_reference`: the agent's adapter turns an entry's env values into
 /// references it resolves from its own process (Claude, KT-1003), so an entry
 /// is kept unless a credential sits in its `args`.
+/// The command-line flag that narrows the internal bridge to a step's tools.
+pub(crate) fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String {
+    format!("--step-tools={}", tools.kronn_internal.join(","))
+}
+
+/// KT-908 — a step that declares its tools gets only Kronn's bridge, narrowed
+/// to them, or no server at all; an undeclared step keeps `servers` as is.
+fn declared_mcp_servers(
+    servers: Vec<crate::acp::AcpMcpServer>,
+    step_tools: Option<&crate::models::StepTools>,
+) -> Vec<crate::acp::AcpMcpServer> {
+    let Some(tools) = step_tools else {
+        return servers;
+    };
+    if tools.kronn_internal.is_empty() {
+        return Vec::new();
+    }
+    servers
+        .into_iter()
+        .filter(|server| server.id == "kronn-internal")
+        .map(|mut server| {
+            server.args.push(step_tools_bridge_arg(tools));
+            server.allowed_tools = tools.kronn_internal.clone();
+            server
+        })
+        .collect()
+}
+
 fn acp_project_mcp_servers(
     project_path: &str,
     env_by_reference: bool,
@@ -11086,6 +11227,7 @@ async fn start_ollama_http_with_idle(
         http_cancel: Some(http_cancel),
         pgid: None,
         token_fragments: false,
+        bridge_token: None,
     })
 }
 
@@ -11386,7 +11528,12 @@ async fn run_claude_task_worker_auth_probe(
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::Unsupported, message))?;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    async_cmd(command)
+    let mut probe = async_cmd(command);
+    crate::core::child_env::isolate(
+        probe.as_std_mut(),
+        crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Claude),
+    );
+    probe
         .args(args)
         .current_dir(effective_work_dir)
         .stdin(Stdio::null())
@@ -11553,6 +11700,10 @@ async fn run_copilot_task_worker_preflight_with_timeout(
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
     let mut command = async_cmd(command);
+    crate::core::child_env::isolate(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Copilot),
+    );
     command
         .args(args)
         .current_dir(effective_work_dir)
@@ -11722,7 +11873,7 @@ fn claude_task_worker_mcp_config(project_root: &Path) -> Result<String, String> 
             "KRONN_TASK_WORKER_CONTEXT": "${KRONN_TASK_WORKER_CONTEXT}",
             "KRONN_DISCUSSION_ID": "${KRONN_DISCUSSION_ID}",
             "KRONN_BACKEND_URL": "${KRONN_BACKEND_URL:-http://127.0.0.1:3140}",
-            "KRONN_AUTH_TOKEN": "${KRONN_AUTH_TOKEN:-}",
+            "KRONN_BRIDGE_TOKEN": "${KRONN_BRIDGE_TOKEN:-}",
         }),
     );
     serde_json::to_string(&serde_json::json!({
@@ -12608,6 +12759,8 @@ pub(crate) fn try_spawn(
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     room_agent_context: Option<&RoomAgentBridgeContext>,
     workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    github_env: &[(String, String)],
+    bridge_token: Option<&str>,
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -12669,6 +12822,12 @@ pub(crate) fn try_spawn(
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
     let mut cmd = async_cmd(&final_cmd);
+    // Built, never inherited: the backend's own environment holds secrets.
+    let route = crate::core::child_env::ChildRoute::Agent(
+        crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
+    );
+    crate::core::child_env::reset(cmd.as_std_mut(), route);
+    let inherited = crate::core::child_env::names_of(cmd.as_std());
     // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut cmd, std::path::Path::new(&effective_work_dir));
     if let SpawnIo::Adapter(env) = io {
@@ -12714,18 +12873,28 @@ pub(crate) fn try_spawn(
         }
     }
 
-    // Set TMPDIR to a directory on the same filesystem as work_dir.
-    // Prevents EXDEV (cross-device link) errors when agents like Codex do
-    // os.rename() from temp files to the work directory (macOS Docker + VirtioFS).
-    let agent_tmpdir = work_dir.join(".kronn/tmp");
-    let _ = std::fs::create_dir_all(&agent_tmpdir);
-    // Ensure .kronn/tmp/ is gitignored in the project (once per project, idempotent)
-    if let Some(project_path) = work_dir.to_str() {
-        crate::core::mcp_scanner::ensure_gitignore_public(project_path, ".kronn/tmp/");
-    }
-    cmd.env("TMPDIR", &agent_tmpdir);
-    cmd.env("TEMP", &agent_tmpdir);
-    cmd.env("TMP", &agent_tmpdir);
+    // Same host as the backend, except an agent in WSL2 NAT mode, whose
+    // loopback is the Linux VM: the operator's WSL override then applies.
+    let backend_url = (discussion_id.is_some() || runs_in_wsl).then(|| {
+        let wsl_override = std::env::var(super::wsl::WSL_BACKEND_URL_ENV).ok();
+        if runs_in_wsl {
+            super::wsl::warn_once_if_backend_unreachable(wsl_override.is_some());
+        }
+        super::wsl::agent_backend_url(
+            runs_in_wsl,
+            std::env::var("KRONN_BACKEND_URL").ok().as_deref(),
+            wsl_override.as_deref(),
+        )
+    });
+    let launch = crate::core::child_env::AgentLaunch {
+        discussion_id,
+        task_worker: task_worker_context,
+        room_agent: room_agent_context,
+        workflow_step: workflow_step_context,
+        bridge_token,
+        api_key: api_key.map(|key| (env_key, key)),
+    };
+    crate::core::child_env::apply_agent_launch(cmd.as_std_mut(), work_dir, &launch, backend_url)?;
 
     // In Docker, HOME=/home/kronn (the container user) and EVERY agent's auth
     // dir is mounted there by docker-compose: `${HOME}/.claude → /home/kronn/.claude`,
@@ -12746,57 +12915,6 @@ pub(crate) fn try_spawn(
     // a few lines down. Ollama doesn't read $HOME (uses HTTP API).
     // Unknown binaries keep the override — they may legitimately need
     // a host-rooted HOME (e.g. arbitrary user-installed tools).
-    // Forward the discussion id to the agent process so the
-    // `kronn-internal` MCP bridge (auto-injected into .mcp.json by the
-    // disc setup paths) can call back into Kronn's introspection
-    // endpoints with the right disc context. Set unconditionally when
-    // we have one — non-MCP-aware agents simply ignore the env var.
-    if let Some(disc_id) = discussion_id {
-        cmd.env("KRONN_DISCUSSION_ID", disc_id);
-    }
-    if discussion_id.is_some() || runs_in_wsl {
-        // Same host as the backend, except an agent in WSL2 NAT mode, whose
-        // loopback is the Linux VM: the operator's WSL override then applies.
-        let wsl_override = std::env::var(super::wsl::WSL_BACKEND_URL_ENV).ok();
-        if runs_in_wsl {
-            super::wsl::warn_once_if_backend_unreachable(wsl_override.is_some());
-        }
-        let backend_url = super::wsl::agent_backend_url(
-            runs_in_wsl,
-            std::env::var("KRONN_BACKEND_URL").ok().as_deref(),
-            wsl_override.as_deref(),
-        );
-        cmd.env("KRONN_BACKEND_URL", backend_url);
-    }
-    if let Some(context) = task_worker_context {
-        let encoded = serde_json::to_string(context)
-            .map_err(|error| format!("Unable to encode task worker context: {error}"))?;
-        cmd.env("KRONN_TASK_WORKER_CONTEXT", encoded);
-    } else {
-        // A normal turn must never inherit a caller's worker capability.
-        cmd.env_remove("KRONN_TASK_WORKER_CONTEXT");
-    }
-    match room_agent_context.filter(|_| task_worker_context.is_none()) {
-        Some(context) => {
-            let encoded = serde_json::to_string(context)
-                .map_err(|error| format!("Unable to encode room agent context: {error}"))?;
-            cmd.env("KRONN_ROOM_AGENT_CONTEXT", encoded);
-        }
-        None => {
-            cmd.env_remove("KRONN_ROOM_AGENT_CONTEXT");
-        }
-    }
-    match workflow_step_context.filter(|_| task_worker_context.is_none()) {
-        Some(context) => {
-            let encoded = serde_json::to_string(context)
-                .map_err(|error| format!("Unable to encode workflow step context: {error}"))?;
-            cmd.env("KRONN_WORKFLOW_STEP_CONTEXT", encoded);
-        }
-        None => {
-            cmd.env_remove("KRONN_WORKFLOW_STEP_CONTEXT");
-        }
-    }
-
     let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
         let exists = std::path::Path::new(rh).is_dir();
         if !exists {
@@ -12863,40 +12981,8 @@ pub(crate) fn try_spawn(
     #[cfg(unix)]
     cmd.env("SHELL", "/bin/bash");
 
-    // Only set API key env var if explicitly configured (override)
-    // Otherwise let the agent use its own local auth
-    if let Some(key) = api_key {
-        cmd.env(env_key, key);
-    }
-
-    // Forward GitHub token so agents can create branches, PRs, etc.
-    // Priority: env var GH_TOKEN/GITHUB_TOKEN > `gh auth token` (gh CLI config).
-    // Also sets COPILOT_GITHUB_TOKEN for GitHub Copilot CLI.
-    let gh_token = std::env::var("GH_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .or_else(|_| {
-            // Fallback: extract token from `gh auth token` (stored in ~/.config/gh/hosts.yml).
-            // Use sync_cmd so the gh subprocess does not flash a console window on Windows.
-            crate::core::cmd::sync_cmd("gh")
-                .args(["auth", "token"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t)
-                    }
-                })
-                .ok_or(std::env::VarError::NotPresent)
-        });
-    if let Ok(ref token) = gh_token {
-        cmd.env("GH_TOKEN", token);
-        cmd.env("GITHUB_TOKEN", token);
-        cmd.env("COPILOT_GITHUB_TOKEN", token);
-    }
+    // Only a project connected to GitHub hands its agents a token (D2).
+    crate::core::github_connection::apply_launch_env(cmd.as_std_mut(), github_env);
     // If an API key was explicitly set (e.g. for CopilotCli), also set COPILOT_GITHUB_TOKEN
     if let Some(key) = api_key {
         if env_key == "GH_TOKEN" {
@@ -12916,10 +13002,15 @@ pub(crate) fn try_spawn(
         receipt.validate_single_argument_limit()?;
     }
 
-    // wsl.exe drops every Windows variable `WSLENV` does not list.
+    let mut granted = launch.granted();
+    granted.extend_from_slice(crate::core::child_env::GITHUB_ENV);
+    crate::core::child_env::seal(cmd.as_std_mut(), route, &granted);
+
+    // wsl.exe drops every Windows variable `WSLENV` does not list. What the
+    // launch merely inherited stays on the Windows side, as before.
     if runs_in_wsl {
-        super::wsl::apply_wslenv(&mut cmd, KRONN_INTERNAL_CODEX_ENV_VARS, |name| {
-            std::env::var_os(name).is_some()
+        super::wsl::apply_wslenv(&mut cmd, |name| {
+            crate::core::child_env::forwarded_into_wsl(name, &inherited, &granted)
         });
     }
 
@@ -13625,6 +13716,7 @@ mod acp_resume_tests {
     ) -> AgentProcess {
         run_acp_session(
             AcpSessionRequest {
+                step_tools: None,
                 agent_type,
                 work_dir: Path::new("."),
                 prompt: "fixture prompt",
@@ -13970,6 +14062,7 @@ mod acp_resume_tests {
             let transport = transport(outcome, PromptOutcome::Complete);
             let result = run_acp_session(
                 AcpSessionRequest {
+                    step_tools: None,
                     agent_type: &AgentType::OpenCode,
                     work_dir: Path::new("."),
                     prompt: "delta only",
@@ -14201,6 +14294,7 @@ mod acp_resume_tests {
         model_flag: Option<&'a str>,
     ) -> AcpSessionRequest<'a> {
         AcpSessionRequest {
+            step_tools: None,
             agent_type,
             work_dir: Path::new("."),
             prompt: "fixture prompt",

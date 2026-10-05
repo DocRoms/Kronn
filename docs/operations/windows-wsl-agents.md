@@ -15,10 +15,12 @@ boundary.
 - **Environment.** `wsl.exe` drops every Windows variable that `WSLENV` does
   not list. Each launch therefore adds to `WSLENV` the name of every variable
   it sets (discussion id, backend URL, worker/room/workflow contexts, API key,
-  GitHub token, the MCP secret references of KT-964/KT-1003, `TMPDIR`…) plus
-  the bridge variables inherited from Kronn's own environment, such as
-  `KRONN_AUTH_TOKEN`. Names only, never values. The user's existing `WSLENV`
-  is kept and their flags win for a name they already list.
+  GitHub token, the MCP secret references of KT-964/KT-1003, the scoped
+  `KRONN_BRIDGE_TOKEN`, `TMPDIR`…). The launch's environment is built, not
+  inherited (KT-1006), so that list is complete; the Windows-side allow-list
+  (`SystemRoot`, proxies, locale…) stays on the Windows side. Names only, never
+  values. The user's existing `WSLENV` is kept and their flags win for a name
+  they already list.
   `TMPDIR`/`TEMP`/`TMP` carry `/up` (translated, Linux side only). Other
   names carry no flag, so they also reach a Windows program the agent starts
   through interop, such as the bundled `kronn-internal.exe` bridge. `HOME`,
@@ -90,8 +92,9 @@ Code (`claude`) installed **only** inside WSL (`which claude` in WSL succeeds,
    is not mirrored". With the installed (bundled) bridge, ask Claude to call a
    `kronn-internal` tool such as `kronn_intro`: it should answer.
 3. Ask Claude to run `env | grep -E 'KRONN_|TMPDIR'` and `pwd`. Expect
-   `KRONN_DISCUSSION_ID`, `KRONN_BACKEND_URL`, `KRONN_AUTH_TOKEN` (if auth is
-   on), `TMPDIR=/mnt/c/…/.kronn/tmp` and a `/mnt/c/…` working directory.
+   `KRONN_DISCUSSION_ID`, `KRONN_BACKEND_URL`, `KRONN_BRIDGE_TOKEN`,
+   `TMPDIR=/mnt/c/…/.kronn/tmp` and a `/mnt/c/…` working directory, and never
+   `KRONN_AUTH_TOKEN`.
    `echo $WSLENV` lists names only.
 4. Ask Claude to list its MCP servers (`/mcp` is not available in print mode:
    ask it to call a tool of each project MCP). The project's MCP servers from

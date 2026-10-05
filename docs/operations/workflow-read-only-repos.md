@@ -87,6 +87,34 @@ readable with this wording when that template is available:
 > are read-only. If a read is denied, report the limitation; do not claim to have
 > inspected the checkout or attempt to bypass the restriction.
 
+## Run artifacts directory
+
+Each run gets its own directory, created by Kronn outside every checkout and
+exposed as `{{run.artifacts_dir}}` (KT-910). Exec steps write files there. A
+Claude Code or Codex Agent step whose rendered prompt contains that path gets
+it as a read-only directory under the policy above, without the Git checkout
+requirement: `--add-dir`, `Edit` deny rule and sandbox `denyWrite` for Claude,
+an explicit `read` entry for Codex. Other agents receive no grant.
+[src: file: backend/src/workflows/run_artifacts.rs:1]
+[src: file: backend/src/workflows/steps.rs:89]
+
+```json
+[
+  {"name": "capture", "step_type": {"type": "Exec"}, "exec_command": "npx",
+   "exec_args": ["playwright", "screenshot", "https://example.org", "{{run.artifacts_dir}}/S1.png"]},
+  {"name": "verdict", "step_type": {"type": "Agent"}, "agent": "ClaudeCode",
+   "prompt_template": "Open {{run.artifacts_dir}}/S1.png and judge the layout."}
+]
+```
+
+Retention: the directory exists while its run can still execute (running,
+waiting for approval, interrupted within `interrupted_worktree_ttl_days`). It
+is removed when the run ends, the same moment as its worktree, and at startup
+for a run that ended, was deleted, or stayed interrupted past that TTL. It
+lives under the Kronn data directory (`run-artifacts/<run id>`, owner-only).
+A gate rejection ends the run without executing it again: its directory goes
+at the next startup.
+
 ## Qualification
 
 The automated policy and dispatch regressions use temporary repositories and

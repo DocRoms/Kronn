@@ -238,17 +238,12 @@ pub(crate) fn wslenv_value<'a>(
     })
 }
 
-/// Set `WSLENV` on a launch that crosses into WSL: every variable this launch
-/// sets, plus the bridge variables the agent inherits from Kronn's own
-/// environment (`inherited` says which of those are present).
-pub(crate) fn apply_wslenv(
-    command: &mut tokio::process::Command,
-    inherited_bridge_names: &[&str],
-    inherited: impl Fn(&str) -> bool,
-) {
+/// Set `WSLENV` on a launch that crosses into WSL: every variable the launch's
+/// built environment carries that `forward` accepts. Nothing is inherited past
+/// the built environment, so this list is complete.
+pub(crate) fn apply_wslenv(command: &mut tokio::process::Command, forward: impl Fn(&str) -> bool) {
     let std_command = command.as_std();
     let mut set: Vec<String> = Vec::new();
-    let mut removed: Vec<String> = Vec::new();
     let mut existing: Option<String> = None;
     for (key, value) in std_command.get_envs() {
         let key = key.to_string_lossy().into_owned();
@@ -256,20 +251,12 @@ pub(crate) fn apply_wslenv(
             Some(value) if key.eq_ignore_ascii_case("WSLENV") => {
                 existing = Some(value.to_string_lossy().into_owned());
             }
-            Some(_) => set.push(key),
-            None => removed.push(key),
+            Some(_) if forward(&key) => set.push(key),
+            _ => {}
         }
     }
     let existing = existing.or_else(|| std::env::var("WSLENV").ok());
-    let inherited_names = inherited_bridge_names.iter().filter(|name| {
-        inherited(name) && !removed.iter().any(|gone| gone.eq_ignore_ascii_case(name))
-    });
-    let names: Vec<&str> = set
-        .iter()
-        .map(String::as_str)
-        .chain(inherited_names.copied())
-        .collect();
-    if let Some(value) = wslenv_value(existing.as_deref(), names) {
+    if let Some(value) = wslenv_value(existing.as_deref(), set.iter().map(String::as_str)) {
         command.env("WSLENV", value);
     }
 }
@@ -626,22 +613,16 @@ mod tests {
     fn apply_wslenv_forwards_every_variable_the_launch_sets() {
         let mut command = tokio::process::Command::new("wsl.exe");
         command
+            .env_clear()
             .env("KRONN_DISCUSSION_ID", "d1")
             .env("KRONN_BACKEND_URL", "http://localhost:3140")
+            .env("KRONN_BRIDGE_TOKEN", "kbt_x")
             .env("TMPDIR", r"C:\proj\.kronn\tmp")
             .env("HOME", r"C:\Users\Romu")
+            .env("SystemRoot", r"C:\Windows")
             .env("KRONN_MCP_REF_0", "secret-value")
-            .env_remove("KRONN_TASK_WORKER_CONTEXT")
             .env("WSLENV", "GOPATH/l");
-        apply_wslenv(
-            &mut command,
-            &[
-                "KRONN_AUTH_TOKEN",
-                "KRONN_TASK_WORKER_CONTEXT",
-                "KRONN_SESSION_ID",
-            ],
-            |name| name != "KRONN_SESSION_ID",
-        );
+        apply_wslenv(&mut command, |name| name != "SystemRoot");
         let wslenv = command
             .as_std()
             .get_envs()
@@ -654,17 +635,17 @@ mod tests {
         for expected in [
             "KRONN_DISCUSSION_ID",
             "KRONN_BACKEND_URL",
+            "KRONN_BRIDGE_TOKEN",
             "TMPDIR/up",
             "KRONN_MCP_REF_0",
-            "KRONN_AUTH_TOKEN",
         ] {
             assert!(
                 entries.contains(&expected),
                 "{expected} missing from {wslenv}"
             );
         }
-        // Removed for this launch, absent from Kronn's env, or WSL-owned.
-        for absent in ["KRONN_TASK_WORKER_CONTEXT", "KRONN_SESSION_ID", "HOME"] {
+        // Filtered by the caller, or WSL-owned.
+        for absent in ["SystemRoot", "HOME", "KRONN_AUTH_TOKEN"] {
             assert!(
                 !entries.iter().any(|entry| entry.starts_with(absent)),
                 "{absent} must not be forwarded: {wslenv}"

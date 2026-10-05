@@ -27,6 +27,7 @@ const { config, contacts } = vi.hoisted(() => ({
     saveGlobalContextMode: vi.fn(),
     getNetworkExposure: vi.fn(),
     setNetworkExposure: vi.fn(),
+    getDesktopPort: vi.fn(),
   },
   contacts: {
     networkInfo: vi.fn(),
@@ -55,6 +56,7 @@ beforeEach(() => {
   config.getGlobalContextMode.mockResolvedValue('always');
   config.saveGlobalContextMode.mockResolvedValue(undefined);
   config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] });
+  config.getDesktopPort.mockResolvedValue({ saved: 47315, current: 47315, min: 1024, max: 65535 });
   config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
   contacts.networkInfo.mockResolvedValue({
     tailscale_ip: null, advertised_host: null, detected_ips: [],
@@ -268,6 +270,20 @@ describe('IdentitySection — network exposure toggle', () => {
       await mountIdentity();
       await act(async () => { fireEvent.click(screen.getByText('settings.exposeRestartBtn')); });
       await waitFor(() => expect(calls).toEqual(['flush', 'restart_app']));
+    } finally {
+      delete window.__TAURI__;
+    }
+  });
+
+  it('offers the desktop port only inside the desktop app', async () => {
+    await mountIdentity();
+    expect(screen.queryByTestId('desktop-port-field')).toBeNull();
+    expect(config.getDesktopPort).not.toHaveBeenCalled();
+    cleanup();
+    window.__TAURI__ = { core: { invoke: vi.fn() as never } };
+    try {
+      await mountIdentity();
+      expect(await screen.findByTestId('desktop-port-field')).toBeInTheDocument();
     } finally {
       delete window.__TAURI__;
     }

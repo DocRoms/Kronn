@@ -127,6 +127,7 @@ pub async fn hydrate_step_from_quick_prompt(
         }
         None => {
             step.agent_settings = Some(crate::models::AgentSettings {
+                tools: None,
                 model: qp_model,
                 tier: Some(qp.tier),
                 reasoning_effort: qp_effort,
@@ -367,6 +368,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-model", "Résume {{host}}");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("qwen3:8b".to_string()),
             tier: None,
             reasoning_effort: None,
@@ -450,6 +452,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: None,
             tier: None,
             reasoning_effort: None,
@@ -475,6 +478,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-model2", "x");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("qwen3:8b".to_string()),
             tier: None,
             reasoning_effort: None,
@@ -484,6 +488,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("llama3.3:70b".to_string()),
             tier: None,
             reasoning_effort: None,
@@ -507,6 +512,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-effort", "Résume {{host}}");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: None,
             tier: None,
             reasoning_effort: Some("high".to_string()),
@@ -532,6 +538,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut qp = make_qp("qp-effort2", "x");
         qp.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: None,
             tier: None,
             reasoning_effort: Some("high".to_string()),
@@ -541,6 +548,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: None,
             tier: None,
             reasoning_effort: Some("low".to_string()),

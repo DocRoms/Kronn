@@ -125,48 +125,12 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
     }
 
-    // 0.8.11 — unify the API auth token across config.toml and the
-    // KRONN_AUTH_TOKEN env, in BOTH directions, so every layer agrees:
-    //   • env → config: an operator who sets KRONN_AUTH_TOKEN (e.g. in
-    //     docker-compose) enables auth without editing config.toml — the auth
-    //     middleware reads `config.server.auth_token`, so mirror the env into it.
-    //   • config → env: spawned children (the `kronn-internal` MCP sidecar, a
-    //     grandchild via the agent CLI) read KRONN_AUTH_TOKEN and send
-    //     `Authorization: Bearer` — without it an auth-enabled / LAN-exposed
-    //     instance returned a silent 401 to its own sidecar.
-    let env_token = std::env::var("KRONN_AUTH_TOKEN")
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
-    if let Some(ref t) = env_token {
-        match &app_config.server.auth_token {
-            None => app_config.server.auth_token = Some(t.clone()),
-            // Both set but DIFFERENT: the middleware validates the config
-            // token while spawned children (sidecar) inherit the env one —
-            // every sidecar call 401s with no visible cause. Don't silently
-            // pick a winner; tell the operator which one wins.
-            Some(cfg) if cfg != t => tracing::warn!(
-                "KRONN_AUTH_TOKEN env differs from the token in config.toml — the API \
-                 validates the CONFIG token, but child processes (MCP sidecar, agent \
-                 CLIs) inherit the ENV one and will get 401s. Align them (unset the env \
-                 var, or clear server.auth_token in config.toml)."
-            ),
-            Some(_) => {}
-        }
-        // An operator who explicitly sets KRONN_AUTH_TOKEN is asking for auth
-        // — and the LAN boot guard's own error message promises this env var
-        // secures the instance. A token with auth_enabled=false is a no-op in
-        // the middleware, so honor the intent.
-        if !app_config.server.auth_enabled {
-            tracing::info!("KRONN_AUTH_TOKEN set — enabling API authentication (was disabled)");
-            app_config.server.auth_enabled = true;
-        }
-    }
-    if let Some(ref token) = app_config.server.auth_token {
-        if std::env::var("KRONN_AUTH_TOKEN").is_err() {
-            std::env::set_var("KRONN_AUTH_TOKEN", token);
-        }
-    }
+    // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
+    // leaves this process's environment: children never inherit the admin
+    // token. Kronn-launched agents receive a scoped bridge token per launch.
+    let env_token = std::env::var("KRONN_AUTH_TOKEN").ok();
+    std::env::remove_var("KRONN_AUTH_TOKEN");
+    kronn::core::config::adopt_env_auth_token(&mut app_config.server, env_token);
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
     } else {
@@ -272,6 +236,17 @@ async fn main() -> anyhow::Result<()> {
     match kronn::core::keystore::reconcile(&mut app_config, &database).await {
         Ok(outcome) => tracing::info!("Encryption key reconciled: {outcome:?}"),
         Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
+    }
+
+    // Before any launch: which projects hand their agents a GitHub token (D2).
+    match kronn::core::github_connection::load_grants(
+        &database,
+        app_config.encryption_secret.as_deref(),
+    )
+    .await
+    {
+        Ok(n) => tracing::info!("GitHub connections loaded: {n} connected project(s)"),
+        Err(e) => tracing::error!("GitHub connections not loaded (no agent gets a token): {e}"),
     }
 
     match kronn::bootstrap_external_api_connections(&database, &mut app_config).await {
@@ -525,6 +500,14 @@ async fn main() -> anyhow::Result<()> {
             ttl_days = interrupted_ttl_days,
             "Interrupted workflow worktree reclamation completed"
         );
+    }
+
+    // KT-910 — artifacts directories of runs that ended or no longer exist.
+    let swept =
+        kronn::workflows::run_artifacts::sweep(&state.db, interrupted_ttl_days, chrono::Utc::now())
+            .await;
+    if swept > 0 {
+        tracing::info!(swept, "Run artifacts directories removed");
     }
 
     // Checkouts deleted without git (or nested inside a removed run worktree)

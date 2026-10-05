@@ -93,6 +93,15 @@ pub fn render_key(
     Ok(Some(rendered.to_string()))
 }
 
+/// A multi-project workflow's limit counts the runs of each project apart
+/// (KT-851); a single-project one keeps one bucket.
+fn project_bucket<'a>(workflow: &Workflow, run: &'a WorkflowRun) -> Option<Option<&'a str>> {
+    workflow
+        .project_scope
+        .is_some()
+        .then_some(run.project_id.as_deref())
+}
+
 /// Inserts `run` unless the workflow's limit is already reached for it. Call it
 /// inside a single `with_conn` closure: on the shared connection the count and
 /// the insert are then atomic, so two launches cannot both take the last slot.
@@ -102,9 +111,16 @@ pub fn insert_run_within_limit(
     run: &WorkflowRun,
 ) -> anyhow::Result<Result<(), String>> {
     if let Some(max) = workflow.concurrency_limit {
+        let project = project_bucket(workflow, run);
         if workflow.concurrency_key.is_some() {
             let key = run.concurrency_key.as_deref();
-            let active = crate::db::workflows::count_active_runs_for_key(conn, &workflow.id, key)?;
+            let active = crate::db::workflows::count_admitted_runs(
+                conn,
+                &workflow.id,
+                Some(key),
+                None,
+                project,
+            )?;
             if active >= max {
                 let label = key.map_or_else(|| "an empty key".to_string(), |k| format!("`{k}`"));
                 return Ok(Err(format!(
@@ -112,7 +128,8 @@ pub fn insert_run_within_limit(
                 )));
             }
         } else {
-            let active = crate::db::workflows::count_active_runs(conn, &workflow.id)?;
+            let active =
+                crate::db::workflows::count_admitted_runs(conn, &workflow.id, None, None, project)?;
             if active >= max {
                 return Ok(Err(format!("Concurrency limit reached ({active}/{max})")));
             }
@@ -137,7 +154,13 @@ pub fn resume_within_limit(
         .concurrency_key
         .is_some()
         .then_some(run.concurrency_key.as_deref());
-    let active = crate::db::workflows::count_admitted_runs(conn, &workflow.id, key, Some(&run.id))?;
+    let active = crate::db::workflows::count_admitted_runs(
+        conn,
+        &workflow.id,
+        key,
+        Some(&run.id),
+        project_bucket(workflow, run),
+    )?;
     if active >= max {
         return Ok(Err(format!(
             "Concurrency limit reached ({active}/{max}): another run of this workflow is active. Resume this run once it has finished."
@@ -220,5 +243,72 @@ mod tests {
         let two_lines = HashMap::from([("ticketKey".to_string(), "a\nb".to_string())]);
         assert!(render_key("{{ticketKey}}", &vars, &two_lines).is_err());
         assert_eq!(normalize_key(Some("  ".into())), None);
+    }
+
+    fn run_for(id: &str, project: &str, status: crate::models::RunStatus) -> WorkflowRun {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "workflow_id": "wf-scope", "status": status,
+            "trigger_context": null, "step_results": [], "tokens_used": 0,
+            "workspace_path": null, "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": null, "run_type": "linear", "batch_total": 0,
+            "batch_completed": 0, "batch_failed": 0, "batch_no_response": 0,
+            "batch_name": null, "parent_run_id": null, "state": {},
+            "produced_branches": [], "concurrency_key": null,
+            "project_id": project
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_multi_project_limit_counts_each_projects_runs_apart() {
+        use crate::models::RunStatus;
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        for id in ["a", "b", "c"] {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES (?1, ?1, ?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [id],
+            )
+            .unwrap();
+        }
+        crate::db::resource_identities::tests::seed_workflow(&conn, "wf-scope", "Scope", None);
+        let mut workflow = crate::db::workflows::get_workflow(&conn, "wf-scope")
+            .unwrap()
+            .unwrap();
+        workflow.concurrency_limit = Some(1);
+        workflow.project_scope = Some(crate::models::WorkflowProjectScope::All);
+        insert_run_within_limit(
+            &conn,
+            &workflow,
+            &run_for("r-a1", "a", RunStatus::WaitingApproval),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            insert_run_within_limit(&conn, &workflow, &run_for("r-b1", "b", RunStatus::Pending))
+                .unwrap()
+                .is_ok(),
+            "another project has its own slot"
+        );
+        let refused =
+            insert_run_within_limit(&conn, &workflow, &run_for("r-a2", "a", RunStatus::Pending))
+                .unwrap()
+                .unwrap_err();
+        assert!(refused.contains("(1/1)"), "{refused}");
+        let paused = run_for("r-a1", "a", RunStatus::WaitingApproval);
+        assert!(resume_within_limit(&conn, &workflow, &paused)
+            .unwrap()
+            .is_ok());
+
+        // A single-project workflow keeps one bucket.
+        workflow.project_scope = None;
+        assert!(insert_run_within_limit(
+            &conn,
+            &workflow,
+            &run_for("r-c1", "c", RunStatus::Pending)
+        )
+        .unwrap()
+        .is_err());
     }
 }

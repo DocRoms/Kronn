@@ -164,18 +164,35 @@ impl AcpTransport for ClaudeAcpAdapter {
         // Always supply a strict registry, even when absent/invalid/refused.
         // Freeze the exact authorized snapshot: passing its path would allow
         // a replacement between negotiation and CLI startup to widen scope.
-        if self.launch.worker_context.is_none() && !self.broker.audit_excludes("kronn-internal") {
+        // A step that declared no Kronn tool mounts no bridge (KT-908).
+        let bridge_declared = self
+            .launch
+            .step_tools
+            .as_ref()
+            .is_none_or(|tools| !tools.kronn_internal.is_empty());
+        if self.launch.worker_context.is_none()
+            && bridge_declared
+            && !self.broker.audit_excludes("kronn-internal")
+        {
             // This is Kronn's own executable, not a user/project declaration.
             // Keep room tools available even without a project, just as the
             // Codex adapter does, without restoring any global MCP registry.
             let launch = crate::agents::runner::disc_introspection_mcp_command().ok_or_else(|| {
                 AcpError::Transport("Claude ACP internal bridge is unavailable; repair the Kronn installation or check the configured bridge executable/script".into())
             })?;
+            let mut launch = launch;
+            let mut allowed = Vec::new();
+            if let Some(tools) = &self.launch.step_tools {
+                launch
+                    .args
+                    .push(crate::agents::runner::step_tools_bridge_arg(tools));
+                allowed = tools.kronn_internal.clone();
+            }
             let bridge = crate::acp::AcpMcpServer {
                 id: "kronn-internal".into(),
                 command: launch.command.clone(),
                 args: launch.args.clone(),
-                allowed_tools: Vec::new(),
+                allowed_tools: allowed,
             };
             self.broker.register_trusted_mcp_server(&bridge);
             servers.retain(|server| server.id != bridge.id);
@@ -311,11 +328,21 @@ impl AcpTransport for ClaudeAcpAdapter {
         if self.broker.session_policy().claude_skip_permissions {
             args.push("--dangerously-skip-permissions".into());
         }
-        let mcp_env = if self.launch.worker_context.is_none() {
+        let mut mcp_env = if self.launch.worker_context.is_none() {
             self.project_mcp_env.lock().await.clone()
         } else {
             Vec::new()
         };
+        if let Some(tools) = &self.launch.step_tools {
+            // Only the declared built-in tools, and no skill listing.
+            args.push("--tools".into());
+            args.push(tools.cli.join(","));
+            args.push("--disable-slash-commands".into());
+            if !tools.kronn_internal.is_empty() {
+                // Declared Kronn tools arrive with their schemas, not deferred.
+                mcp_env.push(("ENABLE_TOOL_SEARCH".into(), "false".into()));
+            }
+        }
         let mut child = crate::agents::runner::try_spawn(
             &self.program,
             None,
@@ -328,6 +355,8 @@ impl AcpTransport for ClaudeAcpAdapter {
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
             self.launch.workflow_step_context.as_ref(),
+            &self.launch.github_env,
+            self.launch.bridge_token.as_deref(),
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child

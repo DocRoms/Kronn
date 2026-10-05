@@ -1,7 +1,9 @@
 # Agent secret boundary (0.14.3 design note, v3.1)
 
-Status: **proposal v3.1, awaiting validation by Romu and Codex** (KT-1006,
-KT-1007, KT-990, KT-969). v1 `7e721fc6`, v2 `9261bfa7`.
+Status: **v3.1. Layer A and the bridge token (layer B, first half) are
+implemented in 0.14.3; the per-action human proof is deferred to 0.15 by Romu
+(card `0143-secu-d1-v31`).** See §9 for what shipped and the residual path.
+(KT-1006, KT-1013, KT-1007, KT-990, KT-969). v1 `7e721fc6`, v2 `9261bfa7`.
 Sources: the 0.14.3 security audit (room `c3a5311c`, SEC-1 to SEC-15), Codex's
 reviews (room messages `060744b2`, `8b2bd770`, `e0163229`), an independent
 adversarial review (findings A1-A5, B1-B3 below), and Romu's question on an
@@ -27,11 +29,17 @@ platform, what this design guarantees and what remains exposed. A CLI's own
 sandbox (Claude permissions, Codex sandbox) is listed as defense in depth only,
 never as the mechanism behind a guarantee.
 
-## 2. Guarantees per platform (after the four layers ship)
+## 2. Guarantees per platform (target, once all four layers ship)
+
+**Not the 0.14.3 state.** 0.14.3 ships layer A, the bridge token (first half
+of layer B) and layer C. The per-action human proof (D1) is deferred to 0.15,
+so the loopback path to secret-class routes stays open; KT-990 and KT-969
+(layer D) are **not** fixed. The table below is the target. What actually holds
+in 0.14.3 is in §9.
 
 | Platform | Key | Admin token / decrypted secrets over the API | Secret files | Code the agent influences (4.6) | Residual exposure |
 |---|---|---|---|---|---|
-| macOS native | OS Keychain only, after a verified restore test; no sidecar, nothing in `config.toml`. The Keychain item's ACL should make macOS prompt when another program reads it (to verify by probe, including `security find-generic-password` and Kronn's own binary run by an agent) | Agent env carries neither; secret-class routes need a per-action human proof | `kronn.db` `0600`, readable by the same user | Runs as the user: **no OS boundary** | A same-user process can read the DB and drive the live UI session; it cannot read the key without a Keychain prompt; values of the agent's own project MCPs |
+| macOS native | OS Keychain only, after a verified restore test; no sidecar, nothing in `config.toml`. The Keychain item's ACL is meant to make macOS prompt when another program reads it: **not demonstrated yet**, to be proven by probe (`security find-generic-password`, Kronn's own binary run by an agent) before any cell relies on it | Agent env carries neither; secret-class routes need a per-action human proof | `kronn.db` `0600`, readable by the same user | Runs as the user: **no OS boundary** | A same-user process can read the DB and drive the live UI session; it cannot read the key without a Keychain prompt, if the ACL probe confirms it; values of the agent's own project MCPs |
 | Windows native | Credential Manager: **not a boundary** between processes of the same account (`CredRead` serves any process of the logon session) | Same as macOS | Same | No OS boundary | Same as Linux native: an agent can obtain the key and decrypt offline |
 | Linux / WSL native | **Sidecar file stays** (no keyring assumed) | Same as macOS | Sidecar + DB readable by the same user | No OS boundary | An agent can read the sidecar and the DB and decrypt offline: layers A-B only close the API path |
 | Docker (Linux host) | Sidecar in `/data`, `0700` to the backend UID | Same; the container spawn path uses the same env builder | Agents run under a second UID without access to `/data` (KT-969) | Second UID for every agent-influenced execution | Repositories writable by agents; SSH agent socket usable while an agent runs |
@@ -119,7 +127,10 @@ concurrent uses of one proof yield one success.
 ### 4.2 The human factor
 
 Factors, strongest first. A user enrols at least **two** before any secret can
-be revealed or exported (one may be the recovery passphrase).
+be revealed or exported (one may be the recovery passphrase). Two factors on
+the same phone (a phone passkey and a TOTP app on it) do **not** give
+independent recovery: losing the phone loses both, so enrolment must say so
+and ask for a factor that does not live on that device.
 
 1. **Passkey (WebAuthn)**: Touch ID, Windows Hello, a security key or a phone
    passkey. Kronn stores only the public key, so reading the whole data
@@ -244,6 +255,16 @@ DoD items, each with a test:
 
 ### 4.5 GitHub connection per project (D2)
 
+**Status: implemented** (0.14.3, approved by Romu on card `0143-secu-d2-v31`).
+User guide: [`guides/github-connection.md`](../guides/github-connection.md).
+Code: `core/github_connection.rs` (`env_for_launch`, `apply_launch_env`, scope
+check), `db/github_connections.rs` (migration 216, upgrade seeding),
+`api/github_connection.rs`, `ProjectGithubRow.tsx`. Decisions taken while
+implementing: workflow Exec steps receive the project's token when it is
+connected and none otherwise; summaries and audits receive none; Copilot's own
+configured token is unchanged; quick execs and the project exec route keep the
+backend environment until the environment builder (layer A) covers them.
+
 Goal (Romu, card `0143-secu-d2-gh-token`): turning GitHub on for a project is
 one click, and the UI says what it gives and what it risks.
 
@@ -290,6 +311,10 @@ The backend never trusts a boolean from a client:
   of these; that is the residual risk of the native lines of section 2.
 
 ## 5. Order and rollout
+
+0.14.3 delivers steps 1 and 2 without the human factor: layer C, layer A and
+the bridge token. The human proof, the rest of step 2, moves to 0.15; step 3
+is not started.
 
 1. KT-1007 (layer C), tested on copies of real 0.14.2 config and databases.
 2. KT-1006 + KT-1013 (layers A-B), in one change with the bridge moving to the
@@ -341,3 +366,84 @@ The backend never trusts a boolean from a client:
   one-time notice, new projects not connected (4.5).
 - **D3:** KT-968 in 0.15.2 with the residual risk in the advisory (already
   tagged by the 0143-scope decision).
+
+## 9. Implementation status (0.14.3)
+
+**Layer A — shipped (KT-1006, KT-1013).** `backend/src/core/child_env.rs` builds
+the environment of every process Kronn starts on a caller's behalf: agent CLIs
+on the direct route and the Claude/Codex adapters (`try_spawn`), native ACP
+agents (`native_command`), the task-worker auth probes, the project and
+discussion exec routes, workflow Exec steps (setup included), workspace
+lifecycle hooks, Quick Exec (task validations included) and the API-call
+credential CLIs. Each path has a test that inspects the final environment;
+the seal runs after every other `.env()` of the launch. Agents
+under Docker run in the backend container through the same `try_spawn`; there
+is no separate container spawn path. Each child starts from `env_clear()`, gets
+the reviewed allow-list (process essentials, temp dirs, proxies, TLS stores, XDG
+dirs, SSH agent socket, toolchains, Windows essentials), its own agent's
+documented variables, then the launch's values (provider key for this agent
+only, discussion/room/workflow/task contexts, `KRONN_BACKEND_URL`, MCP
+references, the bridge token). A final seal drops `KRONN_AUTH_TOKEN`,
+`KRONN_ENCRYPTION_KEK`, `KRONN_KEK`, other agents' provider keys and any
+secret-looking name nobody granted. `main.rs` no longer exports
+`KRONN_AUTH_TOKEN`; an operator-set value is mirrored into the config and
+removed from the process environment. GitHub variables are never inherited:
+`core::github_connection::env_for_launch` (§4.5) adds them for a connected
+project only, on every route (native ACP, Exec steps, Quick Exec runs, exec
+routes); workspace hooks and Kronn's internal Quick Exec callers (task
+validations, probes) carry no project and get none.
+Native ACP agents now receive their configured key and their room and workflow
+contexts (KT-1013).
+
+The exec routes run without a shell (no variable, `~` or glob expansion), drop
+`env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
+any path argument of `cat`, `head`, `tail`, `find`, `stat`, `grep`, `rg`, `wc`,
+`du`, `file`, `tree` and `ls` that resolves outside the project, symlinks
+followed (`core/fs_guard.rs::resolve_contained_read`).
+
+**Layer B, bridge token — shipped (KT-1006).** `backend/src/core/bridge_token.rs`.
+A random 256-bit token (`kbt_…`) per agent launch, held only in memory, bound
+to the launch's discussions, task execution and workflow run, and to their
+project (resolved on first use). It is revoked when the launch's process handle
+is dropped, is dead when its discussion or run no longer exists, and is lost on
+restart. The bridge reads `KRONN_BRIDGE_TOKEN` first and falls back to
+`KRONN_AUTH_TOKEN` for host sessions. A request bearing a bridge token is
+accepted only on `BRIDGE_ROUTES` (derived from the bridge script; the test
+`backend/scripts/test_bridge_routes.py` fails on drift in either direction) and
+only for resources in its scope: ids in the path, the query and the top-level
+JSON body. Writes to a discussion need one of the launch's own discussions (or
+one it created through `disc/create`); reads need the token's project;
+effectful routes need the token's project and are logged with the token id.
+A workflow trigger that names no project gets the token's project added to its
+body, so a shared or multi-project workflow runs for that project (KT-851
+resolution) and one that does not serve it is refused. A
+bridge token is refused on every other route, secret-class ones included, even
+from loopback. Any bearer that matches neither the operator token nor a live
+bridge token (dead, expired, mistyped) is refused outright, never downgraded to
+loopback trust. Not covered by an agent's environment any more but still
+inheriting the backend's: Kronn's own probes that take no caller input (CLI
+version and model discovery, the MCP probe, the document sidecar).
+
+**Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
+*without* a token keep today's trust. An agent on the same machine can drop its
+bridge token and call any route from `127.0.0.1`, secret-class routes included
+(reveal, export, recovery, exec). What 0.14.3 removes is the admin token and the
+key from the agent's environment, the exec routes' environment and file dump,
+and every route outside the bridge's list for a token-bearing caller. On an
+instance with strict localhost or LAN exposure, the agent no longer holds a
+credential that opens the API. The per-action human proof (layer B, second
+half) closes the loopback path in 0.15.
+
+**Real probe for the human.**
+1. Start a Claude discussion on a project, with Kronn running natively.
+2. Ask Claude to run `env | grep -E 'KRONN|_API_KEY|_TOKEN'`.
+3. Expected: `KRONN_DISCUSSION_ID`, `KRONN_BACKEND_URL`, `KRONN_BRIDGE_TOKEN`
+   (a `kbt_…` value), Claude's own key only if one is configured in Kronn, the
+   the GitHub token only if the project is connected; never `KRONN_AUTH_TOKEN`,
+   `KRONN_ENCRYPTION_KEK` nor another provider's key.
+4. Ask Claude to call a room tool (`disc_meta`, then `disc_append` a short
+   line): both work.
+5. Ask Claude to `curl -H "Authorization: Bearer $KRONN_BRIDGE_TOKEN"
+   http://127.0.0.1:3140/api/config/export`: expect HTTP 403.
+6. After the turn ends, the same `curl` with that token value on
+   `/api/discussions` answers 401.

@@ -94,24 +94,28 @@ pub(crate) fn secret_mapping_error(
     None
 }
 
-/// The project a child runs in: its own when pinned, else the parent run's.
+/// The project a child runs in: the parent run's when the child serves it
+/// (a multi-project child, KT-851), else its own when pinned, else the
+/// parent run's.
 pub(crate) fn child_project_id(
     child: &Workflow,
     parent_project_id: Option<&str>,
 ) -> Option<String> {
+    if let (Some(scope), Some(parent)) = (child.project_scope.as_ref(), parent_project_id) {
+        if scope.allows(child.project_id.as_deref(), parent) {
+            return Some(parent.to_string());
+        }
+    }
     child
         .project_id
         .clone()
         .or_else(|| parent_project_id.map(str::to_string))
 }
 
-/// A child pinned to another project must not attach to the parent's
+/// A child running for another project must not attach to the parent's
 /// worktree: that checkout belongs to another repository.
 pub(crate) fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
-    child
-        .project_id
-        .as_deref()
-        .is_some_and(|child_project| Some(child_project) != parent_project_id)
+    child_project_id(child, parent_project_id).as_deref() != parent_project_id
 }
 
 /// Every mapped name must be a launch variable of the child.
@@ -1106,6 +1110,7 @@ async fn execute_foreach(
                     Some(st) if st.tier.is_none() => st.tier = Some(tier),
                     None => {
                         s.agent_settings = Some(crate::models::AgentSettings {
+                            tools: None,
                             model: None,
                             tier: Some(tier),
                             reasoning_effort: None,
@@ -1330,6 +1335,7 @@ mod tests {
 
         // Child workflow: deterministic JsonData steps — no LLM, no project.
         let child_wf = crate::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: "child-wf".into(),
             name: "child".into(),

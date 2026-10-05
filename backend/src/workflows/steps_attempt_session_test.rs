@@ -34,6 +34,7 @@ async fn run_claude_fixture(script: &str) -> StepResult {
     execute_step(
         &step,
         &project,
+        None,
         &project,
         &tokens,
         false,

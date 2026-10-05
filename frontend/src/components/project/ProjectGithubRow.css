@@ -1,0 +1,103 @@
+.gh-row { display: grid; gap: var(--kr-sp-4); }
+.gh-row-loading { color: var(--kr-text-muted); font-size: var(--kr-fs-sm); }
+.gh-meaning { margin: 0; color: var(--kr-text-secondary); font-size: var(--kr-fs-sm); }
+.gh-limit { margin: 0; color: var(--kr-text-muted); font-size: var(--kr-fs-xs); line-height: 1.5; }
+.gh-error { margin: 0; color: var(--kr-error); font-size: var(--kr-fs-sm); }
+
+.gh-btn {
+  padding: var(--kr-sp-2) var(--kr-sp-5);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+.gh-btn:hover:not(:disabled) { background: var(--kr-bg-hover); }
+.gh-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.gh-btn:focus-visible { outline: 2px solid var(--kr-accent-ink); outline-offset: 2px; }
+.gh-btn[data-variant='primary'] {
+  border-color: var(--kr-accent-border);
+  background: rgba(var(--kr-accent-rgb), 0.14);
+  color: var(--kr-text-primary);
+}
+.gh-btn[data-variant='danger'] {
+  border-color: rgba(var(--kr-error-rgb), 0.45);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-text-primary);
+}
+
+.gh-notice {
+  display: grid;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-6);
+  border: 1px solid rgba(var(--kr-info-rgb), 0.35);
+  border-radius: var(--kr-r-lg);
+  background: rgba(var(--kr-info-rgb), 0.06);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+.gh-notice p { margin: 0; }
+.gh-notice-actions, .gh-dialog-actions { display: flex; gap: var(--kr-sp-4); justify-content: flex-end; }
+
+.gh-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--kr-z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--kr-sp-8);
+  background: var(--kr-bg-overlay);
+}
+.gh-dialog {
+  display: grid;
+  gap: var(--kr-sp-6);
+  width: min(520px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--kr-sp-8);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xl);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  box-shadow: var(--kr-shadow-modal);
+}
+.gh-dialog h3 { margin: 0; font-size: var(--kr-fs-lg); }
+.gh-dialog p { margin: 0; font-size: var(--kr-fs-sm); line-height: 1.5; }
+.gh-dialog-risk {
+  display: flex;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+}
+.gh-dialog-risk > svg { flex-shrink: 0; color: var(--kr-warning); }
+.gh-dialog-option { display: grid; gap: var(--kr-sp-3); justify-items: start; font-size: var(--kr-fs-sm); }
+.gh-dialog-option small { color: var(--kr-text-muted); }
+.gh-dialog-option input {
+  width: 100%;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-mono);
+}
+.gh-dialog-option input:focus-visible { outline: 2px solid var(--kr-accent-ink); outline-offset: 1px; }
+.gh-dialog-scope { color: var(--kr-text-secondary); }
+.gh-dialog-recommend { color: var(--kr-warning); }
+
+.gh-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 0 var(--kr-sp-3);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-pill);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}
+.gh-chip[data-tone='success'] { border-color: rgba(var(--kr-success-rgb), 0.45); color: var(--kr-success); }
+.gh-chip[data-tone='info'] { border-color: rgba(var(--kr-info-rgb), 0.45); color: var(--kr-info); }

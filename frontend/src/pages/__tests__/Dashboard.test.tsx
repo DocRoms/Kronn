@@ -26,6 +26,10 @@ vi.mock('../../lib/api', () => ({
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
     agentFiles: vi.fn().mockResolvedValue({ policy: 'repo' }),
+    githubConnection: vi.fn().mockResolvedValue({
+      project_id: '', mode: 'not_connected', state: 'not_connected', machine_token_available: false,
+      machine_token_source: null, on_github: false, scope: null, connected_on_upgrade: false, updated_at: null,
+    }),
     auditStatusAll: vi.fn().mockResolvedValue([]),
     auditHistory: vi.fn().mockResolvedValue([]),
     auditEvidence: vi.fn().mockResolvedValue({

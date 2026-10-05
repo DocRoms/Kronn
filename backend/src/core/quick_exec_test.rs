@@ -696,3 +696,38 @@ fn what_check_command_line_accepts_is_what_validate_accepts() {
         );
     }
 }
+
+#[test]
+fn a_quick_exec_child_carries_a_built_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let roots = vec![root.path().to_path_buf()];
+    let validated = validate(&spec("git", &["status"], root.path()), &roots).unwrap();
+    let command = crate::core::child_env::with_parent_env(
+        &[
+            ("PATH", "/usr/bin:/bin"),
+            ("KRONN_AUTH_TOKEN", "admin"),
+            ("KRONN_ENCRYPTION_KEK", "raw"),
+            ("OPENAI_API_KEY", "sk"),
+            ("GH_TOKEN", "ghp"),
+        ],
+        || build_command(&validated),
+    );
+    let env: Vec<String> = command
+        .as_std()
+        .get_envs()
+        .filter(|(_, value)| value.is_some())
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect();
+    assert!(env.contains(&"PATH".to_string()));
+    for gone in [
+        "KRONN_AUTH_TOKEN",
+        "KRONN_ENCRYPTION_KEK",
+        "OPENAI_API_KEY",
+        "GH_TOKEN",
+    ] {
+        assert!(
+            !env.contains(&gone.to_string()),
+            "{gone} reached Quick Exec"
+        );
+    }
+}

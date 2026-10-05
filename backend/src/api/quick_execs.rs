@@ -425,6 +425,7 @@ pub async fn run(
         &work_dir,
         &context,
         crate::workflows::exec_step::MAX_COLLECT_OUTPUT_BYTES,
+        project_id.as_deref(),
     )
     .await;
     let terminal_snapshot_run_id = run_id.clone();

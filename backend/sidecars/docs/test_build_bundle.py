@@ -218,6 +218,25 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("quality-gates", release_job.split("steps:")[0])
         self.assertIn("release-checks", release_job.split("steps:")[0])
 
+    def test_reusable_workflow_callers_grant_every_permission_their_jobs_declare(self) -> None:
+        workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+        caller = (workflows / "desktop-build.yml").read_text(encoding="utf-8")
+
+        def declared(text: str) -> set[tuple[str, str]]:
+            grants: set[tuple[str, str]] = set()
+            for block in re.findall(r"^( +)permissions:\n((?:\1  [a-z-]+: [a-z]+\n)+)", text, re.M):
+                grants.update(re.findall(r"([a-z-]+): ([a-z]+)", block[1]))
+            return grants
+
+        for callee in ("ci-test.yml", "dependency-review.yml"):
+            uses = caller.index(f"uses: ./.github/workflows/{callee}")
+            headers = [m.start() for m in re.finditer(r"^  [a-z0-9-]+:\n", caller[:uses], re.M)]
+            job = caller[headers[-1]:uses]
+            caller_grants = declared(job)
+            needed = declared((workflows / callee).read_text(encoding="utf-8"))
+            missing = {grant for grant in needed if grant not in caller_grants}
+            self.assertFalse(missing, f"desktop-build.yml must grant {sorted(missing)} to {callee}")
+
     def test_ci_runs_every_gate_when_called_for_a_release(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci-test.yml"

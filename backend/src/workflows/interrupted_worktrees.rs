@@ -237,6 +237,7 @@ mod tests {
         }))
         .unwrap();
         let workflow = crate::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: "wf-reclaim".into(),
             name: WORKFLOW.into(),

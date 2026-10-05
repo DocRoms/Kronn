@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
-import { buildBlankStep, jsonPathToTarget } from '../../lib/workflowUiUtils';
+import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
@@ -23,7 +23,7 @@ import type {
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
-  TransformDataField,
+  TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
@@ -38,6 +38,7 @@ import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
+import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
@@ -318,6 +319,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
+  const [projectScope, setProjectScope] = useState<WorkflowProjectScope | null>(editWorkflow?.project_scope ?? null);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -1226,6 +1228,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
+          project_scope: projectScope,
         });
       } else {
         const req: CreateWorkflowRequest = {
@@ -1242,6 +1245,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
+          project_scope: projectScope ?? undefined,
         };
         if (pendingChildWorkflows.length > 0) {
           // Decomposed preset: create children first (they inherit the
@@ -1456,6 +1460,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             emptyLabel={t('disc.noMatchingProjects')}
             clearLabel={t('disc.noProject')}
             testId="workflow-project-picker"
+          />
+          <WorkflowProjectScopeControl
+            value={projectScope}
+            onChange={setProjectScope}
+            projects={projects}
+            homeProjectId={projectId}
           />
 
           {/* 0.8.5 — unified QuickStart picker. Replaces three formerly
@@ -4351,6 +4361,60 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           aria-label={t('wiz.readOnlyRepos')}
                         />
                         <p className="text-2xs text-muted">{t('wiz.readOnlyReposHint')}</p>
+                      </div>
+                    )}
+
+                    {/* KT-908 — the tools this step may call; undeclared keeps every tool. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label">{t('wiz.stepTools')}</label>
+                        <select
+                          className="wf-select"
+                          aria-label={t('wiz.stepTools')}
+                          value={step.agent_settings?.tools ? 'declared' : 'all'}
+                          onChange={e => updateStep(i, {
+                            agent_settings: {
+                              ...step.agent_settings,
+                              tools: e.target.value === 'declared' ? { cli: [], kronn_internal: [] } : undefined,
+                            },
+                          })}
+                        >
+                          <option value="all">{t('wiz.stepTools.all')}</option>
+                          <option value="declared">{t('wiz.stepTools.declared')}</option>
+                        </select>
+                        {step.agent_settings?.tools && (
+                          <div className="mt-2">
+                            {step.agent === 'ClaudeCode' && (
+                              <>
+                                <label className="wf-label text-2xs">{t('wiz.stepTools.cli')}</label>
+                                <input
+                                  className="wf-input"
+                                  aria-label={t('wiz.stepTools.cli')}
+                                  value={step.agent_settings.tools.cli.join(', ')}
+                                  onChange={e => updateStep(i, {
+                                    agent_settings: withStepTools(step, { cli: splitToolList(e.target.value) }),
+                                  })}
+                                  onBlur={e => updateStep(i, {
+                                    agent_settings: withStepTools(step, { cli: splitToolList(e.target.value, true) }),
+                                  })}
+                                />
+                              </>
+                            )}
+                            <label className="wf-label text-2xs">{t('wiz.stepTools.kronn')}</label>
+                            <input
+                              className="wf-input"
+                              aria-label={t('wiz.stepTools.kronn')}
+                              value={step.agent_settings.tools.kronn_internal.join(', ')}
+                              onChange={e => updateStep(i, {
+                                agent_settings: withStepTools(step, { kronn_internal: splitToolList(e.target.value) }),
+                              })}
+                              onBlur={e => updateStep(i, {
+                                agent_settings: withStepTools(step, { kronn_internal: splitToolList(e.target.value, true) }),
+                              })}
+                            />
+                            <p className="text-2xs text-muted">{t('wiz.stepTools.hint')}</p>
+                          </div>
+                        )}
                       </div>
                     )}
 

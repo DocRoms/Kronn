@@ -30,6 +30,7 @@ import type { AgentSwitchTarget } from './AgentSwitchPicker';
 import { DiscussionSessionBinding } from './DiscussionSessionBinding';
 import { DiscussionTokenCost } from './DiscussionTokenCost';
 import { ContextHelp } from './ContextHelp';
+import { GithubConnectionChip } from './project/ProjectGithubRow';
 import type { ExternalApiConnectionView } from '../lib/api';
 import {
   discussionConnectionId, externalAgentTargets, externalConnectionForDiscussion,
@@ -500,6 +501,7 @@ export function ChatHeader({
                 ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')
                 : t('disc.general')}
             </span>
+            {discussion.project_id && <GithubConnectionChip projectId={discussion.project_id} />}
             {discussion.workspace_mode === 'Isolated' && discussion.worktree_branch && (
               <span className="disc-worktree-badge" data-locked={!!discussion.workspace_path}>
                 <GitBranch size={8} /> {discussion.worktree_branch}

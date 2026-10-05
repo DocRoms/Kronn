@@ -1,4 +1,5 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
+import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -2585,6 +2586,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           onNavigatePage={onNavigatePage}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
           onCancel={() => setEditingWorkflow(null)}
+        />
+      )}
+
+      {!showCreate && !editingWorkflow && (
+        <RunRetentionBanner
+          onOpenSetting={() => {
+            try { sessionStorage.setItem(RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET); } catch { /* land on the page top */ }
+            onNavigateSettings?.();
+          }}
         />
       )}
 

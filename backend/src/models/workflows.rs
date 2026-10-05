@@ -84,8 +84,37 @@ pub struct Workflow {
     /// page list, same affordance as `Discussion::pinned`.
     #[serde(default)]
     pub pinned: bool,
+    /// KT-851 — the projects this workflow may run for besides `project_id`
+    /// (its home project, whose repository carries it). `None` keeps the
+    /// single-project behaviour; the project is then resolved at trigger time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_scope: Option<WorkflowProjectScope>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Which projects a multi-project workflow serves (KT-851).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum WorkflowProjectScope {
+    /// Every project of this instance.
+    All,
+    /// These projects, plus the home project when the workflow has one.
+    Projects { project_ids: Vec<String> },
+}
+
+impl WorkflowProjectScope {
+    /// Whether a run of a workflow homed in `home` may target `project_id`.
+    pub fn allows(&self, home: Option<&str>, project_id: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Projects { project_ids } => {
+                home == Some(project_id) || project_ids.iter().any(|id| id == project_id)
+            }
+        }
+    }
 }
 
 /// Declared artifact in a workflow. Phase-3 minimal model — only
@@ -1130,6 +1159,76 @@ pub struct AgentSettings {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// KT-908 — the tools this Agent step declares. `None` keeps today's
+    /// launch exactly; a declaration replaces the catalogue, the MCP servers
+    /// and the CLI's skill listing with what it names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tools: Option<StepTools>,
+}
+
+/// What a workflow Agent step may call (KT-908). Both lists empty = no tool.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StepTools {
+    /// Built-in Claude Code tools (`Read`, `Bash`, `Edit`…). Claude Code only.
+    #[serde(default)]
+    pub cli: Vec<String>,
+    /// `kronn-internal` tools, loaded with their schemas at start; no other
+    /// MCP server is mounted.
+    #[serde(default)]
+    pub kronn_internal: Vec<String>,
+}
+
+impl StepTools {
+    /// Save-time rules for a step running on `agent`.
+    pub fn validate(&self, agent: &crate::models::AgentType) -> Result<(), String> {
+        use crate::models::AgentType;
+        let native_acp = matches!(
+            agent,
+            AgentType::GeminiCli
+                | AgentType::Kiro
+                | AgentType::CopilotCli
+                | AgentType::Vibe
+                | AgentType::OpenCode
+        );
+        if !matches!(agent, AgentType::ClaudeCode | AgentType::Codex) && !native_acp {
+            return Err(format!(
+                "`agent_settings.tools` is supported for Claude Code, Codex and the ACP agents, not {agent:?}"
+            ));
+        }
+        if !self.cli.is_empty() && *agent != AgentType::ClaudeCode {
+            return Err(
+                "`agent_settings.tools.cli` restricts Claude Code's built-in tools; other agents accept `kronn_internal` only"
+                    .into(),
+            );
+        }
+        let valid = |name: &String, lower: bool| {
+            let mut chars = name.chars();
+            chars.next().is_some_and(|c| {
+                if lower {
+                    c.is_ascii_lowercase()
+                } else {
+                    c.is_ascii_alphabetic()
+                }
+            }) && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && name.len() <= 64
+        };
+        if self.cli.len() > 64 || self.kronn_internal.len() > 64 {
+            return Err("`agent_settings.tools` lists at most 64 tools of each kind".into());
+        }
+        if let Some(bad) = self.cli.iter().find(|name| !valid(name, false)) {
+            return Err(format!(
+                "`agent_settings.tools.cli`: invalid tool name `{bad}`"
+            ));
+        }
+        if let Some(bad) = self.kronn_internal.iter().find(|name| !valid(name, true)) {
+            return Err(format!(
+                "`agent_settings.tools.kronn_internal`: invalid tool name `{bad}`"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1680,6 +1779,9 @@ pub struct CreateWorkflowRequest {
     /// adoption of Kronn by drafting common patterns autonomously.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_scope: Option<WorkflowProjectScope>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1720,6 +1822,10 @@ pub struct UpdateWorkflowRequest {
     /// Pin/unpin as favorite; omit to leave untouched.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// `null` makes the workflow single-project again; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional)]
+    pub project_scope: Option<Option<WorkflowProjectScope>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1864,6 +1970,10 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub state: ::std::collections::HashMap<String, String>,
+    /// The project to run a multi-project workflow for (KT-851).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_id: Option<String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.

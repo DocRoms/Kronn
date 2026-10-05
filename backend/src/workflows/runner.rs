@@ -640,6 +640,18 @@ async fn execute_run_with_notify_policy(
         notify_security_policy,
     )
     .await;
+    // KT-910 — the artifacts directory goes with the run once it can no
+    // longer execute; a paused or interrupted run keeps it.
+    if !matches!(
+        run.status,
+        RunStatus::Pending
+            | RunStatus::Running
+            | RunStatus::WaitingApproval
+            | RunStatus::Interrupted
+    ) || (result.is_err() && run.status != RunStatus::WaitingApproval)
+    {
+        super::run_artifacts::remove(&run.id);
+    }
     // An error settles the run as failed: its worktree goes now, not at the
     // next boot. An inherited worktree belongs to the parent run.
     if result.is_err() && !is_inherited_workspace && run.status != RunStatus::WaitingApproval {
@@ -765,7 +777,25 @@ async fn execute_run_body(
             .map_err(anyhow::Error::msg)
         })
         .await?;
-    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let mut workflow_in_project = workflow_in_run_project(workflow, run);
+    // KT-851 — a multi-project workflow keeps Quick Prompt/API references
+    // symbolic; they resolve in this run's project.
+    if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
+        let mut resolved = workflow_in_project.into_owned();
+        let project_id = resolved.project_id.clone();
+        let resolved_steps = state
+            .db
+            .with_read_conn(move |conn| {
+                crate::core::resource_refs::resolve_run_structured_references(
+                    conn,
+                    &mut resolved,
+                    project_id.as_deref(),
+                )?;
+                Ok(resolved)
+            })
+            .await?;
+        workflow_in_project = std::borrow::Cow::Owned(resolved_steps);
+    }
     let workflow: &Workflow = &workflow_in_project;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
@@ -1224,6 +1254,30 @@ async fn execute_run_body(
     }
     // After trigger fields and variables, so neither can stand in for the run.
     ctx.set("run.id", run.id.clone());
+    // KT-910 — Exec steps write here, Agent steps that name it read it.
+    match super::run_artifacts::ensure(&run.id) {
+        Ok(dir) => ctx.set("run.artifacts_dir", dir.to_string_lossy().to_string()),
+        Err(error) => tracing::warn!(
+            run_id = %run.id,
+            "run artifacts directory unavailable: {error}"
+        ),
+    }
+    // KT-917 — `{{ref:<kind>:<slug>}}` resolves in this run's project; an
+    // unresolved one stays unknown so strict rendering fails its step.
+    let refs_workflow = workflow.clone();
+    let refs_project = workflow.project_id.clone();
+    let references = db
+        .with_conn(move |conn| {
+            crate::core::resource_refs::resolve_template_references(
+                conn,
+                &refs_workflow,
+                refs_project.as_deref(),
+            )
+        })
+        .await?;
+    for (reference, id) in references {
+        ctx.set(reference, id);
+    }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
     // wrote it) renders cleanly rather than leaving the literal
@@ -1982,6 +2036,7 @@ async fn execute_run_body(
                         let mut outcome = execute_step(
                             step,
                             &project_path,
+                            workflow.project_id.as_deref(),
                             &work_dir,
                             tokens_config,
                             full_access,
@@ -2140,11 +2195,12 @@ async fn execute_run_body(
                     // The run-time guard mirrors the save-time validator
                     // for defence in depth (a workflow loaded from a
                     // hand-edited JSON could carry a stale Exec step).
-                    super::exec_step::execute_exec_step(
+                    super::exec_step::execute_exec_step_for_project(
                         step,
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
+                        workflow.project_id.as_deref(),
                     )
                     .await
                 }
@@ -3035,6 +3091,7 @@ async fn execute_run_body(
                             let outcome = execute_step(
                                 rb_step,
                                 &project_path,
+                                workflow.project_id.as_deref(),
                                 &work_dir,
                                 tokens_config,
                                 full_access,
@@ -3069,11 +3126,12 @@ async fn execute_run_body(
                 StepType::Exec => {
                     // Exec in rollback is allowed (e.g. `make revert`
                     // as a compensation step). Same allowlist enforced.
-                    super::exec_step::execute_exec_step(
+                    super::exec_step::execute_exec_step_for_project(
                         rb_step,
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
+                        workflow.project_id.as_deref(),
                     )
                     .await
                 }
@@ -4620,6 +4678,7 @@ mod tests {
         let mut step = mk_step_for_snapshot(StepType::Agent);
         step.agent = AgentType::ClaudeCode;
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: None,
             tier: Some(ModelTier::Reasoning),
             reasoning_effort: None,
@@ -4638,6 +4697,7 @@ mod tests {
         );
         // explicit model override wins, default tier → bare model
         step.agent_settings = Some(AgentSettings {
+            tools: None,
             model: Some("o3".into()),
             tier: None,
             reasoning_effort: None,
@@ -4989,6 +5049,7 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            project_scope: None,
             pinned: false,
             id: "test".into(),
             name: "test".into(),
@@ -6877,6 +6938,7 @@ mod tests {
         let mut step = fake_step("reason");
         step.agent = AgentType::Codex;
         step.agent_settings = Some(crate::models::AgentSettings {
+            tools: None,
             model: Some("gpt-5.6-sol".into()),
             tier: None,
             reasoning_effort: None,
@@ -7165,6 +7227,285 @@ mod tests {
             persisted.finished_at.is_some(),
             "terminal write re-stamps finished_at"
         );
+    }
+
+    // ─── KT-917 — symbolic references resolved per run ───────────────────
+
+    fn exec_step(name: &str, command: &str, args: &[&str]) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some(command.into());
+        step.exec_args = args.iter().map(|arg| arg.to_string()).collect();
+        step
+    }
+
+    #[tokio::test]
+    async fn an_exec_step_receives_the_local_id_of_a_workflow_reference() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-refs", repo.path()).await;
+        let mut target = make_workflow_with_artifacts(Default::default());
+        target.id = "wf-local-target-7".into();
+        target.name = "Nightly Triage".into();
+        target.project_id = Some("proj-refs".into());
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-refs".into();
+        workflow.project_id = Some("proj-refs".into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step(
+            "launch",
+            "echo",
+            &["--target={{ref:workflow:nightly-triage}}"],
+        )];
+        let mut run = pending_run("run-refs", &workflow.id);
+        run.project_id = Some("proj-refs".into());
+        let target_db = target.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &target_db))
+            .await
+            .unwrap();
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains("--target=wf-local-target-7"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_reference_fails_its_step_before_the_command_starts() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-refs-unknown", repo.path()).await;
+        let marker = repo.path().join("launched");
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-refs-unknown".into();
+        workflow.project_id = Some("proj-refs-unknown".into());
+        workflow.exec_allowlist = vec!["touch".into()];
+        let marker_arg = marker.to_string_lossy().to_string();
+        workflow.steps = vec![exec_step(
+            "launch",
+            "touch",
+            &[marker_arg.as_str(), "{{ref:workflow:no-such-workflow}}"],
+        )];
+        let mut run = pending_run("run-refs-unknown", &workflow.id);
+        run.project_id = Some("proj-refs-unknown".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
+        assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    // ─── KT-910 — the run's artifacts directory ──────────────────────────
+
+    #[tokio::test]
+    async fn an_exec_step_writes_an_image_the_next_steps_find_and_the_run_end_removes() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-artifacts", repo.path()).await;
+        let image = repo.path().join("capture.png");
+        std::fs::write(&image, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        let image_arg = image.to_string_lossy().to_string();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-artifacts".into();
+        workflow.project_id = Some("proj-artifacts".into());
+        workflow.exec_allowlist = vec!["cp".into(), "ls".into()];
+        workflow.steps = vec![
+            exec_step(
+                "capture",
+                "cp",
+                &[image_arg.as_str(), "{{run.artifacts_dir}}/S1.png"],
+            ),
+            exec_step("list", "ls", &["{{run.artifacts_dir}}"]),
+        ];
+        let mut run = pending_run("run-artifacts-1", &workflow.id);
+        run.project_id = Some("proj-artifacts".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+        let dir = super::super::run_artifacts::dir_for(&run.id).unwrap();
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(
+            run.step_results[1].output.contains("S1.png"),
+            "{:?}",
+            run.step_results
+        );
+        assert!(!dir.exists(), "the directory goes with the ended run");
+        assert!(!image.starts_with(&dir));
+    }
+
+    #[test]
+    fn only_a_claude_or_codex_step_naming_the_directory_reads_it() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("run.artifacts_dir", "/data/run-artifacts/run-1");
+        let mut step = fake_step("constat");
+        step.agent = AgentType::ClaudeCode;
+        let prompt = "Look at /data/run-artifacts/run-1/S1.png";
+        assert_eq!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt),
+            vec!["/data/run-artifacts/run-1".to_string()]
+        );
+        assert!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, "No files.").is_empty()
+        );
+        step.agent = AgentType::GeminiCli;
+        assert!(crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt).is_empty());
+        step.agent = AgentType::Codex;
+        assert_eq!(
+            crate::workflows::steps::artifacts_read_only_dirs(&step, &ctx, prompt).len(),
+            1
+        );
+        assert!(crate::workflows::steps::artifacts_read_only_dirs(
+            &step,
+            &TemplateContext::new(),
+            prompt
+        )
+        .is_empty());
+    }
+
+    // ─── KT-851 — one workflow, several projects ─────────────────────────
+
+    async fn git_project(state: &crate::AppState, id: &str) -> tempfile::TempDir {
+        let repo = tempfile::TempDir::new().unwrap();
+        git_in(repo.path(), &["init", "-q", "-b", "main"]).await;
+        git_in(repo.path(), &["config", "user.email", "test@kronn.local"]).await;
+        git_in(repo.path(), &["config", "user.name", "test"]).await;
+        std::fs::write(repo.path().join("README.md"), id).unwrap();
+        git_in(repo.path(), &["add", "."]).await;
+        git_in(repo.path(), &["commit", "-q", "-m", "init"]).await;
+        insert_project_at(state, id, repo.path()).await;
+        repo
+    }
+
+    #[tokio::test]
+    async fn one_workflow_triggered_for_two_projects_runs_isolated_in_each_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo_a = git_project(&state, "proj-multi-a").await;
+        let repo_b = git_project(&state, "proj-multi-b").await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-multi".into();
+        workflow.name = "multi".into();
+        workflow.project_id = None;
+        workflow.project_scope = Some(crate::models::WorkflowProjectScope::Projects {
+            project_ids: vec!["proj-multi-a".into(), "proj-multi-b".into()],
+        });
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["cat".into()];
+        workflow.steps = vec![exec_step("which", "cat", &["README.md"])];
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        let mut finished = Vec::new();
+        for project in ["proj-multi-a", "proj-multi-b"] {
+            let (wf, mut run) = crate::api::workflows::create_manual_run(
+                &state,
+                &workflow.id,
+                Default::default(),
+                Default::default(),
+                crate::core::launch_context::LaunchContext {
+                    requested_project_id: Some(project.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("admitted");
+            assert_eq!(run.project_id.as_deref(), Some(project));
+            execute_run(
+                state.clone(),
+                &wf,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("run");
+            finished.push(run);
+        }
+        let refused = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                requested_project_id: Some("proj-elsewhere".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("does not serve"), "{refused}");
+
+        for (run, repo, readme) in [
+            (&finished[0], &repo_a, "proj-multi-a"),
+            (&finished[1], &repo_b, "proj-multi-b"),
+        ] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            assert!(
+                run.step_results[0].output.contains(readme),
+                "{:?}",
+                run.step_results
+            );
+            let workspace = run.workspace_path.as_deref().expect("an isolated worktree");
+            let canonical_repo = repo.path().canonicalize().unwrap();
+            assert!(
+                std::path::Path::new(workspace).starts_with(repo.path())
+                    || std::path::Path::new(workspace).starts_with(&canonical_repo),
+                "{workspace} is not under its project's repository"
+            );
+        }
+        assert_ne!(finished[0].workspace_path, finished[1].workspace_path);
     }
 
     // ─── KT-1015 — the run's launch project ──────────────────────────────

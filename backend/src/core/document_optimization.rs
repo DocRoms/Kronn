@@ -739,24 +739,10 @@ fn measure(path: &str, content: &str) -> DocumentMeasure {
         estimated_tokens: content.chars().count().div_ceil(4),
     }
 }
+/// Raw words, HTML comments included: the agent reads the file as written, so
+/// a comment costs it exactly what visible text does.
 fn word_count(s: &str) -> usize {
-    strip_html_comments(s).split_whitespace().count()
-}
-/// HTML comments (`<!-- kronn:section ... -->` markers, spec headers) carry
-/// no context-window cost for an agent that renders Markdown, so they are
-/// excluded from every word budget.
-fn strip_html_comments(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(&rest[..start]);
-        rest = match rest[start..].find("-->") {
-            Some(end) => &rest[start + end + 3..],
-            None => "",
-        };
-    }
-    out.push_str(rest);
-    out
+    s.split_whitespace().count()
 }
 fn contains_placeholder(s: &str) -> bool {
     crate::api::audit::validation::count_raw_placeholders(s) > 0
@@ -1181,10 +1167,17 @@ mod tests {
     }
 
     #[test]
-    fn provided_skeleton_fits_its_word_budget_html_comments_excluded() {
-        // DoD #3 (KT-840): the empty skeleton must fit the default 800-word
-        // `agents_md_max_words` budget once HTML comments (section markers,
-        // the spec header) are excluded from the count.
+    fn word_budgets_count_html_comments_because_the_agent_reads_them() {
+        assert_eq!(word_count("one <!-- two three --> four"), 6);
+        assert_eq!(word_count(""), 0);
+        assert_eq!(word_count("<!--\n  été  naïve\n-->"), 4);
+    }
+
+    #[test]
+    fn provided_skeleton_fits_its_word_budget_html_comments_included() {
+        // The budget is measured in raw words, HTML comments included, because
+        // that is what the agent reads and pays for (KT-934, replacing the
+        // KT-840 visible-words rule).
         let tmp = skeleton_project();
         let content = fs::read_to_string(tmp.path().join("docs/AGENTS.md")).unwrap();
         let words = word_count(&content);

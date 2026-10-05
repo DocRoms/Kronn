@@ -25,7 +25,7 @@ use crate::AppState;
 
 /// Where skills are looked for. `kronn/skills` is where Kronn used to write
 /// them: it is still read (and offered for migration), never written.
-const PROJECT_SKILL_ROOTS: &[&str] = &[
+pub(crate) const PROJECT_SKILL_ROOTS: &[&str] = &[
     "kronn/skills",
     ".claude/skills",
     ".agents/skills",
@@ -174,11 +174,9 @@ pub(super) fn typed_seeds(
     project_id: &str,
 ) -> anyhow::Result<Vec<ResourceSeed>> {
     let mut seeds = Vec::new();
-    seeds.extend(
-        crate::db::workflows::list_workflows_for_project(conn, project_id)?
-            .into_iter()
-            .map(ResourceSeed::workflow),
-    );
+    for workflow in crate::db::workflows::list_workflows_for_project(conn, project_id)? {
+        seeds.push(ResourceSeed::workflow(portable_workflow(conn, workflow)?));
+    }
     seeds.extend(
         crate::db::quick_prompts::list_quick_prompts_for_project(conn, project_id)?
             .into_iter()
@@ -210,6 +208,16 @@ fn project_seeds(
     Ok(seeds)
 }
 
+/// A workflow as `kronn/` carries it: references to other resources by slug,
+/// never by this instance's ids (KT-917).
+pub(super) fn portable_workflow(
+    conn: &rusqlite::Connection,
+    mut workflow: Workflow,
+) -> anyhow::Result<Workflow> {
+    crate::core::resource_refs::symbolize_workflow(conn, &mut workflow)?;
+    Ok(workflow)
+}
+
 /// Reads a resource by kind and id.
 pub(super) fn load_database_resource(
     conn: &rusqlite::Connection,
@@ -221,10 +229,11 @@ pub(super) fn load_database_resource(
             crate::core::skills::get_skill(id)
                 .ok_or_else(|| anyhow::anyhow!("Skill not found: {id}"))?,
         ),
-        ProjectRepositoryResourceKind::Workflow => LoadedResource::Workflow(
+        ProjectRepositoryResourceKind::Workflow => LoadedResource::Workflow(portable_workflow(
+            conn,
             crate::db::workflows::get_workflow(conn, id)?
                 .ok_or_else(|| anyhow::anyhow!("Workflow not found: {id}"))?,
-        ),
+        )?),
         ProjectRepositoryResourceKind::QuickPrompt => LoadedResource::QuickPrompt(
             crate::db::quick_prompts::get_quick_prompt(conn, id)?
                 .ok_or_else(|| anyhow::anyhow!("Quick Prompt not found: {id}"))?,
@@ -1521,9 +1530,14 @@ fn seed_of(
     let ours = |owner: Option<&str>| owner == Some(project_id);
     Ok(match kind {
         ProjectRepositoryResourceKind::Skill => None,
-        ProjectRepositoryResourceKind::Workflow => crate::db::workflows::get_workflow(conn, id)?
-            .filter(|item| ours(item.project_id.as_deref()))
-            .map(ResourceSeed::workflow),
+        ProjectRepositoryResourceKind::Workflow => {
+            match crate::db::workflows::get_workflow(conn, id)?
+                .filter(|item| ours(item.project_id.as_deref()))
+            {
+                Some(workflow) => Some(ResourceSeed::workflow(portable_workflow(conn, workflow)?)),
+                None => None,
+            }
+        }
         ProjectRepositoryResourceKind::QuickPrompt => {
             crate::db::quick_prompts::get_quick_prompt(conn, id)?
                 .filter(|item| ours(item.project_id.as_deref()))
@@ -1939,6 +1953,36 @@ fn import_document(
                         step.notify_config = None;
                     }
                 }
+            }
+            // Project ids are this instance's: another machine's are dropped,
+            // and a list left empty makes the workflow single-project (KT-851).
+            if let Some(crate::models::WorkflowProjectScope::Projects { project_ids }) =
+                resource.project_scope.as_mut()
+            {
+                let mut known = Vec::new();
+                for id in project_ids.drain(..) {
+                    if crate::db::projects::get_project(conn, &id)?.is_some() {
+                        known.push(id);
+                    }
+                }
+                *project_ids = known;
+            }
+            if matches!(
+                &resource.project_scope,
+                Some(crate::models::WorkflowProjectScope::Projects { project_ids }) if project_ids.is_empty()
+            ) {
+                resource.project_scope = None;
+            }
+            // The repository names other resources by slug (KT-917).
+            let keep_resource_refs = resource.project_scope.is_some();
+            for steps in [&mut resource.steps, &mut resource.on_failure] {
+                crate::core::resource_refs::resolve_structured_references(
+                    conn,
+                    steps,
+                    Some(project_id),
+                    keep_resource_refs,
+                )
+                .map_err(anyhow::Error::msg)?;
             }
             crate::api::workflows::rebind_api_configs(conn, &mut resource.steps, Some(project_id));
             crate::api::workflows::rebind_api_configs(
@@ -4179,8 +4223,9 @@ mod tests {
     /// must hold no secret value.
     #[tokio::test]
     async fn the_listing_of_one_resource_of_each_kind_is_byte_for_byte_what_it_was() {
-        // Captured from the code before KT-915, on the same content.
-        const GOLDEN: &str = "62b08785722790d9a69aaabe1a0c4455e0f9b163a43ea4b8bd3a8e3102dad2b5";
+        // Captured from the code before KT-915, on the same content; KT-917
+        // changed only the workflow's fingerprint (references written by slug).
+        const GOLDEN: &str = "15d19b43075a2401f4dfe47b659e6bb59bdebcf52ccfd48b6f53329c147f9418";
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
         seed_project(&state, mk_project("project-1", root.path())).await;
@@ -6250,5 +6295,201 @@ mod tests {
         assert!(response.0.data.is_none());
         let plan = skill_migration_plan(State(state), AxumPath("missing".into())).await;
         assert!(plan.0.data.is_none());
+    }
+
+    // ─── KT-917 — references survive publication and import ──────────────
+
+    async fn publish_kind(
+        state: &crate::AppState,
+        project_id: &str,
+        kind: ProjectRepositoryResourceKind,
+        id: &str,
+    ) -> String {
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.to_string()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind,
+                id: id.into(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        published.0.data.expect("published").slug
+    }
+
+    async fn import_kind(
+        state: &crate::AppState,
+        project_id: &str,
+        kind: ProjectRepositoryResourceKind,
+        slug: &str,
+    ) -> Result<String, String> {
+        let imported = import_repository_resource(
+            State(state.clone()),
+            AxumPath(project_id.to_string()),
+            Json(ImportProjectRepositoryResourceRequest {
+                kind,
+                slug: slug.into(),
+                overwrite_kronn_changes: false,
+            }),
+        )
+        .await;
+        match imported.0.data {
+            Some(mutation) => Ok(mutation.id),
+            None => Err(imported.0.error.unwrap_or_default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_published_workflow_imported_into_a_blank_instance_targets_the_local_resources() {
+        let origin = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&origin, mk_project("project-origin", root.path())).await;
+        origin
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_prompts::insert_quick_prompt(
+                    conn,
+                    &sample_prompt_json("qp-origin", "Review PR", "project-origin"),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-origin-child",
+                        "Child Target",
+                        "project-origin",
+                        serde_json::json!([
+                            {"name": "work", "step_type": {"type": "Agent"}, "prompt_template": "Work"}
+                        ]),
+                    ),
+                )?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-origin-parent",
+                        "Parent",
+                        "project-origin",
+                        serde_json::json!([
+                            {"name": "review", "step_type": {"type": "Agent"}, "quick_prompt_id": "qp-origin"},
+                            {"name": "chain", "step_type": {"type": "TriggerWorkflow"}, "sub_workflow_id": "wf-origin-child"}
+                        ]),
+                    ),
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .unwrap();
+        let prompt_slug = publish_kind(
+            &origin,
+            "project-origin",
+            ProjectRepositoryResourceKind::QuickPrompt,
+            "qp-origin",
+        )
+        .await;
+        let child_slug = publish_kind(
+            &origin,
+            "project-origin",
+            ProjectRepositoryResourceKind::Workflow,
+            "wf-origin-child",
+        )
+        .await;
+        let parent_slug = publish_kind(
+            &origin,
+            "project-origin",
+            ProjectRepositoryResourceKind::Workflow,
+            "wf-origin-parent",
+        )
+        .await;
+        let file = std::fs::read_to_string(
+            root.path()
+                .join(format!("kronn/workflows/{parent_slug}.yaml")),
+        )
+        .unwrap();
+        assert!(file.contains("ref:workflow:child-target"), "{file}");
+        assert!(file.contains("ref:prompt:review-pr"), "{file}");
+        assert!(
+            !file.contains("wf-origin-child") && !file.contains("qp-origin"),
+            "{file}"
+        );
+
+        // Another machine: same repository, empty database.
+        let blank = test_state();
+        seed_project(&blank, mk_project("project-blank", root.path())).await;
+        let refused = import_kind(
+            &blank,
+            "project-blank",
+            ProjectRepositoryResourceKind::Workflow,
+            &parent_slug,
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("ref:workflow:child-target"), "{refused}");
+        let prompt_id = import_kind(
+            &blank,
+            "project-blank",
+            ProjectRepositoryResourceKind::QuickPrompt,
+            &prompt_slug,
+        )
+        .await
+        .unwrap();
+        let child_id = import_kind(
+            &blank,
+            "project-blank",
+            ProjectRepositoryResourceKind::Workflow,
+            &child_slug,
+        )
+        .await
+        .unwrap();
+        let parent_id = import_kind(
+            &blank,
+            "project-blank",
+            ProjectRepositoryResourceKind::Workflow,
+            &parent_slug,
+        )
+        .await
+        .unwrap();
+        assert_ne!(child_id, "wf-origin-child");
+        let parent = blank
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &parent_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parent.steps[0].quick_prompt_id.as_deref(),
+            Some(prompt_id.as_str())
+        );
+        assert_eq!(
+            parent.steps[1].sub_workflow_id.as_deref(),
+            Some(child_id.as_str())
+        );
+
+        // Rendered again, the imported workflow is the file it came from:
+        // once approved it is aligned, and its execution approval holds.
+        let approved = approve_repository_resource(
+            State(blank.clone()),
+            AxumPath("project-blank".to_string()),
+            Json(crate::models::ApproveProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::Workflow,
+                id: parent.id.clone(),
+            }),
+        )
+        .await;
+        assert!(approved.0.data.is_some(), "{:?}", approved.0.error);
+        let listing = list_resources(&blank, "project-blank").await;
+        let entry = listing
+            .resources
+            .iter()
+            .find(|item| item.id == parent.id)
+            .unwrap();
+        assert_eq!(entry.status, ProjectRepositoryResourceStatus::UpToDate);
+        blank
+            .db
+            .with_conn(move |conn| {
+                crate::core::repository_resources::ensure_workflow_execution_approved(conn, &parent)
+                    .map_err(anyhow::Error::msg)
+            })
+            .await
+            .expect("approved for execution");
     }
 }

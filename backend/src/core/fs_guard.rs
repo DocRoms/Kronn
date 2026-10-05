@@ -217,9 +217,88 @@ pub fn guarded_copy_new(root: &Path, src: &Path, dst: &Path) -> Result<bool, Str
     )
 }
 
+/// Where a READ of `path` lands, refused when it leaves `root`. Relative paths
+/// are taken from `root`; symlinks are followed (a link inside the project
+/// pointing outside is refused); a missing tail is resolved lexically from its
+/// deepest existing ancestor, and a `..` in that tail is refused.
+pub fn resolve_contained_read(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve the project root {}: {e}", root.display()))?;
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let mut existing = joined.as_path();
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let resolved = loop {
+        match existing.canonicalize() {
+            Ok(real) => break real,
+            Err(_) => {
+                let Some(name) = existing.file_name() else {
+                    return Err(format!("{} cannot be resolved", path.display()));
+                };
+                tail.push(name);
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| format!("{} cannot be resolved", path.display()))?;
+            }
+        }
+    };
+    // `file_name` is `None` on a `..` component, so the tail never holds one.
+    let mut resolved = resolved;
+    for name in tail.into_iter().rev() {
+        resolved.push(name);
+    }
+    if resolved.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(format!("{} is outside the project", path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_inside_the_project_resolves_and_one_outside_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("secret"), "x").unwrap();
+
+        assert!(resolve_contained_read(&root, Path::new("src/main.rs")).is_ok());
+        assert!(resolve_contained_read(&root, Path::new("src/not-yet.rs")).is_ok());
+        assert!(resolve_contained_read(&root, Path::new(".")).is_ok());
+        assert!(resolve_contained_read(&root, Path::new("../secret")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("../../x")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("src/../../secret")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("missing/../../secret")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("/etc/passwd")).is_err());
+        assert!(resolve_contained_read(&root, &dir.path().join("secret")).is_err());
+        // Unicode names stay ordinary paths.
+        assert!(resolve_contained_read(&root, Path::new("src/é漢.md")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_leaving_the_project_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("etc")).unwrap();
+        std::fs::write(root.join("inside"), "y").unwrap();
+        std::os::unix::fs::symlink(root.join("inside"), root.join("ok-link")).unwrap();
+
+        assert!(resolve_contained_read(&root, Path::new("link")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("etc/passwd")).is_err());
+        assert!(resolve_contained_read(&root, Path::new("ok-link")).is_ok());
+    }
 
     fn no_temp_left(dir: &Path) -> bool {
         // An unreadable dir or entry must FAIL the check, never pass it.

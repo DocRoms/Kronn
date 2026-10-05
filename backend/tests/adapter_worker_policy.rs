@@ -87,6 +87,9 @@ if [ "$1" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
   exit 0
 fi
+# Agents get a built environment: the fixture's paths ride in names each owns.
+KRONN_POLICY_ARGV="${CLAUDE_POLICY_ARGV:-$CODEX_POLICY_ARGV}"
+KRONN_POLICY_ENV="${CLAUDE_POLICY_ENV:-$CODEX_POLICY_ENV}"
 printf '%s\n' "$@" > "$KRONN_POLICY_ARGV"
 printf '%s\n' "${KRONN_TASK_WORKER_CONTEXT-unset}" "${KRONN_DISCUSSION_ID-unset}" "${TMPDIR-unset}" "${CLAUDE_CODE_BUBBLEWRAP-unset}" > "$KRONN_POLICY_ENV"
 cat >/dev/null
@@ -126,8 +129,10 @@ esac
                 let label = format!("{agent:?} toggle={toggle:?} mode={mode}");
                 let argv = dir.path().join(format!("argv-{count}"));
                 let child_env = dir.path().join(format!("env-{count}"));
-                env.set("KRONN_POLICY_ARGV", argv.clone());
-                env.set("KRONN_POLICY_ENV", child_env.clone());
+                env.set("CLAUDE_POLICY_ARGV", argv.clone());
+                env.set("CODEX_POLICY_ARGV", argv.clone());
+                env.set("CLAUDE_POLICY_ENV", child_env.clone());
+                env.set("CODEX_POLICY_ENV", child_env.clone());
                 let context = TaskWorkerBridgeContext {
                     execution_id: "fixture-execution".into(),
                     discussion_id: "fixture-discussion".into(),

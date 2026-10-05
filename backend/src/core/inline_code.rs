@@ -129,6 +129,9 @@ pub enum InlineFinding {
     Untrusted(String),
     /// An unclosed or malformed placeholder: refused, it cannot be checked.
     Malformed,
+    /// A value sits where the interpreter still reads options, so it could
+    /// turn into an option or into code once rendered (`{{mode}}` → `-c`).
+    OptionPosition(String),
 }
 
 /// The first unsafe placeholder in the inline code of `cmd args`, if any.
@@ -136,6 +139,24 @@ pub enum InlineFinding {
 /// eval, nested quotes), whatever filter it went through, so only
 /// `{{run.id}}` and `{{time.now…}}` are accepted.
 pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
+    if let Some(finding) = first_unsafe_code_placeholder(cmd, args) {
+        return Some(finding);
+    }
+    let index = first_tainted_option_position(cmd, args, &tainted_templates(args))?;
+    let path = crate::workflows::template::placeholder_paths(&args[index])
+        .ok()
+        .and_then(|paths| {
+            paths
+                .into_iter()
+                .find(|path| !is_trusted_template_path(path))
+        });
+    Some(match path {
+        Some(path) => InlineFinding::OptionPosition(path),
+        None => InlineFinding::Malformed,
+    })
+}
+
+fn first_unsafe_code_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
     for code in inline_code_args(cmd, args) {
         let Ok(paths) = crate::workflows::template::placeholder_paths(&args[code.index]) else {
             return Some(InlineFinding::Malformed);
@@ -154,8 +175,10 @@ pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFind
 pub fn safe_recipe(path: &str) -> String {
     format!(
         "passe la valeur en argument séparé après le script, que l'interpréteur ne lit jamais \
-         comme du code : `exec_args=[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{{path}}}}}\"]` pour \
-         un shell, `sys.argv[1]` / `process.argv[1]` sinon, ou via `exec_stdin`"
+         comme du code ni comme une option : `exec_args=[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{{{{path}}}}}\"]` \
+         pour un shell, `[\"-c\", \"import sys; print(sys.argv[1])\", \"{{{{{path}}}}}\"]` pour Python, \
+         `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{{{{path}}}}}\"]` pour Node (le `--` est \
+         obligatoire, comme pour perl, ruby et php), ou via `exec_stdin`"
     )
 }
 
@@ -189,6 +212,12 @@ fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
              même filtrée par `|sh`. {}.",
             safe_recipe(&path)
         )),
+        InlineFinding::OptionPosition(path) => Some(format!(
+            "{subject} : `{{{{{path}}}}}` est à une position où `{cmd}` lit encore ses options — \
+             une fois rendue, la valeur pourrait devenir une option ou du code (`-c`, `--eval=…`). \
+             {}.",
+            safe_recipe(&path)
+        )),
     }
 }
 
@@ -205,7 +234,9 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             return;
         };
         let placeholder = match &finding {
-            InlineFinding::Untrusted(path) => format!("{{{{{path}}}}}"),
+            InlineFinding::Untrusted(path) | InlineFinding::OptionPosition(path) => {
+                format!("{{{{{path}}}}}")
+            }
             InlineFinding::Malformed => String::new(),
         };
         let (suggested_args, manual_fix) = match suggest_args(cmd, args) {
@@ -222,6 +253,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             placeholder,
             reason: match finding {
                 InlineFinding::Untrusted(_) => "inline_code_interpolation".into(),
+                InlineFinding::OptionPosition(_) => "option_position_interpolation".into(),
                 InlineFinding::Malformed => "malformed_placeholder".into(),
             },
             suggested_args,
@@ -285,8 +317,9 @@ pub fn runtime_refusal(step: &WorkflowStep) -> Option<String> {
         ""
     };
     Some(format!(
-        "Exec step `{}`{phase} refusé avant exécution : le code inline de `{}` interpole {what}, \
-         qu'une valeur hostile (titre de ticket, sortie d'étape) pourrait faire exécuter. \
+        "Exec step `{}`{phase} refusé avant exécution : `{}` reçoit {what} dans son code inline ou \
+         là où il lit encore ses options, qu'une valeur hostile (titre de ticket, sortie d'étape) \
+         pourrait faire exécuter. \
          Ouvre le workflow et applique la correction proposée (« Proposer une correction »), \
          ou {}.",
         step.name,
@@ -297,6 +330,191 @@ pub fn runtime_refusal(step: &WorkflowStep) -> Option<String> {
                 .trim_start_matches("{{")
                 .trim_end_matches("}}")
         )
+    ))
+}
+
+/// How an interpreter stops reading options, which decides where a value can
+/// sit without ever becoming an option or code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionParsing {
+    /// Shells and Python: options end with the inline code, `--`, or the
+    /// first plain argument (the script).
+    StopsAtCodeOrScript,
+    /// Node, Bun, Perl, Ruby: options continue after the inline code; they end
+    /// with `--` or a script file (by extension).
+    StopsAtDashDashOrScript(&'static [&'static str]),
+    /// PHP, Deno: only `--` is a provable end of options.
+    StopsAtDashDash,
+    /// PowerShell: `-Command` takes the rest of the line, no data position.
+    Never,
+}
+
+fn option_parsing(cmd: &str) -> Option<OptionParsing> {
+    let lower = base_name(cmd);
+    Some(if is_shell(cmd) || is_python(cmd) {
+        OptionParsing::StopsAtCodeOrScript
+    } else if matches!(lower.as_str(), "node" | "nodejs" | "bun") {
+        OptionParsing::StopsAtDashDashOrScript(&[".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"])
+    } else if lower == "perl" {
+        OptionParsing::StopsAtDashDashOrScript(&[".pl", ".pm"])
+    } else if lower == "ruby" {
+        OptionParsing::StopsAtDashDashOrScript(&[".rb"])
+    } else if matches!(lower.as_str(), "php" | "deno") {
+        OptionParsing::StopsAtDashDash
+    } else if matches!(lower.as_str(), "pwsh" | "powershell") {
+        OptionParsing::Never
+    } else {
+        return None;
+    })
+}
+
+/// Options that take the next argument as their value.
+fn value_options(cmd: &str) -> &'static [&'static str] {
+    let lower = base_name(cmd);
+    if is_shell(cmd) {
+        &["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]
+    } else if is_python(cmd) {
+        &["-W", "-X", "-m"]
+    } else if matches!(lower.as_str(), "node" | "nodejs" | "bun") {
+        &[
+            "-r",
+            "--require",
+            "--import",
+            "--loader",
+            "--experimental-loader",
+            "-C",
+            "--conditions",
+            "--input-type",
+            "--env-file",
+            "--title",
+            "--inspect-port",
+        ]
+    } else if lower == "ruby" {
+        &["-I", "-r", "-C", "-E"]
+    } else {
+        &[]
+    }
+}
+
+/// Whether `arg` is an inline-code option of `cmd`, and whether its code is
+/// attached to it.
+fn code_option(options: &InlineCodeOptions, arg: &str) -> Option<bool> {
+    if let Some(rest) = arg.strip_prefix("--") {
+        let (name, value) = rest
+            .split_once('=')
+            .map_or((rest, None), |(name, value)| (name, Some(value)));
+        let flag = format!("--{}", name.to_ascii_lowercase());
+        return options
+            .long
+            .contains(&flag.as_str())
+            .then_some(value.is_some());
+    }
+    let cluster = arg.strip_prefix('-')?;
+    let (at, c) = cluster.char_indices().find(|(_, c)| {
+        options.letters.contains(c)
+            || (options.case_insensitive && options.letters.contains(&c.to_ascii_lowercase()))
+    })?;
+    Some(!options.case_insensitive && at + c.len_utf8() < cluster.len())
+}
+
+/// The first argument that carries an outside value (`tainted`) while `cmd`
+/// may still read it as an option or as code. Values are safe only after the
+/// inline code (shells, Python), after `--`, or after a script file. A
+/// tainted argument never ends option parsing itself: at save time it is a
+/// placeholder, at run time its rendered text is not trusted.
+pub fn first_tainted_option_position(
+    cmd: &str,
+    args: &[String],
+    tainted: &[bool],
+) -> Option<usize> {
+    let parsing = option_parsing(cmd)?;
+    let options = inline_code_options(cmd)?;
+    let is_tainted = |i: usize| tainted.get(i).copied().unwrap_or(false);
+    if parsing == OptionParsing::Never {
+        return (0..args.len()).find(|&i| is_tainted(i));
+    }
+    let values = value_options(cmd);
+    let mut i = 0;
+    while i < args.len() {
+        if is_tainted(i) {
+            return Some(i);
+        }
+        let arg = &args[i];
+        if arg == "--" {
+            // Shells and Python read the script name right after `--`.
+            if parsing == OptionParsing::StopsAtCodeOrScript && is_tainted(i + 1) {
+                return Some(i + 1);
+            }
+            return None;
+        }
+        if arg.len() > 1 && arg.starts_with('-') {
+            if let Some(attached) = code_option(&options, arg) {
+                if !attached && is_tainted(i + 1) {
+                    return Some(i + 1);
+                }
+                if parsing == OptionParsing::StopsAtCodeOrScript {
+                    return None;
+                }
+                i += if attached { 1 } else { 2 };
+                continue;
+            }
+            if values.contains(&arg.as_str()) {
+                if is_tainted(i + 1) {
+                    return Some(i + 1);
+                }
+                // `python -m module`: what follows is the module's argv.
+                if is_python(cmd) && arg == "-m" {
+                    return None;
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        match parsing {
+            OptionParsing::StopsAtCodeOrScript => return None,
+            OptionParsing::StopsAtDashDashOrScript(extensions)
+                if extensions
+                    .iter()
+                    .any(|ext| arg.to_ascii_lowercase().ends_with(ext)) =>
+            {
+                return None
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Which template arguments carry a value from outside Kronn.
+fn tainted_templates(args: &[String]) -> Vec<bool> {
+    args.iter()
+        .map(
+            |arg| match crate::workflows::template::placeholder_paths(arg) {
+                Ok(paths) => paths.iter().any(|path| !is_trusted_template_path(path)),
+                Err(_) => true,
+            },
+        )
+        .collect()
+}
+
+/// Run-time check on the rendered argv, with the provenance of each field:
+/// a field rendered from an outside value must sit in a data position of
+/// the structure the interpreter will really parse.
+pub fn rendered_refusal(
+    step: &str,
+    cmd: &str,
+    templates: &[String],
+    rendered: &[String],
+) -> Option<String> {
+    let tainted = tainted_templates(templates);
+    let index = first_tainted_option_position(cmd, rendered, &tainted)?;
+    Some(format!(
+        "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
+         valeur extérieure et tombe là où `{cmd}` lit encore des options ou du code. Ouvre le \
+         workflow et applique la correction proposée, ou place les valeurs après le code inline \
+         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php)."
     ))
 }
 
@@ -661,10 +879,16 @@ fn rewrite_literals(
     let manual = |why: &str| Err(format!("correction manuelle requise : {why}"));
     let found =
         placeholders(script).map_err(|why| format!("correction manuelle requise : {why}"))?;
-    // Python: argv[0] is `-c`, extra arguments start at 1. Node `-e`/`-p`:
-    // argv[0] is the node binary, extra arguments start at 1 too.
-    let first_index = rest.len() + 1;
-    let mut tail = rest.to_vec();
+    // Python: argv[0] is `-c` and everything after the code is data, so new
+    // values follow the existing ones. Node keeps parsing options after `-e`
+    // until `--` (which it drops from process.argv): the values go after a
+    // `--`, the first one at process.argv[1].
+    let (first_index, mut tail) = match language {
+        Language::Python => (rest.len() + 1, rest.to_vec()),
+        Language::Node if rest.is_empty() => (1, vec!["--".to_string()]),
+        Language::Node if rest[0] == "--" => (rest.len(), rest.to_vec()),
+        Language::Node => return manual("des arguments existants suivent le code sans `--`"),
+    };
     let mut numbered: Vec<(String, usize)> = Vec::new();
     let mut rewritten = String::with_capacity(script.len());
     let mut cursor = 0;
@@ -858,6 +1082,15 @@ mod tests {
         items.iter().map(|item| item.to_string()).collect()
     }
 
+    /// Values that an interpreter still parsing options would obey.
+    const OPTION_LIKE: [&str; 5] = [
+        "--eval=require('fs').writeFileSync('pwned','x')",
+        "-e",
+        "--",
+        "-cimport os; os.system('touch pwned')",
+        "--rcfile=/dev/null",
+    ];
+
     const HOSTILE: &str = "a'b\"c $(touch pwned) ; touch pwned2 `touch pwned3` \\ é🦀";
 
     #[test]
@@ -974,7 +1207,7 @@ mod tests {
         );
         assert_eq!(
             suggest_args("node", &args(&["-e", "console.log(\"{{x}}\")"])).unwrap(),
-            args(&["-e", "console.log(process.argv[1])", "{{x}}"])
+            args(&["-e", "console.log(process.argv[1])", "--", "{{x}}"])
         );
     }
 
@@ -1078,17 +1311,107 @@ mod tests {
             let after = run(cmd, &migrated, "benign value", dir.path()).unwrap();
             assert_eq!(before, after, "{cmd}: {migrated:?}");
 
-            let printed = run(cmd, &migrated, HOSTILE, dir.path()).unwrap();
-            assert!(printed.contains(HOSTILE), "{cmd}: {printed}");
-            assert_eq!(
-                std::fs::read_dir(dir.path()).unwrap().count(),
-                0,
-                "{cmd}: the hostile value ran"
-            );
+            for hostile in OPTION_LIKE.iter().copied().chain([HOSTILE]) {
+                let printed = run(cmd, &migrated, hostile, dir.path()).unwrap();
+                assert!(printed.contains(hostile), "{cmd} {hostile}: {printed}");
+                assert_eq!(
+                    std::fs::read_dir(dir.path()).unwrap().count(),
+                    0,
+                    "{cmd}: the hostile value {hostile} ran"
+                );
+            }
             assert!(
                 first_unsafe_placeholder(cmd, &migrated).is_none(),
                 "{migrated:?}"
             );
         }
+    }
+
+    fn tainted_position(cmd: &str, line: &[&str]) -> Option<usize> {
+        let line = args(line);
+        first_tainted_option_position(cmd, &line, &tainted_templates(&line))
+    }
+
+    #[test]
+    fn a_templated_argument_where_options_are_still_read_is_refused() {
+        for (cmd, line) in [
+            ("python3", vec!["{{mode}}", "{{issue.title}}"]),
+            ("bash", vec!["{{mode}}", "echo hi"]),
+            ("bash", vec!["-o", "{{opt}}", "-c", "echo hi"]),
+            ("python3", vec!["-W", "{{x}}", "script.py"]),
+            ("python3", vec!["-m", "{{module}}"]),
+            ("python3", vec!["--", "{{script}}"]),
+            ("node", vec!["-e", "console.log(1)", "{{x}}"]),
+            ("node", vec!["-r", "{{x}}", "app.js"]),
+            ("node", vec!["run", "{{x}}"]),
+            ("perl", vec!["-e", "print 1", "{{x}}"]),
+            ("ruby", vec!["-e", "puts 1", "x", "{{x}}"]),
+            ("php", vec!["script.php", "{{x}}"]),
+            ("pwsh", vec!["-File", "s.ps1", "{{x}}"]),
+        ] {
+            assert!(tainted_position(cmd, &line).is_some(), "{cmd} {line:?}");
+            let finding = first_unsafe_placeholder(cmd, &args(&line));
+            assert!(finding.is_some(), "{cmd} {line:?}");
+        }
+    }
+
+    #[test]
+    fn values_in_data_positions_are_accepted() {
+        for (cmd, line) in [
+            ("bash", vec!["-c", "echo \"$1\"", "_", "{{x}}"]),
+            (
+                "bash",
+                vec!["-o", "pipefail", "-c", "echo \"$1\"", "_", "{{x}}"],
+            ),
+            ("bash", vec!["./run.sh", "{{x}}"]),
+            (
+                "python3",
+                vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"],
+            ),
+            ("python3", vec!["-X", "utf8", "tool.py", "--flag", "{{x}}"]),
+            ("python3", vec!["-m", "http.server", "{{port}}"]),
+            (
+                "node",
+                vec!["-e", "console.log(process.argv[1])", "--", "{{x}}"],
+            ),
+            ("node", vec!["app.js", "{{x}}"]),
+            ("perl", vec!["-e", "print @ARGV", "--", "{{x}}"]),
+            ("ruby", vec!["script.rb", "{{x}}"]),
+            ("php", vec!["-r", "echo $argv[1];", "--", "{{x}}"]),
+            ("make", vec!["{{x}}"]),
+            ("node", vec!["-e", "console.log({{run.id}})"]),
+        ] {
+            assert_eq!(tainted_position(cmd, &line), None, "{cmd} {line:?}");
+        }
+    }
+
+    #[test]
+    fn rendered_fields_from_outside_values_must_stay_data() {
+        // `{{mode}}` rendered to `-c`: the field is tainted, it must not
+        // become an option even though its rendered text looks like one.
+        let templates = args(&["{{mode}}", "{{issue.title}}"]);
+        let rendered = args(&["-c", "print(1)"]);
+        assert!(rendered_refusal("s", "python3", &templates, &rendered).is_some());
+        // The positional recipe stays data whatever the value renders to.
+        let templates = args(&["-e", "console.log(process.argv[1])", "--", "{{x}}"]);
+        let rendered = args(&["-e", "console.log(process.argv[1])", "--", "--eval=1"]);
+        assert!(rendered_refusal("s", "node", &templates, &rendered).is_none());
+        // A tainted field rendered to `--` does not end option parsing.
+        let templates = args(&["-e", "console.log(1)", "{{a}}", "{{b}}"]);
+        let rendered = args(&["-e", "console.log(1)", "--", "--eval=1"]);
+        assert!(rendered_refusal("s", "node", &templates, &rendered).is_some());
+    }
+
+    #[test]
+    fn node_rewrites_end_options_with_a_double_dash() {
+        assert_eq!(
+            suggest_args("node", &args(&["-e", "console.log('{{x}}')", "--", "a"])).unwrap(),
+            args(&["-e", "console.log(process.argv[2])", "--", "a", "{{x}}"])
+        );
+        let reason = suggest_args("node", &args(&["-e", "console.log('{{x}}')", "a"])).unwrap_err();
+        assert!(
+            reason.starts_with("correction manuelle requise"),
+            "{reason}"
+        );
     }
 }
