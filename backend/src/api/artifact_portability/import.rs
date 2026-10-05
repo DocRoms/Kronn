@@ -140,6 +140,7 @@ fn validate_page(page: &ArtifactBundlePage) -> Result<()> {
         || page.slug.starts_with('-')
         || page.slug.ends_with('-')
         || page.slug.contains("--")
+        || uuid::Uuid::parse_str(&page.slug).is_ok()
         || !page
             .slug
             .bytes()

@@ -849,8 +849,9 @@ fn room_project(conn: &Connection, discussion_id: &str) -> Result<Option<String>
         .flatten())
 }
 
-/// Why an item may not touch its task from this room: the task must hold the
-/// room's project (a General room only reaches project-less tasks).
+/// Why an item may not touch its task from this room: the task must belong to
+/// the room's project and to no other (a General room only reaches
+/// project-less tasks), the same rule as a bridge token's write.
 fn task_outside_room(
     conn: &Connection,
     discussion_id: &str,
@@ -864,11 +865,15 @@ fn task_outside_room(
     let projects = stmt
         .query_map(params![task_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let inside = match room_project(conn, discussion_id)? {
-        Some(project) => projects.contains(&project),
-        None => projects.is_empty(),
-    };
-    Ok((!inside).then(|| "the task is outside this discussion's project".to_string()))
+    let room = room_project(conn, discussion_id)?;
+    Ok(match room {
+        Some(project) if projects.contains(&project) && projects.len() > 1 => {
+            Some("the task is shared with other projects".to_string())
+        }
+        Some(project) if projects.contains(&project) => None,
+        None if projects.is_empty() => None,
+        _ => Some("the task is outside this discussion's project".to_string()),
+    })
 }
 
 /// Apply an accepted item's underlying task mutation, returning the affected
@@ -1259,6 +1264,48 @@ mod decision_tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    /// B5-04 — a task shared with another project is the gate's shared
+    /// resource: refused on arrival and at apply.
+    #[test]
+    fn a_task_shared_with_another_project_is_refused() {
+        let conn = db();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p2','Q','/tmp/q',?1,?1)",
+            params![now],
+        )
+        .unwrap();
+        task_in(&conn, "task-both", 903, Some("p1"));
+        conn.execute(
+            "INSERT INTO planning_task_projects (task_id, project_id) VALUES ('task-both', 'p2')",
+            [],
+        )
+        .unwrap();
+        ingest_message_proposals(
+            &conn,
+            "d1",
+            "msg1",
+            "```kronn-plan-action\n{\"action\":\"complete\",\"task_id\":\"task-both\"}\n```",
+        )
+        .unwrap();
+        let proposal = get_proposal(&conn, "proposal:msg1:0").unwrap().unwrap();
+        assert_eq!(proposal.items[0].state, ProposalItemState::Rejected);
+        assert!(proposal.items[0]
+            .rejected_reason
+            .as_deref()
+            .is_some_and(|why| why.contains("shared")));
+        let refused = decide_item(
+            &conn,
+            "proposal:msg1:0",
+            "proposal:msg1:0:0",
+            ProposalDecision::Accept,
+            None,
+            "k0",
+        );
+        assert!(refused.is_err());
+        assert_eq!(status_of(&conn, "task-both"), "todo");
     }
 
     /// B4-05 — an item naming a task outside the room's project is refused on

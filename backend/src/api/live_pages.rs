@@ -328,6 +328,7 @@ pub async fn update_html(
 
 pub async fn create(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<CreateLivePageRequest>,
 ) -> Json<ApiResponse<crate::models::LivePageDetail>> {
     let title = match normalize_page_title(&request.title) {
@@ -352,7 +353,7 @@ pub async fn create(
     if !valid_slug(&slug) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
-            "Page slug must contain lowercase ASCII letters, digits and single '-' separators",
+            "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id",
         ));
     }
 
@@ -426,6 +427,14 @@ pub async fn create(
         .await
     {
         let message = error.to_string();
+        // Slugs are unique across projects: a token learns only that this one
+        // is taken, never where.
+        if bridge.is_some() && message.contains("live_pages.slug") {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                "This Page slug is not available; choose another",
+            ));
+        }
         let code = if message.starts_with("Source message") {
             ApiErrorCode::Validation
         } else if message.contains("UNIQUE constraint") || message.contains("Dataset names") {
@@ -552,8 +561,11 @@ fn normalize_page_title(title: &str) -> Result<String, &'static str> {
     }
 }
 
-fn valid_slug(slug: &str) -> bool {
-    !slug.is_empty()
+/// A slug never looks like a page id: pages resolve by id or slug, and one
+/// page's slug equal to another's id would make the id ambiguous.
+pub(crate) fn valid_slug(slug: &str) -> bool {
+    Uuid::parse_str(slug).is_err()
+        && !slug.is_empty()
         && slug.len() <= 100
         && !slug.starts_with('-')
         && !slug.ends_with('-')
@@ -566,6 +578,13 @@ fn valid_slug(slug: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slug_never_looks_like_a_page_id() {
+        assert!(!valid_slug("0b8f5c2e-3a7d-4f1e-9c6b-2d4e8a1f7c3b"));
+        assert!(!valid_slug("0b8f5c2e3a7d4f1e9c6b2d4e8a1f7c3b"));
+        assert!(valid_slug("adobe-indicators"));
+    }
 
     #[test]
     fn slugify_is_stable_and_url_safe() {

@@ -17,14 +17,16 @@ pub fn is_literal(template: &str) -> bool {
     !template.contains("{{")
 }
 
-/// The projects of every page an id or slug resolves to, as the publisher
-/// resolves it (`id OR slug`).
+/// The project of the page an id or slug resolves to, as the publisher
+/// resolves it: by id first, else by slug.
 pub fn page_projects(
     conn: &rusqlite::Connection,
     page: &str,
 ) -> anyhow::Result<Vec<Option<String>>> {
-    let mut statement =
-        conn.prepare("SELECT project_id FROM live_pages WHERE id = ?1 OR slug = ?1")?;
+    let mut statement = conn.prepare(
+        "SELECT project_id FROM live_pages WHERE id = ?1 OR slug = ?1 \
+         ORDER BY (id = ?1) DESC LIMIT 1",
+    )?;
     let projects = statement
         .query_map([page], |row| row.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;

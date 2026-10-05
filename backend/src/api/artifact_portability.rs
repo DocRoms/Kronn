@@ -57,7 +57,7 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
                 FROM live_page_dataset_points pt JOIN live_page_datasets d ON d.id = pt.dataset_id
                 WHERE d.page_id = p.id), 0)
          FROM live_pages p JOIN live_page_revisions r ON r.id = p.current_revision_id
-         WHERE p.id = ?1 OR p.slug = ?1", [id], |row| row.get(0)).optional()?;
+         WHERE p.id = ?1 OR p.slug = ?1 ORDER BY (p.id = ?1) DESC LIMIT 1", [id], |row| row.get(0)).optional()?;
     let estimated = estimated.ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     if estimated > MAX_BUNDLE_BYTES as i64 {
         bail!("Artifact exceeds the 16 MiB bundle limit");

@@ -1114,6 +1114,19 @@ fn param_role(route: &BridgeRoute, name: &str) -> Role {
     }
 }
 
+/// A page or room a saved workflow will write into: on a token's save, update
+/// or import it must be the token's project's, since a literal one is used at
+/// run time whatever its project (`workflows::run_scope`).
+fn publishes_into(route: &BridgeRoute, key: &str, parent: Option<&str>) -> bool {
+    let saves_workflow = matches!(
+        (route.method, route.pattern),
+        ("POST", "/api/workflows")
+            | ("PUT", "/api/workflows/{id}")
+            | ("POST", "/api/workflows/import")
+    );
+    saves_workflow && (key == "room_id" || (key == "page_id" && parent == Some("page_publish")))
+}
+
 fn unknown_id_field(key: &str) -> Refusal {
     Refusal(format!(
         "`{key}` is an id field a bridge token cannot use on this route"
@@ -1222,7 +1235,11 @@ impl Walk<'_> {
             if self.bundled.is_some() && kind == Kind::Project {
                 return Ok(());
             }
-            let role = key_role(key);
+            let role = if publishes_into(self.route, key, parent) {
+                Role::Target
+            } else {
+                key_role(key)
+            };
             let mut push = |raw: &serde_json::Value| {
                 let id = match raw {
                     serde_json::Value::String(id) => id.clone(),
@@ -1349,13 +1366,18 @@ pub enum Residence {
     /// Visible to project-less callers only (an MCP config opted into General
     /// discussions and linked to no project).
     General,
+    /// These projects, and project-less callers too (an MCP config linked to
+    /// projects and opted into General discussions).
+    ProjectsAndGeneral(HashSet<String>),
 }
 
 impl Residence {
     fn holds(&self, project: &str) -> bool {
         match self {
             Self::AllProjects => true,
-            Self::Projects(projects) => projects.contains(project),
+            Self::Projects(projects) | Self::ProjectsAndGeneral(projects) => {
+                projects.contains(project)
+            }
             Self::Global | Self::General => false,
         }
     }
@@ -1396,9 +1418,13 @@ pub fn visible_for_read(
     }
     match (kind, place) {
         (Kind::Project, _) => bound == Some(id),
-        (Kind::Discussion, Residence::Projects(_)) => bound.is_some_and(|p| place.holds(p)),
-        (Kind::Discussion, _) => false,
+        // A discussion or a run without a project is private to its launch.
+        (Kind::Discussion | Kind::Run, Residence::Projects(_)) => {
+            bound.is_some_and(|p| place.holds(p))
+        }
+        (Kind::Discussion | Kind::Run, _) => false,
         (_, Residence::Projects(_)) => bound.is_some_and(|p| place.holds(p)),
+        (_, Residence::ProjectsAndGeneral(_)) => bound.is_none_or(|p| place.holds(p)),
         (_, Residence::General) => bound.is_none(),
         (_, Residence::Global | Residence::AllProjects) => true,
     }
@@ -1430,7 +1456,10 @@ fn effect_allowed(
         return matches!(place, Residence::Projects(_)) && bound.is_some_and(|p| place.holds(p));
     }
     if let Some(project) = bound {
-        if matches!(place, Residence::Projects(_)) {
+        if matches!(
+            place,
+            Residence::Projects(_) | Residence::ProjectsAndGeneral(_)
+        ) {
             return place.holds(project);
         }
     }
@@ -1439,7 +1468,9 @@ fn effect_allowed(
         (Residence::Projects(_), _) => false,
         (_, Some(_)) => shared_effect && !matches!(place, Residence::General),
         // A project-less token runs only what is itself project-less.
-        (Residence::Global | Residence::General, None) => shared_effect,
+        (Residence::Global | Residence::General | Residence::ProjectsAndGeneral(_), None) => {
+            shared_effect
+        }
         (Residence::AllProjects, None) => false,
     }
 }
@@ -1630,7 +1661,9 @@ pub fn residence(
             let projects: HashSet<String> = statement
                 .query_map([id], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<_>>()?;
-            Ok(Some(if !projects.is_empty() {
+            Ok(Some(if !projects.is_empty() && include_general {
+                Residence::ProjectsAndGeneral(projects)
+            } else if !projects.is_empty() {
                 Residence::Projects(projects)
             } else if include_general {
                 Residence::General
@@ -1888,6 +1921,20 @@ pub fn credential_targets(
             _ => Ok(None),
         }
     };
+    // Every room where a caller-supplied (agent_type, session_id) is active.
+    let session_rooms = || -> anyhow::Result<Vec<String>> {
+        let (Some(agent), Some(session)) = (field("agent_type"), field("session_id")) else {
+            return Ok(Vec::new());
+        };
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT disc_id FROM discussion_sessions \
+             WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'",
+        )?;
+        let rooms = statement
+            .query_map([agent, session], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rooms)
+    };
     // The room a caller-supplied (agent, session) is currently bound to.
     let bound_room = || -> anyhow::Result<Option<String>> {
         match (field("source_agent"), field("source_session_id")) {
@@ -1915,6 +1962,13 @@ pub fn credential_targets(
             out.push(found.map_or_else(unresolved, |disc| {
                 NamedId::new(Kind::Discussion, disc, Role::Target)
             }));
+            // Joining ends the named session in every other room: each of
+            // them must be one the token may write.
+            out.extend(
+                session_rooms()?
+                    .into_iter()
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+            );
         }
         "/api/discussions/peer-resume" | "/api/discussions/orchestrator-return-resume" => {
             let found: Option<String> = match field("resume_token") {
@@ -1932,20 +1986,11 @@ pub fn credential_targets(
             }));
         }
         "/api/discussions/peer-leave" => {
-            if let (Some(agent), Some(session)) = (field("agent_type"), field("session_id")) {
-                let mut statement = conn.prepare(
-                    "SELECT DISTINCT disc_id FROM discussion_sessions \
-                     WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'",
-                )?;
-                let rooms = statement
-                    .query_map([agent, session], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                out.extend(
-                    rooms
-                        .into_iter()
-                        .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
-                );
-            }
+            out.extend(
+                session_rooms()?
+                    .into_iter()
+                    .map(|disc| NamedId::new(Kind::Discussion, disc, Role::Target)),
+            );
         }
         // Acting on the room of a joined session: that room must be in
         // scope, and a session that resolves to no room is refused.
@@ -2033,6 +2078,7 @@ fn returned_kind(pattern: &str) -> Option<Kind> {
         "/api/quick-apis" | "/api/quick-apis/{id}" => Kind::QuickApi,
         "/api/quick-execs" | "/api/quick-execs/{id}" => Kind::QuickExec,
         "/api/planning/tasks" | "/api/planning/tasks/{id}" => Kind::Task,
+        "/api/workflows/{id}/runs" | "/api/workflows/{id}/runs/{run_id}" => Kind::Run,
         "/api/pages" | "/api/pages/{id}" => Kind::Page,
         _ => return None,
     })
@@ -2203,6 +2249,9 @@ impl Scoper<'_> {
             let visible = match place {
                 Residence::Projects(projects) => self.bound.is_some_and(|p| projects.contains(p)),
                 Residence::General => self.bound.is_none(),
+                Residence::ProjectsAndGeneral(projects) => {
+                    self.bound.is_none_or(|p| projects.contains(p))
+                }
                 Residence::Global | Residence::AllProjects => true,
             };
             if !visible {
