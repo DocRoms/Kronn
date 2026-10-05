@@ -39,6 +39,7 @@ import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import '../../pages/WorkflowsPage.css';
+import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
 const checkAgentRestricted = isAgentRestricted;
 
@@ -4050,6 +4051,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           >
                             {selected && <Check size={8} />}
                             {skill.name}
+                            <SkillVariablesBadge skill={skill} />
                           </button>
                         );
                       })}

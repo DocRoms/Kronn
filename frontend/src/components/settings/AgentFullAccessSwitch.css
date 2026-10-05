@@ -104,3 +104,5 @@
   background: rgba(var(--kr-warning-rgb), 0.18);
   color: var(--kr-warning);
 }
+
+.fa-switch:disabled { cursor: not-allowed; }

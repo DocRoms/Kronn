@@ -21,6 +21,8 @@ Kronn/
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
+│       │   ├── ui_preferences.rs # GET/PUT /api/ui-preferences — server copy of synced localStorage keys (64 KiB cap), see frontend lib/uiPreferences.ts
+│       │   ├── health.rs       # /api/health (unauthenticated) + per-launch desktop `instance` tag
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
 │       │   ├── projects/docker.rs # Project-scoped Docker Compose status + closed start/stop/restart actions
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
@@ -112,7 +114,7 @@ Kronn/
 │       │   ├── model_catalog/  # ACP/Codex discovery, HTTP reconciliation, preflight and one-time seed migration
 │       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
-│       │   ├── agent_skill.rs # Agent Skills file format (agentskills.io): parse, validate (name/description bounds) and render a SKILL.md; Kronn's own fields go under `metadata`
+│       │   ├── agent_skill.rs # Agent Skills file format (agentskills.io): parse, validate (name/description bounds) and render a SKILL.md; Kronn's own fields go under `metadata`; Claude Code `arguments` + `metadata.kronn-variables` (JSON)
 │       │   ├── skill_migration.rs # "Migrate everything to .agents/skills": read-only plan (moves, conflicts, blocked) then apply; nothing overwritten without a chosen version, symlinks refused, never commits
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
 │       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — prefers the desktop-bundled executable, falls back to the Docker/dev Python venv, reads "KRONN_DOCS_READY <port>", and exposes handle() → base_url for the proxy.
@@ -287,7 +289,7 @@ Kronn/
 ├── kronn                       # CLI entrypoint (bash script, cross-platform)
 ├── desktop/                    # Tauri desktop app (native Windows/macOS/Linux wrapper)
 │   ├── package.json            # Desktop app dependencies
-│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers)
+│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers; src/port.rs = saved loopback port)
 ├── docker-compose.yml          # 3 services: backend, frontend, gateway
 ├── Makefile                    # start, stop, logs, build, dev-backend, dev-frontend, typegen
 └── .docker/                    # Docker configs (nginx gateway)

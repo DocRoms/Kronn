@@ -89,11 +89,38 @@ pub struct ImportPluginBundleRequest {
     pub content: String,
     #[serde(default)]
     pub passphrase: Option<String>,
-    /// Explicit consent to apply bundled custom arguments. They replace the
-    /// plugin's whole command line, so they are dropped unless this is true.
+    /// Source config ids whose bundled custom arguments the importer accepted.
+    /// They replace the plugin's whole command line, so every other plugin's
+    /// arguments are dropped.
     #[serde(default)]
-    #[ts(optional)]
-    pub accept_args_override: Option<bool>,
+    pub accept_args_for: Vec<String>,
+}
+
+/// One plugin as the import would treat it, before anything is written.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ImportPreviewPlugin {
+    pub source_config_id: String,
+    pub label: String,
+    pub server_name: String,
+    /// The command line the plugin runs today (catalogue), for stdio plugins.
+    pub usual_args: Option<Vec<String>>,
+    /// The bundle's proposed command line, secret-looking parts masked.
+    pub proposed_args: Option<Vec<String>>,
+    pub args_differ: bool,
+    pub importable: bool,
+    pub issue: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ImportBundlePreview {
+    pub bundle_id: String,
+    pub already_imported: bool,
+    pub includes_values: bool,
+    /// The file was a single-plugin JSON from the old per-plugin export.
+    pub legacy: bool,
+    pub plugins: Vec<ImportPreviewPlugin>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -686,13 +713,74 @@ fn resolve_import_server(
     Ok(Some(server))
 }
 
+/// A re-import of an already imported bundle may add the consent the first
+/// import lacked: the accepted plugins' arguments are applied to the configs
+/// that import created. Nothing else is touched.
+fn apply_late_consent(
+    conn: &rusqlite::Connection,
+    payload: &PluginBundlePayload,
+    consent: &HashSet<String>,
+    instance_secret: &str,
+    report: &mut ImportPluginBundleReport,
+) -> anyhow::Result<()> {
+    for portable in &payload.plugins {
+        if !consent.contains(&portable.source_config_id) {
+            continue;
+        }
+        let Some(server) = current_registry_server(&portable.server.id).or_else(|| {
+            db::mcps::list_servers(conn)
+                .ok()?
+                .into_iter()
+                .find(|server| server.id == portable.server.id)
+        }) else {
+            continue;
+        };
+        let mut ignored = Vec::new();
+        let Some(args) = import_args_override(&server, portable, true, &mut ignored) else {
+            continue;
+        };
+        let Some(config) = report
+            .imported_configs
+            .iter()
+            .find(|item| item.server_id == server.id && item.label == portable.label)
+            .and_then(|item| db::mcps::get_config(conn, &item.config_id).ok().flatten())
+        else {
+            continue;
+        };
+        if config.args_override.as_ref() == Some(&args) {
+            continue;
+        }
+        let env = db::mcps::decrypt_env(&config.env_encrypted, instance_secret)
+            .map_err(anyhow::Error::msg)?;
+        let hash = db::mcps::compute_config_hash(&server, &env, Some(&args));
+        db::mcps::update_config(
+            conn,
+            &config.id,
+            None,
+            None,
+            None,
+            Some(&args),
+            None,
+            Some(&hash),
+            None,
+            None,
+            None,
+        )?;
+        report.warnings.push(format!(
+            "{}: the accepted custom arguments were applied",
+            portable.label
+        ));
+    }
+    Ok(())
+}
+
 fn import_payload(
     conn: &rusqlite::Connection,
     envelope: &PluginBundleEnvelope,
     payload: PluginBundlePayload,
     instance_secret: &str,
     fingerprint: &str,
-    accept_args_override: bool,
+    consent: &HashSet<String>,
 ) -> anyhow::Result<ImportPluginBundleReport> {
     if let Some((existing_hash, report_json)) = conn
         .query_row(
@@ -711,6 +799,9 @@ fn import_payload(
         }
         let mut report: ImportPluginBundleReport = serde_json::from_str(&report_json)?;
         report.already_imported = true;
+        if !consent.is_empty() {
+            apply_late_consent(conn, &payload, consent, instance_secret, &mut report)?;
+        }
         return Ok(report);
     }
 
@@ -729,8 +820,12 @@ fn import_payload(
             skipped_plugins += 1;
             continue;
         };
-        let args_override =
-            import_args_override(&server, &portable, accept_args_override, &mut conflicts);
+        let args_override = import_args_override(
+            &server,
+            &portable,
+            consent.contains(&portable.source_config_id),
+            &mut conflicts,
+        );
         let allowed_env_keys = allowed_import_env_keys(&server);
         let env_keys = portable
             .env_keys
@@ -988,59 +1083,266 @@ pub async fn export_plugin_bundle(
     }
 }
 
+/// Parse an uploaded file as a plugin bundle. A single-plugin JSON from the old
+/// per-plugin export is converted into a one-plugin bundle here, so it goes
+/// through exactly the same validation as any bundle.
+fn load_bundle(
+    content: &str,
+    passphrase: Option<&str>,
+) -> Result<(PluginBundleEnvelope, PluginBundlePayload, String, bool), (ApiErrorCode, String)> {
+    let validation = |message: String| (ApiErrorCode::Validation, message);
+    let raw: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| validation(format!("Invalid plugin bundle JSON: {error}")))?;
+    let (envelope, legacy_payload) = if raw.get("kind").is_none() && raw.get("name").is_some() {
+        let (envelope, payload) = legacy_bundle(raw, content).map_err(validation)?;
+        (envelope, Some(payload))
+    } else {
+        let envelope: PluginBundleEnvelope = serde_json::from_value(raw)
+            .map_err(|error| validation(format!("Invalid plugin bundle JSON: {error}")))?;
+        (envelope, None)
+    };
+    let legacy = legacy_payload.is_some();
+    if envelope.kind != PLUGIN_BUNDLE_KIND || envelope.version != PLUGIN_BUNDLE_VERSION {
+        return Err(validation(format!(
+            "Unsupported plugin bundle (kind `{}`, version {})",
+            envelope.kind, envelope.version
+        )));
+    }
+    if envelope.bundle_id.trim().is_empty() {
+        return Err(validation("Plugin bundle id is required".into()));
+    }
+    let payload = match legacy_payload {
+        Some(payload) => payload,
+        None => decode_payload(&envelope, passphrase).map_err(|e| validation(e.to_string()))?,
+    };
+    validate_payload_contract(&envelope, &payload).map_err(|e| validation(e.to_string()))?;
+    let fingerprint =
+        semantic_fingerprint(&envelope).map_err(|e| (ApiErrorCode::Internal, e.to_string()))?;
+    Ok((envelope, payload, fingerprint, legacy))
+}
+
+/// The old per-plugin JSON (`name`, `base_url`, `fields`, `endpoints`, `auth`)
+/// as a one-plugin bundle. Values are never carried, as before.
+fn legacy_bundle(
+    raw: serde_json::Value,
+    content: &str,
+) -> Result<(PluginBundleEnvelope, PluginBundlePayload), String> {
+    let spec: crate::models::CustomApiPayload = serde_json::from_value(raw)
+        .map_err(|error| format!("Not a plugin bundle or a plugin export: {error}"))?;
+    let spec = crate::api::mcps::sanitize_imported_payload(spec)?;
+    let server = crate::api::mcps::materialize_custom_server(&spec);
+    let env_keys = spec
+        .fields
+        .iter()
+        .filter(|field| !field.label.trim().is_empty())
+        .map(|field| crate::api::mcps::slug_env_key(&field.label))
+        .collect::<Vec<_>>();
+    let digest = Sha256::digest(content.as_bytes());
+    let bundle_id = format!(
+        "legacy-{}",
+        digest
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let payload = PluginBundlePayload {
+        plugins: vec![PortablePluginConfig {
+            source_config_id: "legacy-plugin".into(),
+            label: spec.name.clone(),
+            server,
+            env_keys,
+            values: None,
+            args_override: None,
+            was_global: false,
+            include_general: true,
+            preferred_interface: PluginInterface::default(),
+        }],
+    };
+    let envelope = PluginBundleEnvelope {
+        kind: PLUGIN_BUNDLE_KIND.into(),
+        version: PLUGIN_BUNDLE_VERSION,
+        bundle_id,
+        exported_at: Utc::now(),
+        includes_values: false,
+        encrypted: false,
+        plugin_labels: vec![spec.name],
+        value_manifest: Vec::new(),
+        payload: Some(payload.clone()),
+        encrypted_payload: None,
+        wrapped_key: None,
+    };
+    Ok((envelope, payload))
+}
+
+fn looks_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "apikey",
+        "api-key",
+        "api_key",
+        "auth",
+        "bearer",
+        "credential",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+}
+
+/// Arguments safe to show: `--flag=value` and the value after a secret-named
+/// flag are masked, as is anything shaped like a credential.
+fn mask_secret_args(args: &[String]) -> Vec<String> {
+    const MASK: &str = "••••";
+    let known_prefix = [
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "glpat-",
+        "sk-",
+        "xox",
+        "AKIA",
+        "eyJ",
+    ];
+    let mut previous_secret_flag = false;
+    args.iter()
+        .map(|arg| {
+            let masked = if previous_secret_flag && !arg.starts_with('-') {
+                MASK.to_string()
+            } else if let Some((key, _)) = arg.split_once('=') {
+                if looks_secret(key) || known_prefix.iter().any(|p| arg.contains(p)) {
+                    format!("{key}={MASK}")
+                } else {
+                    arg.clone()
+                }
+            } else if known_prefix.iter().any(|prefix| arg.starts_with(prefix))
+                || (arg.chars().count() >= 32
+                    && arg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            {
+                MASK.to_string()
+            } else {
+                arg.clone()
+            };
+            previous_secret_flag = arg.starts_with('-') && !arg.contains('=') && looks_secret(arg);
+            masked
+        })
+        .collect()
+}
+
+fn build_import_preview(
+    conn: &rusqlite::Connection,
+    envelope: &PluginBundleEnvelope,
+    payload: &PluginBundlePayload,
+    fingerprint: &str,
+    legacy: bool,
+) -> anyhow::Result<ImportBundlePreview> {
+    let already_imported = conn
+        .query_row(
+            "SELECT content_sha256 FROM plugin_bundle_imports WHERE source_bundle_id = ?1",
+            [&envelope.bundle_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some_and(|existing| existing == fingerprint);
+    let servers = db::mcps::list_servers(conn)?;
+    let configs = db::mcps::list_configs(conn)?;
+    let plugins = payload
+        .plugins
+        .iter()
+        .map(|portable| {
+            let known = current_registry_server(&portable.server.id).or_else(|| {
+                servers
+                    .iter()
+                    .find(|server| server.id == portable.server.id)
+                    .cloned()
+            });
+            let (importable, issue) = if known.is_some() {
+                (true, None)
+            } else if has_reserved_registry_prefix(&portable.server.id) {
+                (false, Some("reserved".to_string()))
+            } else if !is_safe_manual_server(&portable.server) {
+                (false, Some("untrusted_server".to_string()))
+            } else {
+                (true, None)
+            };
+            let own_args = known.as_ref().and_then(|server| match &server.transport {
+                McpTransport::Stdio { args, .. } => Some(args.clone()),
+                _ => None,
+            });
+            let proposed = portable.args_override.as_ref();
+            let args_differ =
+                own_args.is_some() && proposed.is_some() && proposed != own_args.as_ref();
+            let exists = configs.iter().any(|config| {
+                config.server_id == portable.server.id && config.label == portable.label
+            });
+            ImportPreviewPlugin {
+                source_config_id: portable.source_config_id.clone(),
+                label: portable.label.clone(),
+                server_name: portable.server.name.clone(),
+                usual_args: own_args.as_deref().map(mask_secret_args),
+                proposed_args: if args_differ {
+                    proposed.map(|args| mask_secret_args(args))
+                } else {
+                    None
+                },
+                args_differ,
+                importable: importable && (!exists || already_imported),
+                issue: issue
+                    .or_else(|| (exists && !already_imported).then(|| "exists".to_string())),
+            }
+        })
+        .collect();
+    Ok(ImportBundlePreview {
+        bundle_id: envelope.bundle_id.clone(),
+        already_imported,
+        includes_values: envelope.includes_values,
+        legacy,
+        plugins,
+    })
+}
+
+/// POST /api/mcps/bundles/import-preview
+pub async fn preview_plugin_bundle_import(
+    State(state): State<AppState>,
+    Json(request): Json<ImportPluginBundleRequest>,
+) -> Json<ApiResponse<ImportBundlePreview>> {
+    let (envelope, payload, fingerprint, legacy) =
+        match load_bundle(&request.content, request.passphrase.as_deref()) {
+            Ok(loaded) => loaded,
+            Err((code, message)) => return Json(ApiResponse::err_coded(code, message)),
+        };
+    match state
+        .db
+        .with_read_conn(move |conn| {
+            build_import_preview(conn, &envelope, &payload, &fingerprint, legacy)
+        })
+        .await
+    {
+        Ok(preview) => Json(ApiResponse::ok(preview)),
+        Err(error) => Json(ApiResponse::err(error.to_string())),
+    }
+}
+
 /// POST /api/mcps/bundles/import
 pub async fn import_plugin_bundle(
     State(state): State<AppState>,
     Json(request): Json<ImportPluginBundleRequest>,
 ) -> Json<ApiResponse<ImportPluginBundleReport>> {
-    let envelope: PluginBundleEnvelope = match serde_json::from_str(&request.content) {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            return Json(ApiResponse::err_coded(
-                ApiErrorCode::Validation,
-                format!("Invalid plugin bundle JSON: {error}"),
-            ))
-        }
-    };
-    if envelope.kind != PLUGIN_BUNDLE_KIND || envelope.version != PLUGIN_BUNDLE_VERSION {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            format!(
-                "Unsupported plugin bundle (kind `{}`, version {})",
-                envelope.kind, envelope.version
-            ),
-        ));
-    }
-    if envelope.bundle_id.trim().is_empty() {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            "Plugin bundle id is required",
-        ));
-    }
-    let payload = match decode_payload(&envelope, request.passphrase.as_deref()) {
-        Ok(payload) => payload,
-        Err(error) => {
-            return Json(ApiResponse::err_coded(
-                ApiErrorCode::Validation,
-                error.to_string(),
-            ))
-        }
-    };
-    if let Err(error) = validate_payload_contract(&envelope, &payload) {
-        return Json(ApiResponse::err_coded(
-            ApiErrorCode::Validation,
-            error.to_string(),
-        ));
-    }
-    let fingerprint = match semantic_fingerprint(&envelope) {
-        Ok(fingerprint) => fingerprint,
-        Err(error) => return Json(ApiResponse::err(error.to_string())),
-    };
+    let (envelope, payload, fingerprint, _) =
+        match load_bundle(&request.content, request.passphrase.as_deref()) {
+            Ok(loaded) => loaded,
+            Err((code, message)) => return Json(ApiResponse::err_coded(code, message)),
+        };
     let instance_secret = match state.config.read().await.encryption_secret.clone() {
         Some(secret) => secret,
         None => return Json(ApiResponse::err("No encryption secret configured")),
     };
-    let accept_args_override = request.accept_args_override.unwrap_or(false);
+    let consent: HashSet<String> = request.accept_args_for.into_iter().collect();
     match state
         .db
         .with_conn(move |conn| {
@@ -1050,7 +1352,7 @@ pub async fn import_plugin_bundle(
                 payload,
                 &instance_secret,
                 &fingerprint,
-                accept_args_override,
+                &consent,
             )
         })
         .await
@@ -1301,7 +1603,7 @@ mod tests {
                     payload,
                     &target_secret_for_import,
                     &fingerprint,
-                    false,
+                    &HashSet::new(),
                 )
             })
             .await
@@ -1361,7 +1663,7 @@ mod tests {
                     replay_payload,
                     &target_secret,
                     &replay_fingerprint,
-                    false,
+                    &HashSet::new(),
                 )
             })
             .await
@@ -1381,7 +1683,7 @@ mod tests {
                     changed_payload,
                     &crypto::generate_secret(),
                     &changed_fingerprint,
-                    false,
+                    &HashSet::new(),
                 )
             })
             .await
@@ -1424,6 +1726,19 @@ mod tests {
         plugins: Vec<PortablePluginConfig>,
         accept_args_override: bool,
     ) -> ImportPluginBundleReport {
+        let consent = if accept_args_override {
+            plugins.iter().map(|p| p.source_config_id.clone()).collect()
+        } else {
+            HashSet::new()
+        };
+        import_with_consent(conn, plugins, &consent)
+    }
+
+    fn import_with_consent(
+        conn: &rusqlite::Connection,
+        plugins: Vec<PortablePluginConfig>,
+        consent: &HashSet<String>,
+    ) -> ImportPluginBundleReport {
         let envelope = clear_envelope(plugins);
         let payload = envelope.payload.clone().unwrap();
         let fingerprint = semantic_fingerprint(&envelope).unwrap();
@@ -1433,7 +1748,7 @@ mod tests {
             payload,
             &crypto::generate_secret(),
             &fingerprint,
-            accept_args_override,
+            consent,
         )
         .unwrap()
     }
@@ -1565,5 +1880,217 @@ mod tests {
             .contains("abc-secret-arg"));
         let payload = decode_payload(&encrypted, Some("portable-passphrase")).unwrap();
         assert_eq!(payload.plugins[0].args_override, Some(args));
+    }
+
+    #[test]
+    fn consent_applies_only_to_the_checked_plugins() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let github = current_registry_server("mcp-github").unwrap();
+        let args = vec!["-y".to_string(), "other-package".to_string()];
+        let mut first = portable(github.clone(), Some(args.clone()));
+        first.label = "first".into();
+        let mut second = portable(github, Some(args.clone()));
+        second.label = "second".into();
+        let consent = HashSet::from([first.source_config_id.clone()]);
+
+        let report = import_with_consent(&conn, vec![first, second], &consent);
+        let by_label = |label: &str| {
+            let id = &report
+                .imported_configs
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap()
+                .config_id;
+            db::mcps::get_config(&conn, id).unwrap().unwrap()
+        };
+        assert_eq!(by_label("first").args_override, Some(args));
+        assert_eq!(by_label("second").args_override, None);
+        assert_eq!(
+            report
+                .conflicts
+                .iter()
+                .filter(|c| c.contains("were not applied"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_reimport_can_add_the_consent_the_first_import_lacked() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let github = current_registry_server("mcp-github").unwrap();
+        let args = vec!["-y".to_string(), "other-package".to_string()];
+        let plugin = portable(github, Some(args.clone()));
+        let source_id = plugin.source_config_id.clone();
+        let envelope = clear_envelope(vec![plugin]);
+        let payload = envelope.payload.clone().unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+        let secret = crypto::generate_secret();
+
+        let first = import_payload(
+            &conn,
+            &envelope,
+            payload.clone(),
+            &secret,
+            &fingerprint,
+            &HashSet::new(),
+        )
+        .unwrap();
+        let config_id = first.imported_config_ids[0].clone();
+        assert_eq!(
+            db::mcps::get_config(&conn, &config_id)
+                .unwrap()
+                .unwrap()
+                .args_override,
+            None
+        );
+
+        let again = import_payload(
+            &conn,
+            &envelope,
+            payload.clone(),
+            &secret,
+            &fingerprint,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(again.already_imported);
+        assert_eq!(
+            db::mcps::get_config(&conn, &config_id)
+                .unwrap()
+                .unwrap()
+                .args_override,
+            None
+        );
+
+        let consented = import_payload(
+            &conn,
+            &envelope,
+            payload,
+            &secret,
+            &fingerprint,
+            &HashSet::from([source_id]),
+        )
+        .unwrap();
+        assert!(consented.already_imported);
+        assert_eq!(consented.imported_config_ids, vec![config_id.clone()]);
+        assert_eq!(
+            db::mcps::get_config(&conn, &config_id)
+                .unwrap()
+                .unwrap()
+                .args_override,
+            Some(args)
+        );
+    }
+
+    #[test]
+    fn secret_looking_arguments_are_masked_for_display() {
+        let masked = mask_secret_args(&[
+            "-y".into(),
+            "@scope/server".into(),
+            "--token".into(),
+            "abc123".into(),
+            "--api-key=hunter2".into(),
+            "ghp_0123456789abcdef".into(),
+            "--region=eu-west-1".into(),
+        ]);
+        assert_eq!(
+            masked,
+            vec![
+                "-y",
+                "@scope/server",
+                "--token",
+                "••••",
+                "--api-key=••••",
+                "••••",
+                "--region=eu-west-1"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_import_preview_shows_the_usual_and_the_proposed_command() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let github = current_registry_server("mcp-github").unwrap();
+        let McpTransport::Stdio { args: usual, .. } = github.transport.clone() else {
+            panic!("stdio");
+        };
+        let proposed = vec![
+            "--token".to_string(),
+            "s3cr3t".to_string(),
+            "evil".to_string(),
+        ];
+        let same = portable(github.clone(), Some(usual.clone()));
+        let mut different = portable(github, Some(proposed));
+        different.label = "different".into();
+        let envelope = clear_envelope(vec![same, different]);
+        let payload = envelope.payload.clone().unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+
+        let preview =
+            build_import_preview(&conn, &envelope, &payload, &fingerprint, false).unwrap();
+        assert!(!preview.plugins[0].args_differ);
+        assert_eq!(preview.plugins[0].proposed_args, None);
+        let different = &preview.plugins[1];
+        assert!(different.args_differ);
+        assert_eq!(different.usual_args.as_ref().unwrap(), &usual);
+        assert_eq!(
+            different.proposed_args.as_ref().unwrap(),
+            &vec![
+                "--token".to_string(),
+                "••••".to_string(),
+                "evil".to_string()
+            ]
+        );
+        assert!(!serde_json::to_string(&preview).unwrap().contains("s3cr3t"));
+    }
+
+    #[test]
+    fn an_old_single_plugin_json_becomes_a_one_plugin_bundle() {
+        let old = r#"{"name":"Legacy API","base_url":"https://api.legacy.test","description":"d","docs_url":null,
+            "fields":[{"label":"API Key","value":"leaked-value"}],
+            "endpoints":[{"path":"/things","method":"GET","description":"list"}],"auth":"None"}"#;
+        let (envelope, payload, _, legacy) = load_bundle(old, None).unwrap();
+        assert!(legacy);
+        assert_eq!(envelope.kind, PLUGIN_BUNDLE_KIND);
+        let plugin = &payload.plugins[0];
+        assert_eq!(plugin.label, "Legacy API");
+        assert_eq!(plugin.env_keys, vec!["API_KEY".to_string()]);
+        assert!(plugin.values.is_none(), "credentials never travel");
+        assert!(matches!(plugin.server.transport, McpTransport::ApiOnly));
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let fingerprint = semantic_fingerprint(&envelope).unwrap();
+        let report = import_payload(
+            &conn,
+            &envelope,
+            payload,
+            &crypto::generate_secret(),
+            &fingerprint,
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(report.imported_config_ids.len(), 1);
+        assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    }
+
+    #[test]
+    fn a_malformed_old_plugin_json_is_refused_with_a_clear_error() {
+        let missing_url = r#"{"name":"Legacy","base_url":"  ","fields":[]}"#;
+        let (code, message) = load_bundle(missing_url, None).unwrap_err();
+        assert!(matches!(code, ApiErrorCode::Validation));
+        assert!(message.contains("base_url"), "{message}");
+        let not_json = load_bundle("{ nope", None).unwrap_err();
+        assert!(not_json.1.contains("Invalid plugin bundle JSON"));
+        let wrong_shape = load_bundle(r#"{"name": 5}"#, None).unwrap_err();
+        assert!(
+            wrong_shape.1.contains("Not a plugin bundle"),
+            "{}",
+            wrong_shape.1
+        );
     }
 }

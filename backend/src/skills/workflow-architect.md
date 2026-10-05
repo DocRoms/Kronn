@@ -84,7 +84,7 @@ Runs a binary listed in `Workflow.exec_allowlist` directly from the Rust engine,
 - Allowlist is per-workflow (not global). Empty list = Exec disabled. Match is exact on the bare binary name.
 - **Never** invokes a shell. `Command::new(binary).args(args)` directly. No pipes, no redirection, no glob.
 - Args are templated (`{{steps.X.summary}}`) but rendered values are **literal argv strings** — even `; rm -rf /` becomes a benign argument.
-- **Except inside an interpreter's inline script** (`bash -c`, `python3 -c`, `node -e`…): that one argument is parsed as code, so a templated tracker title or step output would run. Never interpolate into it — pass the value as a later argument (`"exec_command": "bash", "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]`, or `sys.argv[1]` in Python), or, in a shell script only, write `{{issue.title|sh}}` (one single-quoted word) outside any quotes. Saving refuses any other placeholder in an inline script except `{{run.id}}` and `{{time.now…}}`.
+- **Except inside an interpreter's inline code** (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included): that code is parsed, so a templated tracker title or step output could run (heredoc, eval, quotes). It accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses (`"exec_command": "bash", "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]`, or `sys.argv[1]` in Python), or via `exec_stdin`. Saving refuses anything else; an older saved step that still does it is flagged ("unsafe interpolation"), refused at run time, and the workflow view offers "Suggest a fix".
 - Workdir locked to the workspace, timeout-bounded.
 
 ```json
@@ -622,7 +622,7 @@ Output envelope: `{ data: { items: [{input, status, response?, error?, http_stat
 | Field | Type | Description |
 |-------|------|-------------|
 | `exec_command` | string | Binary name (must match a `Workflow.exec_allowlist` entry exactly — bare name, no path, no shell metas) |
-| `exec_args` | array of string | Argv elements. Templates `{{steps.X}}` are rendered, but the result is a literal argv string — no shell interpretation, except in the inline script of `bash -c` / `python3 -c` / `node -e`, where a placeholder is refused (pass it as a later argument or use `{{x|sh}}` in a shell script) |
+| `exec_args` | array of string | Argv elements. Templates `{{steps.X}}` are rendered, but the result is a literal argv string — no shell interpretation, except in the inline code of `bash -c` / `python3 -c` / `node -e` (attached forms too), where a placeholder is refused: pass it as a later argument |
 | `exec_timeout_secs` | number | Default 300, hard-capped at 1800 by validator |
 
 ### Fields specific to `Gate`

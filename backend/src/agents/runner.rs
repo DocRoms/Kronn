@@ -1513,27 +1513,6 @@ fn is_wsl() -> bool {
     }
 }
 
-/// Convert a Windows path (C:\Users\...) to WSL path (/mnt/c/Users/...).
-#[cfg(target_os = "windows")]
-fn windows_to_wsl_path(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        // Extended-length path
-        convert_drive_path(rest)
-    } else if s.len() >= 3 && s.as_bytes()[1] == b':' {
-        convert_drive_path(&s)
-    } else {
-        path.to_path_buf()
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn convert_drive_path(s: &str) -> PathBuf {
-    let drive = s.chars().next().unwrap().to_lowercase().next().unwrap();
-    let rest = s[2..].replace('\\', "/");
-    PathBuf::from(format!("/mnt/{}{}", drive, rest))
-}
-
 /// Output mode — how to interpret stdout from the agent
 #[derive(Clone, Copy, PartialEq)]
 pub enum OutputMode {
@@ -1795,6 +1774,35 @@ impl ToolActivityProbe {
     pub fn read(&self) -> Option<(String, u32)> {
         let usage = self.0.lock().ok()?;
         usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
+    }
+
+    /// The run's usage so far: an HTTP agent adds each tool turn, an ACP session
+    /// each report, without any text line having to arrive.
+    pub fn usage(&self) -> Option<ReportedUsage> {
+        let usage = self.0.lock().ok()?;
+        (usage.input_tokens.saturating_add(usage.output_tokens) > 0).then_some(ReportedUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            prompt_cache: usage.prompt_cache,
+        })
+    }
+
+    /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
+    #[cfg(test)]
+    pub fn scripted() -> Self {
+        Self(Arc::default())
+    }
+
+    /// One tool turn of a scripted run: its usage and, optionally, its tool.
+    #[cfg(test)]
+    pub fn record_turn(&self, input_tokens: u64, output_tokens: u64, tool: Option<&str>) {
+        let mut usage = self.0.lock().unwrap();
+        usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
+        usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
+        if let Some(tool) = tool {
+            usage.last_tool = Some(tool.to_owned());
+            usage.tool_calls = usage.tool_calls.saturating_add(1);
+        }
     }
 }
 
@@ -12404,35 +12412,23 @@ fn resolve_agent_invocation(
     }
 }
 
-fn platform_agent_invocation(
+/// Whether this launch crosses into WSL (Windows-native Kronn, WSL binary).
+fn agent_runs_in_wsl(command: &str, resolved_via_wsl: bool) -> bool {
+    super::wsl::runs_in_wsl(
+        cfg!(target_os = "windows") && !is_wsl(),
+        command,
+        resolved_via_wsl,
+    )
+}
+
+pub(crate) fn platform_agent_invocation(
     command: String,
     args: Vec<String>,
     resolved_via_wsl: bool,
     work_dir: &Path,
 ) -> (String, Vec<String>, PathBuf) {
-    #[cfg(target_os = "windows")]
-    let use_wsl = !is_wsl() && (resolved_via_wsl || command.starts_with('/'));
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = resolved_via_wsl;
-    }
-    #[cfg(not(target_os = "windows"))]
-    let use_wsl = false;
-
-    if use_wsl {
-        #[cfg(target_os = "windows")]
-        let wsl_work_dir = windows_to_wsl_path(work_dir);
-        #[cfg(not(target_os = "windows"))]
-        let wsl_work_dir = work_dir.to_path_buf();
-
-        let mut wsl_args = vec![
-            "--cd".to_string(),
-            wsl_work_dir.display().to_string(),
-            "-e".to_string(),
-            command,
-        ];
-        wsl_args.extend(args);
-        ("wsl.exe".to_string(), wsl_args, work_dir.to_path_buf())
+    if agent_runs_in_wsl(&command, resolved_via_wsl) {
+        super::wsl::wrap_invocation(command, args, work_dir)
     } else {
         (command, args, work_dir.to_path_buf())
     }
@@ -12662,6 +12658,7 @@ pub(crate) fn try_spawn(
         }
     );
 
+    let runs_in_wsl = agent_runs_in_wsl(&cmd_name, resolved_via_wsl);
     let (final_cmd, final_args, effective_work_dir) = platform_agent_invocation(
         cmd_name.clone(),
         cmd_args.clone(),
@@ -12756,11 +12753,19 @@ pub(crate) fn try_spawn(
     // we have one — non-MCP-aware agents simply ignore the env var.
     if let Some(disc_id) = discussion_id {
         cmd.env("KRONN_DISCUSSION_ID", disc_id);
-        // Backend URL: the agent process runs on the same host as the
-        // Kronn backend (Docker bridge or native), default 127.0.0.1
-        // unless an operator override is set in the system env.
-        let backend_url = std::env::var("KRONN_BACKEND_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:3140".to_string());
+    }
+    if discussion_id.is_some() || runs_in_wsl {
+        // Same host as the backend, except an agent in WSL2 NAT mode, whose
+        // loopback is the Linux VM: the operator's WSL override then applies.
+        let wsl_override = std::env::var(super::wsl::WSL_BACKEND_URL_ENV).ok();
+        if runs_in_wsl {
+            super::wsl::warn_once_if_backend_unreachable(wsl_override.is_some());
+        }
+        let backend_url = super::wsl::agent_backend_url(
+            runs_in_wsl,
+            std::env::var("KRONN_BACKEND_URL").ok().as_deref(),
+            wsl_override.as_deref(),
+        );
         cmd.env("KRONN_BACKEND_URL", backend_url);
     }
     if let Some(context) = task_worker_context {
@@ -12909,6 +12914,13 @@ pub(crate) fn try_spawn(
             receipt.compact()
         );
         receipt.validate_single_argument_limit()?;
+    }
+
+    // wsl.exe drops every Windows variable `WSLENV` does not list.
+    if runs_in_wsl {
+        super::wsl::apply_wslenv(&mut cmd, KRONN_INTERNAL_CODEX_ENV_VARS, |name| {
+            std::env::var_os(name).is_some()
+        });
     }
 
     // Name the carrier before the OS refuses the whole invocation for it.

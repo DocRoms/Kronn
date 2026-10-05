@@ -61,4 +61,20 @@ describe('AgentFullAccessSwitch', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(onChange).toHaveBeenCalledWith(false);
   });
+
+  it('shows a locked, always-on state that cannot be toggled', () => {
+    const onChange = vi.fn().mockResolvedValue(undefined);
+    render(
+      <I18nProvider>
+        <AgentFullAccessSwitch agentName="Codex" checked={false} locked onChange={onChange} />
+      </I18nProvider>,
+    );
+    const sw = screen.getByRole('switch');
+    expect(sw.getAttribute('aria-checked')).toBe('true');
+    expect(sw).toBeDisabled();
+    expect(sw.textContent).toMatch(/Codex/);
+    fireEvent.click(sw);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
 });

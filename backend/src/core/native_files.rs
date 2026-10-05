@@ -774,6 +774,9 @@ mod tests {
             auto_triggers: None,
             external: false,
             source_url: None,
+            arguments: Vec::new(),
+            argument_hint: None,
+            variables: Vec::new(),
         }
     }
 

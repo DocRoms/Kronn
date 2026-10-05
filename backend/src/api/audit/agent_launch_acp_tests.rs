@@ -33,6 +33,14 @@ enum Turn {
     Hang,
     /// Answers, reporting this usage — `None` when the runtime reports nothing.
     Answer(Option<Reported>),
+    /// Answers with `REPORTED` usage, the cost and the served model given.
+    Priced {
+        usd_micros: Option<u64>,
+        model: Option<&'static str>,
+    },
+    /// Calls this many tools, the usage growing with each, without a word of
+    /// text; then works until stopped.
+    ToolChain(u32),
 }
 
 struct ScriptedAgent {
@@ -108,6 +116,47 @@ impl AcpTransport for ScriptedAgent {
                 }
                 let _ = events.send(AcpSessionEvent::Completed).await;
                 Ok(())
+            }
+            Turn::Priced { usd_micros, model } => {
+                if let Some(model) = model {
+                    let _ = events
+                        .send(AcpSessionEvent::ModelObserved(model.into()))
+                        .await;
+                }
+                let _ = events.send(AcpSessionEvent::TextDelta("done".into())).await;
+                let _ = events
+                    .send(AcpSessionEvent::Usage {
+                        input_tokens: REPORTED.input,
+                        output_tokens: REPORTED.output,
+                        prompt_cache: PromptCacheUsage::default(),
+                    })
+                    .await;
+                if let Some(usd_micros) = usd_micros {
+                    let _ = events.send(AcpSessionEvent::Cost { usd_micros }).await;
+                }
+                let _ = events.send(AcpSessionEvent::Completed).await;
+                Ok(())
+            }
+            Turn::ToolChain(calls) => {
+                for call in 1..=u64::from(calls) {
+                    let _ = events
+                        .send(AcpSessionEvent::ToolCall {
+                            name: "Read".into(),
+                        })
+                        .await;
+                    let _ = events
+                        .send(AcpSessionEvent::ToolTarget(format!("src/é{call}.rs")))
+                        .await;
+                    let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                    let _ = events
+                        .send(AcpSessionEvent::Usage {
+                            input_tokens: 100 * call,
+                            output_tokens: 10 * call,
+                            prompt_cache: PromptCacheUsage::default(),
+                        })
+                        .await;
+                }
+                std::future::pending().await
             }
         }
     }
@@ -487,4 +536,183 @@ async fn a_partial_audit_on_opencode_gets_the_read_policy_and_survives_a_refused
     assert!(body.contains("carried on after the refusal"), "{body}");
     let done = first_step_done(&body);
     assert_eq!(done["tokens"], json!(120), "{done}");
+}
+
+async fn latest_run(state: &AppState, id: &str) -> crate::models::AuditRun {
+    let id = id.to_string();
+    state
+        .db
+        .with_conn(move |conn| Ok(crate::db::audit_runs::list_recent(conn, &id, 1)?.remove(0)))
+        .await
+        .unwrap()
+}
+
+/// KT-997 DoD — the cost the runtime reported is recorded on the step and sent
+/// with `step_done`; the run names the model the runtime served.
+async fn an_acp_step_records_its_reported_cost_and_model(pipeline: Pipeline) {
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let agent = ScriptedAgent::new(Turn::Priced {
+        usd_micros: Some(420_000),
+        model: Some("scripted-model-é"),
+    });
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-cost", project.path()).await;
+
+    let body = launch(&state, pipeline, "proj-cost", AgentType::OpenCode)
+        .await
+        .unwrap();
+
+    let done = first_step_done(&body);
+    assert_eq!(
+        done["cost_usd_micros"],
+        json!(420_000),
+        "{pipeline:?}: {done}"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-cost").await;
+    assert_eq!(steps[0].cost_usd_micros, Some(420_000), "{pipeline:?}");
+    assert_eq!(
+        latest_run(&state, "proj-cost").await.model.as_deref(),
+        Some("scripted-model-é"),
+        "{pipeline:?}: the observed model, not a configured guess"
+    );
+}
+
+#[tokio::test]
+async fn a_full_audit_step_records_the_cost_and_model_its_runtime_reported() {
+    an_acp_step_records_its_reported_cost_and_model(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_partial_audit_step_records_the_cost_and_model_its_runtime_reported() {
+    an_acp_step_records_its_reported_cost_and_model(Pipeline::Partial).await;
+}
+
+/// KT-997 DoD — no reported cost stays unknown (NULL, `null`), never 0; with no
+/// observed model the run carries the configured one, labelled as such.
+async fn an_unreported_cost_stays_unknown(pipeline: Pipeline) {
+    let state = new_state();
+    state
+        .config
+        .write()
+        .await
+        .agents
+        .model_tiers
+        .open_code
+        .reasoning = Some("cfg-model".into());
+    let project = tempfile::tempdir().unwrap();
+    let agent = ScriptedAgent::new(Turn::Priced {
+        usd_micros: None,
+        model: None,
+    });
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-nocost", project.path()).await;
+
+    let body = launch(&state, pipeline, "proj-nocost", AgentType::OpenCode)
+        .await
+        .unwrap();
+
+    let done = first_step_done(&body);
+    assert!(done["cost_usd_micros"].is_null(), "{pipeline:?}: {done}");
+    assert_eq!(
+        done["tokens"],
+        json!(120),
+        "{pipeline:?}: tokens are still known"
+    );
+    let (_, steps) = latest_run_steps(&state, "proj-nocost").await;
+    assert_eq!(steps[0].cost_usd_micros, None, "{pipeline:?}");
+    assert_eq!(
+        latest_run(&state, "proj-nocost").await.model.as_deref(),
+        Some("cfg-model (configured)"),
+        "{pipeline:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_full_audit_step_without_a_reported_cost_stays_unknown() {
+    an_unreported_cost_stays_unknown(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_partial_audit_step_without_a_reported_cost_stays_unknown() {
+    an_unreported_cost_stays_unknown(Pipeline::Partial).await;
+}
+
+/// KT-950 DoD — an ACP step that only calls tools, without a word of text,
+/// shows its last tool, its call count and its tokens while it works, through
+/// the same probe as an HTTP agent; and a Stop still ends it.
+async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) {
+    const CALLS: u32 = 40;
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let agent = ScriptedAgent::new(Turn::ToolChain(CALLS));
+    let _route = route(project.path(), &agent);
+    add_project(&state, "proj-tools", project.path()).await;
+    let run = launch(&state, pipeline, "proj-tools", AgentType::OpenCode);
+
+    let tracker = state.audit_tracker.clone();
+    let progress = move || tracker.lock().unwrap().progress.get("proj-tools").cloned();
+    until("the tool chain to show on the audit's progress", || {
+        progress().is_some_and(|p| {
+            p.current_tool_call_count == Some(CALLS)
+                && p.step_tokens == Some(u64::from(CALLS) * 110)
+        })
+    })
+    .await;
+    let shown = progress().unwrap();
+    assert_eq!(
+        shown.current_tool.as_deref(),
+        Some(format!("Read · src/é{CALLS}.rs").as_str()),
+        "{pipeline:?}"
+    );
+
+    let response = crate::api::audit::full::cancel_audit(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("proj-tools".to_string()),
+    )
+    .await;
+    assert!(response.0.success, "{pipeline:?}: {:?}", response.0.error);
+    let body = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap_or_else(|_| panic!("{pipeline:?}: the stopped audit never ended"))
+        .unwrap();
+
+    let events = sse_events(&body);
+    let tool = events
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "tool_call")
+        .unwrap_or_else(|| panic!("{pipeline:?}: no tool_call: {body}"));
+    assert_eq!(tool.1["calls"], json!(CALLS), "{pipeline:?}");
+    let progress_event = events
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "step_progress")
+        .unwrap_or_else(|| panic!("{pipeline:?}: no step_progress: {body}"));
+    assert_eq!(
+        progress_event.1["step_tokens"],
+        json!(u64::from(CALLS) * 110),
+        "{pipeline:?}"
+    );
+    assert!(
+        !events.iter().any(|(name, _)| name == "chunk"),
+        "{pipeline:?}: activity never becomes text in the answer: {body}"
+    );
+    assert!(
+        events.iter().any(|(name, _)| name == "cancelled"),
+        "{pipeline:?}"
+    );
+    assert!(agent.cancels.load(Ordering::SeqCst) >= 1, "{pipeline:?}");
+    let (status, _) = latest_run_steps(&state, "proj-tools").await;
+    assert_eq!(status, "Cancelled", "{pipeline:?}");
+}
+
+#[tokio::test]
+async fn a_full_audit_tool_chain_without_text_shows_progress_and_stops() {
+    a_tool_chain_without_text_shows_progress_and_stops(Pipeline::Full).await;
+}
+
+#[tokio::test]
+async fn a_partial_audit_tool_chain_without_text_shows_progress_and_stops() {
+    a_tool_chain_without_text_shows_progress_and_stops(Pipeline::Partial).await;
 }

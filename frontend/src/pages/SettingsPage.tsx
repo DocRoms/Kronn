@@ -76,6 +76,7 @@ import { MatrixText } from '../components/MatrixText';
 import { KronnMark } from '../components/KronnMark';
 import './SettingsPage.css';
 import { safeGetItem } from '../lib/safeStorage';
+import { SkillVariablesBadge } from '../components/SkillVariablesBadge';
 
 const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
 const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
@@ -322,6 +323,7 @@ export function SettingsPage({
   const [serverGlobalTimeout, setServerGlobalTimeout] = useState(30);
   const [serverLocalGlobalTimeout, setServerLocalGlobalTimeout] = useState(240);
   const [executionVariableRetentionDays, setExecutionVariableRetentionDays] = useState(30);
+  const [runPayloadRetentionDays, setRunPayloadRetentionDays] = useState(30);
   const [serverDebugMode, setServerDebugMode] = useState(false);
   const [discussionNotesEnabled, setDiscussionNotesEnabled] = useState(true);
   // True after the user just toggled debug_mode. Shows a "restart required"
@@ -350,6 +352,7 @@ export function SettingsPage({
       setServerDebugMode(cfg.debug_mode ?? false);
       setDiscussionNotesEnabled(cfg.discussion_notes_enabled ?? true);
       setExecutionVariableRetentionDays(cfg.execution_variable_retention_days ?? 30);
+      setRunPayloadRetentionDays(cfg.run_payload_retention_days ?? 30);
     }
     return cfg;
   }), []);
@@ -744,6 +747,7 @@ export function SettingsPage({
                   <span className="set-cat-badge" data-cat={skill.category}>
                     {t(`skills.${skill.category.toLowerCase()}`)}
                   </span>
+                  <SkillVariablesBadge skill={skill} />
                   {skill.token_estimate > 0 && (
                     <span className="set-token-cost-badge" title={t('config.tokenCostHint')}>
                       ~{skill.token_estimate} tok
@@ -1890,6 +1894,33 @@ export function SettingsPage({
               <option value={365}>{t('config.executionVariableRetention.days', 365)}</option>
             </select>
             <small>{t('config.executionVariableRetentionHint')}</small>
+          </label>
+
+          <label className="set-db-retention">
+            <span className="set-form-label">{t('config.runPayloadRetention')}</span>
+            <select
+              className="set-input set-input-sm cursor-pointer"
+              value={runPayloadRetentionDays}
+              aria-label={t('config.runPayloadRetention')}
+              onChange={async event => {
+                const value = Number(event.target.value);
+                const previous = runPayloadRetentionDays;
+                setRunPayloadRetentionDays(value);
+                try {
+                  await configApi.setServerConfig({ run_payload_retention_days: value });
+                } catch (error) {
+                  setRunPayloadRetentionDays(previous);
+                  toastActionFailed(error);
+                }
+              }}
+            >
+              <option value={7}>{t('config.executionVariableRetention.days', 7)}</option>
+              <option value={30}>{t('config.executionVariableRetention.days', 30)}</option>
+              <option value={90}>{t('config.executionVariableRetention.days', 90)}</option>
+              <option value={365}>{t('config.executionVariableRetention.days', 365)}</option>
+              <option value={0}>{t('config.runPayloadRetention.forever')}</option>
+            </select>
+            <small>{t('config.runPayloadRetentionHint')}</small>
           </label>
 
           <div className="set-export-warning">

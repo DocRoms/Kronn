@@ -42,4 +42,23 @@ describe('QuickExecForm', () => {
       variables: [expect.objectContaining({ name: 'region', label: 'AWS region', required: true })],
     }));
   });
+
+  it('shows the save refusal in place so its fix stays readable', async () => {
+    const refusal = 'Quick Exec « Ticket » : le script inline de `python3` interpole `{{ticket}}`';
+    const onSave = vi.fn().mockRejectedValue(new Error(refusal));
+    render(
+      <QuickExecForm
+        projects={[] as Parameters<typeof QuickExecForm>[0]['projects']}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('qe.name *'), { target: { value: 'Ticket' } });
+    fireEvent.change(screen.getByLabelText('qe.command *'), { target: { value: 'python3' } });
+    fireEvent.click(screen.getByText('qe.save'));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('{{ticket}}');
+    expect(screen.getByText('qe.save')).toBeDefined();
+  });
 });

@@ -362,6 +362,50 @@ describe('AuditTimeline', () => {
     expect(carried.getAttribute('title')).toContain('abcdef12');
   });
 
+  const expandAll = (container: HTMLElement) => {
+    container.querySelectorAll<HTMLElement>('.audit-tl-group-head').forEach(head => {
+      if (head.getAttribute('aria-expanded') === 'false') fireEvent.click(head);
+    });
+  };
+
+  it('shows each step\'s reported cost, a real zero as 0 and an unreported one as unknown (KT-997)', async () => {
+    mockTimeline([{ id: 'run-1' }], [
+      step(1, { cost_usd_micros: 420_000 }),
+      step(2, { cost_usd_micros: 0 }),
+      step(3, { cost_usd_micros: null }),
+      step(4, { cost_usd_micros: 3_100 }),
+    ]);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expandAll(container);
+
+    expect(await screen.findByTestId('audit-timeline-step-cost-1')).toHaveTextContent(/^~0[.,]42 \$$/);
+    expect(screen.getByTestId('audit-timeline-step-cost-2')).toHaveTextContent(/^~0[.,]00 \$$/);
+    const unknown = screen.getByTestId('audit-timeline-step-cost-3');
+    expect(unknown).toHaveTextContent(/\?$/);
+    expect(unknown).not.toHaveTextContent(/0/);
+    expect(unknown.getAttribute('title')).toMatch(/inconnu|unknown/);
+    expect(screen.getByTestId('audit-timeline-step-cost-4')).toHaveTextContent(/^~0[.,]0031 \$$/);
+    // One unknown step: the total is a floor, and says so.
+    const total = screen.getByTestId('audit-timeline-cost-total');
+    expect(total).toHaveTextContent(/≥ 0[.,]42 \$/);
+    expect(total).toHaveTextContent(/1/);
+  });
+
+  it('totals the run exactly when every step reported, and unknown when none did (KT-997)', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1, { cost_usd_micros: 400_000 }), step(2, { cost_usd_micros: 20_000 })]);
+    const { unmount } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    expect(await screen.findByTestId('audit-timeline-cost-total')).toHaveTextContent(/~0[.,]42 \$/);
+    expect(screen.getByTestId('audit-timeline-cost-total')).not.toHaveTextContent('≥');
+    unmount();
+
+    mockTimeline([{ id: 'run-1' }], [step(1), step(2)]);
+    wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    const total = await screen.findByTestId('audit-timeline-cost-total');
+    expect(total).toHaveTextContent(/\?/);
+    expect(total).not.toHaveTextContent(/\d/);
+  });
+
   it('saves the briefing without creating a discussion', async () => {
     const p = props();
     wrap(<AuditTimeline {...p} />);

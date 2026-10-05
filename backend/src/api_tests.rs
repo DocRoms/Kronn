@@ -6545,4 +6545,105 @@ mod tests {
             );
         }
     }
+
+    fn ui_preferences_request(method: &str, body: Option<Value>) -> Request<Body> {
+        let builder = Request::builder()
+            .method(method)
+            .uri("/api/ui-preferences")
+            .header("content-type", "application/json");
+        match body {
+            Some(json) => builder.body(Body::from(json.to_string())).unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_preferences_round_trip_and_replace_the_whole_map() {
+        let state = test_state();
+        let (status, body) = send(state.clone(), false, ui_preferences_request("GET", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"], serde_json::json!({}));
+
+        let first = serde_json::json!({
+            "kronn:theme": "light",
+            "kronn:tour-progress:v1": "{\"completed\":true}",
+            "kronn:new-discussion:default-project": "projet-é-🌙",
+        });
+        let (_, body) = send(
+            state.clone(),
+            false,
+            ui_preferences_request("PUT", Some(first.clone())),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        let (_, body) = send(state.clone(), false, ui_preferences_request("GET", None)).await;
+        assert_eq!(body["data"], first);
+
+        let second = serde_json::json!({ "kronn:theme": "dark" });
+        send(
+            state.clone(),
+            false,
+            ui_preferences_request("PUT", Some(second.clone())),
+        )
+        .await;
+        let (_, body) = send(state, false, ui_preferences_request("GET", None)).await;
+        assert_eq!(body["data"], second, "a PUT replaces the stored snapshot");
+    }
+
+    #[tokio::test]
+    async fn ui_preferences_refuse_oversized_or_foreign_maps_and_keep_the_old_one() {
+        let state = test_state();
+        let kept = serde_json::json!({ "kronn:theme": "light" });
+        send(
+            state.clone(),
+            false,
+            ui_preferences_request("PUT", Some(kept.clone())),
+        )
+        .await;
+
+        let big = "x".repeat(crate::api::ui_preferences::MAX_UI_PREFERENCES_BYTES + 1);
+        for refused in [
+            serde_json::json!({ "kronn:theme": big }),
+            serde_json::json!({ "authToken": "secret" }),
+        ] {
+            let (_, body) = send(
+                state.clone(),
+                false,
+                ui_preferences_request("PUT", Some(refused)),
+            )
+            .await;
+            assert_eq!(body["success"], false, "{body}");
+        }
+        let (status, _) = send(
+            state.clone(),
+            false,
+            ui_preferences_request("PUT", Some(serde_json::json!({ "kronn:theme": 3 }))),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "values must be strings"
+        );
+
+        let (_, body) = send(state, false, ui_preferences_request("GET", None)).await;
+        assert_eq!(body["data"], kept);
+    }
+
+    #[tokio::test]
+    async fn health_serves_the_instance_tag_never_the_nonce() {
+        crate::api::health::set_instance_nonce("api-test-nonce".into());
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(test_state(), true, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["instance"],
+            crate::api::health::instance_tag("api-test-nonce")
+        );
+        assert!(!body.to_string().contains("api-test-nonce"));
+    }
 }

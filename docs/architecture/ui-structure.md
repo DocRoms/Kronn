@@ -211,7 +211,7 @@ renormalizes only over present ratings instead of hiding missing evidence.
 
 Note: the old "Agents" tab has been merged into Config. Nav order: Projets → Discussions → Planification → Plugins → Workflows → Pages (after activation) → Config. **"?" button** in nav replays the guided tour.
 
-**Full access (KT-975):** one control, `AgentFullAccessSwitch`, on the agent card (Settings) and in the setup wizard's Access step; enabling asks first with the shared risk text (`config.fullAccessRisk`), off by default. Agents offered are listed once in `lib/agentFullAccess.ts`, mirroring the backend `AgentsConfig::set_full_access` (Vibe and Kiro ignore the flag, so they are refused).
+**Full access (KT-975):** one control, `AgentFullAccessSwitch`, on the agent card (Settings) and in the setup wizard's Access step; enabling asks first with the shared risk text (`config.fullAccessRisk`), off by default. Agents offered are listed once in `lib/agentFullAccess.ts`, mirroring the backend `AgentsConfig::set_full_access` (every CLI agent reads it: Claude and Codex through their own flag, the others by widening the ACP permission broker's auto-approval).
 
 **Project overview blocks (KT-989):** `ProjectGitBlock` and `ProjectDependenciesBlock` read through `useCachedResource`, a module-level stale-while-revalidate cache keyed per project: last result and its date at once, background refresh, an error keeps the data. Git status is requested twice, first with `?skip_pr_lookup=true` (local Git only, a PR link already cached is still returned), then in full. Invalidate with `invalidateCachedResource` when the cached value stops being true (branch switch).
 

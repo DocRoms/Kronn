@@ -256,14 +256,17 @@ pub fn repair_stale_workflow_projections(conn: &Connection) -> Result<usize> {
 }
 
 pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Result<()> {
-    let project_id: Option<String> = conn
-        .query_row(
-            "SELECT project_id FROM workflows WHERE id=?1",
-            [&run.workflow_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
+    let project_id: Option<String> = match run.project_id.clone() {
+        Some(project_id) => Some(project_id),
+        None => conn
+            .query_row(
+                "SELECT project_id FROM workflows WHERE id=?1",
+                [&run.workflow_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten(),
+    };
     let status = match run.status {
         crate::models::RunStatus::Pending => SharedRunStatus::Queued,
         crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval => {

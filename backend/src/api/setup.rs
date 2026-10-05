@@ -674,6 +674,34 @@ pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse
     Json(ApiResponse::ok(config.agents.clone()))
 }
 
+/// GET /api/config/agent-access/effective
+pub async fn get_agent_access_effective(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<AgentEffectiveAccess>>> {
+    let config = state.config.read().await;
+    let in_container = crate::core::env::is_docker();
+    let rows = [
+        AgentType::ClaudeCode,
+        AgentType::Codex,
+        AgentType::GeminiCli,
+        AgentType::CopilotCli,
+        AgentType::OpenCode,
+        AgentType::Kiro,
+        AgentType::Vibe,
+    ]
+    .into_iter()
+    .map(|agent| {
+        let (full_access, reason) = config.agents.effective_full_access(&agent, in_container);
+        AgentEffectiveAccess {
+            agent,
+            full_access,
+            reason: reason.map(str::to_string),
+        }
+    })
+    .collect();
+    Json(ApiResponse::ok(rows))
+}
+
 /// POST /api/config/agent-access
 /// Toggle full_access for an agent
 pub async fn set_agent_access(
@@ -819,6 +847,7 @@ pub async fn get_server_config(
         agent_handoff_blocked_agents: config.server.agent_handoff_blocked_agents.clone(),
         discussion_weight: config.server.discussion_weight,
         execution_variable_retention_days: config.server.execution_variable_retention_days,
+        run_payload_retention_days: config.server.run_payload_retention_days,
     }))
 }
 
@@ -841,6 +870,9 @@ pub async fn set_server_config(
     }
     if let Some(days) = req.execution_variable_retention_days {
         config.server.execution_variable_retention_days = days;
+    }
+    if let Some(days) = req.run_payload_retention_days {
+        config.server.run_payload_retention_days = days;
     }
     if let Some(domain) = req.domain {
         config.server.domain = if domain.is_empty() {
@@ -1417,9 +1449,9 @@ pub struct DbBackupResponse {
 /// `POST /api/db/backup` — write a consistent snapshot of the live
 /// database to `<data_dir>/backups/kronn-YYYYMMDD-HHMM.db`.
 ///
-/// Uses SQLite's online-backup API (via `rusqlite::backup::Backup`)
-/// so the snapshot is consistent even while the backend has the DB
-/// open. Equivalent to the runbook's manual
+/// Uses `VACUUM INTO` on its own read snapshot (see
+/// `core::backup::snapshot_database`), so the copy is consistent and
+/// compact while the backend keeps writing. Equivalent to the runbook's manual
 /// `sqlite3 .backup '...'` command, but reachable from Settings →
 /// Server with one click.
 ///
@@ -1456,30 +1488,18 @@ pub async fn db_backup(State(state): State<AppState>) -> Json<ApiResponse<DbBack
     let backup_filename = format!("kronn-{}.db", now.format("%Y%m%d-%H%M%S"));
     let backup_path = backup_dir.join(&backup_filename);
 
-    // Run the SQLite online-backup inside the DB executor so the
-    // source connection's mutex is held for the duration. This
-    // mirrors how `with_conn` runs every other query — the operator
-    // doesn't need a quiet window, the API holds the mutex while it
-    // copies pages.
+    // Same copy as the scheduled backup: its own read snapshot, so writers
+    // keep going, and a free-space check before anything is written.
+    let _maintenance = crate::core::backup::MAINTENANCE_LOCK.lock().await;
     let backup_path_owned = backup_path.clone();
-    let result = state
-        .db
-        .with_conn(move |conn| {
-            let mut dst = rusqlite::Connection::open(&backup_path_owned)?;
-            let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-            // One-shot copy via `step(-1)` (all pages in a single call). Pausing
-            // between page batches only helps when OTHER connections could write
-            // in the gaps — Kronn has a single shared connection, so a pause just
-            // holds the global mutex longer (~2.5s/MB) for no benefit.
-            // NOT `run_to_completion(-1, …)`: it asserts pages_per_step > 0 and
-            // panics (2026-07-09 boot-tick incident — poisoned the DB mutex).
-            match backup.step(-1)? {
-                rusqlite::backup::StepResult::Done => {}
-                other => anyhow::bail!("backup did not complete in one step: {other:?}"),
-            }
-            Ok(())
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::backup::snapshot_database(&source_path, &backup_path_owned, |dir| {
+            fs2::available_space(dir)
         })
-        .await;
+        .map(|_| ())
+    })
+    .await
+    .unwrap_or_else(|e| Err(anyhow::anyhow!("backup task failed: {e}")));
 
     match result {
         Ok(()) => {
@@ -1497,11 +1517,27 @@ pub async fn db_backup(State(state): State<AppState>) -> Json<ApiResponse<DbBack
                 taken_at: now,
             }))
         }
-        Err(e) => {
-            // Clean up the partial file if the backup failed mid-flight.
-            let _ = std::fs::remove_file(&backup_path);
-            Json(ApiResponse::err(format!("Backup failed: {}", e)))
+        Err(e) => Json(ApiResponse::err(format!("Backup failed: {}", e))),
+    }
+}
+
+/// `POST /api/db/compact` — KT-984: give the database's free pages back to the
+/// filesystem and report the size before and after. Explicit only: it holds
+/// the write connection for the whole rewrite.
+pub async fn db_compact(State(state): State<AppState>) -> Json<ApiResponse<DbCompaction>> {
+    match crate::core::backup::compact_database(&state.db).await {
+        Ok(report) => {
+            tracing::info!(
+                "Database compacted in {} ms: {} -> {} bytes (WAL {} -> {})",
+                report.duration_ms,
+                report.file_bytes_before,
+                report.file_bytes_after,
+                report.wal_bytes_before,
+                report.wal_bytes_after
+            );
+            Json(ApiResponse::ok(report))
         }
+        Err(e) => Json(ApiResponse::err(format!("Compaction refused: {e}"))),
     }
 }
 

@@ -674,21 +674,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // a bug on GitHub" button can stamp them into the issue template
         // without hitting an authenticated endpoint first. Docker's curl-based
         // healthcheck ignores the body, so adding fields is backwards-safe.
-        .route(
-            "/api/health",
-            get(|| async {
-                axum::Json(serde_json::json!({
-                    "ok": true,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "host_os": crate::agents::detect_host_label_public(),
-                    // Lets the UI gate the "Install agent" button: under Docker the
-                    // backend runs in a Linux container that can't install onto the
-                    // host, so the UI points to the host-side `kronn` CLI instead.
-                    // Native (Tauri/CLI) → false → Install works on the host.
-                    "in_docker": crate::core::env::is_docker(),
-                }))
-            }),
-        )
+        .route("/api/health", get(api::health::health))
         // ── Setup wizard ──
         .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
@@ -817,6 +803,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/tts-voices", get(api::setup::get_tts_voices))
         .route("/api/config/tts-voice", post(api::setup::save_tts_voice))
         .route(
+            "/api/ui-preferences",
+            get(api::ui_preferences::get).put(api::ui_preferences::put),
+        )
+        .route(
             "/api/config/global-context",
             get(api::setup::get_global_context).post(api::setup::save_global_context),
         )
@@ -876,6 +866,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::setup::get_agent_access).post(api::setup::set_agent_access),
         )
         .route(
+            "/api/config/agent-access/effective",
+            get(api::setup::get_agent_access_effective),
+        )
+        .route(
             "/api/config/agent-mention-color",
             post(api::setup::set_agent_mention_color),
         )
@@ -898,6 +892,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/db-info", get(api::setup::db_info))
         .route("/api/config/db-usage", get(api::setup::db_usage))
         .route("/api/db/backup", post(api::setup::db_backup))
+        .route("/api/db/compact", post(api::setup::db_compact))
         .route("/api/config/export", get(api::setup::export_data))
         // ── Compact opaque-ID resolution (MCP token economy) ──
         .route("/api/resolve/{id}", get(api::id_resolver::resolve))
@@ -1414,6 +1409,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::plugin_portability::export_plugin_bundle),
         )
         .route(
+            "/api/mcps/bundles/import-preview",
+            post(api::plugin_portability::preview_plugin_bundle_import)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
             "/api/mcps/bundles/import",
             post(api::plugin_portability::import_plugin_bundle)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -1507,6 +1507,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::workflows::get)
                 .put(api::workflows::update)
                 .delete(api::workflows::delete),
+        )
+        .route(
+            "/api/workflows/{id}/unsafe-steps",
+            get(api::workflows::unsafe_steps),
         )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(

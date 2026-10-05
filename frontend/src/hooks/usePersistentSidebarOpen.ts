@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { safeSetItem } from '../lib/safeStorage';
 
 function readCollapsed(storageKey: string): boolean {
   try {
@@ -19,11 +20,7 @@ export function usePersistentSidebarOpen(storageKey: string, isMobile: boolean) 
 
   useEffect(() => {
     if (isMobile) return;
-    try {
-      localStorage.setItem(storageKey, String(!sidebarOpen));
-    } catch {
-      // Storage can be disabled or full — the collapse stays usable in memory.
-    }
+    safeSetItem(storageKey, String(!sidebarOpen));
   }, [isMobile, sidebarOpen, storageKey]);
 
   return [sidebarOpen, setSidebarOpen] as const;

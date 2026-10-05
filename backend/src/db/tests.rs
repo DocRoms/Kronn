@@ -2038,6 +2038,7 @@ pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -2092,60 +2093,6 @@ fn workflow_run_page_keeps_the_boundary_parent_group_complete() {
         crate::db::workflows::list_runs_page_complete_group(&conn, "child-wf", 10, 17).unwrap();
     assert_eq!(older.len(), 5);
     assert!(older.iter().all(|run| run.parent_run_id.is_none()));
-}
-
-#[test]
-fn purge_runs_older_than_deletes_old_terminal_but_preserves_parents_and_recent() {
-    use chrono::Duration;
-    let conn = test_db();
-    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
-    let old = || Utc::now() - Duration::days(100);
-
-    // A parent (old, terminal) referenced by a child → must be PRESERVED.
-    let mut parent = sample_run("parent", "w1");
-    parent.status = RunStatus::Success;
-    parent.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &parent).unwrap();
-
-    let mut child = sample_run("child", "w1");
-    child.status = RunStatus::Success;
-    child.parent_run_id = Some("parent".into());
-    child.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &child).unwrap();
-
-    // Old standalone terminal → DELETED.
-    let mut old_standalone = sample_run("old-standalone", "w1");
-    old_standalone.status = RunStatus::Failed;
-    old_standalone.finished_at = Some(old());
-    crate::db::workflows::insert_run(&conn, &old_standalone).unwrap();
-
-    // Recent terminal → kept (within window).
-    let mut recent = sample_run("recent", "w1");
-    recent.status = RunStatus::Success;
-    recent.finished_at = Some(Utc::now());
-    crate::db::workflows::insert_run(&conn, &recent).unwrap();
-
-    // Old but still Running (no finished_at) → never purged.
-    let mut running = sample_run("running", "w1");
-    running.status = RunStatus::Running;
-    running.started_at = old();
-    crate::db::workflows::insert_run(&conn, &running).unwrap();
-
-    let n = crate::db::workflows::purge_runs_older_than(&conn, 90).unwrap();
-    assert_eq!(
-        n, 2,
-        "old standalone terminal + the (unreferenced-after) child"
-    );
-
-    let exists = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().is_some();
-    assert!(
-        exists("parent"),
-        "parent referenced by a child is preserved"
-    );
-    assert!(!exists("old-standalone"), "old standalone terminal purged");
-    assert!(!exists("child"), "old terminal child purged");
-    assert!(exists("recent"), "recent run kept");
-    assert!(exists("running"), "non-terminal run never purged");
 }
 
 #[test]
@@ -2439,6 +2386,79 @@ fn terminal_workspace_cleanup_candidates_exclude_interrupted_and_owned_paths() {
         Some("/repo/.kronn/worktrees/owned"),
         "an active child retains durable ownership of the checkout"
     );
+}
+
+#[test]
+fn a_run_keeps_its_launch_project_and_cleanup_reads_it_for_a_global_workflow() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-launch', 'Launch', '/repo-launch', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    // A global workflow: no project of its own.
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w-global")).unwrap();
+    let mut done = sample_run("global-done", "w-global");
+    done.status = RunStatus::Success;
+    done.project_id = Some("p-launch".into());
+    done.workspace_path = Some("/repo-launch/.kronn/worktrees/global".into());
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+    let mut stale = sample_run("global-stale", "w-global");
+    stale.status = RunStatus::Interrupted;
+    stale.project_id = Some("p-launch".into());
+    stale.finished_at = Some(Utc::now() - chrono::Duration::days(30));
+    stale.workspace_path = Some("/repo-launch/.kronn/worktrees/stale".into());
+    crate::db::workflows::insert_run(&conn, &stale).unwrap();
+
+    let loaded = crate::db::workflows::get_run(&conn, "global-done")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.project_id.as_deref(), Some("p-launch"));
+    let listed = crate::db::workflows::list_runs(&conn, "w-global").unwrap();
+    assert!(listed
+        .iter()
+        .all(|run| run.project_id.as_deref() == Some("p-launch")));
+
+    let terminal = crate::db::workflows::terminal_workspace_cleanup_candidates(&conn).unwrap();
+    assert_eq!(terminal.len(), 1, "{terminal:?}");
+    assert_eq!(terminal[0].run_id, "global-done");
+    assert_eq!(terminal[0].project_path, "/repo-launch");
+    let interrupted = crate::db::workflows::stale_interrupted_workspace_candidates(
+        &conn,
+        Utc::now() - chrono::Duration::days(7),
+    )
+    .unwrap();
+    assert_eq!(interrupted.len(), 1, "{interrupted:?}");
+    assert_eq!(interrupted[0].project_path, "/repo-launch");
+}
+
+#[test]
+fn a_run_without_a_launch_project_still_falls_back_to_its_workflow_project() {
+    let conn = test_db();
+    conn.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('p-legacy', 'Legacy', '/repo-legacy', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    let mut workflow = sample_workflow("w-legacy");
+    workflow.project_id = Some("p-legacy".into());
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let mut done = sample_run("legacy-done", "w-legacy");
+    done.status = RunStatus::Failed;
+    done.workspace_path = Some("/repo-legacy/.kronn/worktrees/x".into());
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+    assert_eq!(
+        crate::db::workflows::get_run(&conn, "legacy-done")
+            .unwrap()
+            .unwrap()
+            .project_id,
+        None
+    );
+    let terminal = crate::db::workflows::terminal_workspace_cleanup_candidates(&conn).unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].project_path, "/repo-legacy");
 }
 
 #[test]
@@ -2888,6 +2908,7 @@ fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
         tool: "Edit".into(),
         target: Some("src/é.rs".into()),
         at: Utc::now(),
+        calls: 1,
     };
     let set = |index: usize, name: &str| {
         crate::db::workflows::set_in_flight_step_activity(&conn, "r1", index, name, &activity)
@@ -3328,6 +3349,51 @@ fn workflow_runs_count_active() {
 }
 
 #[test]
+fn a_paused_run_holds_its_concurrency_slot_and_a_resume_does_not_count_itself() {
+    let conn = test_db();
+    let mut workflow = sample_workflow("w-paused");
+    workflow.concurrency_limit = Some(1);
+    crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+    let mut paused = sample_run("r-paused", "w-paused");
+    paused.status = RunStatus::WaitingApproval;
+    crate::db::workflows::insert_run(&conn, &paused).unwrap();
+    let mut interrupted = sample_run("r-interrupted", "w-paused");
+    interrupted.status = RunStatus::Interrupted;
+    crate::db::workflows::insert_run(&conn, &interrupted).unwrap();
+
+    assert_eq!(
+        crate::db::workflows::count_active_runs(&conn, "w-paused").unwrap(),
+        1
+    );
+    let new_run = sample_run("r-new", "w-paused");
+    let refused =
+        crate::workflows::concurrency::insert_run_within_limit(&conn, &workflow, &new_run).unwrap();
+    assert!(refused.is_err(), "a paused run keeps the slot");
+
+    assert_eq!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &workflow, &paused).unwrap(),
+        Ok(()),
+        "the paused run itself may resume"
+    );
+    assert!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &workflow, &interrupted)
+            .unwrap()
+            .is_err(),
+        "an interrupted run may not resume over the paused one"
+    );
+
+    let mut keyed = workflow.clone();
+    keyed.concurrency_key = Some("{{ticket}}".into());
+    let mut other_key = sample_run("r-other-key", "w-paused");
+    other_key.concurrency_key = Some("EW-2".into());
+    assert_eq!(
+        crate::workflows::concurrency::resume_within_limit(&conn, &keyed, &other_key).unwrap(),
+        Ok(()),
+        "another key has its own slot"
+    );
+}
+
+#[test]
 fn has_running_run_false_when_no_runs() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
@@ -3409,6 +3475,7 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3667,6 +3734,79 @@ fn discussions_list_with_messages_batch_loads() {
 }
 
 #[test]
+fn a_removed_worktree_is_forgotten_by_its_finished_sharers_only() {
+    // KT-984 — a sub-workflow child shares its parent's worktree path.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let path = "/repo/.kronn/worktrees/gone-é";
+    for (id, status) in [
+        ("owner", RunStatus::Success),
+        ("child", RunStatus::Failed),
+        ("interrupted", RunStatus::Interrupted),
+        ("waiting", RunStatus::WaitingApproval),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.status = status;
+        run.workspace_path = Some(path.into());
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    assert_eq!(
+        crate::db::workflows::forget_removed_workspace(&conn, path).unwrap(),
+        2
+    );
+    let kept = |id: &str| {
+        crate::db::workflows::get_run(&conn, id)
+            .unwrap()
+            .unwrap()
+            .workspace_path
+            .is_some()
+    };
+    assert!(!kept("owner") && !kept("child"));
+    assert!(kept("interrupted") && kept("waiting"));
+}
+
+#[test]
+fn workflow_delete_is_blocked_by_live_paused_or_resumable_runs() {
+    // WF-9 — the delete cascades to the run rows a runner or a worktree
+    // still depends on.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let blocking = |conn: &Connection| {
+        crate::db::workflows::runs_blocking_workflow_delete(conn, "w1").unwrap()
+    };
+    assert_eq!(blocking(&conn), 0);
+    let mut finished = sample_run("done", "w1");
+    finished.status = RunStatus::Success;
+    finished.workspace_path = Some("/repo/.kronn/worktrees/done".into());
+    crate::db::workflows::insert_run(&conn, &finished).unwrap();
+    let mut interrupted_clean = sample_run("interrupted-clean", "w1");
+    interrupted_clean.status = RunStatus::Interrupted;
+    crate::db::workflows::insert_run(&conn, &interrupted_clean).unwrap();
+    assert_eq!(
+        blocking(&conn),
+        0,
+        "finished runs and clean interruptions do not block"
+    );
+
+    for (id, status, workspace) in [
+        ("running", RunStatus::Running, None),
+        ("pending", RunStatus::Pending, None),
+        ("waiting", RunStatus::WaitingApproval, None),
+        (
+            "interrupted",
+            RunStatus::Interrupted,
+            Some("/repo/.kronn/worktrees/i".to_string()),
+        ),
+    ] {
+        let mut run = sample_run(id, "w1");
+        run.status = status;
+        run.workspace_path = workspace;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+    }
+    assert_eq!(blocking(&conn), 4);
+}
+
+#[test]
 fn workflow_get_last_runs_all_batch() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
@@ -3675,7 +3815,7 @@ fn workflow_get_last_runs_all_batch() {
     crate::db::workflows::insert_run(&conn, &sample_run("r2", "w1")).unwrap();
     crate::db::workflows::insert_run(&conn, &sample_run("r3", "w2")).unwrap();
 
-    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let last_runs = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert_eq!(last_runs.len(), 2);
     assert!(last_runs.contains_key("w1"));
     assert!(last_runs.contains_key("w2"));
@@ -3686,7 +3826,7 @@ fn workflow_get_last_runs_all_batch() {
 fn workflow_get_last_runs_all_empty() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
-    let last_runs = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let last_runs = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert!(last_runs.is_empty());
 }
 
@@ -3706,6 +3846,39 @@ fn workflow_latest_run_aggregation_does_not_read_run_payload_pages() {
         "latest-run aggregation must stay on index pages rather than visiting every payload row: {plan:?}"
     );
     assert!(!plan.iter().any(|detail| detail.contains("TEMP B-TREE")));
+}
+
+#[test]
+fn workflow_list_last_runs_never_read_run_payloads() {
+    // KT-1019 — the list showed five scalars yet rebuilt every latest
+    // step_results_json with json_each; all five sit after the payload.
+    let conn = test_db();
+    let plan = super::query_plan(&conn, crate::db::workflows::LAST_RUN_SUMMARIES_SQL);
+    assert!(
+        super::table_reads_outside_index(&plan, &["wr", "workflow_runs"]).is_empty(),
+        "the last-run summaries must be answered from an index: {plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("idx_workflow_runs_summary")),
+        "{plan:?}"
+    );
+    assert!(!crate::db::workflows::LAST_RUN_SUMMARIES_SQL.contains("json_each"));
+}
+
+#[test]
+fn table_reads_outside_index_flags_a_payload_walk() {
+    // The guard above must be able to fail: a column outside every index.
+    let conn = test_db();
+    let plan = super::query_plan(
+        &conn,
+        "SELECT SUM(LENGTH(step_results_json)) FROM workflow_runs",
+    );
+    assert_eq!(
+        super::table_reads_outside_index(&plan, &["workflow_runs"]).len(),
+        1,
+        "{plan:?}"
+    );
 }
 
 #[test]
@@ -3781,7 +3954,7 @@ fn workflow_latest_run_index_upgrade_preserves_existing_runs_and_ties() {
         )
         .unwrap();
     assert!(indexed, "the upgrade must create the latest-run index");
-    let latest = crate::db::workflows::get_last_runs_all(&conn).unwrap();
+    let latest = crate::db::workflows::get_last_run_summaries(&conn).unwrap();
     assert_eq!(latest.len(), 2);
     assert!(!latest.contains_key("without-runs"));
     assert_eq!(latest["qp:latest-batch"].id, "batch");

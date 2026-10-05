@@ -168,52 +168,67 @@ impl WorkflowEngine {
                 continue;
             }
 
-            // Advisory per-workflow check; a keyed limit is only known once the
-            // run's variables are resolved, so spawn_run enforces it.
-            if let Some(limit) = wf
-                .concurrency_limit
-                .filter(|_| wf.concurrency_key.is_none())
-            {
-                let wf_id = wf.id.clone();
-                let db2 = self.db().clone();
-                let active = db2
-                    .with_conn(move |conn| crate::db::workflows::count_active_runs(conn, &wf_id))
-                    .await?;
-                if active >= limit {
-                    tracing::debug!(
-                        "Workflow '{}' skipped — concurrency limit ({}/{})",
-                        wf.name,
-                        active,
-                        limit
-                    );
-                    continue;
-                }
-            }
-
-            match &wf.trigger {
-                WorkflowTrigger::Cron { .. } => {
-                    self.spawn_run(
-                        &wf,
-                        serde_json::json!({
-                            "type": "cron",
-                            "triggered_at": Utc::now().to_rfc3339(),
-                        }),
-                    )
-                    .await?;
-                }
-                WorkflowTrigger::Tracker {
-                    source,
-                    query,
-                    labels,
-                    ..
-                } => {
-                    self.handle_tracker_trigger(&wf, source, query, labels)
-                        .await?;
-                }
-                WorkflowTrigger::Manual => {}
+            // The window is already claimed: one workflow's error must not
+            // drop the occurrences of the workflows after it.
+            if let Err(error) = self.fire_trigger(&wf).await {
+                tracing::error!(
+                    workflow_id = %wf.id,
+                    "Workflow '{}' trigger failed: {error:#}",
+                    wf.name
+                );
             }
         }
 
+        Ok(())
+    }
+
+    /// Fires one due workflow: a cron run, or a tracker poll.
+    async fn fire_trigger(&self, wf: &Workflow) -> anyhow::Result<()> {
+        // Advisory per-workflow check; a keyed limit is only known once the
+        // run's variables are resolved, so spawn_run enforces it.
+        if let Some(limit) = wf
+            .concurrency_limit
+            .filter(|_| wf.concurrency_key.is_none())
+        {
+            let wf_id = wf.id.clone();
+            let active = self
+                .db()
+                .with_conn(move |conn| crate::db::workflows::count_active_runs(conn, &wf_id))
+                .await?;
+            if active >= limit {
+                tracing::debug!(
+                    "Workflow '{}' skipped — concurrency limit ({}/{})",
+                    wf.name,
+                    active,
+                    limit
+                );
+                return Ok(());
+            }
+        }
+
+        match &wf.trigger {
+            WorkflowTrigger::Cron { .. } => {
+                self.spawn_run(
+                    wf,
+                    serde_json::json!({
+                        "type": "cron",
+                        "triggered_at": Utc::now().to_rfc3339(),
+                    }),
+                    None,
+                )
+                .await?;
+            }
+            WorkflowTrigger::Tracker {
+                source,
+                query,
+                labels,
+                ..
+            } => {
+                self.handle_tracker_trigger(wf, source, query, labels)
+                    .await?;
+            }
+            WorkflowTrigger::Manual => {}
+        }
         Ok(())
     }
 
@@ -244,7 +259,17 @@ impl WorkflowEngine {
         };
 
         let issues = tracker.poll_new_items(query, labels).await?;
+        self.admit_tracker_issues(wf, issues).await
+    }
 
+    /// One run per issue not processed yet. An issue is marked processed in
+    /// the same transaction as its run's admission, so an issue refused by
+    /// the concurrency limit or the preflight is polled again next tick.
+    async fn admit_tracker_issues(
+        &self,
+        wf: &Workflow,
+        issues: Vec<tracker::TrackedIssue>,
+    ) -> anyhow::Result<()> {
         for issue in issues {
             // Check reconciliation — skip already-processed issues
             let wf_id = wf.id.clone();
@@ -260,15 +285,6 @@ impl WorkflowEngine {
                 continue;
             }
 
-            // Mark as processed
-            let wf_id = wf.id.clone();
-            let issue_id = issue.id.clone();
-            let db2 = self.db().clone();
-            db2.with_conn(move |conn| {
-                crate::db::workflows::mark_issue_processed(conn, &wf_id, &issue_id)
-            })
-            .await?;
-
             // Spawn a run with issue context
             let trigger_ctx = serde_json::json!({
                 "type": "tracker",
@@ -279,18 +295,29 @@ impl WorkflowEngine {
                 "issue_labels": issue.labels,
             });
 
-            self.spawn_run(wf, trigger_ctx).await?;
+            if let Err(error) = self
+                .spawn_run(wf, trigger_ctx, Some(issue.id.clone()))
+                .await
+            {
+                tracing::warn!(
+                    workflow_id = %wf.id,
+                    issue_id = %issue.id,
+                    "Tracker issue not admitted, retried next poll: {error:#}"
+                );
+            }
         }
 
         Ok(())
     }
 
-    /// Create and execute a workflow run in a background task.
+    /// Create and execute a workflow run in a background task. `tracker_issue`
+    /// is marked processed only when the run is admitted. Returns whether it was.
     async fn spawn_run(
         &self,
         wf: &Workflow,
         mut trigger_ctx: serde_json::Value,
-    ) -> anyhow::Result<()> {
+        tracker_issue: Option<String>,
+    ) -> anyhow::Result<bool> {
         let now = Utc::now();
         let config = self.config().read().await;
         let tokens = config.tokens.clone();
@@ -368,6 +395,7 @@ impl WorkflowEngine {
             produced_branches: vec![],
             concurrency_key,
             triggered_by_run_id: None,
+            project_id: wf.project_id.clone(),
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -382,7 +410,15 @@ impl WorkflowEngine {
         let admission = wf.clone();
         let db = self.db().clone();
         let inserted = db
-            .with_conn(move |conn| concurrency::insert_run_within_limit(conn, &admission, &r))
+            .with_conn(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                let admitted = concurrency::insert_run_within_limit(&tx, &admission, &r)?;
+                if let (Ok(()), Some(issue_id)) = (&admitted, tracker_issue.as_deref()) {
+                    crate::db::workflows::mark_issue_processed(&tx, &admission.id, issue_id)?;
+                }
+                tx.commit()?;
+                Ok::<_, anyhow::Error>(admitted)
+            })
             .await?;
         if let Err(reason) = inserted {
             tracing::info!(
@@ -390,7 +426,7 @@ impl WorkflowEngine {
                 wf.name,
                 reason
             );
-            return Ok(());
+            return Ok(false);
         }
 
         tracing::info!("Spawning workflow run {} for '{}'", run.id, wf.name);
@@ -419,7 +455,7 @@ impl WorkflowEngine {
             crate::core::run_notify::notify_if_failed(&state, &workflow, &run).await;
         });
 
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -505,6 +541,216 @@ mod tests {
             "StepType enum and the shared authoring schema's step_types_closed_set have drifted — \
              update api/workflow_step_schema.json to match the Rust enum."
         );
+    }
+
+    // ─── KT-1016 — scheduler tick isolation and tracker admission ────────
+
+    fn engine_for_tests() -> WorkflowEngine {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config = Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        WorkflowEngine::new(AppState::new_defaults(
+            config,
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        ))
+    }
+
+    fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
+        let at = Utc::now() - chrono::Duration::minutes(age_minutes);
+        Workflow {
+            id: id.into(),
+            name: id.into(),
+            project_id: None,
+            trigger,
+            steps: vec![],
+            actions: vec![],
+            safety: WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            concurrency_key: None,
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            pinned: false,
+            created_at: at,
+            updated_at: at,
+        }
+    }
+
+    fn required_input(name: &str) -> PromptVariable {
+        PromptVariable {
+            name: name.into(),
+            label: name.into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }
+    }
+
+    fn issue(id: &str) -> tracker::TrackedIssue {
+        tracker::TrackedIssue {
+            id: id.into(),
+            number: 7,
+            title: "Crash on « été »".into(),
+            body: String::new(),
+            url: "https://example.invalid/7".into(),
+            labels: vec![],
+            state: "open".into(),
+        }
+    }
+
+    async fn run_count(engine: &WorkflowEngine, workflow_id: &str) -> usize {
+        let id = workflow_id.to_string();
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::list_runs(conn, &id))
+            .await
+            .unwrap()
+            .len()
+    }
+
+    async fn processed(engine: &WorkflowEngine, workflow_id: &str, issue_id: &str) -> bool {
+        let (wf, issue) = (workflow_id.to_string(), issue_id.to_string());
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::is_issue_processed(conn, &wf, &issue))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_failing_workflow_does_not_cancel_the_rest_of_the_tick() {
+        let engine = engine_for_tests();
+        let every_minute = || WorkflowTrigger::Cron {
+            schedule: "* * * * *".into(),
+        };
+        // Listed first (most recently updated) and refused by its preflight.
+        let mut failing = scheduled_workflow("wf-cron-failing", every_minute(), 0);
+        failing.variables = vec![required_input("ticket")];
+        let healthy = scheduled_workflow("wf-cron-healthy", every_minute(), 60);
+        engine
+            .db()
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &failing)?;
+                crate::db::workflows::insert_workflow(conn, &healthy)
+            })
+            .await
+            .unwrap();
+        *engine.last_trigger_check.lock().await = Utc::now() - chrono::Duration::minutes(3);
+
+        engine
+            .check_triggers()
+            .await
+            .expect("the tick itself succeeds");
+
+        assert_eq!(run_count(&engine, "wf-cron-failing").await, 0);
+        assert_eq!(
+            run_count(&engine, "wf-cron-healthy").await,
+            1,
+            "the later workflow still gets its occurrence"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tracker_issue_refused_by_the_limit_is_admitted_on_a_later_poll() {
+        let engine = engine_for_tests();
+        let mut wf = scheduled_workflow("wf-tracker-limit", WorkflowTrigger::Manual, 0);
+        wf.concurrency_limit = Some(1);
+        let mut active = crate::models::WorkflowRun {
+            id: "run-active".into(),
+            workflow_id: wf.id.clone(),
+            status: RunStatus::Running,
+            trigger_context: None,
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: Utc::now(),
+            finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_no_response: 0,
+            batch_name: None,
+            parent_run_id: None,
+            state: Default::default(),
+            produced_branches: vec![],
+            concurrency_key: None,
+            triggered_by_run_id: None,
+            project_id: None,
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
+        };
+        let (wf_db, run_db) = (wf.clone(), active.clone());
+        engine
+            .db()
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+
+        engine
+            .admit_tracker_issues(&wf, vec![issue("gh-7")])
+            .await
+            .unwrap();
+        assert!(!processed(&engine, &wf.id, "gh-7").await);
+        assert_eq!(run_count(&engine, &wf.id).await, 1, "no run admitted");
+
+        active.status = RunStatus::Success;
+        active.finished_at = Some(Utc::now());
+        let snap = crate::db::workflows::RunProgressSnapshot::from_run(&active);
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+            .await
+            .unwrap();
+
+        engine
+            .admit_tracker_issues(&wf, vec![issue("gh-7")])
+            .await
+            .unwrap();
+        assert!(processed(&engine, &wf.id, "gh-7").await);
+        assert_eq!(run_count(&engine, &wf.id).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_tracker_issue_refused_by_the_preflight_stays_unprocessed() {
+        let engine = engine_for_tests();
+        let mut wf = scheduled_workflow("wf-tracker-preflight", WorkflowTrigger::Manual, 0);
+        wf.variables = vec![required_input("ticket")];
+        let wf_db = wf.clone();
+        engine
+            .db()
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        engine
+            .admit_tracker_issues(&wf, vec![issue("gh-8"), issue("gh-9")])
+            .await
+            .expect("one refused issue does not stop the poll");
+
+        assert!(!processed(&engine, &wf.id, "gh-8").await);
+        assert!(!processed(&engine, &wf.id, "gh-9").await);
+        assert_eq!(run_count(&engine, &wf.id).await, 0);
     }
 
     // ─── Healing pass (heal_steps_in_place) ──────────────────────────────
@@ -712,6 +958,7 @@ mod tests {
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -760,6 +1007,7 @@ mod tests {
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,

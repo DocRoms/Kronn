@@ -8256,3 +8256,45 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* KT-1017 — Exec steps refused at run time until their inline code is fixed. */
+.wf-unsafe-badge { color: var(--kr-error); }
+.wf-unsafe-panel {
+  margin: var(--kr-sp-3) 0;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.06);
+}
+.wf-unsafe-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--kr-error);
+}
+.wf-unsafe-intro { margin: var(--kr-sp-2) 0; color: var(--kr-text-secondary); }
+.wf-unsafe-list { margin: 0; padding: 0; list-style: none; }
+.wf-unsafe-item { padding: var(--kr-sp-2) 0; border-top: 1px solid var(--kr-border-light); }
+.wf-unsafe-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+}
+.wf-unsafe-fix { margin-top: var(--kr-sp-2); }
+.wf-unsafe-diff {
+  margin: 0 0 var(--kr-sp-2);
+  padding: var(--kr-sp-2);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-surface);
+  font-size: var(--kr-fs-xs);
+}
+.wf-unsafe-diff-old { color: var(--kr-error); }
+.wf-unsafe-diff-new { color: var(--kr-success); }
+.wf-unsafe-manual { margin: 0; color: var(--kr-warning); }
+.wf-unsafe-manual-reason { margin: var(--kr-sp-1) 0 0; color: var(--kr-text-secondary); }

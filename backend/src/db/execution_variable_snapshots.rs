@@ -64,10 +64,10 @@ pub fn has_live_owner(conn: &Connection, run_kind: &str, run_id: &str) -> Result
             }
         }
         "workflow" | "quick_prompt_compare" => {
-            // run_id is a workflow_run; the project lives on the parent workflow.
+            // run_id is a workflow_run; its launch project wins over the workflow's.
             match owner_project(
                 conn,
-                "SELECT w.project_id FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id WHERE r.id=?1",
+                "SELECT COALESCE(r.project_id, w.project_id) FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id WHERE r.id=?1",
                 run_id,
             )? {
                 Some(owner_project) => owner_project.as_deref() == snapshot_project,

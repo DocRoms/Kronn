@@ -5795,6 +5795,7 @@ async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
         produced_branches: vec![],
         concurrency_key: Some("EW-1".into()),
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -6088,10 +6089,10 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
     let child: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
         "id": "foreach-child", "name": "child", "project_id": null,
         "trigger": {"type": "Manual"},
-        "steps": [{"name": "note", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+        "steps": [{"name": "where", "step_type": {"type": "Exec"}, "exec_command": "pwd"}],
         "actions": [], "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
         "workspace_config": null, "concurrency_limit": null, "guards": null, "artifacts": {},
-        "on_failure": [], "exec_allowlist": [], "variables": [], "enabled": true, "pinned": false,
+        "on_failure": [], "exec_allowlist": ["pwd"], "variables": [], "enabled": true, "pinned": false,
         "created_at": now, "updated_at": now,
     }))
     .unwrap();
@@ -6173,11 +6174,16 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
             .db
             .with_conn(move |conn| {
                 let run = kronn::db::workflows::get_run(conn, &run_id)?.expect("run");
-                let children: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
-                    [&run_id],
-                    |row| row.get(0),
+                let mut statement = conn.prepare(
+                    "SELECT id FROM workflow_runs WHERE parent_run_id = ?1 AND status = 'Success'",
                 )?;
+                let ids: Vec<String> = statement
+                    .query_map([&run_id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                let mut children = Vec::new();
+                for id in ids {
+                    children.push(kronn::db::workflows::get_run(conn, &id)?.expect("child"));
+                }
                 Ok((run, children))
             })
             .await
@@ -6188,15 +6194,41 @@ async fn isolated_foreach_runs_overlap_in_their_own_worktrees() {
             "{:?}",
             run.step_results
         );
-        assert_eq!(children, 2, "each run's foreach processes both items once");
-        let workspace = run
-            .workspace_path
-            .clone()
-            .expect("an isolated run records its worktree");
-        assert_ne!(
-            workspace,
-            repo.path().to_string_lossy(),
-            "never the main checkout"
+        assert_eq!(
+            children.len(),
+            2,
+            "each run's foreach processes both items once"
+        );
+        // The worktree is gone, so neither the run nor its children keep a path.
+        assert_eq!(run.workspace_path, None);
+        let mut seen: Vec<String> = children
+            .iter()
+            .map(|child| {
+                assert_eq!(child.workspace_path, None);
+                let output = &child.step_results[0].output;
+                let envelope = output
+                    .split("---STEP_OUTPUT---")
+                    .nth(1)
+                    .and_then(|rest| rest.split("---END_STEP_OUTPUT---").next())
+                    .unwrap_or_else(|| panic!("pwd envelope: {output}"));
+                let envelope: Value = serde_json::from_str(envelope.trim()).unwrap();
+                envelope["data"]["stdout"]
+                    .as_str()
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            1,
+            "both items ran in the run's worktree: {seen:?}"
+        );
+        let workspace = seen.remove(0);
+        assert!(
+            workspace.contains(".kronn/worktrees"),
+            "never the main checkout: {workspace}"
         );
         workspaces.push(workspace);
     }
@@ -11486,6 +11518,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
     assert_eq!(json["data"]["execution_variable_retention_days"], 30);
+    assert_eq!(json["data"]["run_payload_retention_days"], 30);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -11539,6 +11572,23 @@ async fn server_config_updates_execution_variable_retention_including_zero() {
 
         let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
         assert_eq!(persisted["data"]["execution_variable_retention_days"], days);
+    }
+}
+
+#[tokio::test]
+async fn server_config_updates_run_payload_retention_including_zero() {
+    // KT-984 — zero keeps every run's step outputs.
+    let app = test_app();
+    for days in [90, 0] {
+        let (_, updated) = post_json(
+            app.clone(),
+            "/api/config/server",
+            serde_json::json!({ "run_payload_retention_days": days }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+        let (_, persisted) = get_json(app.clone(), "/api/config/server").await;
+        assert_eq!(persisted["data"]["run_payload_retention_days"], days);
     }
 }
 
@@ -14645,6 +14695,16 @@ async fn db_backup_in_memory_db_returns_error() {
 }
 
 #[tokio::test]
+async fn db_compact_in_memory_db_returns_error() {
+    let app = test_app();
+    let (status, json) = post_json(app, "/api/db/compact", serde_json::Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(err.contains("memory"), "got: {err}");
+}
+
+#[tokio::test]
 async fn version_check_returns_current_version_envelope() {
     let app = test_app();
     let (status, json) = get_json(app, "/api/version/check").await;
@@ -16800,6 +16860,34 @@ async fn mcp_refresh_detects_project_mcp_json_with_explicit_host_sync_none() {
         detected["host_sync"], "None",
         "a config detected from a project's own .mcp.json must not be opted into host sync"
     );
+}
+
+#[tokio::test]
+async fn agent_access_effective_lists_every_cli_agent_with_its_real_state() {
+    let app = build_router_with_auth(test_state(), false);
+    let (status, body) = get_json(app, "/api/config/agent-access/effective").await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let rows = body["data"].as_array().expect("rows");
+    let agents: Vec<&str> = rows.iter().filter_map(|r| r["agent"].as_str()).collect();
+    for expected in [
+        "ClaudeCode",
+        "Codex",
+        "GeminiCli",
+        "CopilotCli",
+        "OpenCode",
+        "Kiro",
+        "Vibe",
+    ] {
+        assert!(agents.contains(&expected), "{expected} missing: {body:?}");
+    }
+    let codex = rows.iter().find(|r| r["agent"] == "Codex").unwrap();
+    // Outside a container nothing overrides the stored (default off) setting.
+    if !kronn::core::env::is_docker() {
+        assert_eq!(codex["full_access"], false);
+        assert!(codex["reason"].is_null());
+    } else {
+        assert_eq!(codex["reason"], "forced_in_container");
+    }
 }
 
 #[tokio::test]
@@ -22706,6 +22794,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -25439,4 +25528,317 @@ async fn discussion_poll_omits_an_unchanged_detail_and_returns_it_after_a_change
 
     let (_, missing) = get_json(app, "/api/discussions/nope/poll").await;
     assert_eq!(missing["success"], false);
+}
+
+/// KT-1017 — a saved Exec step that interpolates a value into inline code is
+/// flagged in the list and the report, an unrelated edit keeps working, a new
+/// unsafe line is refused, and the suggested rewrite clears the flag.
+#[tokio::test]
+async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                id: "workflow-unsafe".into(),
+                name: "Unsafe".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps: vec![kronn::models::WorkflowStep {
+                    name: "greet".into(),
+                    step_type: kronn::models::StepType::Exec,
+                    exec_command: Some("bash".into()),
+                    exec_args: vec!["-c".into(), "echo {{issue.title}}".into()],
+                    ..Default::default()
+                }],
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["bash".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let summary = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wf| wf["id"] == "workflow-unsafe")
+        .unwrap();
+    assert_eq!(summary["unsafe_step_count"], 1);
+
+    let (status, report) =
+        get_json(app.clone(), "/api/workflows/workflow-unsafe/unsafe-steps").await;
+    assert_eq!(status, StatusCode::OK);
+    let issue = &report["data"][0];
+    assert_eq!(issue["step_name"], "greet");
+    assert_eq!(issue["placeholder"], "{{issue.title}}");
+    assert_eq!(
+        issue["suggested_args"],
+        serde_json::json!(["-c", "echo \"$1\"", "_", "{{issue.title}}"])
+    );
+
+    let mut steps = serde_json::json!([{
+        "name": "greet",
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo {{issue.title}}"],
+    }]);
+    let (_, renamed) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"name": "Renamed", "steps": steps}),
+    )
+    .await;
+    assert_eq!(
+        renamed["success"], true,
+        "an unchanged unsafe step must not block an edit: {renamed}"
+    );
+
+    steps[0]["exec_args"] = serde_json::json!(["-c", "echo {{issue.body}}"]);
+    let (_, refused) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"steps": steps}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+
+    steps[0]["exec_args"] = issue["suggested_args"].clone();
+    let (_, fixed) = put_json_root(
+        app.clone(),
+        "/api/workflows/workflow-unsafe",
+        serde_json::json!({"steps": steps}),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+    let (_, report) = get_json(app, "/api/workflows/workflow-unsafe/unsafe-steps").await;
+    assert_eq!(report["data"], serde_json::json!([]));
+}
+
+/// KT-1017 — a Quick Exec that interpolates a value into inline code is
+/// refused at save time; a stored one stays editable while unchanged, and
+/// its suggested rewrite saves.
+#[tokio::test]
+async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let body = |name: &str, args: serde_json::Value| {
+        serde_json::json!({
+            "name": name,
+            "description": "",
+            "project_id": null,
+            "command": "python3",
+            "args": args,
+            "timeout_secs": 10,
+            "output_format": "text",
+            "variables": []
+        })
+    };
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/quick-execs",
+        body("Ticket", serde_json::json!(["-c", "print('{{ticket}}')"])),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let error = refused["error"].as_str().unwrap();
+    assert!(
+        error.contains("{{ticket}}") && error.contains("sys.argv"),
+        "{error}"
+    );
+
+    let now = chrono::Utc::now();
+    state
+        .db
+        .with_conn(move |conn| {
+            kronn::db::quick_execs::insert_quick_exec(
+                conn,
+                &kronn::models::QuickExec {
+                    id: "qe-legacy".into(),
+                    name: "Legacy".into(),
+                    icon: "⌘".into(),
+                    description: String::new(),
+                    project_id: None,
+                    command: "python3".into(),
+                    args: vec!["-c".into(), "print('{{ticket}}')".into()],
+                    timeout_secs: 10,
+                    output_format: kronn::models::CollectQuickExecOutputFormat::Text,
+                    variables: vec![],
+                    pinned: false,
+                    created_at: now,
+                    updated_at: now,
+                },
+            )
+        })
+        .await
+        .unwrap();
+
+    let (_, renamed) = put_json_root(
+        app.clone(),
+        "/api/quick-execs/qe-legacy",
+        body("Renamed", serde_json::json!(["-c", "print('{{ticket}}')"])),
+    )
+    .await;
+    assert_eq!(
+        renamed["success"], true,
+        "an unchanged line stays editable: {renamed}"
+    );
+
+    let (_, changed) = put_json_root(
+        app.clone(),
+        "/api/quick-execs/qe-legacy",
+        body("Renamed", serde_json::json!(["-c", "print('{{other}}')"])),
+    )
+    .await;
+    assert_eq!(changed["success"], false, "{changed}");
+
+    let (_, fixed) = put_json_root(
+        app,
+        "/api/quick-execs/qe-legacy",
+        body(
+            "Renamed",
+            serde_json::json!(["-c", "import sys\nprint(sys.argv[1])", "{{ticket}}"]),
+        ),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+}
+
+/// KT-1017 — an inline Quick Exec source of a CollectApiData step gets the
+/// same check: counted in the list, reported with its alias, kept while
+/// unchanged, refused when changed to another unsafe line, fixable.
+#[tokio::test]
+async fn inline_quick_exec_sources_are_flagged_and_fixable() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let collect = |args: Vec<&str>| {
+        serde_json::json!([{
+            "name": "collect",
+            "step_type": {"type": "CollectApiData"},
+            "collect_api_data": {"sources": [{
+                "alias": "ticket",
+                "quick_exec": {"command": "python3", "args": args, "output_format": "text"},
+                "required": true
+            }]}
+        }])
+    };
+    let steps: Vec<kronn::models::WorkflowStep> =
+        serde_json::from_value(collect(vec!["-c", "print('{{issue.title}}')"])).unwrap();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                id: "workflow-collect-unsafe".into(),
+                name: "Collect".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps,
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["python3".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state.clone(), false);
+
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let summary = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|wf| wf["id"] == "workflow-collect-unsafe")
+        .unwrap();
+    assert_eq!(summary["unsafe_step_count"], 1);
+
+    let (_, report) = get_json(
+        app.clone(),
+        "/api/workflows/workflow-collect-unsafe/unsafe-steps",
+    )
+    .await;
+    let issue = &report["data"][0];
+    assert_eq!(issue["phase"], "source");
+    assert_eq!(issue["source_alias"], "ticket");
+    let suggested = issue["suggested_args"].clone();
+    assert_eq!(
+        suggested,
+        serde_json::json!(["-c", "import sys\nprint(sys.argv[1])", "{{issue.title}}"])
+    );
+
+    let uri = "/api/workflows/workflow-collect-unsafe";
+    let (_, kept) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"name": "Renamed", "steps": collect(vec!["-c", "print('{{issue.title}}')"])}),
+    )
+    .await;
+    assert_eq!(kept["success"], true, "{kept}");
+
+    let (_, refused) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"steps": collect(vec!["-c", "print('{{issue.body}}')"])}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("ticket"),
+        "{refused}"
+    );
+
+    let fixed_args: Vec<&str> = suggested
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    let (_, fixed) = put_json_root(
+        app.clone(),
+        uri,
+        serde_json::json!({"steps": collect(fixed_args)}),
+    )
+    .await;
+    assert_eq!(fixed["success"], true, "{fixed}");
+    let (_, report) = get_json(app, "/api/workflows/workflow-collect-unsafe/unsafe-steps").await;
+    assert_eq!(report["data"], serde_json::json!([]));
 }

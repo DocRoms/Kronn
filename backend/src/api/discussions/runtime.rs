@@ -1539,6 +1539,7 @@ mod chain_render_tests {
                     produced_branches: vec![],
                     concurrency_key: None,
                     triggered_by_run_id: None,
+                    project_id: None,
                     parent_workflow_id: None,
                     parent_workflow_name: None,
                     parent_run_started_at: None,

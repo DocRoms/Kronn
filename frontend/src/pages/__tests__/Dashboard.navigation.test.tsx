@@ -92,7 +92,7 @@ describe('Dashboard reload/HMR navigation restoration', () => {
   it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
     vi.mocked(workflowsApi.list).mockResolvedValue([{
       id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, enabled: true, pinned: false,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true, pinned: false,
       last_run: { id: 'run-live', status: 'Running', started_at: '2026-01-01T00:00:00Z', finished_at: null, tokens_used: 0 },
       created_at: '2026-01-01T00:00:00Z',
     }]);

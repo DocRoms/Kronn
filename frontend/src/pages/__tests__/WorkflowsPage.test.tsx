@@ -246,7 +246,7 @@ describe('WorkflowsPage', () => {
 
     const workflow = {
       id: 'wf-narrow', name: 'Narrow report', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     } as WorkflowSummary;
     cleanup();
@@ -315,7 +315,7 @@ describe('WorkflowsPage', () => {
   it('puts the search, "Group by" and the filter chips in the sidebar under the title, and no bar above the list', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: 'p-alpha', project_name: 'Alpha',
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     } as WorkflowSummary;
     const beta = { ...alpha, id: 'wf-beta', name: 'Beta report', project_id: null, project_name: null };
@@ -405,7 +405,7 @@ describe('WorkflowsPage', () => {
   describe('sidebar filters and grouping (KT-916)', () => {
     const summary = (id: string, name: string, over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
       id, name, project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
       ...over,
     } as WorkflowSummary);
@@ -797,7 +797,7 @@ describe('WorkflowsPage', () => {
   it('keeps arrow-key navigation on grouped Automation rows rendered by CollectionShell', async () => {
     const alpha = {
       id: 'wf-alpha', name: 'Alpha report', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     } as WorkflowSummary;
     const beta = { ...alpha, id: 'wf-beta', name: 'Beta report' };
@@ -862,7 +862,7 @@ describe('WorkflowsPage', () => {
     } as QuickExec;
     const workflow = {
       id: 'wf-shared', name: 'Shared flow', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     } as WorkflowSummary;
     vi.mocked(quickExecsApi.list)
@@ -923,7 +923,7 @@ describe('WorkflowsPage', () => {
   it('reloads the persisted workflow detail instead of only highlighting its row', async () => {
     const summary = {
       id: 'wf-persisted', name: 'Persisted workflow', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     } as WorkflowSummary;
     const workflow = {
@@ -1088,7 +1088,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 2,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: null,
@@ -1132,7 +1132,7 @@ describe('WorkflowsPage', () => {
   it('pinned workflows surface in a cross-project Favoris group (and stay in their project group)', async () => {
     const base = {
       project_id: 'p1', project_name: 'Proj', trigger_type: 'manual',
-      step_count: 1, misconfigured_step_count: 0, enabled: true,
+      step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0, enabled: true,
       last_run: null, created_at: '2026-01-01T00:00:00Z',
     };
     mockWorkflowsApi.list.mockResolvedValue([
@@ -1168,7 +1168,7 @@ describe('WorkflowsPage', () => {
     }));
     const summary: WorkflowSummary = {
       id: 'wf-pin', name: 'Pinned detail', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: true, last_run: null, created_at: '2026-01-01T00:00:00Z',
     };
     mockWorkflowsApi.list.mockResolvedValueOnce([summary]);
@@ -1236,7 +1236,7 @@ describe('WorkflowsPage', () => {
   it('the star toggle pins a workflow through the partial update', async () => {
     mockWorkflowsApi.list.mockResolvedValue([{
       id: 'wf-reg', name: 'Regular WF', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     }]);
     mockWorkflowsApi.update.mockResolvedValue({});
@@ -1256,7 +1256,7 @@ describe('WorkflowsPage', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     mockWorkflowsApi.list.mockResolvedValue([{
       id: 'wf-reg', name: 'Regular WF', project_id: null, project_name: null,
-      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
     }]);
 
@@ -1272,6 +1272,31 @@ describe('WorkflowsPage', () => {
     expect(within(footer).getByText('/')).toBeInTheDocument();
   });
 
+  it('shows an "unsafe interpolation" badge when unsafe_step_count > 0', async () => {
+    // KT-1017 — such a workflow is refused at run time; the card says so.
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-unsafe',
+      name: 'Triage',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'tracker',
+      step_count: 2,
+      misconfigured_step_count: 0,
+      unsafe_step_count: 2,
+      enabled: true,
+      pinned: false,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    await waitFor(() => expect(screen.getAllByText('Triage')).toHaveLength(2));
+    expect(screen.getByText('2 interpolation dangereuse')).toBeDefined();
+  });
+
   it('shows a "needs config" badge on the card when misconfigured_step_count > 0', async () => {
     // A freshly AI-generated workflow with an unwired API step: the backend
     // reports misconfigured_step_count > 0 and the card must surface it so the
@@ -1284,6 +1309,7 @@ describe('WorkflowsPage', () => {
       trigger_type: 'manual',
       step_count: 4,
       misconfigured_step_count: 3,
+      unsafe_step_count: 0,
       enabled: true,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
@@ -1306,7 +1332,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 2,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
@@ -1464,7 +1490,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: {
@@ -1483,7 +1509,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: {
@@ -1520,7 +1546,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: {
@@ -1565,7 +1591,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: null,
@@ -1599,7 +1625,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: null,
@@ -1636,7 +1662,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: null,
@@ -1674,7 +1700,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
-      misconfigured_step_count: 0,
+      misconfigured_step_count: 0, unsafe_step_count: 0,
       enabled: true,
       pinned: false,
       last_run: null,
@@ -1730,7 +1756,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
 
   const labSummary = (over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
     id: 'wf-lab', name: 'PR Review LAB', project_id: null, project_name: null,
-    trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+    trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
     enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
   });
 

@@ -113,13 +113,16 @@ pub struct ServerConfig {
     /// `KRONN_FAILURE_NOTIFY_URL`.
     #[serde(default)]
     pub failure_notify_url: Option<String>,
-    /// 0.8.11 (B7) — auto-purge workflow runs older than N days at boot.
-    /// `0` (default) = DISABLED: never delete run history automatically (a fast
-    /// cron's run table is 76% of the DB, but silently dropping the user's
-    /// history is worse than size). Set to e.g. 90 to bound growth; parent runs
-    /// still referenced by a retained child are always preserved.
+    /// Delete whole workflow runs older than N days. `0` (default) never
+    /// deletes run history. Applies the same rules as the payload trim below
+    /// (plain, terminal, unreferenced runs that own no worktree), in chunks.
     #[serde(default)]
     pub run_retention_days: u32,
+    /// KT-984 — blank the step outputs of workflow runs finished more than N
+    /// days ago, keeping every run row and its metadata. `0` keeps outputs
+    /// forever. Default 30; see `db::run_retention` for what is never touched.
+    #[serde(default = "default_run_payload_retention_days")]
+    pub run_payload_retention_days: u32,
     /// Encrypted execution-variable snapshot retention. `0` keeps metadata
     /// but disables value retention. Product default: 30 days.
     #[serde(default = "default_execution_variable_retention_days")]
@@ -306,6 +309,10 @@ fn default_disk_critical_gib() -> u64 {
 
 fn default_execution_variable_retention_days() -> u32 {
     30
+}
+pub(crate) const DEFAULT_RUN_PAYLOAD_RETENTION_DAYS: u32 = 30;
+fn default_run_payload_retention_days() -> u32 {
+    DEFAULT_RUN_PAYLOAD_RETENTION_DAYS
 }
 pub(crate) const DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS: u32 = 7;
 fn default_interrupted_worktree_ttl_days() -> u32 {
@@ -535,8 +542,8 @@ impl HttpEndpoints {
 }
 
 impl AgentsConfig {
-    /// Set `full_access` for an agent whose launch honors it. Vibe and Kiro
-    /// ignore the flag (no narrower permission mode), so storing it would lie.
+    /// Set `full_access` for a CLI agent. Every one of them reads it: Claude and
+    /// Codex through their adapter's flag, the others by widening the ACP broker.
     pub fn set_full_access(&mut self, agent: &AgentType, value: bool) -> Result<(), &'static str> {
         let slot = match agent {
             AgentType::ClaudeCode => &mut self.claude_code,
@@ -544,10 +551,27 @@ impl AgentsConfig {
             AgentType::OpenCode => &mut self.open_code,
             AgentType::GeminiCli => &mut self.gemini_cli,
             AgentType::CopilotCli => &mut self.copilot_cli,
+            AgentType::Kiro => &mut self.kiro,
+            AgentType::Vibe => &mut self.vibe,
             _ => return Err("Agent does not support access flags"),
         };
         slot.full_access = value;
         Ok(())
+    }
+
+    /// What a launch really does, which is not always the stored setting: Codex's
+    /// own sandbox cannot start inside the container, so there it always runs
+    /// unsandboxed. The reason is a stable code for the UI.
+    pub fn effective_full_access(
+        &self,
+        agent: &AgentType,
+        in_container: bool,
+    ) -> (bool, Option<&'static str>) {
+        let setting = self.full_access_for(agent);
+        if matches!(agent, AgentType::Codex) && in_container && !setting {
+            return (true, Some("forced_in_container"));
+        }
+        (setting, None)
     }
 
     /// Get the full_access setting for a given agent type.
@@ -887,6 +911,17 @@ pub struct SetScanPathsRequest {
     pub paths: Vec<String>,
 }
 
+/// One agent's access as a launch will really apply it.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AgentEffectiveAccess {
+    pub agent: AgentType,
+    pub full_access: bool,
+    /// Why it differs from the stored setting, when it does.
+    #[ts(optional)]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct SetAgentAccessRequest {
@@ -948,6 +983,8 @@ pub struct ServerConfigPublic {
     /// Default retention for encrypted execution-variable snapshots.
     /// Zero purges values as soon as the run reaches a terminal state.
     pub execution_variable_retention_days: u32,
+    /// Days a finished workflow run keeps its step outputs. Zero keeps them.
+    pub run_payload_retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -987,4 +1024,7 @@ pub struct UpdateServerConfigRequest {
     /// exist only for the lifetime of the active execution.
     #[serde(default)]
     pub execution_variable_retention_days: Option<u32>,
+    /// Days a finished workflow run keeps its step outputs; zero keeps them.
+    #[serde(default)]
+    pub run_payload_retention_days: Option<u32>,
 }

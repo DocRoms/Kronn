@@ -1,0 +1,15 @@
+.skill-variables-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.4);
+  border-radius: var(--kr-radius-pill);
+  background: rgba(var(--kr-purple-rgb), 0.1);
+  color: var(--kr-purple);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: help;
+}

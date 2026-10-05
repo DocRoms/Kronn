@@ -52,6 +52,7 @@ import type {
   PluginBundlePreview,
   ExportPluginBundleRequest,
   ImportPluginBundleRequest,
+  ImportBundlePreview,
   ImportPluginBundleReport,
   Discussion,
   DiscussionDetail,
@@ -84,9 +85,11 @@ import type {
   TokenUsageSummary,
   DbInfo,
   DbUsage,
+  DbCompaction,
   SetAgentAccessRequest,
   SetAgentMentionColorRequest,
   AgentsConfig,
+  AgentEffectiveAccess,
   McpContextEntry,
   DiscoveredHostMcp,
   AdoptHostMcpRequest,
@@ -105,6 +108,7 @@ import type {
   Workflow,
   WorkflowStep,
   WorkflowSummary,
+  UnsafeExecStep,
   WorkflowRun,
   BatchRunSummary,
   BatchCompareDetails,
@@ -618,6 +622,9 @@ interface AuditSseEvent {
   step_tokens?: number;
   total_tokens_so_far?: number;
   tool?: string;
+  /** The step's tool-call count, sent by agents whose tools are read off the
+   *  run (HTTP, ACP) rather than off their stream (KT-950). */
+  calls?: number;
   // 0.8.3 root-cause fix — `step_warning` is emitted when the CLI
   // exited 0 but the step's target_file is empty / suspiciously
   // small (e.g. agent crashed mid-Write). The step FAILS honestly and
@@ -816,6 +823,9 @@ export const config = {
   getTtsVoices: () => api<Record<string, string>>('GET', '/config/tts-voices'),
   saveTtsVoice: (lang: string, voiceId: string) =>
     api<void>('POST', '/config/tts-voice', { lang, voice_id: voiceId }),
+  /** KT-972 — interface preferences mirrored server-side (see lib/uiPreferences). */
+  getUiPreferences: () => api<Record<string, string>>('GET', '/ui-preferences'),
+  saveUiPreferences: (values: Record<string, string>) => api<void>('PUT', '/ui-preferences', values),
   /** Global context (markdown) injected into discussions. */
   getGlobalContext: () => api<string>('GET', '/config/global-context'),
   saveGlobalContext: (content: string) => api<void>('POST', '/config/global-context', content),
@@ -839,6 +849,7 @@ export const config = {
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
+  getAgentAccessEffective: () => api<AgentEffectiveAccess[]>('GET', '/config/agent-access/effective'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
   setAgentConcurrency: (req: { agent: AgentType; concurrency: number | null }) => api<void>('POST', '/config/agent-concurrency', req),
   setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
@@ -853,6 +864,9 @@ export const config = {
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */
   dbBackup: () => api<DbBackupResponse>('POST', '/db/backup'),
+  /** VACUUM: gives freed pages back to the disk. Pauses database writes for
+   *  its duration and is refused while a workflow run is in progress. */
+  dbCompact: () => api<DbCompaction>('POST', '/db/compact'),
   exportData: async (): Promise<Blob> => {
     const res = await fetch(`${_apiBase}/api/config/export`, {
       headers: authHeaders(),
@@ -893,7 +907,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1397,7 +1411,7 @@ export const projects = {
        * the user knows what the agent is busy doing during the
        * step. Optional for backwards compat.
        */
-      onToolCall?: (step: number, tool: string) => void;
+      onToolCall?: (step: number, tool: string, calls?: number) => void;
       /**
        * 0.8.3 root-cause fix — backend detected that this step's
        * `target_file` is empty / truncated despite the CLI exiting 0.
@@ -1495,7 +1509,8 @@ export const projects = {
               break;
             case 'tool_call':
               if (typeof p.step === 'number' && typeof p.tool === 'string') {
-                handlers.onToolCall?.(p.step, p.tool);
+                if (typeof p.calls === 'number') handlers.onToolCall?.(p.step, p.tool, p.calls);
+                else handlers.onToolCall?.(p.step, p.tool);
               }
               break;
             case 'step_warning':
@@ -1587,6 +1602,8 @@ export const mcps = {
       blob: await response.blob(),
     };
   },
+  previewImportBundle: (request: ImportPluginBundleRequest) =>
+    api<ImportBundlePreview>('POST', '/mcps/bundles/import-preview', request),
   importBundle: (request: ImportPluginBundleRequest) =>
     api<ImportPluginBundleReport>('POST', '/mcps/bundles/import', request),
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),
@@ -2369,6 +2386,8 @@ export const planning = {
 export const workflows = {
   list: () => api<WorkflowSummary[]>('GET', '/workflows'),
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
+  /** KT-1017 — Exec command lines refused at run time, with suggested rewrites. */
+  unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
   create: (req: CreateWorkflowRequest) => api<Workflow>('POST', '/workflows', req),
   /** 0.8.3 — atomic bundle creation. POSTs a payload with optional
    *  `quick_prompts` / `quick_apis` / `custom_apis` sections plus a

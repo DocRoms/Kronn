@@ -15,6 +15,7 @@ import {
   isTauriRuntime,
   retryDesktopStartup,
 } from './lib/tauri';
+import { bootUiPreferences, startUiPreferencesSync } from './lib/uiPreferences';
 
 // The packaged shell waits for its owned backend before loading the real UI.
 async function navigateToDesktopBackend(): Promise<boolean> {
@@ -28,8 +29,9 @@ async function navigateToDesktopBackend(): Promise<boolean> {
 async function bootstrap() {
   if (await navigateToDesktopBackend()) return;
   // Load exactly the active dictionary before first paint. Other locales stay
-  // in their own Vite chunks until the user switches language.
-  await loadInitialLocale();
+  // in their own Vite chunks until the user switches language. A new origin
+  // (desktop port change) takes its preferences from the server first.
+  await Promise.all([loadInitialLocale(), bootUiPreferences()]);
   const rootEl = document.getElementById('root');
   if (!rootEl) throw new Error('Missing #root element in index.html');
   ReactDOM.createRoot(rootEl).render(
@@ -46,6 +48,7 @@ async function bootstrap() {
       </ThemeProvider>
     </React.StrictMode>,
   );
+  startUiPreferencesSync();
 }
 
 void bootstrap().catch(error => {

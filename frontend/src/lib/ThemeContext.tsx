@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { themes as themesApi, type UnlockedItem } from './api';
+import { safeSetItem } from './safeStorage';
 
 /** Theme modes.
  *
@@ -61,9 +62,7 @@ function loadUnlocked(): ThemeMode[] {
 }
 
 function saveUnlocked(themes: ThemeMode[]) {
-  try {
-    localStorage.setItem(UNLOCKED_KEY, JSON.stringify(themes));
-  } catch { /* noop */ }
+  safeSetItem(UNLOCKED_KEY, JSON.stringify(themes));
 }
 
 function getInitialTheme(unlocked: ThemeMode[]): ThemeMode {
@@ -105,7 +104,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (SECRET_THEMES.has(t) && !unlockedThemes.includes(t)) {
       return;
     }
-    try { localStorage.setItem(STORAGE_KEY, t); } catch { /* noop */ }
+    safeSetItem(STORAGE_KEY, t);
     setThemeState(t);
   }, [unlockedThemes]);
 

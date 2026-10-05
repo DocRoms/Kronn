@@ -311,6 +311,27 @@ describe('fullAuditStream — legacy_docs_migrated event (0.8.3 #272)', () => {
     expect(onToolCall).toHaveBeenNthCalledWith(2, 3, 'mcp__Sequential Thinking__sequentialthinking');
   });
 
+  it('tool_call carries the run-side call count of an HTTP or ACP agent (KT-950)', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fakeSseResponse([
+        { event: 'tool_call', data: { step: 2, tool: 'read_file · docs/é.md', calls: 41 } },
+        { event: 'done', data: {} },
+      ])
+    );
+    const { projects } = await import('../api');
+    const onToolCall = vi.fn();
+    await projects.fullAuditStream(
+      'p-1', { agent: 'LiteLlm' },
+      {
+        onTemplateInstalled: () => {},
+        onToolCall,
+        onStepStart: () => {}, onChunk: () => {}, onStepDone: () => {},
+        onValidationCreated: () => {}, onDone: () => {}, onError: () => {},
+      },
+    );
+    expect(onToolCall).toHaveBeenCalledWith(2, 'read_file · docs/é.md', 41);
+  });
+
   it('onStepProgress + onToolCall are optional — older callers compile', async () => {
     // Backwards compat sanity. Handlers absent → events flow
     // through without error.

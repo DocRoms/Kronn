@@ -856,6 +856,8 @@ pub async fn full_audit(
         // KT-927 — unknown (`None`) until a step's agent reports something, so a
         // run whose runtime reports nothing never shows "0 tokens".
         let mut run_tokens = super::agent_launch::RunTokens::default();
+        // The model last written on the run row, so a step writes it only when it changes.
+        let mut recorded_model: Option<String> = None;
         // 0.8.3 (#311) — track resume + completion status. On every
         // successful `step_done` the run's `progress` records it AND
         // persists the exact count via `update_last_completed_step`. At
@@ -1199,6 +1201,7 @@ pub async fn full_audit(
                 }
             }
             let mut previous_attempt_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
+            let mut step_cost = super::agent_launch::StepCost::default();
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
@@ -1220,6 +1223,8 @@ pub async fn full_audit(
                     tracker.agent_cancels.insert(project_id.clone(), cancel.clone());
                 }
             }
+            // An ACP agent reports its tool calls here, an HTTP agent on its run.
+            let (activity_sink, activity_rx) = tokio::sync::watch::channel(None);
             match agent_launcher.start(
                 &agent_type,
                 audit_tier,
@@ -1229,6 +1234,7 @@ pub async fn full_audit(
                 &tokens,
                 attempt_cancel.clone(),
                 analysis_step.target_file,
+                Some(activity_sink),
             ).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation — of a direct CLI
@@ -1246,14 +1252,22 @@ pub async fn full_audit(
                     }
 
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
-                    // An HTTP agent's tool activity, for the card's live chips.
-                    let _tool_activity = (!is_stream_json).then(|| {
-                        super::agent_launch::ToolActivityMirror::start(
-                            process.tool_activity_probe(),
-                            audit_tracker.clone(),
-                            project_id.clone(),
+                    // An agent without stream-json (HTTP, ACP) reports its tokens and
+                    // tools on the run, not in its lines: looked at on every line and
+                    // on every tick, so a tool chain without prose still shows progress.
+                    let mut activity = (!is_stream_json).then(|| {
+                        super::agent_launch::StepActivityWatch::new(
+                            super::agent_launch::AuditActivityProbe::new(
+                                process.tool_activity_probe(),
+                                Some(activity_rx.clone()),
+                            ),
+                            agent_type.clone(),
                         )
                     });
+                    let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
+                    activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // The cost Claude's stream-json states on its `result` line.
+                    let mut stream_cost: Option<u64> = None;
                     // 0.8.3 (#309) — Zombie audit detection.
                     //
                     // The naive `while let Some(line) = process.next_line().await`
@@ -1266,18 +1280,30 @@ pub async fn full_audit(
                     // can't proceed, and 100+k tokens are wasted on a run
                     // that's actually dead.
                     //
-                    // Fix: `tokio::select!` with a 60s idle timer. Every
+                    // Fix: `tokio::select!` with a 60s idle deadline. Every
                     // 60s without a new line, we check `try_wait()` on the
                     // child. If the child exited cleanly OR was reaped by
                     // an external SIGKILL, we treat the stream as ended
                     // and break out so the loop can emit `step_done` and
                     // move on. 60s is generous enough to absorb long
                     // thinking-only LLM phases without false positives.
+                    // The activity tick does not push the deadline back.
+                    let idle_after = std::time::Duration::from_secs(60);
+                    let mut idle_deadline = tokio::time::Instant::now() + idle_after;
                     let mut stream_ended = false;
                     while !stream_ended {
-                        let next = tokio::select! {
-                            maybe_line = process.next_line() => maybe_line,
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                        let wake = tokio::select! {
+                            maybe_line = process.next_line() => super::agent_launch::StepWake::Line(maybe_line),
+                            _ = tokio::time::sleep_until(idle_deadline) => super::agent_launch::StepWake::Idle,
+                            _ = activity_tick.tick(), if activity.is_some() => super::agent_launch::StepWake::Tick,
+                        };
+                        let next = match wake {
+                            super::agent_launch::StepWake::Line(line) => {
+                                idle_deadline = tokio::time::Instant::now() + idle_after;
+                                line
+                            }
+                            super::agent_launch::StepWake::Idle => {
+                                idle_deadline = tokio::time::Instant::now() + idle_after;
                                 // 60s idle → probe the child. If it's gone,
                                 // the open stdout pipe is held by a
                                 // descendant; we break with a warning.
@@ -1298,6 +1324,34 @@ pub async fn full_audit(
                                         None
                                     }
                                 }
+                            }
+                            super::agent_launch::StepWake::Tick => {
+                                let Some(watch) = activity.as_mut() else { continue };
+                                if let Some((tool, calls)) = watch.tool_moved() {
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.set_tool_activity(&project_id, tool.clone(), calls);
+                                    }
+                                    yield Event::default().event("tool_call").data(
+                                        serde_json::json!({ "step": step, "tool": tool, "calls": calls }).to_string()
+                                    );
+                                }
+                                if let Some(reading) = watch.tokens_moved() {
+                                    step_usage = reading;
+                                    if let Some(step_tokens) = step_usage.total() {
+                                        let cumulative = run_tokens.with(step_tokens);
+                                        if let Ok(mut t) = audit_tracker.lock() {
+                                            t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                        }
+                                        yield Event::default().event("step_progress").data(
+                                            serde_json::json!({
+                                                "step": step,
+                                                "step_tokens": step_tokens,
+                                                "total_tokens_so_far": cumulative,
+                                            }).to_string()
+                                        );
+                                    }
+                                }
+                                continue;
                             }
                         };
                         let Some(line) = next else {
@@ -1322,9 +1376,12 @@ pub async fn full_audit(
                         if is_stream_json {
                             match runner::parse_claude_stream_line(&line) {
                                 // A reading that counts nothing is no reading.
-                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. }
+                                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, cost_usd }
                                     if input_tokens + output_tokens > 0 =>
                                 {
+                                    if let Some(cost) = cost_usd.and_then(crate::agents::chat_codec::usd_to_micros) {
+                                        stream_cost = Some(cost);
+                                    }
                                     if step_usage.total().is_none_or(|seen| input_tokens + output_tokens >= seen) {
                                         step_usage = crate::db::audit_runs::StepTokens {
                                             input: Some(input_tokens),
@@ -1355,28 +1412,27 @@ pub async fn full_audit(
                                         }).to_string()
                                     );
                                 }
+                                runner::StreamJsonEvent::TerminalError(failure) => {
+                                    if let Some(cost) = failure.cost_usd.and_then(crate::agents::chat_codec::usd_to_micros) {
+                                        stream_cost = Some(cost);
+                                    }
+                                }
                                 // An audit is a one-shot run: nothing to resume.
                                 runner::StreamJsonEvent::Usage { .. }
                                 | runner::StreamJsonEvent::Text(_)
-                                | runner::StreamJsonEvent::TerminalError(_)
                                 | runner::StreamJsonEvent::ToolInputDelta(_)
                                 | runner::StreamJsonEvent::ToolEnd
                                 | runner::StreamJsonEvent::SessionId(_)
                                 | runner::StreamJsonEvent::Skip => {}
                             }
-                        } else {
+                        } else if let Some(reading) = activity.as_mut().and_then(|watch| watch.tokens_moved()) {
                             // KT-927 — an agent that streams text (ACP:
                             // OpenCode, the adapters; HTTP) has no usage in
                             // its lines: the session reports it on the
                             // process. It used to be read nowhere, so every
                             // such step was recorded at 0.
-                            let reading = crate::db::audit_runs::StepTokens::from_reported(
-                                process.reported_usage_counters(),
-                            ).inclusive_for(&agent_type);
-                            if reading.total().is_some() && reading != step_usage {
-                                step_usage = reading;
-                                usage_moved = true;
-                            }
+                            step_usage = reading;
+                            usage_moved = true;
                         }
                         if usage_moved {
                             if let Some(step_tokens) = step_usage.total() {
@@ -1416,6 +1472,9 @@ pub async fn full_audit(
                             step_usage = reading;
                         }
                     }
+                    drop(activity);
+                    // KT-997 — this attempt's cost, summed with the step's earlier ones.
+                    step_cost = step_cost.with_attempt(process.reported_cost_usd_micros().or(stream_cost));
                     let status = process.child.wait().await;
                     process.fix_ownership();
 
@@ -1798,6 +1857,8 @@ pub async fn full_audit(
                         "tokens": combined_step_usage.total(),
                         "duration_ms": duration_ms,
                         "total_tokens": run_tokens.total(),
+                        // `null` — not 0 — when an attempt's agent reported no cost.
+                        "cost_usd_micros": step_cost.usd_micros(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
 
@@ -1908,8 +1969,28 @@ pub async fn full_audit(
                             "step": step, "success": false, "file": file_label,
                             "tokens": previous_attempt_usage.total(), "duration_ms": duration_ms,
                             "total_tokens": run_tokens.total(),
+                            "cost_usd_micros": step_cost.usd_micros(),
                         }).to_string()
                     );
+                }
+            }
+            // KT-997 — what the step's attempts cost and the model the run served,
+            // once the step row is finalized. An unreported cost stays NULL.
+            if let Some(cost) = step_cost.usd_micros() {
+                let run_id = audit_run_id.clone();
+                if let Err(e) = db.with_conn(move |conn| {
+                    crate::db::audit_runs::set_step_cost(conn, &run_id, step as u32, cost)
+                }).await {
+                    tracing::error!("Failed to record the cost of audit step {step}: {e}");
+                }
+            }
+            if let Some(model) = agent_launcher.run_model(&agent_type, audit_tier).await {
+                if recorded_model.as_deref() != Some(model.as_str()) {
+                    let (run_id, value) = (audit_run_id.clone(), model.clone());
+                    match db.with_conn(move |conn| crate::db::audit_runs::set_run_model(conn, &run_id, &value)).await {
+                        Ok(()) => recorded_model = Some(model),
+                        Err(e) => tracing::warn!("Could not record the audit run's model: {e}"),
+                    }
                 }
             }
             // Terminal attempt (success, exhausted retries, or start failure).

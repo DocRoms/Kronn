@@ -11,11 +11,20 @@ const TARGET_MAX_CHARS: usize = 120;
 
 pub fn tool_started(sink: Option<&AgentActivitySink>, tool: &str) {
     if let Some(sink) = sink {
-        sink.send_replace(Some(AgentActivity {
-            tool: tool.to_owned(),
-            target: None,
-            at: chrono::Utc::now(),
-        }));
+        // Counted here, where every call passes: a reader polling the sink
+        // would miss the calls that land between two reads.
+        sink.send_modify(|current| {
+            let calls = current
+                .as_ref()
+                .map_or(0, |previous| previous.calls)
+                .saturating_add(1);
+            *current = Some(AgentActivity {
+                tool: tool.to_owned(),
+                target: None,
+                at: chrono::Utc::now(),
+                calls,
+            });
+        });
     }
 }
 
@@ -71,6 +80,17 @@ mod tests {
         let second = rx.borrow().clone().unwrap();
         assert_eq!((second.tool.as_str(), second.target), ("Bash", None));
         assert!(second.at >= first.at);
+        assert_eq!((first.calls, second.calls), (1, 2));
+    }
+
+    #[test]
+    fn every_call_is_counted_even_when_nobody_reads_in_between() {
+        let (sink, rx) = tokio::sync::watch::channel(None);
+        for _ in 0..50 {
+            tool_started(Some(&sink), "Read");
+            tool_target(Some(&sink), "src/é.rs".into());
+        }
+        assert_eq!(rx.borrow().as_ref().unwrap().calls, 50);
     }
 
     #[test]

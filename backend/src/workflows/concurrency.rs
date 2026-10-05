@@ -122,6 +122,30 @@ pub fn insert_run_within_limit(
     Ok(Ok(()))
 }
 
+/// Re-admission of a paused or interrupted run about to execute again: the
+/// limit is counted without the run itself. Call it in the same `with_conn`
+/// closure as the claim, like [`insert_run_within_limit`].
+pub fn resume_within_limit(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> anyhow::Result<Result<(), String>> {
+    let Some(max) = workflow.concurrency_limit else {
+        return Ok(Ok(()));
+    };
+    let key = workflow
+        .concurrency_key
+        .is_some()
+        .then_some(run.concurrency_key.as_deref());
+    let active = crate::db::workflows::count_admitted_runs(conn, &workflow.id, key, Some(&run.id))?;
+    if active >= max {
+        return Ok(Err(format!(
+            "Concurrency limit reached ({active}/{max}): another run of this workflow is active. Resume this run once it has finished."
+        )));
+    }
+    Ok(Ok(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

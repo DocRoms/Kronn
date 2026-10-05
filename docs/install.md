@@ -55,6 +55,18 @@ Download the macOS installer from [Releases](https://github.com/DocRoms/Kronn/re
 It runs **natively** (no Docker) → it drives your real host CLIs with your
 existing logins, and RTK on your machine. This is the macOS "just works" path.
 
+**Desktop port.** The app serves its interface on `http://127.0.0.1:<port>`
+and keeps the same port across launches, because the browser storage of the
+interface is tied to it. The port is saved in `desktop-port.json` in the Kronn
+data directory (`~/Library/Application Support/com.kronn.kronn/` on macOS,
+`~/.config/kronn/` on Linux, `%APPDATA%\kronn\kronn\config\` on Windows, or
+`$KRONN_DATA_DIR`). To pin a port, quit Kronn, write `{"port": 47315}` (1024 to
+65535) in that file and relaunch. When the port is busy, that launch uses a
+free one and the saved value is kept for the next launch. Interface
+preferences (theme, tour, folds, favourites, dismissed update) are also kept
+by the backend (`/api/ui-preferences`), so a launch on another port restores
+them.
+
 ### Develop / run from source natively (no app build, hot-reload)
 
 If you build/hack on Kronn (or just want it from source on macOS), run the

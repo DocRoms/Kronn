@@ -273,6 +273,7 @@ mod tests {
             auth_strict_localhost: false,
             failure_notify_url: None,
             run_retention_days: 0,
+            run_payload_retention_days: 30,
             execution_variable_retention_days: 30,
             interrupted_worktree_ttl_days:
                 crate::models::setup::DEFAULT_INTERRUPTED_WORKTREE_TTL_DAYS,

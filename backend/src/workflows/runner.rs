@@ -428,6 +428,11 @@ pub async fn settle_errored_run(
             Ok(crate::db::workflows::get_run(conn, &run_id)?.map(|row| row.status))
         })
         .await;
+    // The execute_run wrapper reclaimed the worktree before this settle made
+    // the run terminal.
+    if matches!(settled, Ok(None)) {
+        forget_removed_workspace(state, run).await;
+    }
     match settled {
         Ok(None) => {
             let _ = state
@@ -511,6 +516,49 @@ fn main_tree_refusal_message(refusal: &crate::workflows::workspace::MainTreeRefu
     }
 }
 
+/// The failed preflight result recorded when a run cannot get its worktree.
+fn workspace_failure_result(msg: &str) -> StepResult {
+    StepResult {
+        step_name: "__workspace__".to_string(),
+        status: RunStatus::Failed,
+        output: msg.to_string(),
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: Some("Preflight".into()),
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        step_agent: None,
+        step_model: None,
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+    }
+}
+
+/// The definition a run executes against: the run's launch project wins over
+/// the workflow's, so a global workflow keeps its project across a gate pause,
+/// a restart, or an edit of the workflow while the run waited.
+pub(crate) fn workflow_in_run_project<'a>(
+    workflow: &'a Workflow,
+    run: &WorkflowRun,
+) -> std::borrow::Cow<'a, Workflow> {
+    match run.project_id.as_deref() {
+        Some(project_id) if workflow.project_id.as_deref() != Some(project_id) => {
+            let mut resolved = workflow.clone();
+            resolved.project_id = Some(project_id.to_string());
+            std::borrow::Cow::Owned(resolved)
+        }
+        _ => std::borrow::Cow::Borrowed(workflow),
+    }
+}
+
 /// Execute a complete workflow run.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_run(
@@ -579,6 +627,133 @@ async fn execute_run_with_notify_policy(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    let is_inherited_workspace = inherited_workspace.is_some();
+    let result = execute_run_body(
+        state.clone(),
+        workflow,
+        run,
+        tokens_config,
+        agents_config,
+        events_tx,
+        shared_budget,
+        inherited_workspace,
+        notify_security_policy,
+    )
+    .await;
+    // An error settles the run as failed: its worktree goes now, not at the
+    // next boot. An inherited worktree belongs to the parent run.
+    if result.is_err() && !is_inherited_workspace && run.status != RunStatus::WaitingApproval {
+        let workflow = workflow_in_run_project(workflow, run);
+        if let Err(error) = reclaim_run_worktree(&state, &workflow, run).await {
+            tracing::warn!(
+                run_id = %run.id,
+                error = %error,
+                "worktree of an errored run not removed — the next boot cleanup will retry"
+            );
+        }
+    }
+    result
+}
+
+/// Finished runs whose checkout is gone no longer own a worktree. Clearing
+/// the durable path lets run retention reach them without the boot janitor; a
+/// checkout still on disk, or a run not yet terminal in the database, keeps it.
+pub(crate) async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun) {
+    let Some(path) = run.workspace_path.clone() else {
+        return;
+    };
+    if std::path::Path::new(&path).exists() {
+        return;
+    }
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::forget_removed_workspace(conn, &path))
+        .await
+    {
+        tracing::warn!(run_id = %run.id, "could not clear the removed worktree path: {error}");
+    }
+}
+
+/// Removes the worktree a run owns once it will not execute again, keeping its
+/// branch when it holds commits no known base has (recorded on the run).
+async fn reclaim_run_worktree(
+    state: &AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+) -> Result<()> {
+    let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) else {
+        return Ok(());
+    };
+    if !ws_path.exists() {
+        return Ok(());
+    }
+    let owner_run_id = run.id.clone();
+    let child_dispatches = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::active_child_dispatch_count(conn, &owner_run_id)
+        })
+        .await?;
+    if child_dispatches > 0 {
+        anyhow::bail!("{child_dispatches} child dispatch(es) still read this worktree");
+    }
+    // `before_remove` is a hook like the others: the project's recipe
+    // applies here too.
+    let Some(pid) = workflow.project_id.clone() else {
+        return Ok(());
+    };
+    let Some(project) = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await?
+    else {
+        return Ok(());
+    };
+    let repo_path = crate::core::scanner::resolve_host_path(&project.path);
+    let project_hooks = project.workspace.map(|workspace| workspace.hooks);
+    let ws = Workspace::attach(
+        ws_path,
+        repo_path,
+        &workflow.name,
+        &run.id,
+        resolved_workspace_hooks(project_hooks.as_ref(), workflow.workspace_config.as_ref()),
+    );
+    let outcome = ws.cleanup().await?;
+    if let Some(preserved) = outcome.preserved {
+        run.produced_branches.push(crate::models::ProducedBranch {
+            branch_name: preserved.branch_name,
+            head_sha: preserved.head_sha,
+            ahead: preserved.ahead,
+            pushed_upstream: preserved.pushed_upstream,
+        });
+        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+            .await
+        {
+            tracing::error!(
+                run_id = %run.id,
+                error = %e,
+                "failed to persist produced_branches — the preserved branch pointer is the only record of this run's work"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_body(
+    state: AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    events_tx: Option<EventSender>,
+    shared_budget: Option<SharedBudget>,
+    inherited_workspace: Option<String>,
+    notify_security_policy: NotifySecurityPolicy,
+) -> Result<()> {
     let approval_workflow = workflow.clone();
     state
         .db
@@ -590,6 +765,8 @@ async fn execute_run_with_notify_policy(
             .map_err(anyhow::Error::msg)
         })
         .await?;
+    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let workflow: &Workflow = &workflow_in_project;
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // SSE is an optional live projection, never part of the execution
@@ -761,7 +938,26 @@ async fn execute_run_with_notify_policy(
                         &run.id,
                         hooks,
                     )),
-                    _ => None, // resume without worktree (or worktree gone) — run in main tree
+                    // The run was isolated: continuing in the main checkout
+                    // would let its agents commit and push there.
+                    Some(path) => {
+                        let msg = format!(
+                            "Worktree `{}` no longer exists — refusing to resume in the main checkout. Re-trigger the workflow for a fresh run.",
+                            path.display()
+                        );
+                        run.status = RunStatus::Failed;
+                        run.finished_at = Some(Utc::now());
+                        run.step_results.push(workspace_failure_result(&msg));
+                        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                        db.with_conn(move |conn| {
+                            crate::db::workflows::update_run_progress(conn, snap)
+                        })
+                        .await?;
+                        emit(RunEvent::RunError { error: msg });
+                        broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+                        return Ok(());
+                    }
+                    None => None, // the run never had a worktree: it ran in the main tree
                 }
             } else if !workspace_requested {
                 tracing::debug!(
@@ -3065,6 +3261,7 @@ async fn execute_run_with_notify_policy(
                 }
             }
         }
+        forget_removed_workspace(&state, run).await;
     } else if active_child_dispatches > 0 {
         tracing::warn!(
             run_id = %run.id,
@@ -3133,6 +3330,8 @@ pub async fn resume_run(
     events_tx: Option<EventSender>,
 ) -> Result<()> {
     use anyhow::anyhow;
+    let workflow_in_project = workflow_in_run_project(workflow, run);
+    let workflow: &Workflow = &workflow_in_project;
 
     let gate_step_idx = run
         .step_results
@@ -3225,78 +3424,14 @@ pub async fn resume_run(
             .send(crate::models::WsMessage::SharedRunUpdated {
                 run_id: run.id.clone(),
             });
-        // Cleanup workspace if it exists.
-        if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
-            if ws_path.exists() {
-                // `before_remove` is a hook like the others: the
-                // project's recipe applies here too, or a teardown declared
-                // once would only run for the workflows that repeated it.
-                let (project_path, project_hooks) = if let Some(ref pid) = workflow.project_id {
-                    let pid = pid.clone();
-                    let db2 = state.db.clone();
-                    let project = db2
-                        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
-                        .await?;
-                    match project {
-                        Some(project) => (
-                            project.path,
-                            project.workspace.map(|workspace| workspace.hooks),
-                        ),
-                        None => (String::new(), None),
-                    }
-                } else {
-                    (String::new(), None)
-                };
-                if !project_path.is_empty() {
-                    let repo_path = crate::core::scanner::resolve_host_path(&project_path);
-                    let ws = Workspace::attach(
-                        ws_path,
-                        repo_path,
-                        &workflow.name,
-                        &run.id,
-                        resolved_workspace_hooks(
-                            project_hooks.as_ref(),
-                            workflow.workspace_config.as_ref(),
-                        ),
-                    );
-                    match ws.cleanup().await {
-                        Ok(outcome) => {
-                            if let Some(preserved) = outcome.preserved {
-                                // Reject still preserves anything the agent committed —
-                                // the operator's "no" is on the gate, not on the work
-                                // already on disk. They may want to recover it.
-                                run.produced_branches.push(crate::models::ProducedBranch {
-                                    branch_name: preserved.branch_name,
-                                    head_sha: preserved.head_sha,
-                                    ahead: preserved.ahead,
-                                    pushed_upstream: preserved.pushed_upstream,
-                                });
-                                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-                                let db = state.db.clone();
-                                if let Err(e) = db
-                                    .with_conn(move |conn| {
-                                        crate::db::workflows::update_run_progress(conn, snap)
-                                    })
-                                    .await
-                                {
-                                    tracing::error!(
-                                        run_id = %run.id,
-                                        error = %e,
-                                        "failed to persist produced_branches on Reject — the preserved branch pointer is the only record of this run's work"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                run_id = %run.id,
-                                error = %e,
-                                "workspace cleanup failed on Reject — worktree may be left behind"
-                            );
-                        }
-                    }
-                }
-            }
+        // Reject still preserves anything the agent committed — the
+        // operator's "no" is on the gate, not on the work already on disk.
+        if let Err(e) = reclaim_run_worktree(&state, workflow, run).await {
+            tracing::warn!(
+                run_id = %run.id,
+                error = %e,
+                "workspace cleanup failed on Reject — worktree may be left behind"
+            );
         }
         return Ok(());
     }
@@ -3468,14 +3603,28 @@ pub(crate) async fn claim_interrupted_run_row(
         ));
     }
     append_resume_transition(run);
-    let run_id = run.id.clone();
-    let resume_state = run.state.clone();
+    let claim_run = run.clone();
     let claimed = state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::claim_interrupted_run_status(conn, &run_id, &resume_state)
+            if let Some(workflow) =
+                crate::db::workflows::get_workflow(conn, &claim_run.workflow_id)?
+            {
+                if let Err(reason) =
+                    super::concurrency::resume_within_limit(conn, &workflow, &claim_run)?
+                {
+                    return Ok(Err(reason));
+                }
+            }
+            crate::db::workflows::claim_interrupted_run_status(
+                conn,
+                &claim_run.id,
+                &claim_run.state,
+            )
+            .map(Ok)
         })
-        .await?;
+        .await?
+        .map_err(|reason| anyhow!("Run {} cannot resume: {reason}", run.id))?;
     if !claimed {
         return Err(anyhow!(
             "Run {} was just claimed by another caller — resume ignored (no double-resume)",
@@ -5032,6 +5181,7 @@ mod tests {
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -7015,6 +7165,703 @@ mod tests {
             persisted.finished_at.is_some(),
             "terminal write re-stamps finished_at"
         );
+    }
+
+    // ─── KT-1015 — the run's launch project ──────────────────────────────
+
+    async fn insert_project_at(state: &crate::AppState, id: &str, path: &std::path::Path) {
+        let now = chrono::Utc::now();
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "path": path.to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now.to_rfc3339(), "updated_at": now.to_rfc3339(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
+    }
+
+    fn pwd_step(name: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some("pwd".into());
+        step
+    }
+
+    fn dir_name(path: &std::path::Path) -> String {
+        path.file_name().unwrap().to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_manual_launch_records_the_launch_project_of_a_global_workflow() {
+        let (state, _, _) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-manual-launch", repo.path()).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-manual-global".into();
+        workflow.project_id = None;
+        let wf_db = workflow.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &wf_db))
+            .await
+            .unwrap();
+
+        let (_, run) = crate::api::workflows::create_manual_run(
+            &state,
+            &workflow.id,
+            Default::default(),
+            Default::default(),
+            crate::core::launch_context::LaunchContext {
+                project_id: Some("proj-manual-launch".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("admitted");
+        let run_id = run.id.clone();
+        let persisted = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.project_id.as_deref(), Some("proj-manual-launch"));
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_workflow(conn, "wf-manual-global"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.project_id, None, "the workflow itself stays global");
+    }
+
+    #[tokio::test]
+    async fn a_gate_approval_continues_a_global_workflow_in_its_launch_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-gate-launch", repo.path()).await;
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-gate-global".into();
+        workflow.project_id = None;
+        workflow.exec_allowlist = vec!["pwd".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![gate, pwd_step("where")];
+
+        let mut run = pending_run("run-gate-global", &workflow.id);
+        run.project_id = Some("proj-gate-launch".into());
+        run.status = RunStatus::Running;
+        let mut paused = fake_result("review");
+        paused.status = RunStatus::WaitingApproval;
+        run.step_results = vec![paused];
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        resume_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(
+            output.contains(&dir_name(repo.path())),
+            "the step ran in the launch project, not in the server's cwd: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_resume_continues_a_global_workflow_in_its_launch_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-interrupted-launch", repo.path()).await;
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-interrupted-global".into();
+        workflow.project_id = None;
+        workflow.exec_allowlist = vec!["pwd".into()];
+        workflow.steps = vec![
+            json_data_step("first", serde_json::json!({ "n": 1 })),
+            pwd_step("where"),
+        ];
+        let mut run = pending_run("run-interrupted-global", &workflow.id);
+        run.project_id = Some("proj-interrupted-launch".into());
+        run.status = RunStatus::Interrupted;
+        run.step_results.push(fake_result("first"));
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        claim_interrupted_run(&state, &mut run, false)
+            .await
+            .expect("claim");
+        resume_interrupted_run(state.clone(), &workflow, &mut run, &tokens, &agents, None)
+            .await
+            .expect("resume");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        let output = &run.step_results.last().unwrap().output;
+        assert!(output.contains(&dir_name(repo.path())), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_sub_workflow_pinned_to_another_project_runs_in_that_project() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let parent_repo = tempfile::TempDir::new().unwrap();
+        git_in(parent_repo.path(), &["init", "-q", "-b", "main"]).await;
+        git_in(
+            parent_repo.path(),
+            &["config", "user.email", "t@kronn.local"],
+        )
+        .await;
+        git_in(parent_repo.path(), &["config", "user.name", "t"]).await;
+        std::fs::write(parent_repo.path().join("README.md"), "a\n").unwrap();
+        git_in(parent_repo.path(), &["add", "."]).await;
+        git_in(parent_repo.path(), &["commit", "-q", "-m", "init"]).await;
+        let child_repo = tempfile::TempDir::new().unwrap();
+        insert_project_at(&state, "proj-parent-a", parent_repo.path()).await;
+        insert_project_at(&state, "proj-child-b", child_repo.path()).await;
+
+        let mut child = make_workflow_with_artifacts(Default::default());
+        child.id = "wf-child-b".into();
+        child.name = "child-b".into();
+        child.project_id = Some("proj-child-b".into());
+        child.exec_allowlist = vec!["pwd".into()];
+        child.steps = vec![pwd_step("where")];
+        let child_db = child.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &child_db))
+            .await
+            .unwrap();
+
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = "wf-parent-a".into();
+        parent.name = "parent-a".into();
+        parent.project_id = Some("proj-parent-a".into());
+        parent.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        let mut call = fake_step("call_child");
+        call.step_type = StepType::SubWorkflow;
+        call.sub_workflow_id = Some(child.id.clone());
+        parent.steps = vec![call];
+        let mut run = pending_run("run-parent-a", &parent.id);
+        run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &run).await;
+
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent run");
+
+        let child_run_id = run.step_results[0]
+            .child_run_id
+            .clone()
+            .unwrap_or_else(|| panic!("child launched: {:?}", run.step_results));
+        let child_run = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &child_run_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child_run.project_id.as_deref(), Some("proj-child-b"));
+        assert_eq!(
+            child_run.status,
+            RunStatus::Success,
+            "{:?}",
+            child_run.step_results
+        );
+        let output = &child_run.step_results[0].output;
+        assert!(
+            output.contains(&dir_name(child_repo.path())),
+            "the child ran in its own project's repository: {output}"
+        );
+        assert!(
+            !output.contains(&dir_name(parent_repo.path())),
+            "never in the parent's worktree: {output}"
+        );
+    }
+
+    // ─── KT-1018 — run lifecycle holes ───────────────────────────────────
+
+    async fn isolated_repo_fixture(
+        state: &crate::AppState,
+        project_id: &str,
+    ) -> (tempfile::TempDir, Workflow) {
+        let repo = tempfile::TempDir::new().unwrap();
+        git_in(repo.path(), &["init", "-q", "-b", "main"]).await;
+        git_in(repo.path(), &["config", "user.email", "t@kronn.local"]).await;
+        git_in(repo.path(), &["config", "user.name", "t"]).await;
+        std::fs::write(repo.path().join("README.md"), "x\n").unwrap();
+        git_in(repo.path(), &["add", "."]).await;
+        git_in(repo.path(), &["commit", "-q", "-m", "init"]).await;
+        insert_project_at(state, project_id, repo.path()).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{project_id}");
+        workflow.name = format!("isolated-{project_id}");
+        workflow.project_id = Some(project_id.into());
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["pwd".into()];
+        (repo, workflow)
+    }
+
+    #[tokio::test]
+    async fn a_gate_resume_whose_worktree_vanished_never_runs_in_the_main_checkout() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-vanished").await;
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![gate, pwd_step("where")];
+
+        let mut run = pending_run("run-vanished", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        run.status = RunStatus::Running;
+        let gone = repo.path().join(".kronn/worktrees/removed-by-hand");
+        run.workspace_path = Some(gone.to_string_lossy().to_string());
+        let mut paused = fake_result("review");
+        paused.status = RunStatus::WaitingApproval;
+        run.step_results = vec![paused];
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        resume_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("the refusal is a run outcome, not an error");
+
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(
+            run.step_results
+                .iter()
+                .all(|step| step.step_name != "where"),
+            "no step ran: {:?}",
+            run.step_results
+        );
+        let last = run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "__workspace__");
+        assert!(
+            last.output.contains("refusing to resume"),
+            "{}",
+            last.output
+        );
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-vanished"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, RunStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn an_early_error_after_the_worktree_is_created_removes_it() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-early-error").await;
+        // A declared variable whose snapshot was never written: execute_run
+        // fails after creating the worktree.
+        workflow.variables = vec![crate::models::PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }];
+        workflow.steps = vec![pwd_step("where")];
+        let mut run = pending_run("run-early-error", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        let (wf_db, run_db) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+
+        let error = execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("the missing snapshot is an infrastructure error");
+        assert!(error.to_string().contains("snapshot"), "{error}");
+
+        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("worktree created"));
+        assert!(!path.exists(), "the worktree goes with the error");
+        let listed = git_in(repo.path(), &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            !listed.contains("removed") && !listed.contains(&dir_name(&path)),
+            "{listed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_resume_rechecks_the_concurrency_limit() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-resume-limit".into();
+        workflow.concurrency_limit = Some(1);
+        workflow.steps = vec![json_data_step("only", serde_json::json!({ "n": 1 }))];
+        let mut interrupted = pending_run("run-resume-limit", &workflow.id);
+        interrupted.status = RunStatus::Interrupted;
+        insert_wf_and_run(&state, &workflow, &interrupted).await;
+        let mut other = pending_run("run-other-active", &workflow.id);
+        other.status = RunStatus::WaitingApproval;
+        let other_db = other.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &other_db))
+            .await
+            .unwrap();
+
+        let refused = claim_interrupted_run(&state, &mut interrupted.clone(), false)
+            .await
+            .expect_err("a paused run holds the only slot");
+        assert!(
+            refused.to_string().contains("Concurrency limit"),
+            "{refused}"
+        );
+        let still = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-resume-limit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.status, RunStatus::Interrupted, "not claimed");
+
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE workflow_runs SET status = 'Success' WHERE id = 'run-other-active'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        claim_interrupted_run(&state, &mut interrupted, false)
+            .await
+            .expect("the slot is free again");
+        assert_eq!(interrupted.status, RunStatus::Running);
+    }
+
+    // ─── KT-985 — a run's worktree goes at every end, its commits stay ───
+
+    fn commit_step(name: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Exec;
+        step.exec_command = Some("git".into());
+        step.exec_args = [
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "work",
+        ]
+        .map(String::from)
+        .to_vec();
+        step
+    }
+
+    async fn assert_worktree_gone_and_commit_kept(repo: &std::path::Path, run: &WorkflowRun) {
+        let path = std::path::PathBuf::from(run.workspace_path.clone().expect("isolated"));
+        assert!(!path.exists(), "the worktree is removed");
+        let listed = git_in(repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(!listed.contains("prunable"), "{listed}");
+        assert_eq!(
+            run.produced_branches.len(),
+            1,
+            "{:?}",
+            run.produced_branches
+        );
+        let branch = &run.produced_branches[0];
+        assert_eq!(branch.ahead, 1);
+        git_in(
+            repo,
+            &[
+                "show-ref",
+                "--verify",
+                &format!("refs/heads/{}", branch.branch_name),
+            ],
+        )
+        .await;
+    }
+
+    async fn run_to_end(state: &crate::AppState, workflow: &Workflow, run_id: &str) -> WorkflowRun {
+        let (_, tokens, agents) = test_state_and_configs();
+        let mut run = pending_run(run_id, &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(state, workflow, &run).await;
+        execute_run(
+            state.clone(),
+            workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        run
+    }
+
+    #[tokio::test]
+    async fn a_successful_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, _, _) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-success").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        workflow.steps = vec![commit_step("commit")];
+        let run = run_to_end(&state, &workflow, "run-end-success").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    async fn persisted_workspace(state: &crate::AppState, run_id: &str) -> Option<String> {
+        let run_id = run_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .workspace_path
+    }
+
+    async fn trimmable(state: &crate::AppState, run_id: &str) -> bool {
+        let run_id = run_id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                // A cutoff tomorrow: any finished run is old enough.
+                let future = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+                crate::db::run_retention::compact_run_payloads_chunk(conn, &future, 100)?;
+                Ok(conn.query_row(
+                    "SELECT payload_compacted_at IS NOT NULL FROM workflow_runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_whose_worktree_is_removed_at_runtime_becomes_trimmable() {
+        // KT-984 — the path stayed set until the boot janitor, so retention
+        // skipped every run finished since the last boot.
+        let (state, _, _) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-forget-path").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        workflow.steps = vec![commit_step("commit")];
+        let run = run_to_end(&state, &workflow, "run-forget-path").await;
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(!std::path::Path::new(run.workspace_path.as_deref().unwrap()).exists());
+        assert_eq!(persisted_workspace(&state, "run-forget-path").await, None);
+        assert!(trimmable(&state, "run-forget-path").await);
+    }
+
+    #[tokio::test]
+    async fn an_errored_run_settled_after_its_worktree_went_is_trimmable() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (_repo, mut workflow) = isolated_repo_fixture(&state, "proj-forget-error").await;
+        workflow.variables = vec![crate::models::PromptVariable {
+            name: "ticket".into(),
+            label: "Ticket".into(),
+            placeholder: String::new(),
+            description: None,
+            required: true,
+            pattern: None,
+            source: None,
+            source_ref: None,
+            allow_manual_override: false,
+            control: None,
+        }];
+        workflow.steps = vec![pwd_step("where")];
+        let mut run = pending_run("run-forget-error", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        // No variable snapshot: execute_run fails after creating the worktree.
+        let (wf_db, run_db) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)
+            })
+            .await
+            .unwrap();
+        let error = execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("missing snapshot");
+        settle_errored_run(&state, &workflow, &mut run, &error).await;
+        assert_eq!(persisted_workspace(&state, "run-forget-error").await, None);
+        assert!(trimmable(&state, "run-forget-error").await);
+    }
+
+    #[tokio::test]
+    async fn a_kept_checkout_or_a_live_run_keeps_its_path() {
+        let (state, _, _) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-keep-path".into();
+        let kept = tempfile::TempDir::new().unwrap();
+        let mut finished = pending_run("run-kept-checkout", &workflow.id);
+        finished.status = RunStatus::Success;
+        finished.workspace_path = Some(kept.path().to_string_lossy().to_string());
+        insert_wf_and_run(&state, &workflow, &finished).await;
+        let mut paused = pending_run("run-paused-gone", &workflow.id);
+        paused.status = RunStatus::WaitingApproval;
+        paused.workspace_path = Some("/nonexistent/kronn-paused".into());
+        let paused_db = paused.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &paused_db))
+            .await
+            .unwrap();
+
+        forget_removed_workspace(&state, &finished).await;
+        forget_removed_workspace(&state, &paused).await;
+        assert!(persisted_workspace(&state, "run-kept-checkout")
+            .await
+            .is_some());
+        assert!(persisted_workspace(&state, "run-paused-gone")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, _, _) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-failed").await;
+        workflow.exec_allowlist = vec!["git".into()];
+        let mut broken = fake_step("broken");
+        broken.step_type = StepType::Exec;
+        broken.exec_command = Some("git".into());
+        broken.exec_args = vec!["no-such-subcommand".into()];
+        workflow.steps = vec![commit_step("commit"), broken];
+        let run = run_to_end(&state, &workflow, "run-end-failed").await;
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_removes_its_worktree_and_keeps_its_commits() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let (repo, mut workflow) = isolated_repo_fixture(&state, "proj-end-cancel").await;
+        workflow.exec_allowlist = vec!["git".into(), "sleep".into()];
+        let mut wait = fake_step("wait");
+        wait.step_type = StepType::Exec;
+        wait.exec_command = Some("sleep".into());
+        wait.exec_args = vec!["20".into()];
+        workflow.steps = vec![commit_step("commit"), wait];
+        let mut run = pending_run("run-end-cancel", &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        let canceller = {
+            let state = state.clone();
+            async move {
+                for _ in 0..500 {
+                    let committed = state
+                        .db
+                        .with_conn(|conn| crate::db::workflows::get_run(conn, "run-end-cancel"))
+                        .await
+                        .unwrap()
+                        .is_some_and(|run| !run.step_results.is_empty());
+                    if committed {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "run-end-cancel",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None
+            ),
+            canceller,
+        );
+        result.expect("run");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the sleep was cut short"
+        );
+        assert_eq!(run.status, RunStatus::Cancelled, "{:?}", run.step_results);
+        assert_worktree_gone_and_commit_kept(repo.path(), &run).await;
     }
 }
 

@@ -8,12 +8,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const { configApi } = vi.hoisted(() => ({
-  configApi: { dbUsage: vi.fn() },
+  configApi: { dbUsage: vi.fn(), dbCompact: vi.fn() },
 }));
 
 vi.mock('../../../lib/api', () => ({ config: configApi }));
 vi.mock('../../../lib/I18nContext', () => ({
-  useT: () => ({ t: (key: string) => key, locale: 'en' }),
+  useT: () => ({
+    t: (key: string, ...args: unknown[]) => (args.length ? `${key} ${args.join(' | ')}` : key),
+    locale: 'en',
+  }),
 }));
 
 import { DbUsageChart } from '../DbUsageChart';
@@ -78,7 +81,7 @@ describe('DbUsageChart', () => {
 
     // 3 charted + 12 small = 15 tables, capped at 8 charted plus one fold.
     expect(screen.getAllByRole('row')).toHaveLength(9);
-    expect(screen.getByText('config.dbUsage.otherTables')).toBeInTheDocument();
+    expect(screen.getByText(/config.dbUsage.otherTables/)).toBeInTheDocument();
 
     const percentages = screen
       .getAllByRole('row')
@@ -99,6 +102,56 @@ describe('DbUsageChart', () => {
 
     await waitFor(() => expect(screen.getByText(/config.dbUsage.free/)).toBeInTheDocument());
     expect(screen.getByText(/900.0 Mo/)).toBeInTheDocument();
+  });
+
+  describe('compaction', () => {
+    async function measured(freeBytes: number) {
+      configApi.dbUsage.mockResolvedValue(usage({ free_bytes: freeBytes }));
+      render(<DbUsageChart />);
+      fireEvent.click(screen.getByRole('button', { name: /config.dbUsage.measure/ }));
+      return screen.findByRole('button', { name: /config.dbCompact.action/ });
+    }
+
+    it('asks first, then reports the size before and after and measures again', async () => {
+      // KT-984 — a purge only frees pages inside the file; the VACUUM that
+      // gives them back pauses writes, so it is never run without consent.
+      const confirm = vi.fn(() => true);
+      window.confirm = confirm as never;
+      configApi.dbCompact.mockResolvedValue({
+        file_bytes_before: 4_118 * MB,
+        wal_bytes_before: 0,
+        file_bytes_after: 833 * MB,
+        wal_bytes_after: 0,
+        duration_ms: 4_440,
+      });
+      const button = await measured(3_273 * MB);
+      fireEvent.click(button);
+      fireEvent.click(button);
+
+      expect(await screen.findByRole('status')).toHaveTextContent('config.dbCompact.done 4.02 Go | 833.0 Mo');
+      expect(confirm).toHaveBeenCalledWith('config.dbCompact.confirm');
+      expect(configApi.dbCompact).toHaveBeenCalledTimes(1);
+      expect(configApi.dbUsage).toHaveBeenCalledTimes(2);
+    });
+
+    it('does nothing when the confirmation is declined', async () => {
+      const confirm = vi.fn(() => false);
+      window.confirm = confirm as never;
+      fireEvent.click(await measured(900 * MB));
+      expect(configApi.dbCompact).not.toHaveBeenCalled();
+    });
+
+    it('is disabled when no page is free', async () => {
+      expect(await measured(0)).toBeDisabled();
+    });
+
+    it('shows why the backend refused', async () => {
+      const confirm = vi.fn(() => true);
+      window.confirm = confirm as never;
+      configApi.dbCompact.mockRejectedValue(new Error('workflow runs are in progress'));
+      fireEvent.click(await measured(900 * MB));
+      expect(await screen.findByText('workflow runs are in progress')).toBeInTheDocument();
+    });
   });
 
   it('surfaces a failed measurement instead of showing an empty chart', async () => {

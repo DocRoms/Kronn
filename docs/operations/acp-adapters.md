@@ -81,8 +81,9 @@ the ACP adapter does not repair a missing bridge or an incorrect backend URL.
 
 Claude task workers require a sandbox. Native Windows launches are rejected
 with a specific diagnostic; this does not disable ordinary Claude discussions
-or relax worker isolation. WSL routing remains separate and must be qualified
-with a working Linux agent and bridge configuration.
+or relax worker isolation. Workers run through WSL instead; the boundary
+(`WSLENV`, translated paths, backend URL in NAT mode, native ACP refusal) is in
+[`windows-wsl-agents.md`](windows-wsl-agents.md).
 [src: file: backend/src/agents/runner.rs:9382]
 [Claude sandbox platform support](https://code.claude.com/docs/en/sandboxing)
 

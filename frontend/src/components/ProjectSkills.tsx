@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import type { Skill, SkillCategory } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { SkillVariablesBadge } from './SkillVariablesBadge';
 
 const CATEGORY_COLORS: Record<SkillCategory, string> = {
   Language: 'var(--kr-info)',
@@ -76,6 +77,7 @@ export function ProjectSkills({ projectId, currentSkillIds, allSkills, onUpdate 
             }}>
               {skill.category}
             </span>
+            <SkillVariablesBadge skill={skill} />
             {skill.external && (
               <span
                 style={{

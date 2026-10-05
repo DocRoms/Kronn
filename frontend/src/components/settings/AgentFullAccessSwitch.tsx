@@ -10,10 +10,12 @@ interface Props {
   /** Applies the new value; a rejection is the caller's to report. */
   onChange: (next: boolean) => Promise<void>;
   testId?: string;
+  /** The setting is overridden at launch (see `config.fullAccessForcedInContainer`). */
+  locked?: boolean;
 }
 
 /** The one full-access control: card, settings panel and setup wizard all use it. */
-export function AgentFullAccessSwitch({ agentName, checked, onChange, testId }: Props) {
+export function AgentFullAccessSwitch({ agentName, checked, onChange, testId, locked = false }: Props) {
   const { t } = useT();
   const [confirming, setConfirming] = useState(false);
   const titleId = useId();
@@ -27,18 +29,21 @@ export function AgentFullAccessSwitch({ agentName, checked, onChange, testId }: 
       <button
         type="button"
         role="switch"
-        aria-checked={checked}
+        aria-checked={locked || checked}
+        disabled={locked}
         aria-label={t('config.fullAccessSwitchAria', agentName)}
         className="fa-switch"
         data-testid={testId}
         // Enabling is the risky direction and asks first; turning it off never does.
         onClick={() => (checked ? void apply(false) : setConfirming(true))}
       >
-        <span className="fa-track" data-on={checked} aria-hidden="true">
-          <span className="fa-thumb" data-on={checked} />
+        <span className="fa-track" data-on={locked || checked} aria-hidden="true">
+          <span className="fa-thumb" data-on={locked || checked} />
         </span>
-        <span className="fa-state" data-on={checked}>
-          {checked ? t('config.fullAccessStateOn') : t('config.fullAccessStateOff')}
+        <span className="fa-state" data-on={locked || checked}>
+          {locked
+            ? t('config.fullAccessForcedInContainer')
+            : checked ? t('config.fullAccessStateOn') : t('config.fullAccessStateOff')}
         </span>
       </button>
       {confirming && (

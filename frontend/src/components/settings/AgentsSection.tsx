@@ -39,6 +39,7 @@ const AGENT_CONCURRENCY: Partial<Record<AgentType, { key: AgentConfigKey; fallba
 import type { ToastFn } from '../../hooks/useToast';
 import { FULL_ACCESS_AGENTS, isFullAccess } from '../../lib/agentFullAccess';
 import { AgentFullAccessSwitch } from './AgentFullAccessSwitch';
+import { AgentFullAccessNotice } from './AgentFullAccessNotice';
 import { isUpdateAvailable } from '../../lib/version';
 import {
   AGENT_LABELS,
@@ -294,6 +295,7 @@ export function AgentsSection({
   const [updateModalFor, setUpdateModalFor] = useState<AgentDetection | null>(null);
 
   const { data: tokenConfig, refetch: refetchTokens } = useApi(() => configApi.getTokens(), []);
+  const { data: effectiveAccess } = useApi(() => configApi.getAgentAccessEffective(), [agentAccess]);
   const { data: providerQuotaStates, refetch: refetchProviderQuotaStates } = useApi(() => agentsApi.quotaStates(), []);
   const [rearmingProvider, setRearmingProvider] = useState<AgentType | null>(null);
 
@@ -1023,6 +1025,9 @@ export function AgentsSection({
                 <AgentFullAccessSwitch
                   agentName={agent.name}
                   checked={isAgentFullAccess}
+                  locked={!isAgentFullAccess && (effectiveAccess ?? []).some(
+                    row => row.agent === agent.agent_type && row.full_access && row.reason === 'forced_in_container',
+                  )}
                   testId={`agent-full-access-${agent.agent_type}`}
                   onChange={async next => {
                     try {
@@ -1601,6 +1606,8 @@ export function AgentsSection({
           <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
           {usagePanel}
         </div>
+
+        <AgentFullAccessNotice rows={effectiveAccess ?? []} />
 
         <div className="set-agent-list-head">
           <div>
