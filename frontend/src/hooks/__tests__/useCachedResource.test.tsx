@@ -99,15 +99,18 @@ describe('useCachedResource', () => {
     await act(async () => { fresh.resolve('new result'); });
     expect(second.result.current.data).toBe('new result');
     await act(async () => { old.resolve('old result'); });
+    // Read the shared cache again: the last render alone would hide a stale write.
+    second.rerender();
     expect(second.result.current.data).toBe('new result');
   });
 
   it('ignores a response that lands after the resource was invalidated', async () => {
     const pending = deferred<string>();
     const load = vi.fn().mockReturnValueOnce(pending.promise);
-    const { result } = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    const { result, rerender } = renderHook(() => useCachedResource<string>({ key: 'k', load }));
     invalidateCachedResource('k');
     await act(async () => { pending.resolve('stale'); });
+    rerender();
     expect(result.current.data).toBeNull();
   });
 
@@ -129,10 +132,12 @@ describe('useCachedResource', () => {
     const second = renderHook(() => useCachedResource<string>({ key: 'k', load }));
     await waitFor(() => expect(second.result.current.data).toBe('new partial'));
     await act(async () => { oldPublish('old partial'); });
+    second.rerender();
     expect(second.result.current.data).toBe('new partial');
     await act(async () => { newFull.resolve('new full'); });
     expect(second.result.current.data).toBe('new full');
     await act(async () => { oldFull.resolve('old full'); });
+    second.rerender();
     expect(second.result.current.data).toBe('new full');
   });
 });
