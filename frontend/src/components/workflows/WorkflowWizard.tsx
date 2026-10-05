@@ -23,7 +23,7 @@ import type {
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
-  TransformDataField,
+  TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
@@ -38,6 +38,7 @@ import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
 import { PromptVariableControlEditor } from './PromptVariableControlEditor';
 import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
+import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
@@ -318,6 +319,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [expandedStepTypePicker, setExpandedStepTypePicker] = useState<number | null>(null);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
+  const [projectScope, setProjectScope] = useState<WorkflowProjectScope | null>(editWorkflow?.project_scope ?? null);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -1226,6 +1228,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
+          project_scope: projectScope,
         });
       } else {
         const req: CreateWorkflowRequest = {
@@ -1242,6 +1245,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
+          project_scope: projectScope ?? undefined,
         };
         if (pendingChildWorkflows.length > 0) {
           // Decomposed preset: create children first (they inherit the
@@ -1456,6 +1460,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             emptyLabel={t('disc.noMatchingProjects')}
             clearLabel={t('disc.noProject')}
             testId="workflow-project-picker"
+          />
+          <WorkflowProjectScopeControl
+            value={projectScope}
+            onChange={setProjectScope}
+            projects={projects}
+            homeProjectId={projectId}
           />
 
           {/* 0.8.5 — unified QuickStart picker. Replaces three formerly

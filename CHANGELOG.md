@@ -95,7 +95,8 @@ Release notes for 0.9.3 and earlier are available in the
   `project_id`, the launching discussion's project, one run per project for
   a cron, the project linked to the tracked repository for a tracker), the
   run executes in that project's worktree, and concurrency limits count each
-  project's runs apart (KT-851).
+  project's runs apart. The workflow editor chooses this project only, all
+  projects or chosen projects (KT-851).
 - Each workflow run has its own artifacts directory, `{{run.artifacts_dir}}`:
   Exec steps write screenshots, logs or reports there, and a Claude Code or
   Codex Agent step whose prompt names it reads it without being able to
