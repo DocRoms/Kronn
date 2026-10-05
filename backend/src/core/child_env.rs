@@ -427,6 +427,13 @@ pub fn looks_secret(name: &str) -> bool {
     ]
     .iter()
     .any(|needle| upper.contains(needle))
+        || upper.contains("AUTHTOKEN")
+        // npm's `_auth` (`npm_config__auth`, `…/:_auth`) and any other `AUTH`
+        // word; the SSH agent socket is a path, not a credential.
+        || (upper != "SSH_AUTH_SOCK"
+            && upper
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == "AUTH"))
 }
 
 fn name_in(name: &str, list: &[&str]) -> bool {

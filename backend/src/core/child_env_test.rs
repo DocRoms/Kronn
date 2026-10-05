@@ -388,6 +388,11 @@ fn secret_looking_names_are_recognised() {
         "X_API_KEY",
         "AWS_SECRET_ACCESS_KEY",
         "KRONN_KEK",
+        "NPM_CONFIG__AUTH",
+        "npm_config__auth",
+        "npm_config_//registry.example.com/:_auth",
+        "NGROK_AUTHTOKEN",
+        "npm_config__password",
     ] {
         assert!(looks_secret(name), "{name}");
     }
@@ -397,8 +402,36 @@ fn secret_looking_names_are_recognised() {
         "KRONN_DISCUSSION_ID",
         "LANG",
         "SSH_AUTH_SOCK",
+        "GIT_AUTHOR_NAME",
+        "XAUTHORITY",
+        "NPM_CONFIG_REGISTRY",
     ] {
         assert!(!looks_secret(name), "{name}");
+    }
+}
+
+/// npm's registry credentials ride on an allow-listed prefix: every route
+/// drops them all the same (B3-09).
+#[test]
+fn npm_registry_credentials_reach_no_route() {
+    let parent: &[(&str, &str)] = &[
+        ("PATH", "/usr/bin"),
+        ("NPM_CONFIG_REGISTRY", "https://registry.example.com/"),
+        ("NPM_CONFIG__AUTH", "dXNlcjpwYXNz"),
+        ("npm_config__auth", "dXNlcjpwYXNz"),
+        ("npm_config_//registry.example.com/:_auth", "dXNlcjpwYXNz"),
+        ("npm_config_//registry.example.com/:_authToken", "npm-token"),
+        ("npm_config__password", "cGFzcw=="),
+    ];
+    for route in EVERY_ROUTE {
+        let mut command = std::process::Command::new("node");
+        with_parent_env(parent, || isolate(&mut command, *route));
+        let names: Vec<String> = env_of(&command).into_keys().collect();
+        assert_eq!(
+            names,
+            vec!["NPM_CONFIG_REGISTRY".to_string(), "PATH".to_string()],
+            "{route:?}"
+        );
     }
 }
 
