@@ -338,19 +338,27 @@ pub async fn reconcile_with(
             }
         }
     }
-    let legacy = config.encryption_secret.clone().filter(|k| !k.is_empty());
+    let legacy = config
+        .encryption_secret
+        .clone()
+        .filter(|k| !k.is_empty())
+        .map(|k| crypto::canonical_secret(&k).unwrap_or(k));
     if let Some(legacy) = legacy.clone() {
         candidates.push((legacy, "legacy-config"));
     }
-    // A value that is not a 32-byte hex key can decrypt nothing and must never
-    // be adopted (all encryption would then fail).
-    candidates.retain(|(v, src)| {
-        let valid = crypto::parse_secret(v).is_ok();
-        if !valid {
-            tracing::error!("keystore: {src} holds a value that is not a valid key — ignored");
-        }
-        valid
-    });
+    // One spelling per key (case, whitespace), and a value that is not a 32-byte
+    // hex key can decrypt nothing and must never be adopted.
+    let candidates: Vec<(String, &'static str)> = candidates
+        .into_iter()
+        .filter_map(|(v, src)| match crypto::canonical_secret(&v) {
+            Ok(key) => Some((key, src)),
+            Err(_) => {
+                tracing::error!("keystore: {src} holds a value that is not a valid key — ignored");
+                None
+            }
+        })
+        .collect();
+    let mut candidates = candidates;
     // De-dup by value (a key present in several tiers is one candidate).
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|(v, _)| seen.insert(v.clone()));
@@ -520,7 +528,7 @@ pub async fn recover_with_passphrase(
     // Restoring is for a locked instance. On a running one, another key would
     // split the data between two keys; the same key changes nothing.
     if let Some(active) = config.encryption_secret.as_deref() {
-        if active == key {
+        if crate::core::keyvault::same_key(active, &key) {
             return Ok(KeyOutcome::Resolved {
                 source: "recovery-passphrase",
             });
@@ -679,7 +687,7 @@ pub async fn reencrypt_imported(
         .iter()
         .find_map(|blob| recovery::unwrap_key(blob, passphrase).ok())
         .ok_or_else(|| anyhow::anyhow!("Wrong recovery passphrase for the imported data"))?;
-    if source == active {
+    if crate::core::keyvault::same_key(&source, active) {
         return Ok(Reencrypted::default());
     }
     let report = reencrypt_rows(db, &source, active).await?;
@@ -1516,6 +1524,58 @@ mod tests {
             &k1,
             &collect_encrypted_rows(&db).await.unwrap()
         ));
+    }
+
+    /// The same key spelled in upper case (env) and lower case (sidecar) is one
+    /// key: two boots in a row resolve, never "several keys".
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn one_key_in_two_spellings_is_one_candidate() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, cell) = mem_vault("sidecar", Some(&format!(" {k}\n")));
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        std::env::set_var(crate::core::keyvault::ENV_KEK, k.to_uppercase());
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            let mut cfg = config::default_config();
+            cfg.encryption_secret = Some(k.to_uppercase());
+            outcomes.push(reconcile_with(&mut cfg, &db, &store, tmp.path()).await);
+            assert_eq!(
+                cfg.encryption_secret.as_deref(),
+                Some(k.as_str()),
+                "canonical"
+            );
+        }
+        std::env::remove_var(crate::core::keyvault::ENV_KEK);
+        for outcome in outcomes {
+            assert!(matches!(outcome.unwrap(), KeyOutcome::Resolved { .. }));
+        }
+        assert_eq!(
+            cell.lock().unwrap().as_deref(),
+            Some(format!(" {k}\n").as_str()),
+            "not rewritten"
+        );
+        assert_eq!(store.copies_of(&k.to_uppercase()), 1);
+    }
+
+    /// A corrupted vault value with multi-byte characters never panics the boot.
+    #[tokio::test]
+    async fn a_multibyte_vault_value_is_ignored_without_panicking() {
+        let db = Database::open_in_memory().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut corrupted = "a".repeat(61);
+        corrupted.push_str("éb");
+        let (sidecar, _cell) = mem_vault("sidecar", Some(&corrupted));
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some("日本".repeat(16));
+        let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(outcome, KeyOutcome::Minted);
     }
 
     #[tokio::test]

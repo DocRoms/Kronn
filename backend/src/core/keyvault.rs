@@ -186,6 +186,18 @@ pub(crate) fn write_private_temp(tmp: &Path, bytes: &[u8]) -> std::io::Result<()
     Ok(())
 }
 
+/// Whether two key strings are the same key, whatever their case or
+/// surrounding whitespace; values that are not keys compare as written.
+pub fn same_key(a: &str, b: &str) -> bool {
+    match (
+        crate::core::crypto::canonical_secret(a),
+        crate::core::crypto::canonical_secret(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// A vault that could not be read during [`KeyStore::snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultReadFailure {
@@ -280,21 +292,21 @@ impl KeyStore {
 
     /// Whether `secret` can be read back from a durable tier (env or a vault).
     pub fn holds(&self, secret: &str) -> bool {
-        Self::env_override().as_deref() == Some(secret)
+        Self::env_override().is_some_and(|env| same_key(&env, secret))
             || self
                 .vaults
                 .iter()
-                .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+                .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
     }
 
     /// How many distinct durable copies read `secret` back: the env override and
     /// each vault count once (config.toml is not counted here).
     pub fn copies_of(&self, secret: &str) -> usize {
-        usize::from(Self::env_override().as_deref() == Some(secret))
+        usize::from(Self::env_override().is_some_and(|env| same_key(&env, secret)))
             + self
                 .vaults
                 .iter()
-                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
                 .count()
     }
 
@@ -303,7 +315,7 @@ impl KeyStore {
         self.vaults
             .iter()
             .filter(|v| v.name() == name)
-            .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+            .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
     }
 
     /// Persist `secret` into every EMPTY writable vault. A vault holding another
@@ -315,7 +327,7 @@ impl KeyStore {
             .iter()
             .map(|v| {
                 let res = match v.retrieve() {
-                    Ok(Some(cur)) if cur == secret => Ok(()),
+                    Ok(Some(cur)) if same_key(&cur, secret) => Ok(()),
                     Ok(Some(_)) => Err(anyhow::anyhow!(
                         "not written: the vault holds a different key"
                     )),

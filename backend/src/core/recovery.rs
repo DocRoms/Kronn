@@ -70,7 +70,7 @@ pub fn matches_key(dir: &Path, key_hex: &str) -> RecoveryMatch {
     };
     match (blob.fingerprint, crypto::key_fingerprint_hex(key_hex)) {
         (None, _) => RecoveryMatch::Unverified,
-        (Some(fp), Ok(active)) if fp == active => RecoveryMatch::Matches,
+        (Some(fp), Ok(active)) if fp.eq_ignore_ascii_case(&active) => RecoveryMatch::Matches,
         _ => RecoveryMatch::OtherKey,
     }
 }
@@ -121,9 +121,9 @@ pub fn unwrap_key(blob: &RecoveryBlob, passphrase: &str) -> Result<String, Strin
     kek.zeroize();
     let key_hex =
         result.map_err(|_| "Wrong recovery passphrase or corrupt recovery data".to_string())?;
-    // The unwrapped value must itself be a valid key (defense in depth).
-    crypto::parse_secret(&key_hex)?;
-    Ok(key_hex)
+    // The unwrapped value must itself be a valid key (defense in depth), in
+    // its one canonical spelling so comparisons with the active key hold.
+    crypto::canonical_secret(&key_hex)
 }
 
 /// Serialize a blob to a portable "recovery code" string the user can save
