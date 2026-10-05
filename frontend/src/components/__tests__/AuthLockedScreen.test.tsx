@@ -43,4 +43,11 @@ describe('AuthLockedScreen', () => {
     await waitFor(() => expect(screen.getByTestId('auth-locked-new-token').textContent).toBe('new-token-123'));
     expect(screen.queryByTestId('recovery-restore-panel')).toBeNull();
   });
+
+  it('says to fix the cause and restart when the credentials failed to load (C3-04)', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: false, credentials_unavailable: 'disk full' });
+    render(<AuthLockedScreen onRestored={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('auth-locked-restart').textContent).toContain('disk full'));
+    expect(screen.queryByTestId('auth-locked-new-token-btn')).toBeNull();
+  });
 });

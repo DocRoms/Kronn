@@ -6119,7 +6119,12 @@ locked_credentials: number,
  * Recovery data kept from imports or a replaced recovery.key, usable by
  * "Re-encrypt imported secrets".
  */
-kept_recovery_blobs: number, };
+kept_recovery_blobs: number,
+/**
+ * The key is in use but the stored credentials could not be loaded at
+ * start (disk full, unreadable config.toml): why, to fix before a restart.
+ */
+credentials_unavailable: string | null, };
 
 export type RedactedField = {
 /**

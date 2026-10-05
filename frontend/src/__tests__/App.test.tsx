@@ -127,6 +127,25 @@ describe('App', () => {
     await waitFor(() => expect(screen.getByTestId('setup-wizard')).toBeDefined());
   });
 
+  it('shows a failed reset with the backend message (C3-14)', async () => {
+    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+      is_first_run: false,
+      current_step: 'Complete',
+      agents_detected: [],
+      scan_paths_set: true,
+      repos_detected: [],
+      default_scan_path: '/home',
+    });
+    (setupApi.reset as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('Reset cleared the data but not the stored keys: disk full'),
+    );
+    render(<App />);
+    fireEvent.click(await screen.findByText('Reset'));
+    await waitFor(() =>
+      expect(screen.getByTestId('reset-error').textContent).toContain('not the stored keys'),
+    );
+  });
+
   it('shows Dashboard when setup is complete', async () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
       is_first_run: false,

@@ -142,4 +142,14 @@ describe('RecoverySection', () => {
     render(<RecoverySection toast={toast} t={t} />);
     await waitFor(() => expect(screen.getByTestId('recovery-stale').textContent).toContain('keychain'));
   });
+
+  it('shows the computed warnings: invalid store, single copy, locked credentials (C3-11)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({
+      matches_key: false, copies: 1, invalid_sources: ['sidecar'], locked_credentials: 2,
+    }));
+    render(<RecoverySection toast={toast} t={t} />);
+    await waitFor(() => expect(screen.getByTestId('recovery-invalid').textContent).toContain('sidecar'));
+    expect(screen.getByTestId('recovery-single-copy')).toBeTruthy();
+    expect(screen.getByTestId('recovery-locked-credentials').textContent).toContain('2');
+  });
 });

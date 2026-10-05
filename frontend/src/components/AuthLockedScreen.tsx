@@ -15,12 +15,13 @@ interface AuthLockedScreenProps {
   onRestored: () => void;
 }
 
-type LockState = 'checking' | 'remote' | 'keyLost' | 'tokenUnreadable';
+type LockState = 'checking' | 'remote' | 'keyLost' | 'tokenUnreadable' | 'credentialsFailed';
 
 export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
   const { t } = useT();
   const [state, setState] = useState<LockState>('checking');
   const [newToken, setNewToken] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const toast: ToastFn = (text, type = 'info') => setMessage({ text, error: type === 'error' });
@@ -30,7 +31,13 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
     // Only a caller on this machine may read the status: a refusal means remote.
     Promise.resolve()
       .then(() => configApi.getRecoveryStatus())
-      .then(s => { if (live) setState(s.key_locked ? 'keyLost' : 'tokenUnreadable'); })
+      .then(s => {
+        if (!live) return;
+        // The key is fine but the credentials failed to load at start: the way
+        // out is to fix the cause and restart, not a new token.
+        if (s.credentials_unavailable) { setFailure(s.credentials_unavailable); setState('credentialsFailed'); return; }
+        setState(s.key_locked ? 'keyLost' : 'tokenUnreadable');
+      })
       .catch(() => { if (live) setState('remote'); });
     return () => { live = false; };
   }, []);
@@ -53,6 +60,12 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
         <KeyRound size={18} /> {t('authLocked.title')}
       </h1>
       {state === 'remote' && <p data-testid="auth-locked-remote">{t('authLocked.remoteHint')}</p>}
+      {state === 'credentialsFailed' && (
+        <div data-testid="auth-locked-restart">
+          <p>{t('authLocked.restartHint', failure ?? '')}</p>
+          <code className="set-recovery-code">{failure}</code>
+        </div>
+      )}
       {state === 'keyLost' && (
         <>
           <p>{t('authLocked.hint')}</p>

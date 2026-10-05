@@ -115,6 +115,27 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
             <span>{t('settings.recovery.staleWarning', (status.stale_sources ?? []).join(', '))}</span>
           </div>
         )}
+        {status && (status.invalid_sources ?? []).length > 0 && (
+          <div className="set-expose-warn" data-testid="recovery-invalid">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.invalidWarning', (status.invalid_sources ?? []).join(', '))}</span>
+          </div>
+        )}
+        {status && !status.key_locked && !status.matches_key && status.copies < 2 && (
+          <div className="set-expose-warn" data-testid="recovery-single-copy">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.singleCopyWarning', status.copies)}</span>
+          </div>
+        )}
+        {status && (status.locked_credentials ?? 0) > 0 && (
+          <div className="set-expose-warn" data-testid="recovery-locked-credentials">
+            <AlertTriangle size={13} />
+            <span>{t('settings.recovery.lockedCredentialsWarning', status.locked_credentials)}</span>
+          </div>
+        )}
+        {status && !status.key_locked && (status.kept_recovery_blobs ?? 0) > 0 && (
+          <RecoveryRestorePanel toast={toast} t={t} onRestored={() => window.location.reload()} />
+        )}
 
         {configured === false && !recoveryCode && (
           <div className="set-expose-warn" data-testid="recovery-nudge">
