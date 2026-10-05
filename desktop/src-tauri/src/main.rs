@@ -592,9 +592,10 @@ async fn start_backend(
     // Open database
     // An error (disk too full for the pre-migration backup, a failed migration)
     // reaches the startup screen instead of panicking the backend thread.
-    let database = Arc::new(Database::open().map_err(|e| {
-        anyhow::anyhow!("Kronn could not open its database: {e:#}")
-    })?);
+    let database = Arc::new(
+        Database::open()
+            .map_err(|e| anyhow::anyhow!("Kronn could not open its database: {e:#}"))?,
+    );
 
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
