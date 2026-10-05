@@ -831,6 +831,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "216_project_github_connections",
         include_str!("sql/216_project_github_connections.sql"),
     ),
+    (
+        "217_stored_credentials",
+        include_str!("sql/217_stored_credentials.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

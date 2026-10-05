@@ -2299,9 +2299,17 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
         tracing::info!("Config reset: {}", path.display());
     }
 
-    // Reset in-memory config to defaults
+    // Reset in-memory config to defaults, keeping the active key: a fresh
+    // random one would encrypt new secrets under a key no vault holds.
     let mut cfg = state.config.write().await;
+    let active_key = cfg.encryption_secret.clone();
     *cfg = config::default_config();
+    cfg.encryption_secret = active_key;
+    if let Ok(dir) = config::config_dir() {
+        if let Err(e) = crate::core::credential_store::forget_all(&dir, &state.db).await {
+            tracing::error!("Failed to clear stored credentials during reset: {e}");
+        }
+    }
 
     // Clear all data from DB
     if let Err(e) = state.db.with_conn(|conn| {
@@ -2321,6 +2329,9 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
 #[derive(serde::Deserialize)]
 pub struct SetRecoveryRequest {
     pub passphrase: String,
+    /// Required to replace an existing recovery passphrase.
+    #[serde(default)]
+    pub current_passphrase: Option<String>,
 }
 
 #[derive(serde::Serialize, ts_rs::TS)]
@@ -2335,6 +2346,12 @@ pub struct SetRecoveryResponse {
 #[ts(export)]
 pub struct RecoveryStatus {
     pub configured: bool,
+    /// No recovery passphrase yet: Kronn keeps every local copy of the key
+    /// (vault and sidecar) and deletes none until one is set (KT-1007).
+    pub key_copies_kept: bool,
+    /// config.toml still carries the key (no vault could hold it, or one copy
+    /// alone would remain without a recovery passphrase).
+    pub config_holds_key: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2348,10 +2365,17 @@ pub struct RestoreRecoveryRequest {
 
 /// GET /api/config/recovery/status — is a recovery passphrase configured?
 pub async fn recovery_status() -> Json<ApiResponse<RecoveryStatus>> {
-    let configured = config::config_dir()
-        .map(|d| crate::core::recovery::is_configured(&d))
-        .unwrap_or(false);
-    Json(ApiResponse::ok(RecoveryStatus { configured }))
+    let dir = config::config_dir().ok();
+    Json(ApiResponse::ok(recovery_status_in(dir.as_deref())))
+}
+
+fn recovery_status_in(dir: Option<&std::path::Path>) -> RecoveryStatus {
+    let configured = dir.is_some_and(crate::core::recovery::is_configured);
+    RecoveryStatus {
+        configured,
+        key_copies_kept: !configured,
+        config_holds_key: dir.is_some_and(|d| config::retained_disk_key(d).is_some()),
+    }
 }
 
 /// POST /api/config/recovery/set — wrap the active key under a passphrase and
@@ -2362,7 +2386,11 @@ pub async fn set_recovery(
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
     let config = state.config.read().await;
-    match crate::core::keystore::set_recovery_passphrase(&config, &req.passphrase) {
+    match crate::core::keystore::set_recovery_passphrase(
+        &config,
+        &req.passphrase,
+        req.current_passphrase.as_deref(),
+    ) {
         Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
@@ -2392,7 +2420,16 @@ pub async fn restore_recovery(
     )
     .await
     {
-        Ok(_) => Json(ApiResponse::ok(())),
+        Ok(outcome) => {
+            // The key is back: load the stored credentials it unlocks.
+            if let Err(e) =
+                crate::core::credential_store::boot(&mut config, state.db.clone(), &dir, &outcome)
+                    .await
+            {
+                tracing::error!("Credential store after key restore: {e:#}");
+            }
+            Json(ApiResponse::ok(()))
+        }
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
 }
@@ -3350,6 +3387,27 @@ mod tests {
         // longer keeps a dead run alive.
         assert_eq!(crate::models::clamp_agent_global_timeout_min(240), 240);
         assert_eq!(crate::models::clamp_agent_global_timeout_min(241), 240);
+    }
+
+    #[test]
+    fn recovery_status_reports_kept_copies_and_the_config_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = recovery_status_in(Some(dir.path()));
+        assert!(!status.configured && status.key_copies_kept && !status.config_holds_key);
+
+        config::retain_disk_key(dir.path(), "abcd");
+        crate::core::recovery::save_blob(
+            dir.path(),
+            &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
+                .unwrap(),
+        )
+        .unwrap();
+        let status = recovery_status_in(Some(dir.path()));
+        config::release_disk_key(dir.path());
+        assert!(status.configured && !status.key_copies_kept && status.config_holds_key);
+
+        let none = recovery_status_in(None);
+        assert!(!none.configured && none.key_copies_kept);
     }
 
     #[test]

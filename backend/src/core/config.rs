@@ -27,6 +27,54 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE))
 }
 
+/// Per data directory, the key `config.toml` must still carry. `encryption_secret`
+/// is never serialized from the struct; the reconciler decides here whether the
+/// file keeps a copy (no vault holds the key yet) or drops it.
+static DISK_KEYS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn disk_keys() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf, String>> {
+    DISK_KEYS.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Keep `key` in `dir`'s config.toml on every save.
+pub fn retain_disk_key(dir: &std::path::Path, key: &str) {
+    disk_keys().insert(dir.to_path_buf(), key.to_string());
+}
+
+/// Stop writing the key to `dir`'s config.toml. Returns whether one was kept.
+pub fn release_disk_key(dir: &std::path::Path) -> bool {
+    disk_keys().remove(dir).is_some()
+}
+
+pub fn retained_disk_key(dir: &std::path::Path) -> Option<String> {
+    disk_keys().get(dir).cloned()
+}
+
+/// The TOML written for `config` in `dir`. Credentials are left out once the
+/// encrypted store holds them (`strip_credentials`).
+pub(crate) fn disk_toml(
+    config: &AppConfig,
+    dir: &std::path::Path,
+    strip_credentials: bool,
+) -> Result<String> {
+    let body = if strip_credentials {
+        let mut disk = config.clone();
+        disk.server.auth_token = None;
+        disk.tokens.keys.clear();
+        toml::to_string_pretty(&disk)
+    } else {
+        toml::to_string_pretty(config)
+    }
+    .context("Failed to serialize config")?;
+    Ok(match retained_disk_key(dir) {
+        // A top-level key before any table header is valid TOML.
+        Some(key) => format!("encryption_secret = {}\n{body}", toml::Value::String(key)),
+        None => body,
+    })
+}
+
 /// Load config from disk, or return None if first run
 pub async fn load() -> Result<Option<AppConfig>> {
     let path = config_path()?;
@@ -40,6 +88,15 @@ pub async fn load() -> Result<Option<AppConfig>> {
         .context("Failed to read config file")?;
 
     let mut config: AppConfig = toml::from_str(&content).context("Failed to parse config file")?;
+    let dir = config_dir()?;
+    if let Some(key) = config
+        .encryption_secret
+        .as_deref()
+        .filter(|k| !k.is_empty())
+    {
+        // Kept verbatim until the reconciler proves a vault holds it.
+        retain_disk_key(&dir, key);
+    }
 
     let mut needs_save = false;
 
@@ -50,24 +107,10 @@ pub async fn load() -> Result<Option<AppConfig>> {
     // DB-aware reconciler (env → keychain → sidecar → this legacy field), which
     // only mints on a genuinely empty install. `encryption_secret` is left as
     // read from disk (possibly None) and preserved verbatim on any re-save.
-
-    // Auto-generate auth token on first launch. Auth defaults ON on native
-    // (Tauri/CLI), where the localhost bypass keeps it transparent; OFF under
-    // Docker, where Docker Desktop NATs published-port traffic to the network
-    // gateway so the bypass can't see the real client → auth-on would 401 the
-    // user on first launch. The token is still generated (ready for opt-in
-    // multi-user); the middleware honours `auth_enabled`. See
-    // `core::env::auth_on_by_default`.
-    if config.server.auth_token.is_none() {
-        config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
-        config.server.auth_enabled = super::env::auth_on_by_default();
-        needs_save = true;
-        tracing::info!(
-            "Generated auth token (auth_enabled={}, docker={})",
-            config.server.auth_enabled,
-            super::env::is_docker(),
-        );
-    }
+    //
+    // A missing auth token is not generated here either: since KT-1007 it
+    // lives in the encrypted credential store, which `credential_store::boot`
+    // reads after the DB opens and only then mints a token if none exists.
 
     // Migrate legacy single-key fields to multi-key system
     if config.tokens.keys.is_empty() {
@@ -101,11 +144,13 @@ pub async fn load() -> Result<Option<AppConfig>> {
     }
 
     if needs_save {
-        let updated = toml::to_string_pretty(&config).context("Failed to serialize config")?;
+        // Before the boot migration: the credential store is not armed yet, so
+        // the file keeps whatever credentials it had.
+        let updated = disk_toml(&config, &dir, false)?;
         // Same atomic temp+fsync+rename path as save() — a plain fs::write
         // here could truncate-then-fail and lose the encryption_secret
         // (2026-06-30 incident class).
-        persist_atomic(config_dir()?, path, updated).await?;
+        persist_atomic(dir, path, updated).await?;
     }
 
     Ok(Some(config))
@@ -123,7 +168,10 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     fs::create_dir_all(&dir).await?;
     restrict_permissions(&dir, true).await;
 
-    let content = toml::to_string_pretty(config).context("Failed to serialize config")?;
+    // Credentials go to the encrypted store first; a failure there leaves the
+    // previous config.toml untouched.
+    let credentials_stored = super::credential_store::sync_for_save(&dir, config).await?;
+    let content = disk_toml(config, &dir, credentials_stored)?;
     let path = config_path()?;
 
     persist_atomic(dir, path.clone(), content).await?;
@@ -744,10 +792,15 @@ mod tests {
         let tmp = scratch_dir("keepsecret");
         std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
+        // A 0.14.2 file carries the key; the struct never writes it.
         let mut cfg = default_config();
         let secret = cfg.encryption_secret.clone().expect("default has a secret");
         cfg.server.auth_token = Some("tok".into());
-        save(&cfg).await.expect("save must succeed");
+        let legacy = format!(
+            "encryption_secret = \"{secret}\"\n{}",
+            toml::to_string_pretty(&cfg).unwrap()
+        );
+        std::fs::write(tmp.join(CONFIG_FILE), legacy).unwrap();
 
         let loaded = load().await.expect("load Ok").expect("Some after save");
         assert_eq!(
@@ -755,6 +808,17 @@ mod tests {
             Some(secret.as_str()),
             "an existing secret must be preserved verbatim across load"
         );
+        // Kept on re-save until the reconciler releases it...
+        save(&loaded).await.unwrap();
+        let reread = load().await.unwrap().unwrap();
+        assert_eq!(reread.encryption_secret.as_deref(), Some(secret.as_str()));
+        // ...then gone from the file, although the live config still holds it.
+        assert!(release_disk_key(&tmp));
+        assert!(!release_disk_key(&tmp), "already released");
+        save(&reread).await.unwrap();
+        let text = std::fs::read_to_string(tmp.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("encryption_secret"), "{text}");
+        assert!(!text.contains(&secret));
 
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -875,7 +939,8 @@ mod tests {
             assert_eq!(cli.server.listening_port(), saved_port);
             assert_eq!(cli.server.runtime_port, None);
             assert_eq!(cli.server.pseudo, desktop.server.pseudo);
-            assert_eq!(cli.encryption_secret, desktop.encryption_secret);
+            // The in-memory key is never serialized from the struct.
+            assert_eq!(cli.encryption_secret, None);
             assert_eq!(desktop.server.listening_port(), 53591);
             let persisted = fs::read_to_string(config_path().unwrap()).await.unwrap();
             assert!(!persisted.contains("runtime_port"));
@@ -913,8 +978,8 @@ mod tests {
             .expect("load Ok")
             .expect("Some after concurrent saves");
         assert!(
-            loaded.encryption_secret.is_some(),
-            "a complete config (with its secret) must be readable after concurrent saves"
+            (3000..3008).contains(&loaded.server.port),
+            "a complete config must be readable after concurrent saves"
         );
 
         std::env::remove_var("KRONN_DATA_DIR");
@@ -962,51 +1027,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `load()` on a config with no `auth_token` must (1) auto-generate one and
-    /// (2) set `auth_enabled` to the PLATFORM DEFAULT (`env::auth_on_by_default`),
-    /// not blindly trust whatever was on disk. Under `KRONN_DATA_DIR` (= Docker)
-    /// the default is OFF — this is the macOS-Docker 401 fix: a generated token
-    /// must NOT silently turn auth on and lock the user out on first launch.
+    /// `load()` no longer mints an auth token nor resets `auth_enabled`: the
+    /// token lives in the encrypted credential store, read after the DB opens
+    /// (`credential_store::boot` generates one only when none exists anywhere).
     #[tokio::test]
     #[serial]
-    async fn load_autogenerates_token_and_defaults_auth_enabled_to_platform() {
+    async fn load_does_not_generate_an_auth_token_nor_touch_auth_enabled() {
         let _lock = ENV_LOCK.lock().await;
-        let tmp = std::env::temp_dir().join(format!(
-            "kronn-authgen-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = scratch_dir("noauthgen");
         std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
-        // Persist a config with NO token and auth_enabled deliberately TRUE,
-        // so we can prove load() overrides it from the platform default.
         let mut cfg = default_config();
         cfg.server.auth_token = None;
         cfg.server.auth_enabled = true;
         save(&cfg).await.expect("save must succeed");
 
-        // Docker mode is now the explicit KRONN_IN_DOCKER marker (KRONN_DATA_DIR
-        // alone only relocates data — a native user can set it too).
-        std::env::set_var("KRONN_IN_DOCKER", "1");
         let loaded = load().await.expect("load Ok").expect("Some after save");
-        assert!(
-            loaded.server.auth_token.is_some(),
-            "load() must auto-generate an auth token when none is set"
-        );
-        assert!(
-            !loaded.server.auth_enabled,
-            "auth must default OFF under Docker even though the saved value was true \
-             (env::auth_on_by_default() == {})",
-            crate::core::env::auth_on_by_default()
-        );
+        assert!(loaded.server.auth_token.is_none());
+        assert!(loaded.server.auth_enabled, "the saved choice is kept");
 
-        std::env::remove_var("KRONN_IN_DOCKER");
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn disk_toml_puts_a_retained_key_first_and_strips_credentials_on_request() {
+        let dir = scratch_dir("disktoml");
+        let mut cfg = default_config();
+        cfg.server.auth_token = Some("tok-value".into());
+        cfg.tokens.keys.push(ApiKey {
+            id: "k".into(),
+            name: "n".into(),
+            provider: "anthropic".into(),
+            value: "sk-value".into(),
+            active: true,
+        });
+        let plain = disk_toml(&cfg, &dir, false).unwrap();
+        assert!(plain.contains("tok-value") && plain.contains("sk-value"));
+        assert!(!plain.contains("encryption_secret"));
+
+        retain_disk_key(&dir, "abcd");
+        let stripped = disk_toml(&cfg, &dir, true).unwrap();
+        release_disk_key(&dir);
+        assert!(stripped.starts_with("encryption_secret = \"abcd\"\n"));
+        assert!(!stripped.contains("tok-value") && !stripped.contains("sk-value"));
+        let parsed: AppConfig = toml::from_str(&stripped).unwrap();
+        assert_eq!(parsed.encryption_secret.as_deref(), Some("abcd"));
+        assert!(parsed.tokens.keys.is_empty());
+        assert!(parsed.server.auth_token.is_none());
     }
 
     #[cfg(unix)]

@@ -2503,6 +2503,7 @@ const fr: TranslationDict = {
   'settings.recovery.nudge': 'Aucune phrase de récupération configurée. Sans elle, une perte de la clé de chiffrement rend vos tokens de plugins définitivement irrécupérables — fortement recommandé.',
   'settings.recovery.setLabel': 'Choisissez une phrase de récupération',
   'settings.recovery.replaceLabel': 'Remplacer la phrase de récupération',
+  'settings.recovery.currentPlaceholder': 'Phrase de récupération actuelle',
   'settings.recovery.passphrasePlaceholder': 'Min. 12 caractères — ex. « échouer.insérons.labeur »',
   'settings.recovery.confirmPlaceholder': 'Confirmez la phrase',
   'settings.recovery.tooShort': 'Au moins {0} caractères.',

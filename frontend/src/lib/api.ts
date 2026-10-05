@@ -260,7 +260,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { AgentFilesPolicy, ProjectAgentFiles } from '../types/generated';
+import type { AgentFilesPolicy, ProjectAgentFiles, RecoveryStatus } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -894,9 +894,10 @@ export const config = {
   setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
   /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
    *  passphrase, so MCP secrets survive total machine/keychain loss. */
-  getRecoveryStatus: () => api<{ configured: boolean }>('GET', '/config/recovery/status'),
+  getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
   /** Returns the recovery code the user MUST save off-machine. */
-  setRecovery: (passphrase: string) => api<{ recovery_code: string }>('POST', '/config/recovery/set', { passphrase }),
+  // Replacing an existing passphrase requires the current one (KT-1007).
+  setRecovery: (passphrase: string, currentPassphrase?: string) => api<{ recovery_code: string }>('POST', '/config/recovery/set', currentPassphrase ? { passphrase, current_passphrase: currentPassphrase } : { passphrase }),
   /** Restores the encryption key when the token subsystem is locked. `recoveryCode`
    *  optional — omitted, the local recovery sidecar is used. */
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>

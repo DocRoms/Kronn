@@ -13,6 +13,7 @@ pub mod config;
 pub mod content_memo;
 pub mod context_audit;
 pub mod context_files;
+pub mod credential_store;
 pub mod crypto;
 pub mod dependency_updates;
 pub mod desktop_port;

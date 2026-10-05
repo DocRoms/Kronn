@@ -2469,6 +2469,7 @@ const zh: TranslationDict = {
   "settings.recovery.nudge": "未配置恢复密码。没有它，丢失加密密钥会使插件令牌永久无法恢复——强烈建议配置。",
   "settings.recovery.setLabel": "选择恢复密码",
   "settings.recovery.replaceLabel": "替换恢复密码",
+  "settings.recovery.currentPlaceholder": "当前恢复密码",
   "settings.recovery.passphrasePlaceholder": "最小 12 个字符 — 例如 \"échouer.insérons.labeur\"",
   "settings.recovery.confirmPlaceholder": "确认密码",
   "settings.recovery.tooShort": "至少 {0} 个字符。",

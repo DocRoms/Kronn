@@ -6001,7 +6001,17 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
-export type RecoveryStatus = { configured: boolean, };
+export type RecoveryStatus = { configured: boolean,
+/**
+ * No recovery passphrase yet: Kronn keeps every local copy of the key
+ * (vault and sidecar) and deletes none until one is set (KT-1007).
+ */
+key_copies_kept: boolean,
+/**
+ * config.toml still carries the key (no vault could hold it, or one copy
+ * alone would remain without a recovery passphrase).
+ */
+config_holds_key: boolean, };
 
 export type RedactedField = {
 /**

@@ -2493,6 +2493,7 @@ const es: TranslationDict = {
   'settings.recovery.nudge': 'No hay frase de recuperación configurada. Sin ella, perder la clave de cifrado hace que tus tokens sean definitivamente irrecuperables — muy recomendado.',
   'settings.recovery.setLabel': 'Elige una frase de recuperación',
   'settings.recovery.replaceLabel': 'Reemplazar la frase de recuperación',
+  'settings.recovery.currentPlaceholder': 'Frase de recuperación actual',
   'settings.recovery.passphrasePlaceholder': 'Mín. 12 caracteres — p. ej. «échouer.insérons.labeur»',
   'settings.recovery.confirmPlaceholder': 'Confirma la frase',
   'settings.recovery.tooShort': 'Al menos {0} caracteres.',

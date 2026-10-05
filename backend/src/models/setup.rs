@@ -36,7 +36,10 @@ pub struct AppConfig {
     pub tts_voices: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub disabled_agents: Vec<AgentType>,
-    #[serde(default)]
+    /// The key the running process uses. Never serialized: the only copy
+    /// written to `config.toml` is the one `config::retain_disk_key` keeps
+    /// while no vault holds the key (KT-1007).
+    #[serde(default, skip_serializing)]
     #[ts(skip)]
     pub encryption_secret: Option<String>,
     /// Secret theme unlock codes (theme_name → code). Read-only from the

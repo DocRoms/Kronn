@@ -2493,6 +2493,7 @@ const en: TranslationDict = {
   'settings.recovery.nudge': 'No recovery passphrase configured. Without one, losing the encryption key makes your plugin tokens permanently unrecoverable — strongly recommended.',
   'settings.recovery.setLabel': 'Choose a recovery passphrase',
   'settings.recovery.replaceLabel': 'Replace the recovery passphrase',
+  'settings.recovery.currentPlaceholder': 'Current recovery passphrase',
   'settings.recovery.passphrasePlaceholder': 'Min. 12 characters — e.g. "échouer.insérons.labeur"',
   'settings.recovery.confirmPlaceholder': 'Confirm the passphrase',
   'settings.recovery.tooShort': 'At least {0} characters.',

@@ -130,6 +130,51 @@ async fn main() -> anyhow::Result<()> {
     // token. Kronn-launched agents receive a scoped bridge token per launch.
     let env_token = std::env::var("KRONN_AUTH_TOKEN").ok();
     std::env::remove_var("KRONN_AUTH_TOKEN");
+
+    // Exactly ONE backend per data dir. Refuse to start if another instance
+    // already holds the lock — prevents two processes (a stale one, or P2P peers
+    // sharing a synced dir) racing on config.toml / the key / the DB. Held for
+    // the whole process lifetime; released when the application state drops at exit.
+    let data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
+        tracing::error!("{e}");
+        e
+    })?;
+
+    // Open database
+    let database = Arc::new(Database::open().expect("Failed to open database"));
+    tracing::info!(
+        "Database opened at {}/kronn.db",
+        config::config_dir().unwrap().display()
+    );
+
+    // Resolve the encryption key now that the DB is open — `config::load`
+    // deliberately never mints one. NEVER regenerates a key over existing
+    // encrypted data (any registered column). An unreadable vault or database
+    // stops the boot: continuing could mint or mirror over the only copy.
+    let key_outcome = match kronn::core::keystore::reconcile(&mut app_config, &database).await {
+        Ok(outcome) => {
+            tracing::info!("Encryption key reconciled: {outcome:?}");
+            outcome
+        }
+        Err(e) => {
+            tracing::error!("{e:#}");
+            return Err(e);
+        }
+    };
+    // KT-1007 — provider keys and the auth token live in the encrypted store;
+    // loaded here, before the auth-token handling below reads the token.
+    match kronn::core::credential_store::boot(
+        &mut app_config,
+        database.clone(),
+        &config::config_dir()?,
+        &key_outcome,
+    )
+    .await
+    {
+        Ok(result) => tracing::info!("Credential store: {result:?}"),
+        Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
+    }
+
     kronn::core::config::adopt_env_auth_token(&mut app_config.server, env_token);
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
@@ -168,22 +213,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("{msg}");
         return Err(anyhow::anyhow!(msg));
     }
-
-    // Exactly ONE backend per data dir. Refuse to start if another instance
-    // already holds the lock — prevents two processes (a stale one, or P2P peers
-    // sharing a synced dir) racing on config.toml / the key / the DB. Held for
-    // the whole process lifetime; released when the application state drops at exit.
-    let data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
-        tracing::error!("{e}");
-        e
-    })?;
-
-    // Open database
-    let database = Arc::new(Database::open().expect("Failed to open database"));
-    tracing::info!(
-        "Database opened at {}/kronn.db",
-        config::config_dir().unwrap().display()
-    );
 
     // KT-619 — an operator who lost the admin secret asks for a new one by
     // creating `recover-admin-secret` in the private directory; this honours it
@@ -225,17 +254,6 @@ async fn main() -> anyhow::Result<()> {
         Err(error) => tracing::warn!(
             "Publication bootstrap unavailable ({error}); important cards cannot be published until it exists"
         ),
-    }
-
-    // Resolve/repair the encryption key now that the DB is open — `config::load`
-    // deliberately never mints one. This adopts the legacy config.toml key,
-    // restores it from the keychain/sidecar, or mints on a genuinely empty
-    // install, and NEVER regenerates a key over existing encrypted data (the
-    // silent regen that orphaned every secret on 2026-06-30). Fail-soft: an
-    // unresolvable key locks only the token subsystem, it never blocks boot.
-    match kronn::core::keystore::reconcile(&mut app_config, &database).await {
-        Ok(outcome) => tracing::info!("Encryption key reconciled: {outcome:?}"),
-        Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
