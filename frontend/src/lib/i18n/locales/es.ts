@@ -2131,6 +2131,7 @@ const es: TranslationDict = {
   'planning.proposalRejectReason': 'Motivo opcional…',
   'planning.proposalRejectedReason': 'Motivo: {0}',
   'planning.proposalUnavailable': 'Esta propuesta histórica no está disponible en la bandeja.',
+  'planning.proposalProject': 'Proyecto: {0}',
   'planning.proposalItemFallback': 'Elemento {0}',
   'planning.proposalItem.pending': 'Pendiente',
   'planning.proposalItem.accepted': 'Aceptado',

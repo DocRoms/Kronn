@@ -5293,7 +5293,12 @@ export type PlanningPlanStats = { ready: number, blocked: number, in_progress: n
 /**
  * A durable proposal: one `kronn-plan-action` fence from an Agent message.
  */
-export type PlanningProposal = { id: string, discussion_id: string, source_message_id: string, fence_index: number, aggregate_state: ProposalAggregateState, items: Array<PlanningProposalItem>, created_at: string, updated_at: string, };
+export type PlanningProposal = { id: string, discussion_id: string, source_message_id: string, fence_index: number, aggregate_state: ProposalAggregateState, items: Array<PlanningProposalItem>,
+/**
+ * The project the room's tasks live in (`None` for a General room):
+ * every item is checked against it, and a created task lands in it.
+ */
+project_id: string | null, project_name: string | null, created_at: string, updated_at: string, };
 
 /**
  * One item of a proposal, with its validation state + idempotent result.

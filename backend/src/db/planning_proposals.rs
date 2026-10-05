@@ -117,6 +117,10 @@ pub struct PlanningProposal {
     pub fence_index: i64,
     pub aggregate_state: ProposalAggregateState,
     pub items: Vec<PlanningProposalItem>,
+    /// The project the room's tasks live in (`None` for a General room):
+    /// every item is checked against it, and a created task lands in it.
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -390,16 +394,30 @@ pub fn ingest_message_proposals(
         for (item_index, item) in items.into_iter().enumerate() {
             let item_id = format!("{proposal_id}:{item_index}");
             let payload = serde_json::to_string(&item.payload)?;
+            // A task outside the room's project is refused on arrival, with
+            // its reason on the card, and never offered for acceptance.
+            let refused = match item.payload.task_id.as_deref() {
+                Some(task) => task_outside_room(conn, discussion_id, task)?,
+                None => None,
+            };
             conn.execute(
                 "INSERT OR IGNORE INTO planning_proposal_items
-                     (id, proposal_id, item_index, action, payload_json, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+                     (id, proposal_id, item_index, action, payload_json, state,
+                      rejected_reason, decided_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     item_id,
                     proposal_id,
                     item_index as i64,
                     item.action.as_db_str(),
-                    payload
+                    payload,
+                    if refused.is_some() {
+                        "rejected"
+                    } else {
+                        "pending"
+                    },
+                    refused,
+                    refused.as_ref().map(|_| now.clone()),
                 ],
             )?;
         }
@@ -512,8 +530,21 @@ pub fn get_proposal(conn: &Connection, proposal_id: &str) -> Result<Option<Plann
     else {
         return Ok(None);
     };
+    let project_id = room_project(conn, &discussion_id)?;
+    let project_name = match project_id.as_deref() {
+        Some(project) => conn
+            .query_row(
+                "SELECT name FROM projects WHERE id = ?1",
+                params![project],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?,
+        None => None,
+    };
     Ok(Some(PlanningProposal {
         items: load_items(conn, &id)?,
+        project_id,
+        project_name,
         id,
         discussion_id,
         source_message_id,
@@ -806,6 +837,40 @@ fn placement_from_payload(s: Option<&str>) -> Result<PlanningPlacement, Decision
     }
 }
 
+/// The project of a proposal's room (`None` for a General room).
+fn room_project(conn: &Connection, discussion_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT project_id FROM discussions WHERE id = ?1",
+            params![discussion_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// Why an item may not touch its task from this room: the task must hold the
+/// room's project (a General room only reaches project-less tasks).
+fn task_outside_room(
+    conn: &Connection,
+    discussion_id: &str,
+    task_ref: &str,
+) -> Result<Option<String>> {
+    let Some(task_id) = crate::db::planning::lookup_task_id(conn, task_ref)? else {
+        return Ok(None);
+    };
+    let mut stmt =
+        conn.prepare("SELECT project_id FROM planning_task_projects WHERE task_id = ?1")?;
+    let projects = stmt
+        .query_map(params![task_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let inside = match room_project(conn, discussion_id)? {
+        Some(project) => projects.contains(&project),
+        None => projects.is_empty(),
+    };
+    Ok((!inside).then(|| "the task is outside this discussion's project".to_string()))
+}
+
 /// Apply an accepted item's underlying task mutation, returning the affected
 /// task id. Runs inside the caller's decision transaction.
 fn apply_accepted(
@@ -826,7 +891,7 @@ fn apply_accepted(
                     status: PlanningTaskStatus::Todo,
                     priority: priority_from_payload(p.priority.as_deref())?,
                     parent_id: None,
-                    project_ids: vec![],
+                    project_ids: room_project(conn, discussion_id)?.into_iter().collect(),
                     tags: vec![],
                     definition_of_done: vec![],
                     links: vec![],
@@ -851,6 +916,10 @@ fn apply_accepted(
                 .task_id
                 .clone()
                 .ok_or_else(|| DecisionError::Failed(anyhow::anyhow!("item has no task_id")))?;
+            // Re-checked at apply: the task may have moved since the proposal.
+            if let Some(why) = task_outside_room(conn, discussion_id, &task_id)? {
+                return Err(DecisionError::Invalid(why));
+            }
             let update = match item.action {
                 ProposalItemAction::Complete => UpdatePlanningTaskRequest {
                     status: Some(PlanningTaskStatus::Done),
@@ -1164,6 +1233,111 @@ mod decision_tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    fn task_in(conn: &Connection, id: &str, number: i64, project: Option<&str>) {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO planning_tasks (id, task_number, title, status, created_at, updated_at) \
+             VALUES (?1, ?2, ?1, 'todo', ?3, ?3)",
+            params![id, number, now],
+        )
+        .unwrap();
+        if let Some(project) = project {
+            conn.execute(
+                "INSERT INTO planning_task_projects (task_id, project_id) VALUES (?1, ?2)",
+                params![id, project],
+            )
+            .unwrap();
+        }
+    }
+
+    fn status_of(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM planning_tasks WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// B4-05 — an item naming a task outside the room's project is refused on
+    /// arrival and at apply; a create lands in the room's project.
+    #[test]
+    fn a_proposal_stays_in_its_room_s_project() {
+        let conn = db();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('p2','Q','/tmp/q',?1,?1)",
+            params![now],
+        )
+        .unwrap();
+        task_in(&conn, "task-p2", 902, Some("p2"));
+        task_in(&conn, "task-p1", 901, Some("p1"));
+        ingest_message_proposals(
+            &conn,
+            "d1",
+            "msg1",
+            "```kronn-plan-action\n{\"action\":\"complete\",\"task_id\":\"KT-902\"}\n```\n\
+             ```kronn-plan-action\n{\"action\":\"complete\",\"task_id\":\"task-p1\"}\n```\n\
+             ```kronn-plan-action\n{\"action\":\"create\",\"title\":\"New\"}\n```",
+        )
+        .unwrap();
+        let foreign = get_proposal(&conn, "proposal:msg1:0").unwrap().unwrap();
+        assert_eq!(foreign.items[0].state, ProposalItemState::Rejected);
+        assert!(foreign.items[0]
+            .rejected_reason
+            .as_deref()
+            .is_some_and(|why| why.contains("outside")));
+        assert_eq!(foreign.project_name.as_deref(), Some("P"));
+        let refused = decide_item(
+            &conn,
+            "proposal:msg1:0",
+            "proposal:msg1:0:0",
+            ProposalDecision::Accept,
+            None,
+            "k0",
+        );
+        assert!(refused.is_err());
+        assert_eq!(status_of(&conn, "task-p2"), "todo");
+        // A task moved after the proposal is re-checked at apply.
+        conn.execute(
+            "UPDATE planning_task_projects SET project_id = 'p2' WHERE task_id = 'task-p1'",
+            [],
+        )
+        .unwrap();
+        let moved = decide_item(
+            &conn,
+            "proposal:msg1:1",
+            "proposal:msg1:1:0",
+            ProposalDecision::Accept,
+            None,
+            "k1",
+        );
+        assert!(
+            matches!(moved, Err(DecisionError::Invalid(_))),
+            "{:?}",
+            moved.err()
+        );
+        assert_eq!(status_of(&conn, "task-p1"), "todo");
+        let created = decide_item(
+            &conn,
+            "proposal:msg1:2",
+            "proposal:msg1:2:0",
+            ProposalDecision::Accept,
+            None,
+            "k2",
+        )
+        .unwrap();
+        let task = created.item.result_task_id.unwrap();
+        let project: String = conn
+            .query_row(
+                "SELECT project_id FROM planning_task_projects WHERE task_id = ?1",
+                params![task],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(project, "p1");
     }
 
     #[test]

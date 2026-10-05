@@ -724,6 +724,31 @@ pub fn prepare_body(
             "a bridge token cannot take a session over from another discussion".into(),
         ));
     }
+    // A token's planning write is an agent's, whatever actor it names: the
+    // event log never records it as a human's (or the backend's).
+    if route.pattern.starts_with("/api/planning/tasks") {
+        if let Some(fields) = body.as_object_mut() {
+            let actor = fields
+                .entry("actor")
+                .or_insert_with(|| serde_json::json!({}));
+            if !actor.is_object() {
+                *actor = serde_json::json!({});
+            }
+            if let Some(actor) = actor.as_object_mut() {
+                actor.insert("kind".into(), serde_json::json!("agent"));
+                // An agent actor must name itself; a token that did not is
+                // recorded as a bridge agent.
+                let named = actor
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .is_some_and(|id| !id.trim().is_empty());
+                if !named {
+                    actor.insert("id".into(), serde_json::json!("bridge-agent"));
+                }
+            }
+            changed = true;
+        }
+    }
     if let Some(fields) = body.as_object_mut() {
         let create = CREATE_ROUTES
             .iter()
@@ -1025,6 +1050,25 @@ const OPAQUE_KEYS: &[&str] = &[
     "details",
 ];
 
+/// Maps whose keys the caller chooses (template variables, an external API's
+/// path, query and headers, per-step choices): a key there is a name, not a
+/// Kronn field. Their values reach Kronn through templates, and a rendered
+/// page or room is checked at run time (`workflows::run_scope`).
+const USER_KEYED_KEYS: &[&str] = &[
+    "vars",
+    "variables",
+    "path_params",
+    "query",
+    "headers",
+    "api_query",
+    "api_path_params",
+    "api_headers",
+    "quick_prompt_variables",
+    "sub_workflow_variables",
+    "step_agents",
+    "state",
+];
+
 /// Keys naming what a write acts on rather than what it references.
 const TARGET_KEYS: &[&str] = &["task_execution_id", "execution_id", "offer_id", "parent_id"];
 
@@ -1139,6 +1183,16 @@ impl Walk<'_> {
             serde_json::Value::Object(fields) => {
                 for (key, child) in fields {
                     if OPAQUE_KEYS.contains(&key.as_str()) && !looks_like_id(key) {
+                        continue;
+                    }
+                    // A map whose keys the caller names: each key is a name,
+                    // each value is walked as it is.
+                    if let (true, Some(entries)) =
+                        (USER_KEYED_KEYS.contains(&key.as_str()), child.as_object())
+                    {
+                        for value in entries.values() {
+                            self.walk(value, None, depth + 2, out)?;
+                        }
                         continue;
                     }
                     self.key(key, child, parent, depth, out)?;
@@ -1727,22 +1781,38 @@ pub enum ScopeBinding {
 /// The project a scope is bound to: every existing discussion, execution and
 /// run it names must agree. A scope naming none is bound to its declared
 /// project (when it still exists), or to none.
+/// What the grant is bound to now. Every discussion it owns (its launch's and
+/// the ones it created) and its execution and run must still exist and sit in
+/// one project: one deleted kills the token, one moved is a conflict.
+pub fn resolve_grant_project(
+    conn: &rusqlite::Connection,
+    grant: &BridgeGrant,
+) -> anyhow::Result<ScopeBinding> {
+    let adopted = grant
+        .adopted
+        .lock()
+        .map(|adopted| adopted.clone())
+        .unwrap_or_default();
+    resolve_scope_project(conn, &grant.scope, &adopted)
+}
+
 pub fn resolve_scope_project(
     conn: &rusqlite::Connection,
     scope: &BridgeScope,
+    adopted: &[String],
 ) -> anyhow::Result<ScopeBinding> {
     use rusqlite::OptionalExtension;
-    if scope.owns_nothing() {
-        return Ok(match &scope.project_id {
-            None => ScopeBinding::Bound(None),
-            Some(project) => match residence(conn, Kind::Project, project)? {
-                Some(_) => ScopeBinding::Bound(Some(project.clone())),
-                None => ScopeBinding::Dead,
-            },
-        });
-    }
     let mut seen: Vec<Option<String>> = Vec::new();
-    for discussion in &scope.discussion_ids {
+    if scope.owns_nothing() {
+        match &scope.project_id {
+            None => seen.push(None),
+            Some(project) => match residence(conn, Kind::Project, project)? {
+                Some(_) => seen.push(Some(project.clone())),
+                None => return Ok(ScopeBinding::Dead),
+            },
+        }
+    }
+    for discussion in scope.discussion_ids.iter().chain(adopted) {
         let found = conn
             .query_row(
                 "SELECT project_id FROM discussions WHERE id = ?1",
@@ -1750,8 +1820,9 @@ pub fn resolve_scope_project(
                 |row| row.get::<_, Option<String>>(0),
             )
             .optional()?;
-        if let Some(project) = found {
-            seen.push(project);
+        match found {
+            Some(project) => seen.push(project),
+            None => return Ok(ScopeBinding::Dead),
         }
     }
     for (kind, id) in [
@@ -1764,7 +1835,7 @@ pub fn resolve_scope_project(
                 seen.push(projects.into_iter().next());
             }
             Some(_) => seen.push(None),
-            None => {}
+            None => return Ok(ScopeBinding::Dead),
         }
     }
     let Some(first) = seen.first().cloned() else {
@@ -1956,7 +2027,8 @@ fn returned_kind(pattern: &str) -> Option<Kind> {
         "/api/discussions" | "/api/discussions/{id}" | "/api/discussions/{id}/meta" => {
             Kind::Discussion
         }
-        "/api/workflows" | "/api/workflows/{id}" => Kind::Workflow,
+        // A page's feeding workflows may belong to other projects.
+        "/api/workflows" | "/api/workflows/{id}" | "/api/pages/{id}/workflows" => Kind::Workflow,
         "/api/quick-prompts" | "/api/quick-prompts/{id}" => Kind::QuickPrompt,
         "/api/quick-apis" | "/api/quick-apis/{id}" => Kind::QuickApi,
         "/api/quick-execs" | "/api/quick-execs/{id}" => Kind::QuickExec,

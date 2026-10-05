@@ -718,7 +718,7 @@ mod broker_tests {
         };
         insert_workflow_run(&state, vec![batch.clone(), publish.clone()]).await;
         let published =
-            execute_publish_page_data_step(&publish, "wf-team", "run-1", &state, &context)
+            execute_publish_page_data_step(&publish, "wf-team", "run-1", None, &state, &context)
                 .await
                 .result;
         assert_eq!(published.status, RunStatus::Success, "{}", published.output);
