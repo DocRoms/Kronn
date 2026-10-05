@@ -85,7 +85,8 @@ Release notes for 0.9.3 and earlier are available in the
   the earlier steps, with an error naming the step, the value and the fix,
   whatever started the run (KT-1017). In the workflow, "Suggest a fix" shows
   the rewrite as a diff, the value moved into a separate argument (`$1`,
-  `sys.argv[1]`, `process.argv[1]`), and applies it only when you click
+  `sys.argv[1]`, or `process.argv[1]` after a `--` that ends Node's options),
+  and applies it only when you click
   Apply. When no rewrite is provably equivalent (heredoc, single quotes,
   part of a longer string), it says a manual fix is required and gives the
   recipe. Editing something else in such a workflow keeps working. The
@@ -400,6 +401,11 @@ Release notes for 0.9.3 and earlier are available in the
   (an unchanged stored line stays editable, and still does not run), and the
   Quick Exec form and the workflow editor now show such a refusal in full,
   with the suggested arguments, instead of a generic error.
+  A value may also no longer sit where an interpreter still reads its
+  options (`["{{mode}}", "{{issue.title}}"]` with `{{mode}}` rendering to
+  `-c`): it is accepted only after the inline code of a shell or Python,
+  after `--`, or after a script file, and the run-time check verifies the
+  rendered command with the origin of each argument.
 
 ### Changed
 

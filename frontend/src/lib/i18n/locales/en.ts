@@ -4087,7 +4087,7 @@ const en: TranslationDict = {
   'wf.unsafeSuggest': 'Suggest a fix',
   'wf.unsafeDiff': 'Suggested change',
   'wf.unsafeApply': 'Apply',
-  'wf.unsafeManual': 'Manual fix required: no rewrite is provably equivalent. Move the value into a separate argument (bash: ["-c", "echo \\"$1\\"", "_", "{{value}}"]; Python: sys.argv[1]) or into exec_stdin.',
+  'wf.unsafeManual': 'Manual fix required: no rewrite is provably equivalent. Move the value into a separate argument (bash: ["-c", "echo \\"$1\\"", "_", "{{value}}"]; Python: sys.argv[1]; Node: process.argv[1] after "--") or into exec_stdin.',
   'wf.unsafeApplied': 'Fix applied to « {0} »',
   'wf.trigger': 'Trigger',
   'wf.delete': 'Delete',

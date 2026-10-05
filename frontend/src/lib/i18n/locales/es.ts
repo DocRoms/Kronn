@@ -4087,7 +4087,7 @@ const es: TranslationDict = {
   'wf.unsafeSuggest': 'Proponer una corrección',
   'wf.unsafeDiff': 'Cambio propuesto',
   'wf.unsafeApply': 'Aplicar',
-  'wf.unsafeManual': 'Corrección manual necesaria: ninguna reescritura es equivalente con certeza. Pasa el valor como argumento separado (bash: ["-c", "echo \\"$1\\"", "_", "{{valor}}"]; Python: sys.argv[1]) o por exec_stdin.',
+  'wf.unsafeManual': 'Corrección manual necesaria: ninguna reescritura es equivalente con certeza. Pasa el valor como argumento separado (bash: ["-c", "echo \\"$1\\"", "_", "{{valor}}"]; Python: sys.argv[1]; Node: process.argv[1] después de "--") o por exec_stdin.',
   'wf.unsafeApplied': 'Corrección aplicada a « {0} »',
   'wf.trigger': 'Ejecutar',
   'wf.delete': 'Eliminar',

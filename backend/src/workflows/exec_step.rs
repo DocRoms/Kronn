@@ -260,6 +260,16 @@ async fn execute_exec_step_inner(
             }
         }
     }
+    // The rendered argv is checked again with each field's provenance: an
+    // outside value must not have become an option or code (KT-1017).
+    if let Some(refusal) = crate::core::inline_code::rendered_refusal(
+        &step.name,
+        raw_command,
+        &step.exec_args,
+        &rendered_args,
+    ) {
+        return fail(step, start, refusal);
+    }
     // 2026-06-11 — defence-in-depth: the allowlist authorises a BINARY, but
     // `git`/`rm` carry irreversible foot-guns in their ARGS. Refuse the few
     // unambiguously-destructive invocations (force-push rewrites shared
@@ -331,6 +341,14 @@ async fn execute_exec_step_inner(
                     )
                 }
             }
+        }
+        if let Some(refusal) = crate::core::inline_code::rendered_refusal(
+            &step.name,
+            setup_cmd,
+            &step.exec_setup_args,
+            &setup_args,
+        ) {
+            return fail(step, start, format!("{refusal} (setup)"));
         }
         // Same destructive-arg guard as the main command (2026-06-11).
         if let Some(reason) = destructive_reason(setup_cmd, &setup_args) {

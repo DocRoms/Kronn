@@ -4100,7 +4100,7 @@ const fr: TranslationDict = {
   'wf.unsafeSuggest': 'Proposer une correction',
   'wf.unsafeDiff': 'Modification proposée',
   'wf.unsafeApply': 'Appliquer',
-  'wf.unsafeManual': 'Correction manuelle requise : aucune réécriture n\'est équivalente à coup sûr. Passe la valeur en argument séparé (bash : ["-c", "echo \\"$1\\"", "_", "{{valeur}}"] ; Python : sys.argv[1]) ou via exec_stdin.',
+  'wf.unsafeManual': 'Correction manuelle requise : aucune réécriture n\'est équivalente à coup sûr. Passe la valeur en argument séparé (bash : ["-c", "echo \\"$1\\"", "_", "{{valeur}}"] ; Python : sys.argv[1] ; Node : process.argv[1] après "--") ou via exec_stdin.',
   'wf.unsafeApplied': 'Correction appliquée à « {0} »',
   'wf.trigger': 'Lancer',
   'wf.delete': 'Suppr.',

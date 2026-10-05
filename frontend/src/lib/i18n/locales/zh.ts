@@ -4036,7 +4036,7 @@ const zh: TranslationDict = {
   "wf.unsafeSuggest": "建议修复",
   "wf.unsafeDiff": "建议的修改",
   "wf.unsafeApply": "应用",
-  "wf.unsafeManual": "需要手动修复：没有可证明等价的改写。把值移到独立参数中（bash：[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{value}}\"]；Python：sys.argv[1]）或 exec_stdin。",
+  "wf.unsafeManual": "需要手动修复：没有可证明等价的改写。把值移到独立参数中（bash：[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{value}}\"]；Python：sys.argv[1]；Node：\"--\" 之后的 process.argv[1]）或 exec_stdin。",
   "wf.unsafeApplied": "已对「{0}」应用修复",
   "wf.trigger": "触发",
   "wf.delete": "删除",
