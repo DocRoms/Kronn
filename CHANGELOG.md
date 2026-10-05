@@ -472,6 +472,11 @@ Release notes for 0.9.3 and earlier are available in the
   CHANGELOG section above the install table, and the AppImage advice only when
   an AppImage is attached. A missing platform or CHANGELOG section fails the
   release job instead of publishing a draft that names absent files.
+- A workflow launch card, in a discussion or on a Live Page, shows only the
+  values you can fill as fields. The values Kronn resolves itself go into one
+  folded line, "N values resolved at launch", closed by default, that lists
+  each one's name, description and origin, without greyed-out fields
+  (KT-1024).
 
 ## [0.14.2] - 2026-10-03
 

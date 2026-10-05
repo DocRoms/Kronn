@@ -149,8 +149,43 @@ describe('DiscussionActionCard', () => {
       />,
     );
     expand();
-    expect(screen.getByDisplayValue('disc.action.resolvedAtLaunch')).toBeDisabled();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.getByText(/PROJECT_TOKEN/)).toBeInTheDocument();
+  });
+
+  /// KT-1024 — only editable values are fields; Kronn-resolved ones fold into one line.
+  it('renders editable values as fields and folds the resolved ones into one closed line', () => {
+    render(
+      <DiscussionActionCard
+        action={action({ values: [
+          variable(),
+          variable({ name: 'suggested', label: 'Suggested', provenance: 'agent_suggestion', value: 'x', suggested_value: 'x' }),
+          variable({ name: 'token', label: 'Token', provenance: 'project_env', source_ref: '<env.TOKEN>', description: 'API token' }),
+          variable({ name: 'branch', label: 'Branch', provenance: 'kronn_context', source_ref: 'git.branch' }),
+        ] })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expand();
+    const fields = screen.getAllByRole('textbox');
+    expect(fields).toHaveLength(2);
+    fields.forEach(field => expect(field).toBeEnabled());
+    expect(document.querySelector('input:disabled')).toBeNull();
+    const resolved = screen.getByTestId('action-card-resolved');
+    expect(resolved.tagName).toBe('DETAILS');
+    expect(resolved).not.toHaveAttribute('open');
+    expect(resolved.querySelector('summary')).toHaveTextContent('disc.action.resolvedValues.other:2');
+    expect(resolved).toHaveTextContent('Token');
+    expect(resolved).toHaveTextContent('API token');
+    expect(resolved).toHaveTextContent('disc.action.projectEnv:<env.TOKEN>');
+    expect(resolved).toHaveTextContent('disc.action.kronnContext:git.branch');
+  });
+
+  it('shows no resolved line when every value is editable', () => {
+    render(<DiscussionActionCard action={action()} onChanged={vi.fn()} onOpenDiscussion={vi.fn()} />);
+    expand();
+    expect(screen.queryByTestId('action-card-resolved')).not.toBeInTheDocument();
   });
 
   it('lets an operator override an allow_manual_override environment value, and never requires it', async () => {
@@ -173,6 +208,7 @@ describe('DiscussionActionCard', () => {
     expand();
     const input = screen.getByRole('textbox', { name: 'Token' });
     expect(input).not.toBeDisabled();
+    expect(screen.queryByTestId('action-card-resolved')).not.toBeInTheDocument();
     // An override-eligible env value is never a blocking requirement — Kronn
     // still resolves it when the launcher leaves the field blank.
     expect(screen.queryByText('Token *')).not.toBeInTheDocument();

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable } from '../types/generated';
 import { PromptVariableInput } from './workflows/PromptVariableInput';
 import { RunStatusCard } from './RunStatusCard';
@@ -165,7 +166,6 @@ export function KronnActionCard<T extends KronnAction>({
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const inFlightRef = useRef(false);
 
   useEffect(() => {
     if (!ACTIVE_STATES.has(current.state)) return;
@@ -193,9 +193,8 @@ export function KronnActionCard<T extends KronnAction>({
     onChanged(next);
   };
 
-  const runOnce = async (operation: () => Promise<T>) => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
+  // Two synchronous clicks must not launch twice: the guard is a ref, not `busy`.
+  const runOnce = useAsyncGuard(async (operation: () => Promise<T>) => {
     setBusy(true);
     setError(null);
     try {
@@ -209,11 +208,12 @@ export function KronnActionCard<T extends KronnAction>({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      inFlightRef.current = false;
       setBusy(false);
     }
-  };
+  });
 
+  const editableValues = current.values.filter(isEditableValue);
+  const resolvedValues = current.values.filter(value => !isEditableValue(value));
   const terminal = TERMINAL_STATES.has(current.state);
   const kindLabel = t(`disc.action.kind.${current.kind}`);
   const resultDiscussionId = current.result_discussion_id;
@@ -270,32 +270,22 @@ export function KronnActionCard<T extends KronnAction>({
 
       {expanded && current.state === 'proposed' && current.values.length > 0 && (
         <div className="discussion-action-card__fields">
-          {current.values.map(value => {
-            const editable = isEditableValue(value);
+          {editableValues.map(value => {
             const provenance = provenanceLabel(value, t, bindings?.[value.name]);
             return (
               <div key={value.name} className="discussion-action-card__field">
                 <span className="discussion-action-card__label">
                   {value.label || value.name}{isEffectivelyRequired(value) ? ' *' : ''}
                 </span>
-                {editable ? (
-                  <PromptVariableInput
-                    variable={promptVariable(value, t)}
-                    value={values[value.name] ?? ''}
-                    onChange={next => {
-                      touchedRef.current.add(value.name);
-                      setValues(currentValues => ({ ...currentValues, [value.name]: next }));
-                    }}
-                    disabled={busy}
-                  />
-                ) : (
-                  <input
-                    className="wf-input discussion-action-card__resolved"
-                    value={t('disc.action.resolvedAtLaunch')}
-                    disabled
-                    aria-label={value.label || value.name}
-                  />
-                )}
+                <PromptVariableInput
+                  variable={promptVariable(value, t)}
+                  value={values[value.name] ?? ''}
+                  onChange={next => {
+                    touchedRef.current.add(value.name);
+                    setValues(currentValues => ({ ...currentValues, [value.name]: next }));
+                  }}
+                  disabled={busy}
+                />
                 {(value.description || provenance) && (
                   <small>{value.description}{value.description && provenance ? ' · ' : ''}{provenance}</small>
                 )}
@@ -315,6 +305,29 @@ export function KronnActionCard<T extends KronnAction>({
               </div>
             );
           })}
+          {/* Values Kronn resolves itself are not fields: listed once, folded,
+              so the reader sees what will be used without hunting through them. */}
+          {resolvedValues.length > 0 && (
+            <details className="discussion-action-card__details" data-testid="action-card-resolved">
+              <summary>
+                {resolvedValues.length === 1
+                  ? t('disc.action.resolvedValues.one')
+                  : t('disc.action.resolvedValues.other', resolvedValues.length)}
+              </summary>
+              <ul className="discussion-action-card__resolved-list">
+                {resolvedValues.map(value => {
+                  const provenance = provenanceLabel(value, t, bindings?.[value.name]);
+                  return (
+                    <li key={value.name}>
+                      <strong>{value.label || value.name}</strong>
+                      {value.description && <span>{value.description}</span>}
+                      {provenance && <small>{provenance}</small>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
+          )}
         </div>
       )}
 

@@ -112,7 +112,11 @@ describe('LivePageActionCard', () => {
       />,
     );
 
-    expect(screen.getByDisplayValue('disc.action.resolvedAtLaunch')).toBeDisabled();
+    // KT-1024 — a Page-resolved value is listed in the folded line, never a greyed field.
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    const resolved = screen.getByTestId('action-card-resolved');
+    expect(resolved).not.toHaveAttribute('open');
+    expect(resolved.querySelector('summary')).toHaveTextContent('disc.action.resolvedValues.one');
     // The row is named on the card, and its value is still resolved from the Page.
     expect(screen.getByTestId('action-card-row')).toHaveTextContent('KT-538');
     expect(screen.getByText(/dynamicBinding.*KT-538/)).toBeInTheDocument();
@@ -121,6 +125,38 @@ describe('LivePageActionCard', () => {
       'page-action:page-1:ticket',
       { variables: {}, bindings: { ticket: 'KT-538' } },
     ));
+  });
+
+  it('folds Page-resolved values apart from the fields the reader fills', () => {
+    render(
+      <LivePageActionCard
+        action={action({ values: [
+          {
+            name: 'debrief', label: 'Debrief', placeholder: '', description: null,
+            required: false, allow_manual_override: false, provenance: 'user_input',
+          },
+          {
+            name: 'ticket', label: 'Ticket', placeholder: '', description: 'Clicked row',
+            required: true, allow_manual_override: false, provenance: 'dynamic_binding',
+            source_ref: '<page.dataset.tickets.find(key).id>',
+          },
+          {
+            name: 'token', label: 'Token', placeholder: '', description: null,
+            required: false, allow_manual_override: false, provenance: 'project_env',
+            source_ref: '<env.TOKEN>',
+          },
+        ] })}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    expect(screen.getByRole('textbox', { name: 'Debrief' })).toBeEnabled();
+    const resolved = screen.getByTestId('action-card-resolved');
+    expect(resolved.querySelector('summary')).toHaveTextContent('disc.action.resolvedValues.other:2');
+    expect(resolved).toHaveTextContent('Ticket');
+    expect(resolved).toHaveTextContent('Clicked row');
+    expect(resolved).toHaveTextContent('disc.action.projectEnv:<env.TOKEN>');
   });
 
   it('keeps a terminal action anchored and explains a stale Page revision', () => {

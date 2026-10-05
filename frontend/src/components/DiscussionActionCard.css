@@ -113,9 +113,48 @@
   font-size: var(--kr-fs-2xs);
 }
 
-.discussion-action-card__resolved {
+/* Folded, read-only blocks under the fields: values Kronn resolves itself,
+   and the agents a workflow's steps will run on. */
+.discussion-action-card__details {
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-radius-md);
+  background: var(--kr-bg-raised);
+  font-size: var(--kr-fs-xs);
+}
+
+.discussion-action-card__details > summary {
+  padding: 6px 10px;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.discussion-action-card__details > summary:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+.discussion-action-card__resolved-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 10px 10px;
+  list-style: none;
+}
+
+.discussion-action-card__resolved-list li {
+  display: grid;
+  gap: 2px;
+}
+
+.discussion-action-card__resolved-list strong {
+  color: var(--kr-text-primary);
+  font-weight: 600;
+}
+
+.discussion-action-card__resolved-list span,
+.discussion-action-card__resolved-list small {
   color: var(--kr-text-dim);
-  background: color-mix(in srgb, var(--kr-bg-surface) 70%, transparent);
+  font-size: var(--kr-fs-2xs);
 }
 
 .discussion-action-card__reset {
