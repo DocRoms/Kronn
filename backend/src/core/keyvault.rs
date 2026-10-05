@@ -43,6 +43,9 @@ pub enum VaultError {
     /// The store could not be reached or read (backend failure, I/O error).
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// The store answered but its content is not text (damaged file).
+    #[error("corrupted: {0}")]
+    Corrupted(String),
 }
 
 /// A place the encryption key can be persisted to and read from.
@@ -140,6 +143,9 @@ impl KeyVault for SidecarFile {
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 Err(VaultError::Denied(format!("{}: {e}", self.path.display())).into())
             }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                Err(VaultError::Corrupted(format!("{}: {e}", self.path.display())).into())
+            }
             Err(e) => Err(VaultError::Unavailable(format!("{}: {e}", self.path.display())).into()),
         }
     }
@@ -203,6 +209,8 @@ pub fn same_key(a: &str, b: &str) -> bool {
 pub struct VaultReadFailure {
     pub vault: &'static str,
     pub error: String,
+    /// The vault content is damaged (not merely unreadable).
+    pub corrupted: bool,
 }
 
 /// The ordered ladder of writable vaults (keychain → sidecar), plus the
@@ -282,6 +290,10 @@ impl KeyStore {
                 Err(error) => {
                     return Err(VaultReadFailure {
                         vault: v.name(),
+                        corrupted: matches!(
+                            error.downcast_ref::<VaultError>(),
+                            Some(VaultError::Corrupted(_))
+                        ),
                         error: format!("{error:#}"),
                     })
                 }
@@ -299,15 +311,14 @@ impl KeyStore {
                 .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
     }
 
-    /// How many distinct durable copies read `secret` back: the env override and
-    /// each vault count once (config.toml is not counted here).
+    /// How many persisted copies read `secret` back: each vault counts once.
+    /// The env override is not counted (a one-off variable is not durable), nor
+    /// is config.toml.
     pub fn copies_of(&self, secret: &str) -> usize {
-        usize::from(Self::env_override().is_some_and(|env| same_key(&env, secret)))
-            + self
-                .vaults
-                .iter()
-                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
-                .count()
+        self.vaults
+            .iter()
+            .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if same_key(&cur, secret)))
+            .count()
     }
 
     /// Whether the vault called `name` reads `secret` back.
@@ -534,7 +545,7 @@ mod tests {
         assert!(!ks.holds_in("keychain", "KEY"));
         std::env::set_var(ENV_KEK, "OTHER");
         assert!(ks.holds("OTHER"));
-        assert_eq!(ks.copies_of("OTHER"), 1, "env only");
+        assert_eq!(ks.copies_of("OTHER"), 0, "env is not a persisted copy");
         std::env::remove_var(ENV_KEK);
     }
 

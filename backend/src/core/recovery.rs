@@ -68,6 +68,9 @@ pub fn matches_key(dir: &Path, key_hex: &str) -> RecoveryMatch {
     let Some(blob) = load_blob(dir) else {
         return RecoveryMatch::Unreadable;
     };
+    if B64.decode(&blob.wrapped).map(|w| w.len()).ok() != Some(WRAPPED_LEN) {
+        return RecoveryMatch::Unreadable;
+    }
     match (blob.fingerprint, crypto::key_fingerprint_hex(key_hex)) {
         (None, _) => RecoveryMatch::Unverified,
         (Some(fp), Ok(active)) if fp.eq_ignore_ascii_case(&active) => RecoveryMatch::Matches,
@@ -132,15 +135,35 @@ pub fn to_code(blob: &RecoveryBlob) -> String {
     // `wrapped` is standard base64 (no '.'), so '.' is an unambiguous delimiter.
     let base = format!("{}.{}.{}", CODE_PREFIX, B64.encode(blob.salt), blob.wrapped);
     match &blob.fingerprint {
-        Some(fp) => format!("{base}.{fp}"),
+        Some(fp) => format!("{base}.{fp}.{}", checksum(blob, fp)),
         None => base,
     }
 }
 
+/// Binds the clear fingerprint to the wrapped payload: a damaged payload with
+/// an intact fingerprint must not count as a verified copy.
+fn checksum(blob: &RecoveryBlob, fingerprint: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"kronn-recovery-v1");
+    hasher.update(blob.salt);
+    hasher.update(blob.wrapped.as_bytes());
+    hasher.update(fingerprint.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Length of `wrapped` once decoded: nonce (12) + the 64-char key + tag (16).
+const WRAPPED_LEN: usize = 12 + 64 + 16;
+
 /// Parse a recovery code back into a blob.
 pub fn from_code(code: &str) -> Result<RecoveryBlob, String> {
     let parts: Vec<&str> = code.trim().split('.').collect();
-    if !(parts.len() == 3 || parts.len() == 4) || parts[0] != CODE_PREFIX {
+    if !(3..=5).contains(&parts.len()) || parts[0] != CODE_PREFIX {
         return Err("Invalid recovery code format".into());
     }
     let salt_bytes = B64
@@ -157,18 +180,25 @@ pub fn from_code(code: &str) -> Result<RecoveryBlob, String> {
     }
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&salt_bytes);
-    let fingerprint = match parts.get(3) {
-        Some(fp) if fp.len() == 16 && fp.chars().all(|c| c.is_ascii_hexdigit()) => {
-            Some(fp.to_string())
-        }
-        Some(_) => return Err("Invalid recovery code fingerprint".into()),
-        None => None,
-    };
-    Ok(RecoveryBlob {
+    let is_hex16 = |s: &str| s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit());
+    let mut blob = RecoveryBlob {
         salt,
         wrapped: parts[2].to_string(),
-        fingerprint,
-    })
+        fingerprint: None,
+    };
+    match (parts.get(3), parts.get(4)) {
+        (None, _) => {}
+        (Some(fp), Some(sum)) if is_hex16(fp) && is_hex16(sum) => {
+            if !checksum(&blob, fp).eq_ignore_ascii_case(sum) {
+                return Err("Corrupt recovery code: checksum mismatch".into());
+            }
+            blob.fingerprint = Some(fp.to_string());
+        }
+        // A fingerprint without its checksum is not trusted: unverified.
+        (Some(fp), None) if is_hex16(fp) => {}
+        _ => return Err("Invalid recovery code fingerprint".into()),
+    }
+    Ok(blob)
 }
 
 /// Persist the recovery code to the `0600` sidecar in `dir` (atomic temp+rename
@@ -181,8 +211,11 @@ pub fn save_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<()> {
 /// this machine's `recovery.key`).
 pub fn save_blob_as(dir: &Path, filename: &str, blob: &RecoveryBlob) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = dir.join(filename);
-    let tmp = dir.join(format!(".{filename}.tmp"));
+    // One temp per write: two concurrent writers never share a half-written file.
+    let tmp = dir.join(format!(".{filename}.{}.{seq}.tmp", std::process::id()));
     crate::core::keyvault::write_private_temp(&tmp, to_code(blob).as_bytes())?;
     std::fs::rename(&tmp, &path)
 }
@@ -204,14 +237,39 @@ pub fn save_imported_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<St
     Ok(name)
 }
 
+/// File-name prefix of a replaced `recovery.key` that wrapped another key.
+pub const PREVIOUS_PREFIX: &str = "recovery.previous-";
+
+/// Keep a replaced `recovery.key` that wraps another key than the active one.
+pub fn save_previous_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<String> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
+    let mut name = format!("{PREVIOUS_PREFIX}{stamp}.key");
+    let mut n = 1;
+    while dir.join(&name).exists() {
+        name = format!("{PREVIOUS_PREFIX}{stamp}-{n}.key");
+        n += 1;
+    }
+    save_blob_as(dir, &name, blob)?;
+    Ok(name)
+}
+
+/// Kept blobs of a replaced `recovery.key`, newest first.
+pub fn previous_blobs(dir: &Path) -> Vec<RecoveryBlob> {
+    blobs_with_prefix(dir, PREVIOUS_PREFIX)
+}
+
 /// Imported blobs, newest first.
 pub fn imported_blobs(dir: &Path) -> Vec<RecoveryBlob> {
+    blobs_with_prefix(dir, IMPORTED_PREFIX)
+}
+
+fn blobs_with_prefix(dir: &Path, prefix: &str) -> Vec<RecoveryBlob> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| n.starts_with(IMPORTED_PREFIX) && n.ends_with(".key"))
+                .filter(|n| n.starts_with(prefix) && n.ends_with(".key"))
                 .collect()
         })
         .unwrap_or_default();

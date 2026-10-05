@@ -2311,12 +2311,24 @@ pub struct RecoveryStatus {
     pub matches_key: bool,
     /// No key in memory: restore is the way back (KT-1007).
     pub key_locked: bool,
-    /// No verified recovery passphrase: Kronn keeps every local copy of the key
-    /// (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
+    /// The retention rule keeps config.toml's copy: fewer than two persisted
+    /// vault copies, or one without a verified recovery passphrase (KT-1007).
     pub key_copies_kept: bool,
     /// config.toml still carries the key (no vault could hold it, or one copy
     /// alone would remain without a recovery passphrase).
     pub config_holds_key: bool,
+    /// Persisted vault copies of the key in use, at the last start.
+    pub copies: u32,
+    /// Key stores holding another key than the one in use (never overwritten;
+    /// set a recovery passphrase before downgrading).
+    pub stale_sources: Vec<String>,
+    /// Key stores holding a value that is not a key.
+    pub invalid_sources: Vec<String>,
+    /// Stored credentials the key in use cannot decrypt (kept untouched).
+    pub locked_credentials: u32,
+    /// Recovery data kept from imports or a replaced recovery.key, usable by
+    /// "Re-encrypt imported secrets".
+    pub kept_recovery_blobs: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -2347,12 +2359,28 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
         }
         _ => false,
     };
+    let report = dir
+        .map(crate::core::keystore::boot_report)
+        .unwrap_or_default();
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     RecoveryStatus {
         configured,
         matches_key,
         key_locked: key.is_none(),
-        key_copies_kept: !matches_key,
+        key_copies_kept: !(report.copies >= 2 || (report.copies >= 1 && matches_key)),
         config_holds_key: dir.is_some_and(|d| config::retained_disk_key(d).is_some()),
+        copies: report.copies as u32,
+        stale_sources: names(&report.stale_sources),
+        invalid_sources: names(&report.invalid_sources),
+        locked_credentials: dir
+            .map(crate::core::credential_store::locked_credential_count)
+            .unwrap_or(0) as u32,
+        kept_recovery_blobs: dir
+            .map(|d| {
+                crate::core::recovery::imported_blobs(d).len()
+                    + crate::core::recovery::previous_blobs(d).len()
+            })
+            .unwrap_or(0) as u32,
     }
 }
 
@@ -2363,7 +2391,8 @@ pub async fn set_recovery(
     State(state): State<AppState>,
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
-    let config = state.config.read().await;
+    // The write lock serializes concurrent sets: one recovery.key at a time.
+    let config = state.config.write().await;
     match crate::core::keystore::set_recovery_passphrase(
         &config,
         &req.passphrase,
@@ -3441,8 +3470,19 @@ mod tests {
             &crate::core::recovery::wrap_key(&key, "pw").unwrap(),
         )
         .unwrap();
+        // A verified passphrase with no vault copy recorded yet: still kept.
         let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(status.matches_key && !status.key_copies_kept);
+        assert!(status.matches_key && status.key_copies_kept);
+        // One vault copy + verified passphrase, then two vault copies without
+        // it (keychain + sidecar on macOS): the config copy may go (C2-21).
+        crate::core::keystore::record_report_for_tests(dir.path(), 1, &["keychain"]);
+        let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(!status.key_copies_kept && status.copies == 1);
+        assert_eq!(status.stale_sources, vec!["keychain".to_string()]);
+        std::fs::remove_file(dir.path().join("recovery.key")).unwrap();
+        crate::core::keystore::record_report_for_tests(dir.path(), 2, &[]);
+        let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(!status.matches_key && !status.key_copies_kept);
 
         let locked = recovery_status_in(Some(dir.path()), None);
         assert!(locked.key_locked && !locked.matches_key);

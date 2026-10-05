@@ -343,6 +343,13 @@ pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool
     Ok(true)
 }
 
+/// Stored rows the key in use cannot decrypt (0 when not armed).
+pub fn locked_credential_count(dir: &Path) -> usize {
+    armed_for(dir)
+        .map(|a| a.preserve.lock().unwrap_or_else(|p| p.into_inner()).len())
+        .unwrap_or(0)
+}
+
 /// Delete every stored credential of `dir` (factory reset).
 pub async fn forget_all(dir: &Path, db: &Database) -> Result<()> {
     db.with_conn(rows::delete_all).await?;
@@ -547,6 +554,22 @@ fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Optio
         .context("write config backup")?;
     std::fs::rename(&tmp, &backup).context("move config backup into place")?;
     Ok(Some(backup))
+}
+
+/// Move the encrypted config.toml backup from `from_hex` to `to_hex` when a key
+/// is retired; untouched when it is under another key or absent.
+pub fn reencrypt_backup(dir: &Path, from_hex: &str, to_hex: &str) -> Result<bool> {
+    let path = dir.join(BACKUP_FILENAME);
+    let Ok(text) = read_backup(&path, from_hex) else {
+        return Ok(false);
+    };
+    let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
+    let encrypted = crypto::encrypt(&text, &to).map_err(anyhow::Error::msg)?;
+    let tmp = dir.join(format!(".{BACKUP_FILENAME}.reencrypt.tmp"));
+    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+        .context("write config backup")?;
+    std::fs::rename(&tmp, &path).context("move config backup into place")?;
+    Ok(true)
 }
 
 /// Decrypt a backup written by [`back_up_config_if_it_holds_secrets`].
