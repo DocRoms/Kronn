@@ -55,8 +55,24 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 /// Still bounded so one CLI cannot inflate a workflow run without limit.
 pub const MAX_COLLECT_OUTPUT_BYTES: usize = 1024 * 1024;
 
+/// Added to a failed `gh` step whose project gave it no GitHub token.
+pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
+
 /// Truncation suffix appended when stdout / stderr exceeds [`MAX_OUTPUT_BYTES`].
 const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]";
+
+/// An Exec step child (setup or main command): the program with its built
+/// environment (KT-1006) and the project's GitHub variables only when the
+/// project is connected (D2); callers only add argv, cwd and stdio.
+fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process::Command {
+    let mut command = async_cmd(program);
+    crate::core::child_env::isolate_with_github(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        github_env,
+    );
+    command
+}
 
 pub async fn execute_exec_step(
     step: &WorkflowStep,
@@ -64,8 +80,15 @@ pub async fn execute_exec_step(
     work_dir: &str,
     ctx: &TemplateContext,
 ) -> StepOutcome {
-    execute_exec_step_with_output_limit(step, workflow_allowlist, work_dir, ctx, MAX_OUTPUT_BYTES)
-        .await
+    execute_exec_step_with_output_limit(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        MAX_OUTPUT_BYTES,
+        None,
+    )
+    .await
 }
 
 pub async fn execute_exec_step_with_output_limit(
@@ -74,6 +97,53 @@ pub async fn execute_exec_step_with_output_limit(
     work_dir: &str,
     ctx: &TemplateContext,
     output_limit_bytes: usize,
+    project_id: Option<&str>,
+) -> StepOutcome {
+    let github_env = crate::core::github_connection::env_for_launch(project_id).await;
+    execute_exec_step_inner(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        output_limit_bytes,
+        &github_env,
+    )
+    .await
+}
+
+/// A workflow Exec step: the workflow author chose the command, so it gets
+/// the project's GitHub token when the project is connected, and none
+/// otherwise (D2). Other callers keep the inherited environment.
+pub async fn execute_exec_step_for_project(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    project_id: Option<&str>,
+) -> StepOutcome {
+    let github_env = crate::core::github_connection::env_for_launch(project_id).await;
+    execute_exec_step_inner(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        MAX_OUTPUT_BYTES,
+        &github_env,
+    )
+    .await
+}
+
+fn needs_gh_hint(raw_command: &str, success: bool, github_env: &[(String, String)]) -> bool {
+    !success && raw_command == "gh" && github_env.is_empty()
+}
+
+async fn execute_exec_step_inner(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    output_limit_bytes: usize,
+    github_env: &[(String, String)],
 ) -> StepOutcome {
     let start = Instant::now();
     let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
@@ -190,6 +260,16 @@ pub async fn execute_exec_step_with_output_limit(
             }
         }
     }
+    // The rendered argv is checked again with each field's provenance: an
+    // outside value must not have become an option or code (KT-1017).
+    if let Some(refusal) = crate::core::inline_code::rendered_refusal(
+        &step.name,
+        raw_command,
+        &step.exec_args,
+        &rendered_args,
+    ) {
+        return fail(step, start, refusal);
+    }
     // 2026-06-11 — defence-in-depth: the allowlist authorises a BINARY, but
     // `git`/`rm` carry irreversible foot-guns in their ARGS. Refuse the few
     // unambiguously-destructive invocations (force-push rewrites shared
@@ -262,6 +342,14 @@ pub async fn execute_exec_step_with_output_limit(
                 }
             }
         }
+        if let Some(refusal) = crate::core::inline_code::rendered_refusal(
+            &step.name,
+            setup_cmd,
+            &step.exec_setup_args,
+            &setup_args,
+        ) {
+            return fail(step, start, format!("{refusal} (setup)"));
+        }
         // Same destructive-arg guard as the main command (2026-06-11).
         if let Some(reason) = destructive_reason(setup_cmd, &setup_args) {
             return fail(
@@ -282,7 +370,7 @@ pub async fn execute_exec_step_with_output_limit(
             setup_argc = setup_args.len(),
             "executing setup phase"
         );
-        let mut sc = async_cmd(setup_cmd);
+        let mut sc = exec_child(setup_cmd, github_env);
         sc.args(&setup_args)
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
@@ -382,7 +470,7 @@ pub async fn execute_exec_step_with_output_limit(
         _ => None,
     };
 
-    let mut cmd = async_cmd(raw_command);
+    let mut cmd = exec_child(raw_command, github_env);
     cmd.args(&rendered_args)
         .current_dir(work_dir)
         .stdin(if stdin_bytes.is_some() {
@@ -472,11 +560,14 @@ pub async fn execute_exec_step_with_output_limit(
     } else {
         RunStatus::Failed
     };
-    let summary = match exit_code {
+    let mut summary = match exit_code {
         Some(_) if success => format!("exit 0 — {} ms", duration_ms),
         Some(code) => format!("exit {} — {} ms", code, duration_ms),
         None => format!("killed by signal — {} ms", duration_ms),
     };
+    if needs_gh_hint(raw_command, success, github_env) {
+        summary.push_str(GH_NOT_CONNECTED_HINT);
+    }
 
     // Structured envelope so `{{steps.<name>.data.exit_code}}` etc.
     // resolve in downstream steps. Mirrors notify_step's contract.
@@ -658,6 +749,52 @@ fn destructive_reason(cmd: &str, args: &[String]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_exec_step_child_gets_a_built_environment() {
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin"),
+                ("CARGO_HOME", "/home/u/.cargo"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("KRONN_ENCRYPTION_KEK", "raw"),
+                ("ANTHROPIC_API_KEY", "sk-ant"),
+                ("GH_TOKEN", "ghp"),
+            ],
+            || exec_child("cargo", &[]),
+        );
+        let env: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for kept in ["PATH", "CARGO_HOME"] {
+            assert!(env.iter().any(|name| name == kept), "{kept} missing");
+        }
+        assert!(
+            !env.iter().any(|name| name == "GH_TOKEN"),
+            "an unconnected project's step never inherits the backend's GitHub token"
+        );
+        let connected = exec_child("gh", &[("GH_TOKEN".into(), "project-token".into())]);
+        assert!(
+            connected
+                .as_std()
+                .get_envs()
+                .any(|(name, value)| name == "GH_TOKEN"
+                    && value.is_some_and(|v| v == "project-token"))
+        );
+        for gone in [
+            "KRONN_AUTH_TOKEN",
+            "KRONN_ENCRYPTION_KEK",
+            "ANTHROPIC_API_KEY",
+        ] {
+            assert!(
+                !env.iter().any(|name| name == gone),
+                "{gone} reached the step"
+            );
+        }
+    }
+
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
     }
@@ -763,6 +900,53 @@ mod tests {
             read_only_repos: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(github_machine_token)]
+    async fn a_workflow_exec_step_gets_github_only_from_a_connected_project() {
+        use crate::core::github_connection::{override_machine_token_for_tests, set_grant};
+        use crate::models::GithubConnectionMode;
+        override_machine_token_for_tests(Some(Some("gho_machineTOKEN")));
+        let step = exec_step("token", Some("printenv"), vec!["GH_TOKEN"], None);
+        let allow = vec!["printenv".to_string()];
+        let ctx = TemplateContext::new();
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_str().unwrap();
+
+        let off =
+            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-off"))
+                .await;
+        assert_eq!(
+            off.result.status,
+            RunStatus::Failed,
+            "{}",
+            off.result.output
+        );
+        assert!(!off.result.output.contains("gho_machineTOKEN"));
+
+        set_grant("r16-exec-on", GithubConnectionMode::GhLogin, None);
+        let on =
+            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-on")).await;
+        assert_eq!(on.result.status, RunStatus::Success, "{}", on.result.output);
+        assert!(on.result.output.contains("gho_machineTOKEN"));
+
+        let none = execute_exec_step_for_project(&step, &allow, work_dir, &ctx, None).await;
+        assert_eq!(
+            none.result.status,
+            RunStatus::Failed,
+            "a project-less run gets no token"
+        );
+        override_machine_token_for_tests(None);
+    }
+
+    #[test]
+    fn a_failed_gh_step_without_a_token_says_why() {
+        let token = vec![("GH_TOKEN".to_string(), "t".to_string())];
+        assert!(needs_gh_hint("gh", false, &[]));
+        assert!(!needs_gh_hint("gh", true, &[]));
+        assert!(!needs_gh_hint("gh", false, &token));
+        assert!(!needs_gh_hint("git", false, &[]));
     }
 
     #[tokio::test]

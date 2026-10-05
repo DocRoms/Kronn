@@ -624,6 +624,17 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+    if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
+        if !matches!(s.step_type, StepType::Agent) {
+            return Err(format!(
+                "Step « {} »: `agent_settings.tools` applies to Agent steps only",
+                s.name
+            ));
+        }
+        tools
+            .validate(&s.agent)
+            .map_err(|error| format!("Step « {} »: {error}", s.name))?;
+    }
     if !s.read_only_repos.is_empty() {
         if !matches!(s.step_type, StepType::Agent)
             || !matches!(s.agent, AgentType::ClaudeCode | AgentType::Codex)
@@ -1497,10 +1508,76 @@ pub async fn unsafe_steps(
 }
 
 /// POST /api/workflows
+/// KT-851 — a listed project scope names existing projects.
+async fn validate_project_scope_db(
+    state: &AppState,
+    scope: Option<crate::models::WorkflowProjectScope>,
+) -> Result<(), String> {
+    state
+        .db
+        .with_read_conn(move |conn| {
+            crate::workflows::project_scope::validate_scope(conn, scope.as_ref())
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?
+}
+
+/// Save-time half of KT-917: a structured field written as `ref:<kind>:<slug>`
+/// is stored as the local id it names, so graph validation reads literal ids.
+async fn resolve_saved_references(
+    state: &AppState,
+    project_id: Option<String>,
+    steps: &mut Vec<WorkflowStep>,
+    on_failure: &mut Vec<WorkflowStep>,
+    keep_resource_refs: bool,
+) -> Result<(), String> {
+    let mut owned = (std::mem::take(steps), std::mem::take(on_failure));
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let outcome = crate::core::resource_refs::resolve_structured_references(
+                conn,
+                &mut owned.0,
+                project_id.as_deref(),
+                keep_resource_refs,
+            )
+            .and_then(|()| {
+                crate::core::resource_refs::resolve_structured_references(
+                    conn,
+                    &mut owned.1,
+                    project_id.as_deref(),
+                    keep_resource_refs,
+                )
+            });
+            Ok::<_, anyhow::Error>((owned, outcome))
+        })
+        .await
+        .map_err(|error| format!("DB error: {error}"))?;
+    let ((resolved_steps, resolved_on_failure), outcome) = result;
+    *steps = resolved_steps;
+    *on_failure = resolved_on_failure;
+    outcome
+}
+
 pub async fn create(
     State(state): State<AppState>,
-    Json(req): Json<CreateWorkflowRequest>,
+    Json(mut req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
+    if let Err(e) = validate_project_scope_db(&state, req.project_scope.clone()).await {
+        return Json(ApiResponse::err(e));
+    }
+    let keep_resource_refs = req.project_scope.is_some();
+    if let Err(e) = resolve_saved_references(
+        &state,
+        req.project_id.clone(),
+        &mut req.steps,
+        &mut req.on_failure,
+        keep_resource_refs,
+    )
+    .await
+    {
+        return Json(ApiResponse::err(e));
+    }
     if req.steps.is_empty() {
         return Json(ApiResponse::err("Workflow must have at least one step"));
     }
@@ -1645,6 +1722,7 @@ pub async fn create(
         // to preserve back-compat with every UI-driven save. Cf.
         // [[project_mcp_draft_creation_0_8_5]].
         enabled: req.enabled.unwrap_or(true),
+        project_scope: req.project_scope,
         created_at: now,
         updated_at: now,
     };
@@ -1768,7 +1846,7 @@ pub async fn create_feasibility_autopilot(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<UpdateWorkflowRequest>,
+    Json(mut req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -1786,6 +1864,41 @@ pub async fn update(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
+    if req.steps.is_some() || req.on_failure.is_some() {
+        let project_id = req
+            .project_id
+            .clone()
+            .unwrap_or_else(|| existing.project_id.clone());
+        let mut steps = req.steps.clone().unwrap_or_default();
+        let mut on_failure = req.on_failure.clone().unwrap_or_default();
+        let keep_resource_refs = req
+            .project_scope
+            .clone()
+            .unwrap_or_else(|| existing.project_scope.clone())
+            .is_some();
+        if let Err(e) = resolve_saved_references(
+            &state,
+            project_id,
+            &mut steps,
+            &mut on_failure,
+            keep_resource_refs,
+        )
+        .await
+        {
+            return Json(ApiResponse::err(e));
+        }
+        if req.steps.is_some() {
+            req.steps = Some(steps);
+        }
+        if req.on_failure.is_some() {
+            req.on_failure = Some(on_failure);
+        }
+    }
+    if let Some(scope) = req.project_scope.clone() {
+        if let Err(e) = validate_project_scope_db(&state, scope).await {
+            return Json(ApiResponse::err(e));
+        }
+    }
     // Child targets are re-read only when what they depend on changes, so a
     // rename or a pin never fails on a target deleted since.
     let child_launches_changed =
@@ -1914,6 +2027,7 @@ pub async fn update(
         variables: req.variables.unwrap_or(existing.variables),
         enabled: req.enabled.unwrap_or(existing.enabled),
         pinned: req.pinned.unwrap_or(existing.pinned),
+        project_scope: req.project_scope.unwrap_or(existing.project_scope),
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -2835,8 +2949,19 @@ pub(crate) async fn create_manual_run_with_id(
     // that project's environment/worktree exactly like one declared on the
     // project directly (KT-476 LaunchContext). A workflow's own declared
     // project always wins.
-    if wf.project_id.is_none() {
-        wf.project_id = launch.project_id.clone();
+    // KT-851 — a multi-project workflow runs for the project resolved here;
+    // the run carries it, `wf` is only this launch's copy.
+    wf.project_id = crate::workflows::project_scope::resolve_run_project(&wf, &launch)?;
+    if let (Some(_), Some(project_id)) = (wf.project_scope.as_ref(), wf.project_id.clone()) {
+        let exists = state
+            .db
+            .with_read_conn(move |conn| crate::db::projects::get_project(conn, &project_id))
+            .await
+            .map_err(|error| format!("DB error: {error}"))?
+            .is_some();
+        if !exists {
+            return Err("The project this workflow should run for no longer exists".into());
+        }
     }
     let (secret, retention_days) = {
         let config = state.config.read().await;
@@ -3001,8 +3126,8 @@ pub async fn trigger(
     Path(id): Path<String>,
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
-    let (provided_vars, initial_state) = body
-        .map(|Json(b)| (b.variables, b.state))
+    let (provided_vars, initial_state, requested_project_id) = body
+        .map(|Json(b)| (b.variables, b.state, b.project_id))
         .unwrap_or_default();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(32);
     let run = match start_manual_run(
@@ -3011,7 +3136,10 @@ pub async fn trigger(
         provided_vars,
         initial_state,
         Some(tx),
-        crate::core::launch_context::LaunchContext::default(),
+        crate::core::launch_context::LaunchContext {
+            requested_project_id,
+            ..Default::default()
+        },
     )
     .await
     {
@@ -3465,6 +3593,7 @@ pub async fn test_step(
         let outcome = crate::workflows::steps::execute_step(
             &step,
             &project_path,
+            req.project_id.as_deref(),
             &work_dir,
             &tokens,
             full_access,
@@ -6283,6 +6412,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
             name: name.into(),
@@ -7119,6 +7249,58 @@ mod tests {
         exec.room_id = Some("disc-1".into());
         let misplaced = validate_step_required_fields(&exec).expect_err("Agent only");
         assert!(misplaced.contains("room_id"), "{misplaced}");
+    }
+
+    #[test]
+    fn declared_step_tools_are_validated_at_save() {
+        let mut step = mk_step("redaction", StepType::Agent);
+        step.prompt_template = "Write the verdict".into();
+        step.agent = AgentType::ClaudeCode;
+        let tools = |cli: &[&str], kronn: &[&str]| crate::models::AgentSettings {
+            model: None,
+            tier: None,
+            connection_id: None,
+            reasoning_effort: None,
+            max_tokens: None,
+            tools: Some(crate::models::StepTools {
+                cli: cli.iter().map(|name| name.to_string()).collect(),
+                kronn_internal: kronn.iter().map(|name| name.to_string()).collect(),
+            }),
+        };
+        step.agent_settings = Some(tools(&[], &[]));
+        validate_step_required_fields(&step).expect("tools: none");
+        step.agent_settings = Some(tools(&["Read"], &["task_get"]));
+        validate_step_required_fields(&step).expect("declared tools");
+        let json = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            json["agent_settings"]["tools"],
+            serde_json::json!({"cli": ["Read"], "kronn_internal": ["task_get"]})
+        );
+
+        step.agent = AgentType::Codex;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("tools.cli"));
+        step.agent_settings = Some(tools(&[], &["task_get"]));
+        validate_step_required_fields(&step).expect("Codex takes Kronn tools");
+        step.agent = AgentType::Ollama;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("not Ollama"));
+        step.agent = AgentType::ClaudeCode;
+        for bad in ["mcp__kronn-internal__task_get", "Task Get", "", "tâche"] {
+            step.agent_settings = Some(tools(&[], &[bad]));
+            assert!(validate_step_required_fields(&step).is_err(), "{bad:?}");
+        }
+        step.agent_settings = Some(tools(&[], &[]));
+        step.step_type = StepType::ApiCall;
+        assert!(validate_step_required_fields(&step)
+            .unwrap_err()
+            .contains("Agent steps only"));
+
+        let legacy: crate::models::AgentSettings =
+            serde_json::from_value(serde_json::json!({"tier": "economy"})).unwrap();
+        assert!(legacy.tools.is_none(), "undeclared stays undeclared");
     }
 
     #[test]

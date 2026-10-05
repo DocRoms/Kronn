@@ -1,4 +1,4 @@
-import type { WorkflowRun, WorkflowStep } from '../types/generated';
+import type { AgentSettings, StepTools, WorkflowRun, WorkflowStep } from '../types/generated';
 
 const RUN_RESUME_HISTORY_KEY = '__kronn.resume_history';
 
@@ -162,4 +162,19 @@ export function tryParseTriageManifest(message: string): TriageManifest | null {
   } catch {
     return null;
   }
+}
+
+/** A comma-separated tool list as typed; `finished` drops the empty entries. */
+export function splitToolList(value: string, finished = false): string[] {
+  const names = value.split(',').map(name => name.trim());
+  return finished ? names.filter(Boolean) : names;
+}
+
+/** The step's agent settings with its declared tools patched (KT-908). */
+export function withStepTools(
+  step: Pick<WorkflowStep, 'agent_settings'>,
+  patch: Partial<StepTools>,
+): AgentSettings {
+  const tools = step.agent_settings?.tools ?? { cli: [], kronn_internal: [] };
+  return { ...step.agent_settings, tools: { ...tools, ...patch } };
 }

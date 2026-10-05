@@ -1847,6 +1847,7 @@ fn mcp_config_hash_changes_on_args_override() {
 pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
+        project_scope: None,
         pinned: false,
         id: id.into(),
         name: "Test Workflow".into(),
@@ -4295,6 +4296,7 @@ fn create_batch_run_persists_each_compare_target_tier() {
     let conn = test_db();
     let mut qp = sample_qp_for_batch("qp-compare-tier");
     qp.agent_settings = Some(crate::models::AgentSettings {
+        tools: None,
         model: Some("claude-provider-only-model".into()),
         tier: Some(crate::models::ModelTier::Default),
         reasoning_effort: None,
@@ -5353,6 +5355,7 @@ fn workflow_multi_step_roundtrip() {
     let conn = test_db();
     let now = Utc::now();
     let wf = Workflow {
+        project_scope: None,
         pinned: false,
         id: "wm1".into(),
         name: "Multi-step".into(),

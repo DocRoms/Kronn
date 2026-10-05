@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Each project now decides whether its agents receive a GitHub token (KT-1006,
+  D2). A "GitHub" row on the project's Overview, and a chip in the discussion
+  header, show the state: not connected, available but off, connected through
+  your gh login, or connected through a token pasted for the project and
+  stored encrypted. "Connect GitHub" asks for confirmation, shows the scope
+  GitHub reports for the token (OAuth scopes, or the repositories of a
+  fine-grained token, or why it could not be verified) and recommends a
+  fine-grained token when the gh token reaches every repository. Turning it
+  off applies to new launches; agents already running keep what they received.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).
@@ -20,9 +29,13 @@ Release notes for 0.9.3 and earlier are available in the
   inside the container; the full-access switch now shows that state as locked
   and always on instead of "Restricted" (KT-975).
 
-- Run retention is on by default (KT-984): every 6 hours, in chunks that
+- Run retention (KT-984) is opt-in on every install, new ones included:
+  nothing is emptied until you choose a window in Settings → Database, where
+  30 days is the suggested value. While it is off, the Automations page and
+  Settings → Database show a banner with the database size and a button to the
+  setting; it can be dismissed and comes back past 2 GB. Once on, every 6 hours, in chunks that
   leave the database free between them, Kronn empties the step outputs of
-  workflow runs finished more than 30 days ago and keeps the runs, their
+  workflow runs finished before that delay and keeps the runs, their
   steps, statuses, timings and tokens. Runs in progress, paused or
   interrupted, batch and compare runs, runs that still own a worktree and runs
   referenced elsewhere (child runs, discussions, ratings, live pages,
@@ -73,14 +86,75 @@ Release notes for 0.9.3 and earlier are available in the
   the earlier steps, with an error naming the step, the value and the fix,
   whatever started the run (KT-1017). In the workflow, "Suggest a fix" shows
   the rewrite as a diff, the value moved into a separate argument (`$1`,
-  `sys.argv[1]`, `process.argv[1]`), and applies it only when you click
+  `sys.argv[1]`, or `process.argv[1]` after a `--` that ends Node's options),
+  and applies it only when you click
   Apply. When no rewrite is provably equivalent (heredoc, single quotes,
   part of a longer string), it says a manual fix is required and gives the
   recipe. Editing something else in such a workflow keeps working. The
   inline Quick Exec sources of a CollectApiData step are checked, counted and
   fixable the same way.
 
+- Workflows name other resources by slug: `{{ref:<kind>:<slug>}}` in any
+  templated step field resolves at run time in the run's project, then the
+  global scope, for workflows, Quick Execs, Quick APIs, prompts, skills (the
+  repository's included), plugins and pages, and an unknown reference fails
+  its step before launch. Sub-workflow, trigger, Quick Prompt and Quick API
+  ids are written to `kronn/` as `ref:<kind>:<slug>` and stored as local ids
+  at save and import, so a workflow published from one machine and imported
+  on another runs its targets without editing.
+  `GET /api/resources/resolve?ref=&project=` resolves one for a script
+  (KT-917).
+- One workflow can serve several projects: `project_scope` lists them (or
+  all), the project is resolved when the run is triggered (the request's
+  `project_id`, the launching discussion's project, one run per project for
+  a cron, the project linked to the tracked repository for a tracker), the
+  run executes in that project's worktree, and concurrency limits count each
+  project's runs apart. The workflow editor chooses this project only, all
+  projects or chosen projects (KT-851).
+- Each workflow run has its own artifacts directory, `{{run.artifacts_dir}}`:
+  Exec steps write screenshots, logs or reports there, and a Claude Code or
+  Codex Agent step whose prompt names it reads it without being able to
+  write or delete anything in it (the `read_only_repos` policy). It is
+  removed with the run (KT-910).
+- A workflow Agent step can declare its tools in `agent_settings.tools`:
+  Claude Code built-in tools and Kronn tools by name, or none. A declared
+  step starts with exactly those, without the other MCP servers, the skill
+  listing or the Kronn catalogue and its instructions; an undeclared step
+  launches exactly as before. The step editor and `workflow_step_schema`
+  expose the setting, validated at save (KT-908).
+
+- Each agent launch gets its own bridge token instead of Kronn's admin token:
+  a random value held only in memory, bound to the launch's discussion, task
+  execution or workflow run and their project, revoked when the launch ends
+  and forgotten on restart. It opens only the routes the `kronn-internal`
+  bridge calls, only for resources in its scope (ids in the path, the query
+  and the body are checked), never a route that returns or moves a secret,
+  and effects are logged with its id. A workflow it triggers without naming a
+  project runs for the room's project when the workflow serves it (KT-851),
+  and is refused otherwise. The bridge reads `KRONN_BRIDGE_TOKEN`
+  first. Loopback requests without a token keep today's trust until the
+  per-action human proof ships in 0.15 (KT-1006).
+
 ### Fixed
+
+- Processes Kronn starts for a caller no longer inherit the backend's
+  environment: agent CLIs on all three routes, the project and discussion
+  terminal, workflow Exec steps and workspace hooks, Quick Exec (task
+  validations included) and the API-call credential CLIs get a built
+  environment (a reviewed allow-list, then the launch's own
+  values). No child receives `KRONN_AUTH_TOKEN`, `KRONN_ENCRYPTION_KEK`, or
+  another agent's provider key, nor a GitHub token from the backend's
+  environment (only a connected project's, native ACP agents included), and
+  the backend no longer exports its admin token into its own environment
+  (KT-1006).
+- Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
+  provider key configured in Kronn, a temporary directory beside the project,
+  and their room and workflow-step contexts, like the other routes (KT-1013).
+- The project and discussion terminal no longer runs `env` and no longer
+  reads outside the project: `cat`, `head`, `tail`, `find`, `stat`, `grep`,
+  `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
+  outside it, symlinks followed, and `find -exec`/`-delete` and
+  `git diff --no-index` are refused (KT-1006).
 
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
@@ -181,6 +255,10 @@ Release notes for 0.9.3 and earlier are available in the
   placeholder or a `TODO:` marker, the final review skips the `TEMPLATE.md`
   gabarits like the document gate does, and no root redirector is written
   toward a missing `docs/AGENTS.md`.
+  The 800-word budget of the documentation skeleton now counts raw words, HTML
+  comments included, because that is what the agent reads; the skeleton went
+  from 892 raw words to under 800 by dropping comments that repeated visible
+  guidance (KT-934).
 
 
 
@@ -234,8 +312,10 @@ Release notes for 0.9.3 and earlier are available in the
 - The desktop app keeps its local port from one launch to the next, so the
   interface settings stored by the browser no longer reset at every launch or
   after "Allow connections from other devices" restarts it (KT-972). The port
-  is saved in `desktop-port.json` in the data directory and can be pinned
-  there; a busy port is replaced for that launch only. The port is held from
+  is saved in `desktop-port.json` in the data directory and can be set from
+  Settings → Identity ("Desktop port", 1024 to 65535, desktop app only, with
+  a "Restart now" button) or pinned there by hand; a busy port is replaced for
+  that launch only. The port is held from
   the moment it is chosen, and the app only opens a backend that proves it is
   the one it just started, never another Kronn answering on the same port.
   Interface preferences (theme, tour progress, folds and sidebars, favourites,
@@ -245,7 +325,8 @@ Release notes for 0.9.3 and earlier are available in the
 - A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
   ran with the discussion's full access and without its delivery context, so
   it could act beyond the worker scope and never deliver (KT-1012). These
-  native ACP agents are now refused as launched workers with a clear reason,
+  native ACP agents, and Vibe, are now refused as launched workers with a
+  clear reason,
   at preparation and at launch; one worker policy now decides every route, and
   an exact joined CLI session of the same agent stays eligible.
 - Agent streams are sturdier (KT-1014). An accented letter or emoji split
@@ -321,9 +402,29 @@ Release notes for 0.9.3 and earlier are available in the
   (an unchanged stored line stays editable, and still does not run), and the
   Quick Exec form and the workflow editor now show such a refusal in full,
   with the suggested arguments, instead of a generic error.
+  A value may also no longer sit where an interpreter still reads its
+  options (`["{{mode}}", "{{issue.title}}"]` with `{{mode}}` rendering to
+  `-c`): it is accepted only after the inline code of a shell or Python,
+  after `--`, or after a script file, and the run-time check verifies the
+  rendered command with the origin of each argument.
 
 ### Changed
 
+- Agents no longer receive the machine's GitHub token by default (KT-1006, D2):
+  `GH_TOKEN`, `GITHUB_TOKEN` and `COPILOT_GITHUB_TOKEN` reach Claude and Codex
+  launches only for a connected project, and are removed from the inherited
+  environment otherwise, Docker included. On upgrade, existing projects whose
+  remote is on GitHub stay connected through the gh login and show a one-time
+  notice with a "Turn off" button; new projects start not connected. Workflow
+  Exec steps follow the same project setting, and a failed `gh` step says the
+  project is not connected. `gh auth token` now runs asynchronously, with a
+  5-second limit and a one-minute cache, instead of blocking every launch.
+- A request whose bearer token matches neither the operator token nor a live
+  bridge token is refused, even from loopback, where a request without any
+  token keeps passing (KT-1006).
+- The project and discussion terminal runs its command without a shell:
+  quotes still group words, but `$VAR`, `~` and globs are passed literally
+  (`find . -name "*.rs"` still works) (KT-1006).
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from

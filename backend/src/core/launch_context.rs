@@ -18,6 +18,9 @@ pub struct LaunchContext {
     pub context: HashMap<String, String>,
     /// The workflow run whose `TriggerWorkflow` step is launching this one.
     pub triggered_by_run_id: Option<String>,
+    /// A project chosen explicitly for a multi-project workflow (KT-851);
+    /// unlike `project_id`, refused when the workflow does not serve it.
+    pub requested_project_id: Option<String>,
 }
 
 impl LaunchContext {
@@ -27,6 +30,7 @@ impl LaunchContext {
             project_id,
             context: HashMap::new(),
             triggered_by_run_id: None,
+            requested_project_id: None,
         }
     }
 
@@ -39,6 +43,7 @@ impl LaunchContext {
             project_id,
             context: HashMap::new(),
             triggered_by_run_id: None,
+            requested_project_id: None,
         }
     }
 

@@ -8,6 +8,7 @@ import { flushUiPreferences } from '../../lib/uiPreferences';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
+import { DesktopPortField } from './DesktopPortField';
 import { Dropdown } from '../Dropdown';
 import '../../pages/SettingsPage.css';
 
@@ -284,6 +285,8 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
                 )}
               </div>
             )}
+
+            {isTauri && <DesktopPortField toast={toast} onRestart={restartApp} />}
 
             {pseudo ? (
               <div className="set-invite-box">

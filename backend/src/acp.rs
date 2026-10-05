@@ -64,7 +64,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
     /// requests, the shapes are those of OpenCode 1.18 (`session/request_permission`
     /// with `kind: read`, empty `locations`, and the `once`/`always`/`reject`
     /// options). It records the inline configuration it was started with and the
-    /// answer it got under `$FIXTURE_OUT`, then goes on with its turn.
+    /// answer it got under `$OPENCODE_FIXTURE_OUT` (an `OPENCODE_` name, so the
+    /// built environment passes it to OpenCode), then goes on with its turn.
     #[cfg(unix)]
     pub(crate) const OPENCODE_ACP_FIXTURE: &str = r#"
 import json, os, sys
@@ -73,7 +74,7 @@ def send(frame):
     sys.stdout.write(json.dumps(frame) + "\n")
     sys.stdout.flush()
 
-out = os.environ["FIXTURE_OUT"]
+out = os.environ["OPENCODE_FIXTURE_OUT"]
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
@@ -728,26 +729,78 @@ fn native_acp_wsl_only_refusal(program: &str) -> Option<String> {
         .map(|_| crate::agents::wsl::native_acp_wsl_refusal(program))
 }
 
+/// What one native ACP launch adds to its built environment (KT-1013): the
+/// same per-launch values the direct and adapter routes receive.
+#[derive(Default, Clone)]
+pub struct NativeLaunchEnv {
+    pub discussion_id: Option<String>,
+    pub room_agent: Option<crate::agents::runner::RoomAgentBridgeContext>,
+    pub workflow_step: Option<crate::agents::runner::WorkflowStepBridgeContext>,
+    /// This agent's configured provider key, set under its own variable.
+    pub api_key: Option<String>,
+    /// The launch's scoped bridge token (layer B).
+    pub bridge_token: Option<String>,
+    /// `core::github_connection::env_for_launch` for the agent's project (D2).
+    pub github_env: Vec<(String, String)>,
+}
+
+fn native_family(agent: AcpAgent) -> crate::core::child_env::AgentFamily {
+    use crate::core::child_env::AgentFamily;
+    match agent {
+        AcpAgent::OpenCode => AgentFamily::OpenCode,
+        AcpAgent::GeminiCli => AgentFamily::Gemini,
+        AcpAgent::CopilotCli => AgentFamily::Copilot,
+        AcpAgent::Kiro => AgentFamily::Kiro,
+        AcpAgent::Vibe => AgentFamily::Vibe,
+        AcpAgent::Codex => AgentFamily::Codex,
+        AcpAgent::ClaudeCode => AgentFamily::Claude,
+    }
+}
+
 /// The subprocess of a native ACP session: its command, working directory and
-/// the environment Kronn gives it.
+/// the environment Kronn builds for it.
 fn native_command(
     agent: AcpAgent,
     program: &str,
     args: &[&str],
     cwd: &str,
-    discussion_id: Option<&str>,
-) -> tokio::process::Command {
+    launch: &NativeLaunchEnv,
+) -> Result<tokio::process::Command, String> {
+    use crate::core::child_env;
     let mut command = crate::core::cmd::async_cmd(program);
     command.args(args).current_dir(cwd);
+    let family = native_family(agent);
+    let route = child_env::ChildRoute::Agent(family);
+    child_env::reset(command.as_std_mut(), route);
     // Under Docker, the MCP values the project's MCP files refer to (KT-964).
     crate::core::mcp_secret_refs::apply_to(&mut command, std::path::Path::new(cwd));
-    if let Some(discussion_id) = discussion_id {
-        command.env("KRONN_DISCUSSION_ID", discussion_id);
-    }
+    let values = child_env::AgentLaunch {
+        discussion_id: launch.discussion_id.as_deref(),
+        task_worker: None,
+        room_agent: launch.room_agent.as_ref(),
+        workflow_step: launch.workflow_step.as_ref(),
+        bridge_token: launch.bridge_token.as_deref(),
+        api_key: family.provider_key_env().zip(launch.api_key.as_deref()),
+    };
+    // Native runtimes are refused inside WSL, so the backend URL is the plain one.
+    let backend_url = launch.discussion_id.is_some().then(|| {
+        std::env::var("KRONN_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3140".into())
+    });
+    child_env::apply_agent_launch(
+        command.as_std_mut(),
+        std::path::Path::new(cwd),
+        &values,
+        backend_url,
+    )?;
     if agent == AcpAgent::OpenCode {
         apply_opencode_policy(&mut command);
     }
-    command
+    // Only a project connected to GitHub hands its agent a token (D2).
+    crate::core::github_connection::apply_launch_env(command.as_std_mut(), &launch.github_env);
+    let mut granted = values.granted();
+    granted.extend_from_slice(child_env::GITHUB_ENV);
+    child_env::seal(command.as_std_mut(), route, &granted);
+    Ok(command)
 }
 
 /// Environment Kronn gives `opencode acp`, on top of the user's own: the inline
@@ -781,7 +834,7 @@ impl AcpJsonRpcTransport {
         agent: AcpAgent,
         cwd: &str,
         full_access: bool,
-        discussion_id: Option<&str>,
+        launch: NativeLaunchEnv,
         scope: AcpSessionScope,
     ) -> Result<Self, AcpError> {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
@@ -790,7 +843,8 @@ impl AcpJsonRpcTransport {
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
-        let command = native_command(agent, program, &args, cwd, discussion_id);
+        let command =
+            native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
         Self::spawn_scoped(agent, command, full_access, Some(scope)).await
     }
 
@@ -1650,6 +1704,121 @@ mod tests {
     // Only the Unix liveness fixtures read from a socket.
     #[cfg(unix)]
     use tokio::io::AsyncReadExt;
+
+    fn command_env(command: &tokio::process::Command) -> HashMap<String, String> {
+        command
+            .as_std()
+            .get_envs()
+            .filter_map(|(name, value)| {
+                value.map(|value| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// KT-1013 — a native ACP agent gets the values the other routes give:
+    /// its configured key, its room and workflow contexts, the bridge token and
+    /// a project temp dir; never the admin token nor another agent's key.
+    #[test]
+    fn a_native_launch_receives_its_key_and_contexts_through_the_builder() {
+        let project = tempfile::tempdir().unwrap();
+        let launch = NativeLaunchEnv {
+            discussion_id: Some("room-7".into()),
+            room_agent: Some(crate::agents::runner::RoomAgentBridgeContext {
+                discussion_id: "room-7".into(),
+                agent_type: "GeminiCli".into(),
+                dispatch_job_id: "job-1".into(),
+                source_message_id: "msg-1".into(),
+            }),
+            workflow_step: None,
+            api_key: Some("kronn-stored-gemini-key".into()),
+            bridge_token: Some("kbt_native".into()),
+            github_env: Vec::new(),
+        };
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("KRONN_ENCRYPTION_KEK", "raw"),
+                ("OPENAI_API_KEY", "sk-oai"),
+                ("GOOGLE_CLOUD_PROJECT", "p"),
+                ("GH_TOKEN", "backend-gh"),
+            ],
+            || {
+                native_command(
+                    AcpAgent::GeminiCli,
+                    "gemini",
+                    &["--acp"],
+                    &project.path().to_string_lossy(),
+                    &launch,
+                )
+                .unwrap()
+            },
+        );
+        let env = command_env(&command);
+        assert_eq!(env["GEMINI_API_KEY"], "kronn-stored-gemini-key");
+        assert_eq!(env["KRONN_DISCUSSION_ID"], "room-7");
+        assert!(env["KRONN_ROOM_AGENT_CONTEXT"].contains("job-1"));
+        assert_eq!(env["KRONN_BRIDGE_TOKEN"], "kbt_native");
+        assert!(env.contains_key("KRONN_BACKEND_URL"));
+        assert!(env["TMPDIR"].contains(".kronn"));
+        assert_eq!(env["GOOGLE_CLOUD_PROJECT"], "p");
+        assert!(
+            !env.contains_key("GH_TOKEN"),
+            "no connected project, no GitHub token"
+        );
+        for forbidden in ["KRONN_AUTH_TOKEN", "KRONN_ENCRYPTION_KEK", "OPENAI_API_KEY"] {
+            assert!(
+                !env.contains_key(forbidden),
+                "{forbidden} reached the agent"
+            );
+        }
+
+        // A workflow step's capability rides the same way.
+        let step = NativeLaunchEnv {
+            discussion_id: Some("step-room".into()),
+            workflow_step: Some(crate::agents::runner::WorkflowStepBridgeContext {
+                discussion_id: "step-room".into(),
+                run_id: "run-1".into(),
+                step_key: "s1".into(),
+                capability: "cap".into(),
+            }),
+            ..Default::default()
+        };
+        let command = native_command(
+            AcpAgent::Kiro,
+            "kiro-cli",
+            &[],
+            &project.path().to_string_lossy(),
+            &step,
+        )
+        .unwrap();
+        assert!(command_env(&command)["KRONN_WORKFLOW_STEP_CONTEXT"].contains("run-1"));
+
+        // A connected project's GitHub variables reach the native agent.
+        let connected = NativeLaunchEnv {
+            github_env: vec![
+                ("GH_TOKEN".into(), "project-gh".into()),
+                ("COPILOT_GITHUB_TOKEN".into(), "project-gh".into()),
+            ],
+            ..Default::default()
+        };
+        let command = native_command(
+            AcpAgent::CopilotCli,
+            "copilot",
+            &[],
+            &project.path().to_string_lossy(),
+            &connected,
+        )
+        .unwrap();
+        let env = command_env(&command);
+        assert_eq!(env["GH_TOKEN"], "project-gh");
+        assert_eq!(env["COPILOT_GITHUB_TOKEN"], "project-gh");
+    }
 
     #[test]
     fn native_mcp_registry_keeps_the_owned_bridge_without_trusting_projectless_candidates() {
@@ -2744,9 +2913,10 @@ mod tests {
             "python3",
             &["-c", test_support::OPENCODE_ACP_FIXTURE],
             &project.path().to_string_lossy(),
-            None,
-        );
-        command.env("FIXTURE_OUT", out.path());
+            &NativeLaunchEnv::default(),
+        )
+        .unwrap();
+        command.env("OPENCODE_FIXTURE_OUT", out.path());
         let transport = AcpJsonRpcTransport::spawn_scoped(
             AcpAgent::OpenCode,
             command,

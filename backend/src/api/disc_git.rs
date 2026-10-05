@@ -1119,9 +1119,20 @@ pub async fn disc_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let result = tokio::task::spawn_blocking(move || super::git_ops::run_exec(&work_dir, &cmd))
+    let did = id.clone();
+    let project_id = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.project_id))
+        })
         .await
-        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        .ok()
+        .flatten();
+    let github_env = crate::core::github_connection::env_for_launch(project_id.as_deref()).await;
+    let result =
+        tokio::task::spawn_blocking(move || super::git_ops::run_exec(&work_dir, &cmd, &github_env))
+            .await
+            .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),

@@ -86,6 +86,10 @@ pub struct McpTriggerWorkflowRequest {
     pub workflow_id: String,
     #[serde(default)]
     pub variables: HashMap<String, String>,
+    /// The project to run for, checked against the workflow's scope (KT-851).
+    /// A bridge token adds its own project when the caller names none.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,7 +142,10 @@ pub async fn workflow_trigger(
         &req.workflow_id,
         req.variables,
         Default::default(),
-        crate::core::launch_context::LaunchContext::default(),
+        crate::core::launch_context::LaunchContext {
+            requested_project_id: req.project_id,
+            ..Default::default()
+        },
     )
     .await
     {

@@ -56,6 +56,23 @@ pub fn main_tree_wait_from(raw: Option<&str>) -> std::time::Duration {
         .unwrap_or(DEFAULT_MAIN_TREE_WAIT)
 }
 
+/// A workspace lifecycle hook: user shell in the workspace, with the same
+/// built environment as an Exec step (KT-1006).
+fn hook_command(cmd: &str, dir: &std::path::Path) -> tokio::process::Command {
+    let mut command = async_cmd("sh");
+    // A workspace carries no project id, so a hook gets no GitHub token.
+    crate::core::child_env::isolate_with_github(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::WorkflowExec,
+        &[],
+    );
+    command
+        .args(["-c", cmd])
+        .current_dir(dir)
+        .kill_on_drop(true);
+    command
+}
+
 #[cfg(test)]
 tokio::task_local! {
     /// Per-test wait: the env var is process-wide and tests run in parallel.
@@ -887,11 +904,7 @@ impl Workspace {
             const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
             #[cfg(test)]
             const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-            let mut command = async_cmd("sh");
-            command
-                .args(["-c", cmd])
-                .current_dir(&self.path)
-                .kill_on_drop(true);
+            let mut command = hook_command(cmd, &self.path);
             let output = match tokio::time::timeout(HOOK_TIMEOUT, command.output()).await {
                 Ok(res) => res.with_context(|| format!("Failed to run {} hook", hook_name))?,
                 Err(_) => {
@@ -923,6 +936,28 @@ impl Workspace {
 mod tests {
     use super::{main_tree_wait_from, MainTreeGuard, MainTreeRefusal};
     use std::time::Duration;
+
+    #[test]
+    fn a_workspace_hook_gets_a_built_environment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("OPENAI_API_KEY", "sk"),
+            ],
+            || super::hook_command("npm ci", dir.path()),
+        );
+        let env: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(env.contains(&"PATH".to_string()));
+        assert!(!env.contains(&"KRONN_AUTH_TOKEN".to_string()));
+        assert!(!env.contains(&"OPENAI_API_KEY".to_string()));
+    }
 
     #[test]
     fn main_tree_guard_is_exclusive_per_project_and_released_on_drop() {

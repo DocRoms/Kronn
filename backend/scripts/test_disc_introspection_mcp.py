@@ -116,6 +116,54 @@ def _load_module(isolate=True, isolate_http=None, isolate_telemetry=True):
     return module
 
 
+class DeclaredStepToolsTests(unittest.TestCase):
+    """KT-908: a workflow step's `--step-tools=` list is the whole surface."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _handle(self, request, argv):
+        with mock.patch.object(self.mod.sys, "argv", argv), \
+             mock.patch.object(self.mod, "_spawned_task_worker_mode", return_value=False):
+            return self.mod._handle(request)
+
+    def test_declared_tools_are_listed_alone_and_others_refused(self):
+        argv = ["bridge", "--step-tools=task_get,plan_get"]
+        listed = self._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, argv)
+        names = sorted(tool["name"] for tool in listed["result"]["tools"])
+        self.assertEqual(names, ["plan_get", "task_get"])
+        for tool in listed["result"]["tools"]:
+            self.assertIn("inputSchema", tool)
+        with mock.patch.object(self.mod, "_http") as http:
+            refused = self._handle({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "disc_append", "arguments": {}},
+            }, argv)
+        http.assert_not_called()
+        self.assertEqual(refused["error"]["code"], -32601)
+        self.assertIn("not declared", refused["error"]["message"])
+
+    def test_declared_tools_drop_the_catalogue_instructions(self):
+        initialize = {"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}
+        declared = self._handle(initialize, ["bridge", "--step-tools=task_get"])
+        self.assertNotIn("instructions", declared["result"])
+        empty = self._handle(initialize, ["bridge", "--step-tools="])
+        self.assertNotIn("instructions", empty["result"])
+        listed = self._handle(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, ["bridge", "--step-tools="]
+        )
+        self.assertEqual(listed["result"]["tools"], [])
+
+    def test_an_undeclared_bridge_keeps_its_full_surface(self):
+        listed = self._handle({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, ["bridge"])
+        self.assertEqual(len(listed["result"]["tools"]), len(self.mod.TOOLS))
+        with mock.patch.object(self.mod, "_onboarding_done_for", return_value=True):
+            initialize = self._handle(
+                {"jsonrpc": "2.0", "id": 6, "method": "initialize", "params": {}}, ["bridge"]
+            )
+        self.assertIn("instructions", initialize["result"])
+
+
 class BridgeHarnessIsolationTests(unittest.TestCase):
     def test_default_loader_isolates_bindings_http_and_telemetry(self):
         module = _load_module()
@@ -3509,7 +3557,7 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
                 b'{"success":true,"data":{"file":{"id":"f-1"}}}'
             )
             response.__exit__.return_value = False
-            with mock.patch.dict(os.environ, {"KRONN_AUTH_TOKEN": "secret"}), \
+            with mock.patch.dict(os.environ, {"KRONN_BRIDGE_TOKEN": "secret"}), \
                  mock.patch("urllib.request.urlopen", return_value=response) as urlopen:
                 result = self.mod._http_upload_context_file("disc/one", str(image_path))
 
@@ -7286,10 +7334,9 @@ class DiscListTests(unittest.TestCase):
 
 
 class HttpAuthHeaderTests(unittest.TestCase):
-    """0.8.11 — the sidecar authenticates to the backend: `_http`/`_http_text`
-    send `Authorization: Bearer <token>` iff KRONN_AUTH_TOKEN is set. This is the
-    contract that makes an auth-enabled / LAN-exposed backend reachable by its
-    own sidecar (was a silent 401 before the boot injects the token)."""
+    """The bridge authenticates with the scoped token Kronn mints per launch
+    (`KRONN_BRIDGE_TOKEN`, KT-1006), falling back to an operator token a host
+    session exported (`KRONN_AUTH_TOKEN`), and sends nothing without either."""
 
     def setUp(self):
         # `_http` is the SUBJECT here, so it must be the real one; the transport
@@ -7304,12 +7351,26 @@ class HttpAuthHeaderTests(unittest.TestCase):
 
     def test_http_adds_bearer_when_token_present(self):
         with mock.patch.dict(os.environ,
-                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "sekret"},
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_BRIDGE_TOKEN": "sekret"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
             self.mod._http("GET", "/api/health")
         req = urlopen.call_args.args[0]
         self.assertEqual(req.get_header("Authorization"), "Bearer sekret")
+
+    def test_bridge_token_wins_over_a_host_operator_token(self):
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BRIDGE_TOKEN": "kbt_launch", "KRONN_AUTH_TOKEN": "operator"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        self.assertEqual(urlopen.call_args.args[0].get_header("Authorization"), "Bearer kbt_launch")
+
+    def test_host_session_operator_token_still_works(self):
+        with mock.patch.dict(os.environ, {"KRONN_AUTH_TOKEN": "operator"}, clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        self.assertEqual(urlopen.call_args.args[0].get_header("Authorization"), "Bearer operator")
 
     def test_http_omits_auth_when_no_token(self):
         with mock.patch.dict(os.environ,
@@ -7329,7 +7390,7 @@ class HttpAuthHeaderTests(unittest.TestCase):
         cm.__exit__.return_value = False
         with mock.patch.dict(os.environ,
                              {"KRONN_BACKEND_URL": "http://127.0.0.1:3140",
-                              "KRONN_AUTH_TOKEN": "sekret",
+                              "KRONN_BRIDGE_TOKEN": "sekret",
                               "KRONN_DISCUSSION_ID": "d-1"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
@@ -7343,7 +7404,7 @@ class HttpAuthHeaderTests(unittest.TestCase):
         cm.__enter__.return_value.read.return_value = b'{"kind":"kronn.workflow"}'
         cm.__exit__.return_value = False
         with mock.patch.dict(os.environ,
-                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "tok2"},
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_BRIDGE_TOKEN": "tok2"},
                              clear=True), \
              mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
             self.mod._http_text("GET", "/api/workflows/x/export")
@@ -8291,6 +8352,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
                 "KRONN_TASK_WORKER_CONTEXT",
                 "KRONN_DISCUSSION_ID",
                 "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             ):
                 env.pop(key, None)
             process = subprocess.Popen(
@@ -8360,6 +8422,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             shutil.copy2(_SCRIPT, bridge)
             env = {key: value for key, value in os.environ.items() if key not in {
                 "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             }}
             process = subprocess.Popen(
                 [sys.executable, str(bridge)], stdin=subprocess.PIPE,
@@ -8407,6 +8470,7 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             shutil.copy2(_SCRIPT, bridge)
             env = {key: value for key, value in os.environ.items() if key not in {
                 "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+                "KRONN_BRIDGE_TOKEN",
             }}
             process = subprocess.Popen(
                 [sys.executable, str(bridge)], stdin=subprocess.PIPE,

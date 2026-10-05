@@ -143,7 +143,7 @@ pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key";
+                pinned, concurrency_key, project_scope_json";
 
 pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     // Filter out batch placeholders (prefix "qp:") — they shouldn't show
@@ -974,8 +974,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             wf.id,
             wf.name,
@@ -1000,6 +1000,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
             wf.pinned as i32,
             wf.concurrency_key,
+            wf.project_scope.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
@@ -1028,7 +1029,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
          on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
-         concurrency_key = ?18
+         concurrency_key = ?18, project_scope_json = ?19
          WHERE id = ?1",
         params![
             wf.id,
@@ -1068,6 +1069,10 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
             },
             wf.pinned as i32,
             wf.concurrency_key,
+            wf.project_scope
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     Ok(n > 0)
@@ -2206,38 +2211,33 @@ pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<Workf
 /// on a gate holds its slot: approving it must not put the workflow over its
 /// limit.
 pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
-    count_admitted_runs(conn, workflow_id, None, None)
-}
-
-/// Active runs of a workflow that rendered the same concurrency key. `None`
-/// counts the runs whose key rendered empty, which share one bucket.
-pub fn count_active_runs_for_key(
-    conn: &Connection,
-    workflow_id: &str,
-    key: Option<&str>,
-) -> Result<u32> {
-    count_admitted_runs(conn, workflow_id, Some(key), None)
+    count_admitted_runs(conn, workflow_id, None, None, None)
 }
 
 /// Runs holding a concurrency slot, optionally in one key bucket
-/// (`Some(None)` = the empty key) and without `exclude_run_id`.
+/// (`Some(None)` = the empty key), in one project (`Some(None)` = runs
+/// without one) and without `exclude_run_id`.
 pub fn count_admitted_runs(
     conn: &Connection,
     workflow_id: &str,
     key: Option<Option<&str>>,
     exclude_run_id: Option<&str>,
+    project: Option<Option<&str>>,
 ) -> Result<u32> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
           WHERE workflow_id = ?1
             AND status IN ('Pending', 'Running', 'WaitingApproval')
             AND (?2 = 0 OR concurrency_key IS ?3)
-            AND id IS NOT ?4",
+            AND id IS NOT ?4
+            AND (?5 = 0 OR project_id IS ?6)",
         params![
             workflow_id,
             key.is_some() as i64,
             key.flatten(),
-            exclude_run_id
+            exclude_run_id,
+            project.is_some() as i64,
+            project.flatten(),
         ],
         |row| row.get(0),
     )?;
@@ -2317,6 +2317,11 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         workspace_config: ws_config_str.and_then(|s| serde_json::from_str(&s).ok()),
         concurrency_limit: concurrency,
         concurrency_key: row.get(18).unwrap_or(None),
+        // A corrupt scope narrows to the single-project behaviour.
+        project_scope: row
+            .get::<_, Option<String>>(19)
+            .unwrap_or(None)
+            .and_then(|s| serde_json::from_str(&s).ok()),
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway

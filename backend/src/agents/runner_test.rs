@@ -515,7 +515,7 @@ mod tests {
             !bridge
                 .args
                 .iter()
-                .any(|arg| arg.contains("KRONN_AUTH_TOKEN")),
+                .any(|arg| arg.contains("KRONN_AUTH_TOKEN") || arg.contains("KRONN_BRIDGE_TOKEN")),
             "no credential, and no placeholder for one, may travel over ACP"
         );
 
@@ -9993,10 +9993,80 @@ Suite de la réponse.";
             worker,
             room_agent,
             workflow_step,
+            &[],
+            None,
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// What a spawned agent sees of the three GitHub variables (D2).
+    #[cfg(unix)]
+    async fn github_env_seen_by_child(
+        github_env: &[(String, String)],
+        adapter_env: &[(String, String)],
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gh-env-probe");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\" \"${COPILOT_GITHUB_TOKEN-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let io = if adapter_env.is_empty() {
+            SpawnIo::Direct(None)
+        } else {
+            SpawnIo::Adapter(adapter_env)
+        };
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            dir.path(),
+            "ANTHROPIC_API_KEY",
+            None,
+            io,
+            None,
+            None,
+            None,
+            None,
+            github_env,
+            None,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// An unconnected project's agent gets no GitHub token, even one the
+    /// backend's own environment or `gh` login holds; a connected one gets it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_connected_project_hands_its_agent_a_github_token() {
+        assert_eq!(
+            github_env_seen_by_child(&[], &[]).await,
+            "unset|unset|unset"
+        );
+
+        let granted: Vec<(String, String)> = crate::core::github_connection::GITHUB_ENV_NAMES
+            .iter()
+            .map(|name| (name.to_string(), "gho_project".to_string()))
+            .collect();
+        assert_eq!(
+            github_env_seen_by_child(&granted, &[]).await,
+            "gho_project|gho_project|gho_project"
+        );
+
+        // A value the launch set on purpose (a project MCP's) is not stripped.
+        let mcp = vec![("GITHUB_TOKEN".to_string(), "mcp-value".to_string())];
+        assert_eq!(
+            github_env_seen_by_child(&[], &mcp).await,
+            "unset|mcp-value|unset"
+        );
     }
 
     fn worker_context() -> TaskWorkerBridgeContext {
@@ -12147,7 +12217,7 @@ Suite de la réponse.";
                 "KRONN_TASK_WORKER_CONTEXT": "${KRONN_TASK_WORKER_CONTEXT}",
                 "KRONN_DISCUSSION_ID": "${KRONN_DISCUSSION_ID}",
                 "KRONN_BACKEND_URL": "${KRONN_BACKEND_URL:-http://127.0.0.1:3140}",
-                "KRONN_AUTH_TOKEN": "${KRONN_AUTH_TOKEN:-}",
+                "KRONN_BRIDGE_TOKEN": "${KRONN_BRIDGE_TOKEN:-}",
             })
         );
         assert!(!encoded.contains("UNRELATED_PROJECT_VALUE"));
@@ -12704,6 +12774,7 @@ Suite de la réponse.";
                 http_cancel: None,
                 pgid: Some(pgid),
                 token_fragments: false,
+                bridge_token: None,
             };
             let exit = process.wait().await.expect("leader exits");
             assert!(exit.success);
@@ -12830,6 +12901,7 @@ sleep 3600
             http_cancel: None,
             pgid,
             token_fragments: false,
+            bridge_token: None,
         };
 
         // Call the production kill() method
@@ -12909,6 +12981,7 @@ sleep 3600
             http_cancel: None,
             pgid: None,
             token_fragments: false,
+            bridge_token: None,
         };
 
         assert_eq!(process.reported_token_usage(), Some(8));
@@ -15477,5 +15550,38 @@ mod text_block_tests {
             joined_stream(&[BLOCK_STOP, &text_delta("Réponse")]),
             "Réponse"
         );
+    }
+
+    #[test]
+    fn declared_step_tools_narrow_the_acp_session_servers() {
+        let server = |id: &str| crate::acp::AcpMcpServer {
+            id: id.into(),
+            command: "python3".into(),
+            args: vec!["bridge.py".into()],
+            allowed_tools: vec![],
+        };
+        let servers = vec![server("kronn-internal"), server("project-safe")];
+        let undeclared = super::super::declared_mcp_servers(servers.clone(), None);
+        assert_eq!(undeclared.len(), 2, "an undeclared step keeps every server");
+        assert_eq!(undeclared[0].args, vec!["bridge.py".to_string()]);
+
+        let none = crate::models::StepTools::default();
+        assert!(super::super::declared_mcp_servers(servers.clone(), Some(&none)).is_empty());
+
+        let declared = crate::models::StepTools {
+            cli: vec![],
+            kronn_internal: vec!["task_get".into(), "plan_get".into()],
+        };
+        let narrowed = super::super::declared_mcp_servers(servers, Some(&declared));
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].id, "kronn-internal");
+        assert_eq!(
+            narrowed[0].args,
+            vec![
+                "bridge.py".to_string(),
+                "--step-tools=task_get,plan_get".to_string()
+            ]
+        );
+        assert_eq!(narrowed[0].allowed_tools, declared.kronn_internal);
     }
 }

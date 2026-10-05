@@ -1988,9 +1988,28 @@ pub fn ensure_workflow_execution_approved(
     conn: &rusqlite::Connection,
     workflow: &Workflow,
 ) -> Result<(), String> {
-    ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
-        render_workflow(workflow, slug)
-    })
+    let mut portable = workflow.clone();
+    crate::core::resource_refs::symbolize_workflow(conn, &mut portable)
+        .map_err(|error| error.to_string())?;
+    let symbolized = ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
+        render_workflow(&portable, slug)
+    });
+    // An approval recorded before references were symbolised (KT-917) named
+    // the literal ids; the content it approved is unchanged.
+    match symbolized {
+        Err(error)
+            if serde_json::to_value(&portable.steps).ok()
+                != serde_json::to_value(&workflow.steps).ok()
+                || serde_json::to_value(&portable.on_failure).ok()
+                    != serde_json::to_value(&workflow.on_failure).ok() =>
+        {
+            ensure_rendered_execution_approved(conn, "workflow", &workflow.id, |slug| {
+                render_workflow(workflow, slug)
+            })
+            .map_err(|_| error)
+        }
+        other => other,
+    }
 }
 
 pub fn ensure_quick_prompt_execution_approved(

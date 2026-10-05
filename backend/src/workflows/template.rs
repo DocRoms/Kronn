@@ -40,6 +40,11 @@ impl TemplateContext {
         }
     }
 
+    /// The flat value stored under `key`, if any.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
     /// Set a simple variable: `key` → accessible as `{{key}}`
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.values.insert(key.into(), value.into());
@@ -307,6 +312,10 @@ impl TemplateContext {
                     } else {
                         result.push_str(value);
                     }
+                } else if strict && crate::core::resource_refs::parse_reference(path).is_some() {
+                    anyhow::bail!(
+                        "Unknown resource reference `{{{{{path}}}}}`: nothing of that kind and slug exists in this run's project or the global scope (or the slug is ambiguous)"
+                    );
                 } else if strict {
                     anyhow::bail!("Unknown workflow template variable `{key}`");
                 } else {
@@ -1734,6 +1743,23 @@ mod tests {
             "Fix {{issue.titel}}",
             "preview remains permissive and keeps the typo visible"
         );
+    }
+
+    #[test]
+    fn strict_render_names_an_unknown_resource_reference() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("ref:workflow:triage", "wf-local-1");
+        assert_eq!(
+            ctx.render_strict("--target={{ref:workflow:triage}}")
+                .unwrap(),
+            "--target=wf-local-1"
+        );
+        let error = ctx
+            .render_strict("{{ ref:workflow:missing }}")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ref:workflow:missing"), "{error}");
+        assert!(error.contains("Unknown resource reference"), "{error}");
     }
 
     #[test]

@@ -753,13 +753,24 @@ async fn resolve_dynamic_auth(
 
 // ─── Auth resolution ────────────────────────────────────────────────────
 
+/// A credential CLI process: its cloud configuration and the base allow-list,
+/// nothing else of the backend's environment (KT-1006).
+fn credential_cli_command(command: &str, args: &[String]) -> tokio::process::Command {
+    let mut cmd = crate::core::cmd::async_cmd(command);
+    crate::core::child_env::isolate(
+        cmd.as_std_mut(),
+        crate::core::child_env::ChildRoute::CredentialCli,
+    );
+    cmd.args(args);
+    cmd.kill_on_drop(true);
+    cmd
+}
+
 /// Resolve a credential from a registry-declared local CLI without ever
 /// logging or persisting its stdout. The command is executed directly (no
 /// shell), bounded to five seconds, and its output remains in-memory only.
 async fn resolve_cli_token(command: &str, args: &[String]) -> Result<String, String> {
-    let mut cmd = crate::core::cmd::async_cmd(command);
-    cmd.args(args);
-    cmd.kill_on_drop(true);
+    let mut cmd = credential_cli_command(command, args);
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
         .await
         .map_err(|_| format!("Credential CLI `{command}` timed out after 5 seconds"))?
@@ -2018,6 +2029,28 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_cli_gets_its_cloud_config_and_nothing_of_kronn() {
+        let command = crate::core::child_env::with_parent_env(
+            &[
+                ("PATH", "/usr/bin"),
+                ("AZURE_CONFIG_DIR", "/home/u/.azure"),
+                ("KRONN_AUTH_TOKEN", "admin"),
+                ("ANTHROPIC_API_KEY", "sk"),
+            ],
+            || credential_cli_command("az", &["account".into()]),
+        );
+        let env: Vec<String> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_some())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert!(env.contains(&"AZURE_CONFIG_DIR".to_string()));
+        assert!(!env.contains(&"KRONN_AUTH_TOKEN".to_string()));
+        assert!(!env.contains(&"ANTHROPIC_API_KEY".to_string()));
+    }
     use serde_json::json;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -13,6 +13,7 @@ fn step() -> WorkflowStep {
         agent: AgentType::LiteLlm,
         prompt_template: "Return a result".into(),
         agent_settings: Some(AgentSettings {
+            tools: None,
             model: Some("proxy-alias".into()),
             tier: None,
             connection_id: None,
@@ -66,6 +67,7 @@ async fn run(step: &WorkflowStep, replies: Vec<(u16, serde_json::Value)>) -> Ste
     let mut result = execute_step(
         step,
         &project,
+        None,
         &project,
         &tokens,
         false,
@@ -453,6 +455,7 @@ async fn a_claude_code_step_reports_its_cache_reads_and_writes() {
     let mut result = execute_step(
         &step,
         &project,
+        None,
         &project,
         &tokens,
         false,

@@ -73,11 +73,14 @@ fn decide(candidates: &[(String, &'static str)], encrypted_rows: &[String]) -> D
 async fn collect_encrypted_rows(db: &Database) -> Result<Vec<String>> {
     db.with_conn(|conn| {
         let cfgs = mcps::list_configs(conn)?;
-        Ok(cfgs
+        let mut rows: Vec<String> = cfgs
             .into_iter()
             .filter(|c| !c.env_encrypted.is_empty() && !c.env_keys.is_empty())
             .map(|c| c.env_encrypted)
-            .collect())
+            .collect();
+        // Stored GitHub tokens are ciphertext under the same key.
+        rows.extend(crate::db::github_connections::encrypted_tokens(conn)?);
+        Ok(rows)
     })
     .await
 }
@@ -389,6 +392,49 @@ mod tests {
             after, enc,
             "reconcile must not rewrite ciphertext (orphans == 0)"
         );
+    }
+
+    /// A stored GitHub token is encrypted data too: with only that row and a
+    /// key that does not decrypt it, reconcile locks instead of minting.
+    #[tokio::test]
+    async fn a_stored_github_token_alone_prevents_minting_over_it() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        let cipher =
+            crate::core::github_connection::encrypt_stored_token("github_pat_x", &k).unwrap();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                 VALUES ('p1', 'p1', '/nowhere', datetime('now'), datetime('now'))",
+                [],
+            )?;
+            crate::db::github_connections::set_mode(
+                conn,
+                "p1",
+                crate::models::GithubConnectionMode::StoredToken,
+                Some(&cipher),
+            )
+        })
+        .await
+        .unwrap();
+
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        let wrong = KeyStore::from_vaults(vec![Box::new(FixedVault {
+            name: "sidecar",
+            val: crypto::generate_secret(),
+        })]);
+        let outcome = reconcile_with(&mut cfg, &db, &wrong).await.unwrap();
+        assert_eq!(outcome, KeyOutcome::Locked { encrypted_rows: 1 });
+
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        let right = KeyStore::from_vaults(vec![Box::new(FixedVault {
+            name: "sidecar",
+            val: k.clone(),
+        })]);
+        let outcome = reconcile_with(&mut cfg, &db, &right).await.unwrap();
+        assert_eq!(outcome, KeyOutcome::Resolved { source: "sidecar" });
     }
 
     #[tokio::test]

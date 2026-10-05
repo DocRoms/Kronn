@@ -56,6 +56,8 @@ case " $* " in
   *) exit 0 ;;
 esac
 cat >/dev/null
+# The built environment passes Claude's own `CLAUDE_*` names, not arbitrary ones.
+KT793_DIR="$CLAUDE_KT793_DIR"
 n=$(ls "$KT793_DIR" | grep -c '^launch-')
 printf '%s' "$KRONN_WORKFLOW_STEP_CONTEXT" > "$KT793_DIR/context-$n"
 printf '%s' "$KRONN_DISCUSSION_ID" > "$KT793_DIR/discussion-$n"
@@ -159,6 +161,7 @@ fn workflow() -> Workflow {
     .unwrap();
     assert!(matches!(steps[1].step_type, StepType::Agent));
     Workflow {
+        project_scope: None,
         pinned: false,
         id: "wf-793".into(),
         name: "autoCode".into(),
@@ -248,7 +251,7 @@ async fn a_room_step_is_principal_without_a_token_at_launch_and_after_resume() {
     env.set("KRONN_HOST_BIN", dir.path().join("host-bin"));
     env.set("TMPDIR", dir.path().join("tmp"));
     env.set("KRONN_ACP_ADAPTER_CLAUDE", "0");
-    env.set("KT793_DIR", &marks);
+    env.set("CLAUDE_KT793_DIR", &marks);
     let claude = bin.join("claude");
     std::fs::write(&claude, FAKE_CLAUDE).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();

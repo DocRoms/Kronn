@@ -1,5 +1,5 @@
 //! KT-984 — periodic run retention. A pass trims the step outputs of old runs
-//! (`server.run_payload_retention_days`, default 30) and, when opted in,
+//! (`server.run_payload_retention_days`, off until the user chooses a window; Settings suggests 30) and, when opted in,
 //! deletes old runs (`server.run_retention_days`). Both go through
 //! `db::run_retention`, in chunks, pausing between them so the shared write
 //! connection keeps serving requests. Never at boot: the first pass waits.

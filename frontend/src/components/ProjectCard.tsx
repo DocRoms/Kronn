@@ -36,6 +36,7 @@ import { ContextHelp } from './ContextHelp';
 import { ProjectDockerPanel } from './ProjectDockerPanel';
 import { ProjectGitBlock } from './project/ProjectGitBlock';
 import { ProjectDependenciesBlock } from './project/ProjectDependenciesBlock';
+import { ProjectGithubRow } from './project/ProjectGithubRow';
 import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCachedResource';
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
@@ -1883,6 +1884,10 @@ export function ProjectCard({
                 projectId={proj.id}
                 repoUrl={proj.repo_url ?? null}
                 enabled={detailMode && isOpen && detailView === 'overview' && proj.path_exists !== false}
+              />
+              <ProjectGithubRow
+                projectId={proj.id}
+                enabled={detailMode && isOpen && detailView === 'overview'}
               />
               <ProjectDependenciesBlock
                 projectId={proj.id}

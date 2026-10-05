@@ -56,7 +56,10 @@ jobs:
   quality-gates:
     name: CI quality gates on the release commit
     needs: release-checks
+    # A called workflow gets no more than its caller grants: cover every
+    # permission its jobs declare (the timing observer reads Actions runs).
     permissions:
+      actions: read
       contents: read
     uses: ./.github/workflows/ci-test.yml
     with:

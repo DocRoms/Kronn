@@ -1579,6 +1579,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 [&now],
             )?;
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
                 project_id: None,
@@ -1728,6 +1729,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             )?;
 
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
                 project_id: None,
@@ -5313,6 +5315,7 @@ async fn optional_variable_http_run(
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
         project_id: Some("optional-input-project".into()),
@@ -5499,6 +5502,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
         project_id: Some("goto-fallback-project".into()),
@@ -5633,6 +5637,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
         project_id: None,
@@ -6246,6 +6251,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
         project_id: Some("required-input-project".into()),
@@ -11501,6 +11507,46 @@ async fn workflow_create_with_valid_payload_returns_ok() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn desktop_port_is_validated_saved_and_read_back() {
+    let app = test_app();
+    for bad in [0, 80, 1023, 65536, -5] {
+        let (status, json) = post_json(
+            app.clone(),
+            "/api/config/desktop-port",
+            serde_json::json!({ "port": bad }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], false, "{bad}");
+        assert!(json["error"].as_str().unwrap().contains("1024"), "{bad}");
+    }
+
+    let (_, json) = post_json(
+        app.clone(),
+        "/api/config/desktop-port",
+        serde_json::json!({ "port": 47315 }),
+    )
+    .await;
+    assert_eq!(json["success"], true, "{json}");
+    assert_eq!(json["data"]["saved"], 47315);
+    assert_eq!(json["data"]["min"], 1024);
+    assert_eq!(json["data"]["max"], 65535);
+
+    let (_, json) = get_json(app, "/api/config/desktop-port").await;
+    assert_eq!(json["data"]["saved"], 47315);
+    assert!(json["data"]["current"].as_u64().unwrap() > 0);
+
+    // The desktop shell reads this exact file at launch.
+    let raw = std::fs::read_to_string(
+        kronn::core::config::config_dir()
+            .unwrap()
+            .join("desktop-port.json"),
+    )
+    .unwrap();
+    assert_eq!(kronn::core::desktop_port::parse_port(&raw), Some(47315));
+}
+
+#[tokio::test]
 async fn server_config_returns_defaults() {
     let app = test_app();
     let (status, json) = get_json(app, "/api/config/server").await;
@@ -11518,7 +11564,7 @@ async fn server_config_returns_defaults() {
     assert_eq!(json["data"]["agent_handoff_paid_limit"], 1);
     assert_eq!(json["data"]["agent_handoff_paid_unlimited"], false);
     assert_eq!(json["data"]["execution_variable_retention_days"], 30);
-    assert_eq!(json["data"]["run_payload_retention_days"], 30);
+    assert_eq!(json["data"]["run_payload_retention_days"], 0);
     assert_eq!(
         json["data"]["agent_handoff_blocked_agents"],
         serde_json::json!([])
@@ -22220,6 +22266,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "DisabledWF".into(),
@@ -22279,6 +22326,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "VarsWF".into(),
@@ -22740,6 +22788,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
             name: "TestWF".into(),
@@ -25541,6 +25590,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
                 project_id: None,
@@ -25750,6 +25800,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
                 project_id: None,
@@ -25841,4 +25892,289 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
     assert_eq!(fixed["success"], true, "{fixed}");
     let (_, report) = get_json(app, "/api/workflows/workflow-collect-unsafe/unsafe-steps").await;
     assert_eq!(report["data"], serde_json::json!([]));
+}
+
+// ── GitHub connection per project (design note §4.5, D2) ────────────────────
+mod github_connection_api {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const FINE: &str = "github_pat_11R16apiFINEgrainedSECRET0123456789";
+    const MACHINE: &str = "gho_r16apiMACHINEsecret0123456789";
+
+    async fn send(app: Router, verb: &str, uri: &str, body: Option<Value>) -> Value {
+        let mut req = Request::builder().method(verb).uri(uri);
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        let mut req = req
+            .body(body.map_or_else(Body::empty, |b| Body::from(serde_json::to_vec(&b).unwrap())))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                45678,
+            ))));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            !text.contains(FINE) && !text.contains(MACHINE),
+            "a token reached an API response: {text}"
+        );
+        serde_json::from_str(&text).unwrap()
+    }
+
+    async fn state_with_project(id: &str, repo_url: Option<&str>) -> AppState {
+        let state = test_state();
+        state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
+        let (id, repo_url) = (id.to_string(), repo_url.map(str::to_string));
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, repo_url, created_at, updated_at)
+                     VALUES (?1, ?1, '/nowhere/' || ?1, ?2, datetime('now'), datetime('now'))",
+                    rusqlite::params![id, repo_url],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        state
+    }
+
+    async fn github_stub() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                format!("Bearer {MACHINE}").as_str(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("X-OAuth-Scopes", "repo, workflow")
+                    .set_body_json(serde_json::json!({ "login": "octo" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                format!("Bearer {FINE}").as_str(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": "octo" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/user/repos"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{ "full_name": "octo/kronn" }])),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    #[serial(github_machine_token)]
+    async fn a_new_project_is_not_connected_and_shows_an_available_machine_token() {
+        let state = state_with_project("r16-api-new", Some("https://github.com/octo/kronn")).await;
+        let app = || build_router_with_auth(state.clone(), false);
+
+        kronn::core::github_connection::override_machine_token_for_tests(Some(None));
+        let body = send(app(), "GET", "/api/projects/r16-api-new/github", None).await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(body["data"]["mode"], "not_connected");
+        assert_eq!(body["data"]["state"], "not_connected");
+        assert_eq!(body["data"]["on_github"], true);
+        assert_eq!(body["data"]["connected_on_upgrade"], false);
+
+        kronn::core::github_connection::override_machine_token_for_tests(Some(Some(MACHINE)));
+        let body = send(app(), "GET", "/api/projects/r16-api-new/github", None).await;
+        assert_eq!(body["data"]["state"], "available_but_off");
+        assert_eq!(body["data"]["machine_token_available"], true);
+        assert!(
+            kronn::core::github_connection::env_for_launch(Some("r16-api-new"))
+                .await
+                .is_empty()
+        );
+
+        let missing = send(app(), "GET", "/api/projects/nope/github", None).await;
+        assert_eq!(missing["success"], false);
+        kronn::core::github_connection::override_machine_token_for_tests(None);
+    }
+
+    #[tokio::test]
+    #[serial(github_machine_token)]
+    async fn connect_turn_off_and_stored_token_round_trip_without_leaking_it() {
+        let server = github_stub().await;
+        std::env::set_var("KRONN_GITHUB_API_BASE", server.uri());
+        let state = state_with_project("r16-api-flow", Some("git@github.com:octo/kronn.git")).await;
+        let app = || build_router_with_auth(state.clone(), false);
+        let uri = "/api/projects/r16-api-flow/github";
+
+        // gh login with no machine token is refused.
+        kronn::core::github_connection::override_machine_token_for_tests(Some(None));
+        let refused = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "gh_login" })),
+        )
+        .await;
+        assert_eq!(refused["success"], false);
+        assert!(refused["error"].as_str().unwrap().contains("gh auth login"));
+
+        kronn::core::github_connection::override_machine_token_for_tests(Some(Some(MACHINE)));
+        let body = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "gh_login" })),
+        )
+        .await;
+        assert_eq!(body["data"]["state"], "connected_gh_login", "{body}");
+        assert_eq!(body["data"]["scope"]["verified"], true);
+        assert_eq!(body["data"]["scope"]["broad"], true);
+        assert_eq!(
+            body["data"]["scope"]["scopes"],
+            serde_json::json!(["repo", "workflow"])
+        );
+        let env = kronn::core::github_connection::env_for_launch(Some("r16-api-flow")).await;
+        assert!(env.iter().all(|(_, value)| value == MACHINE) && env.len() == 3);
+
+        // A stored fine-grained token replaces it, encrypted at rest.
+        let body = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "stored_token", "token": format!(" {FINE} ") })),
+        )
+        .await;
+        assert_eq!(body["data"]["state"], "connected_stored_token", "{body}");
+        assert_eq!(body["data"]["scope"]["token_kind"], "fine_grained");
+        assert_eq!(
+            body["data"]["scope"]["repositories"],
+            serde_json::json!(["octo/kronn"])
+        );
+        let stored: String = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT token_encrypted FROM project_github_connections WHERE project_id = 'r16-api-flow'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!stored.contains("FINEgrained"), "token stored in clear");
+        let env = kronn::core::github_connection::env_for_launch(Some("r16-api-flow")).await;
+        assert!(env.iter().all(|(_, value)| value == FINE));
+
+        // Refresh re-reads the scope with the stored token.
+        let body = send(
+            app(),
+            "POST",
+            "/api/projects/r16-api-flow/github/scope",
+            None,
+        )
+        .await;
+        assert_eq!(
+            body["data"]["scope"]["token_kind"], "fine_grained",
+            "{body}"
+        );
+
+        // Turning off: new launches get nothing; the token is erased.
+        let body = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "not_connected" })),
+        )
+        .await;
+        assert_eq!(body["data"]["state"], "available_but_off");
+        assert!(
+            kronn::core::github_connection::env_for_launch(Some("r16-api-flow"))
+                .await
+                .is_empty()
+        );
+        let remaining: Option<String> = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT token_encrypted FROM project_github_connections WHERE project_id = 'r16-api-flow'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(remaining.is_none());
+
+        // Refresh while off reports the machine token's scope for the dialog.
+        let body = send(
+            app(),
+            "POST",
+            "/api/projects/r16-api-flow/github/scope",
+            None,
+        )
+        .await;
+        assert_eq!(body["data"]["scope"]["token_kind"], "oauth", "{body}");
+
+        // Invalid pasted tokens are refused without being echoed.
+        let body = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "stored_token", "token": "ghp_bad value" })),
+        )
+        .await;
+        assert_eq!(body["success"], false);
+        assert!(!body["error"].as_str().unwrap().contains("bad value"));
+        let body = send(
+            app(),
+            "PUT",
+            uri,
+            Some(serde_json::json!({ "mode": "stored_token" })),
+        )
+        .await;
+        assert_eq!(body["success"], false);
+
+        std::env::remove_var("KRONN_GITHUB_API_BASE");
+        kronn::core::github_connection::override_machine_token_for_tests(None);
+    }
+
+    #[tokio::test]
+    #[serial(github_machine_token)]
+    async fn an_unreachable_github_reports_an_unverified_scope() {
+        std::env::set_var("KRONN_GITHUB_API_BASE", "http://127.0.0.1:9");
+        kronn::core::github_connection::override_machine_token_for_tests(Some(Some(MACHINE)));
+        let state = state_with_project("r16-api-down", None).await;
+        let app = build_router_with_auth(state.clone(), false);
+        let body = send(
+            app,
+            "PUT",
+            "/api/projects/r16-api-down/github",
+            Some(serde_json::json!({ "mode": "gh_login" })),
+        )
+        .await;
+        assert_eq!(body["data"]["state"], "connected_gh_login");
+        assert_eq!(body["data"]["on_github"], false);
+        assert_eq!(body["data"]["scope"]["verified"], false);
+        assert!(body["data"]["scope"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("could not be reached"));
+        std::env::remove_var("KRONN_GITHUB_API_BASE");
+        kronn::core::github_connection::override_machine_token_for_tests(None);
+    }
 }

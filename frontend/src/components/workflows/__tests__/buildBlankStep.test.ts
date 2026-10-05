@@ -18,7 +18,7 @@
 //     `.data` / `.summary` from the very first save
 
 import { describe, it, expect } from 'vitest';
-import { buildBlankStep } from '../../../lib/workflowUiUtils';
+import { buildBlankStep, splitToolList, withStepTools } from '../../../lib/workflowUiUtils';
 
 describe('buildBlankStep — default tier semantic', () => {
   it('NULL defaultTier : no agent_settings field set (legacy-compatible)', () => {
@@ -100,5 +100,20 @@ describe('buildBlankStep — default tier semantic', () => {
       expect(step.mode).toEqual(nullStep.mode);
       expect(step.output_format).toEqual(nullStep.output_format);
     }
+  });
+});
+
+describe('declared step tools (KT-908)', () => {
+  it('keeps typed separators while editing and drops empty names when done', () => {
+    expect(splitToolList('Read, ')).toEqual(['Read', '']);
+    expect(splitToolList('Read, ,Grep', true)).toEqual(['Read', 'Grep']);
+    expect(splitToolList('', true)).toEqual([]);
+  });
+
+  it('patches one list and keeps the other settings', () => {
+    const settings = withStepTools({ agent_settings: { tier: 'reasoning' } }, { cli: ['Read'] });
+    expect(settings).toEqual({ tier: 'reasoning', tools: { cli: ['Read'], kronn_internal: [] } });
+    const next = withStepTools({ agent_settings: settings }, { kronn_internal: ['task_get'] });
+    expect(next.tools).toEqual({ cli: ['Read'], kronn_internal: ['task_get'] });
   });
 });
