@@ -139,7 +139,12 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     }
 
     // Open database
-    let database = Arc::new(Database::open().expect("Failed to open database"));
+    // An error (disk too full for the pre-migration backup, a failed migration)
+    // reaches the startup screen instead of panicking the backend thread.
+    let database = Arc::new(
+        Database::open()
+            .map_err(|e| anyhow::anyhow!("Kronn could not open its database: {e:#}"))?,
+    );
     tracing::info!(
         "Database opened at {}/kronn.db",
         config::config_dir().unwrap().display()

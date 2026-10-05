@@ -103,6 +103,9 @@ fn keychain_read_result(read: keyring::Result<String>) -> Result<Option<String>>
         Ok(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(keyring::Error::NoStorageAccess(e)) => Err(VaultError::Denied(e.to_string()).into()),
+        Err(e @ (keyring::Error::BadEncoding(_) | keyring::Error::Ambiguous(_))) => {
+            Err(VaultError::Corrupted(e.to_string()).into())
+        }
         Err(e) => Err(VaultError::Unavailable(e.to_string()).into()),
     }
 }
@@ -565,6 +568,12 @@ mod tests {
         assert!(matches!(
             denied.downcast_ref::<VaultError>(),
             Some(VaultError::Denied(_))
+        ));
+        let damaged =
+            keychain_read_result(Err(keyring::Error::BadEncoding(vec![0xff]))).unwrap_err();
+        assert!(matches!(
+            damaged.downcast_ref::<VaultError>(),
+            Some(VaultError::Corrupted(_))
         ));
         let failed =
             keychain_read_result(Err(keyring::Error::PlatformFailure("boom".into()))).unwrap_err();

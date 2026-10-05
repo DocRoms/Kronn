@@ -1716,24 +1716,47 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
     // used to carry undecryptable ciphertext only (the 2026-06-30 re-enter-
     // everything pain). Safe to ship: the blob is useless without the passphrase;
     // the raw key itself is still never exported.
-    let recovery_code = config::config_dir()
-        .ok()
-        .and_then(|d| crate::core::recovery::load_blob(&d))
-        .map(|b| crate::core::recovery::to_code(&b));
+    // Only a blob known to wrap the key in use can open the exported secrets
+    // elsewhere; any other is left out and the UI says so.
+    let active_key = state.config.read().await.encryption_secret.clone();
+    let (recovery_code, export_warning) =
+        export_recovery_code(config::config_dir().ok().as_deref(), active_key.as_deref());
 
     let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
         Ok(b) => b,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
         .header(
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"kronn-export.zip\"",
-        )
-        .body(Body::from(bytes))
-        .unwrap()
+        );
+    if let Some(warning) = export_warning {
+        response = response.header("X-Kronn-Export-Warning", warning);
+    }
+    response.body(Body::from(bytes)).unwrap()
+}
+
+/// The recovery code to bundle (only a blob verified for the key in use) and,
+/// when a recovery.key exists but cannot be bundled, the warning code.
+fn export_recovery_code(
+    dir: Option<&std::path::Path>,
+    key: Option<&str>,
+) -> (Option<String>, Option<&'static str>) {
+    let (Some(dir), Some(key)) = (dir, key) else {
+        return (None, None);
+    };
+    use crate::core::recovery::{matches_key, RecoveryMatch};
+    match matches_key(dir, key) {
+        RecoveryMatch::Absent => (None, None),
+        RecoveryMatch::Matches => (
+            crate::core::recovery::load_blob(dir).map(|b| crate::core::recovery::to_code(&b)),
+            None,
+        ),
+        _ => (None, Some("recovery-not-bundled")),
+    }
 }
 
 /// Assemble the export ZIP: data.json + config.toml (+ recovery.key when the
@@ -1779,10 +1802,15 @@ fn build_export_zip(
 /// "re-encrypt imported secrets" with the source machine's passphrase.
 /// Returns user-facing warnings for the ImportResult.
 fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
-    let Ok(blob) = crate::core::recovery::from_code(code) else {
-        return vec![
-            "The backup carries a recovery blob but it is malformed — ignored.".to_string(),
-        ];
+    let blob = match crate::core::recovery::from_code(code) {
+        Ok(blob) => blob,
+        Err(reason) => {
+            return vec![format!(
+                "The backup's recovery data is damaged ({reason}) and was not kept (malformed): \
+                 the imported secrets cannot be re-encrypted with it. Use the recovery code saved \
+                 on the source machine, or re-enter the secrets."
+            )]
+        }
     };
     if crate::core::recovery::load_blob(dir).as_ref() == Some(&blob)
         || crate::core::recovery::imported_blobs(dir).contains(&blob)
@@ -2009,6 +2037,26 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             "{dropped_github} project GitHub connection(s) removed: their projects are not part of this import"
         ));
     }
+    // Only when imported MCP secrets really are under another key (an import
+    // from this machine is readable as it is), and point to the lossless path.
+    let active_key = state.config.read().await.encryption_secret.clone();
+    let foreign = data
+        .mcp_configs
+        .iter()
+        .filter(|c| !c.env_encrypted.is_empty())
+        .filter(|c| {
+            active_key
+                .as_deref()
+                .is_none_or(|k| crate::db::mcps::decrypt_env(&c.env_encrypted, k).is_err())
+        })
+        .count();
+    if foreign > 0 {
+        warnings.push(format!(
+            "{foreign} imported MCP configuration(s) hold secrets encrypted with another key: use \
+             Plugins → 'Re-encrypt imported secrets' with the source machine's recovery \
+             passphrase, or re-enter them"
+        ));
+    }
 
     // Import custom skills/directives/profiles (file-based)
     for skill in &data.custom_skills {
@@ -2097,13 +2145,6 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
         }
     }
 
-    // Check for MCP secrets warning: if imported config has any MCP-related env vars,
-    // the encryption_secret is different so they need reconfiguration
-    warnings.push(
-        "MCP secrets are encrypted with a different key — reconfigure them in the Plugins page"
-            .to_string(),
-    );
-
     if let Err(e) = config::save(&config).await {
         tracing::error!("Failed to save merged config: {}", e);
         warnings.push(format!("Failed to save config: {}", e));
@@ -2163,10 +2204,8 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
     // An oversized one is refused like the others.
     let recovery_code = if let Ok(mut f) = archive.by_name("recovery.key") {
         let contents = read_zip_entry_capped(&mut f, "recovery.key", ZIP_CAP_RECOVERY_KEY)?;
-        let trimmed = contents.trim().to_string();
-        crate::core::recovery::from_code(&trimmed)
-            .ok()
-            .map(|_| trimmed)
+        // Passed on raw: persist_imported_recovery reports a damaged blob.
+        Some(contents.trim().to_string())
     } else {
         None
     };
@@ -2273,7 +2312,15 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     let Ok(dir) = config::config_dir() else {
         return Json(ApiResponse::err("Reset failed: no data directory"));
     };
-    if let Err(e) = crate::core::credential_store::forget_provider_keys(&dir, &state.db).await {
+    // With the key locked, no key can ever read the token row: it goes too, so
+    // the next start finds no ciphertext and mints a key and a token.
+    let key_locked = state.config.read().await.encryption_secret.is_none();
+    let forget = if key_locked {
+        crate::core::credential_store::forget_all(&dir, &state.db).await
+    } else {
+        crate::core::credential_store::forget_provider_keys(&dir, &state.db).await
+    };
+    if let Err(e) = forget {
         return Json(ApiResponse::err(format!(
             "Reset cleared the data but not the stored keys: {e}"
         )));
@@ -2356,6 +2403,9 @@ pub struct RecoveryStatus {
     /// Recovery data kept from imports or a replaced recovery.key, usable by
     /// "Re-encrypt imported secrets".
     pub kept_recovery_blobs: u32,
+    /// The key is in use but the stored credentials could not be loaded at
+    /// start (disk full, unreadable config.toml): why, to fix before a restart.
+    pub credentials_unavailable: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2394,8 +2444,16 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
         configured,
         matches_key,
         key_locked: key.is_none(),
-        key_copies_kept: !(report.copies >= 2 || (report.copies >= 1 && matches_key)),
-        config_holds_key: dir.is_some_and(|d| config::retained_disk_key(d).is_some()),
+        // The boot's actual retention decision (two copies, every column
+        // readable), not a recomputation from part of its inputs.
+        key_copies_kept: report.file_keeps_key,
+        // Only the key in use counts: another value kept aside does not.
+        config_holds_key: match (dir, key) {
+            (Some(d), Some(k)) => config::retained_disk_key(d)
+                .is_some_and(|kept| crate::core::keyvault::same_key(&kept, k)),
+            _ => false,
+        },
+        credentials_unavailable: dir.and_then(crate::core::credential_store::boot_failure),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -3205,16 +3263,13 @@ mod tests {
         let err = extract_zip(&bytes).expect_err("oversized config.toml must refuse");
         assert!(err.contains("zip bomb"), "{err}");
 
-        // Within caps → the archive still imports (recovery dropped as
-        // non-parsing, config parsed, data ok).
+        // Within caps → the archive still imports (the damaged recovery entry
+        // is passed on for persist_imported_recovery to report, C3-20).
         let bytes = zip_with(&[("data.json", &data), ("recovery.key", b"not-a-code")]);
         let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
         assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         assert!(cfg.is_none());
-        assert!(
-            key.is_none(),
-            "non-parsing recovery code is dropped, not an error"
-        );
+        assert_eq!(key.as_deref(), Some("not-a-code"));
     }
 
     // ─── export round-trip (v5 fields: QP versions + rejection counters) ─────
@@ -3487,11 +3542,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::core::crypto::generate_secret();
         let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(!status.configured && status.key_copies_kept && !status.config_holds_key);
+        assert!(!status.configured && !status.config_holds_key);
         assert!(!status.matches_key && !status.key_locked);
 
         // A blob for another key: configured, but no recovery copy of this key.
-        config::retain_disk_key(dir.path(), "abcd");
         crate::core::recovery::save_blob(
             dir.path(),
             &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
@@ -3499,33 +3553,34 @@ mod tests {
         )
         .unwrap();
         let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(status.configured && !status.matches_key);
+
+        // C3-03: config.toml keeping ANOTHER value does not hold the key in use.
+        config::retain_disk_key(dir.path(), "abcd");
+        assert!(!recovery_status_in(Some(dir.path()), Some(&key)).config_holds_key);
+        config::retain_disk_key(dir.path(), &key.to_uppercase());
+        assert!(recovery_status_in(Some(dir.path()), Some(&key)).config_holds_key);
         config::release_disk_key(dir.path());
-        assert!(status.configured && !status.matches_key && status.key_copies_kept);
-        assert!(status.config_holds_key);
 
         crate::core::recovery::save_blob(
             dir.path(),
             &crate::core::recovery::wrap_key(&key, "pw").unwrap(),
         )
         .unwrap();
-        // A verified passphrase with no vault copy recorded yet: still kept.
+        assert!(recovery_status_in(Some(dir.path()), Some(&key)).matches_key);
+        // C3-22: key_copies_kept is the boot's actual decision, whatever the
+        // copy count says (a column it cannot decrypt keeps the file copy).
+        crate::core::keystore::record_report_for_tests(dir.path(), 2, &["keychain"], true);
         let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(status.matches_key && status.key_copies_kept);
-        // One vault copy + verified passphrase, then two vault copies without
-        // it (keychain + sidecar on macOS): the config copy may go (C2-21).
-        crate::core::keystore::record_report_for_tests(dir.path(), 1, &["keychain"]);
-        let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(!status.key_copies_kept && status.copies == 1);
+        assert!(status.key_copies_kept && status.copies == 2);
         assert_eq!(status.stale_sources, vec!["keychain".to_string()]);
-        std::fs::remove_file(dir.path().join("recovery.key")).unwrap();
-        crate::core::keystore::record_report_for_tests(dir.path(), 2, &[]);
-        let status = recovery_status_in(Some(dir.path()), Some(&key));
-        assert!(!status.matches_key && !status.key_copies_kept);
+        crate::core::keystore::record_report_for_tests(dir.path(), 2, &[], false);
+        assert!(!recovery_status_in(Some(dir.path()), Some(&key)).key_copies_kept);
 
         let locked = recovery_status_in(Some(dir.path()), None);
         assert!(locked.key_locked && !locked.matches_key);
         let none = recovery_status_in(None, None);
-        assert!(!none.configured && none.key_copies_kept);
+        assert!(!none.configured);
     }
 
     #[test]
@@ -3709,6 +3764,55 @@ mod tests {
             )
             .unwrap();
             assert_eq!(token.as_str(), "github_pat_keep");
+        })
+        .await;
+    }
+
+    /// C3-13 — re-importing this machine's backup (same key) does not claim
+    /// that MCP secrets are under another key.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_same_key_import_raises_no_foreign_secret_warning() {
+        with_data_dir(|_| async {
+            let state = test_state();
+            let key = state.config.read().await.encryption_secret.clone().unwrap();
+            let mut env = std::collections::HashMap::new();
+            env.insert("T".to_string(), "v".to_string());
+            let enc = crate::db::mcps::encrypt_env(&env, &key).unwrap();
+            state
+                .db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','github','stdio')",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json) \
+                         VALUES ('c1','s1','local', ?1, '[\"T\"]')",
+                        [enc],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let export = build_export(&state).await.unwrap();
+            let result = do_import_db(&state, &export).await.unwrap();
+            assert!(
+                !result.warnings.iter().any(|w| w.contains("another key")),
+                "{:?}",
+                result.warnings
+            );
+            // A foreign one is named, with the lossless path.
+            let mut foreign = build_export(&state).await.unwrap();
+            let other = crate::core::crypto::generate_secret();
+            foreign.mcp_configs[0].env_encrypted =
+                crate::db::mcps::encrypt_env(&env, &other).unwrap();
+            let result = do_import_db(&state, &foreign).await.unwrap();
+            assert!(
+                result.warnings.iter().any(|w| w.contains("Re-encrypt imported secrets")),
+                "{:?}",
+                result.warnings
+            );
         })
         .await;
     }
@@ -4125,14 +4229,53 @@ mod tests {
     }
 
     #[test]
-    fn extract_zip_drops_a_corrupt_recovery_entry_without_failing_import() {
+    fn extract_zip_passes_a_corrupt_recovery_entry_on_and_the_import_names_it() {
+        // C3-20: the damaged blob reaches persist_imported_recovery, which says so.
         let data_json = serde_json::to_string(&empty_export()).unwrap();
-        let bytes = build_export_zip(&data_json, "", Some("not-a-valid-recovery-code")).unwrap();
-        let (_, _, extracted) = extract_zip(&bytes).unwrap();
-        assert!(
-            extracted.is_none(),
-            "garbage recovery.key must be dropped, not error"
+        let good = crate::core::recovery::to_code(
+            &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
+                .unwrap(),
         );
+        let damaged = format!("{}0", &good[..good.len() - 1]);
+        let damaged = if damaged == good {
+            format!("{}1", &good[..good.len() - 1])
+        } else {
+            damaged
+        };
+        let bytes = build_export_zip(&data_json, "", Some(&damaged)).unwrap();
+        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        assert_eq!(extracted.as_deref(), Some(damaged.as_str()));
+        let tmp = tempfile::tempdir().unwrap();
+        let warnings = persist_imported_recovery(tmp.path(), &damaged);
+        assert!(
+            warnings[0].contains("damaged") && warnings[0].contains("checksum"),
+            "{warnings:?}"
+        );
+    }
+
+    /// C3-23 — only a recovery.key verified for the key in use is bundled;
+    /// another one is left out with a warning code.
+    #[test]
+    fn export_bundles_only_a_recovery_key_for_the_key_in_use() {
+        use crate::core::recovery;
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::core::crypto::generate_secret();
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), Some(&key)),
+            (None, None)
+        );
+        recovery::save_blob(
+            dir.path(),
+            &recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            export_recovery_code(Some(dir.path()), Some(&key)),
+            (None, Some("recovery-not-bundled"))
+        );
+        recovery::save_blob(dir.path(), &recovery::wrap_key(&key, "pw").unwrap()).unwrap();
+        let (code, warning) = export_recovery_code(Some(dir.path()), Some(&key));
+        assert!(code.is_some() && warning.is_none());
     }
 
     /// Import must NEVER touch local recovery material: the source blob is kept

@@ -65,20 +65,29 @@ pub async fn resolve_key_and_credentials(
     )
     .await
     {
-        Ok(result) => tracing::info!("Credential store: {result:?}"),
+        Ok(result) => {
+            crate::core::credential_store::record_boot_failure(&dir, None);
+            tracing::info!("Credential store: {result:?}");
+        }
         Err(e) if crate::core::credential_store::is_armed(&dir) => tracing::error!(
             "Credential store armed, but finishing its migration failed (the next start \
              completes it): {e:#}"
         ),
         Err(e) => {
             tracing::error!("Credential store not armed, config.toml left as it is: {e:#}");
-            // A stored token we did not load is "auth locked", never "no auth".
+            if config.encryption_secret.is_some() {
+                // The key is fine: say why the credentials are missing.
+                crate::core::credential_store::record_boot_failure(&dir, Some(format!("{e:#}")));
+            }
+            // A stored token we did not load is "auth locked", never "no auth";
+            // neither the token nor its auth flag could be read, so fail closed.
             if config.server.auth_token.is_none()
                 && crate::core::credential_store::stored_auth_token_exists(database)
                     .await
                     .unwrap_or(true)
             {
                 config.server.auth_locked = true;
+                config.server.auth_enabled = true;
             }
         }
     }

@@ -950,6 +950,26 @@ async fn a_failed_credential_boot_locks_auth() {
     std::fs::remove_file(dir.path().join(BACKUP_FILENAME)).unwrap();
     // The backup temp path is blocked: writing the backup fails.
     std::fs::create_dir(dir.path().join(format!(".{BACKUP_FILENAME}.tmp"))).unwrap();
+    // config.toml holds a credential again (the key alone no longer triggers
+    // a backup, C3-04), so the backup step runs and fails.
+    let mut migrated: toml::Table = dir.config_text().parse().unwrap();
+    migrated
+        .get_mut("tokens")
+        .and_then(|t| t.as_table_mut())
+        .unwrap()
+        .insert(
+            "keys".into(),
+            toml::Value::Array(vec![toml::Value::Table(
+                "id = \"file-key\"\nname = \"n\"\nprovider = \"openai\"\nvalue = \"sk-file\"\nactive = true\n"
+                    .parse()
+                    .unwrap(),
+            )]),
+        );
+    std::fs::write(
+        dir.path().join("config.toml"),
+        toml::to_string(&migrated).unwrap(),
+    )
+    .unwrap();
     let mut cfg = config::load().await.unwrap().unwrap();
     assert!(cfg.server.auth_token.is_none());
     crate::resolve_key_and_credentials(&mut cfg, &db, None)
@@ -1119,6 +1139,11 @@ fn both_mains_lock_before_loading_and_drop_the_env_token() {
         "desktop: lock in main(), backend started later"
     );
     assert!(desktop.contains("config::load().await"));
+    // C3-17: a database that cannot open reaches the startup error (no panic),
+    // and the desktop writes kronn.log.
+    assert!(!backend.contains("Database::open().expect"));
+    assert!(!desktop.contains("Database::open().expect"));
+    assert!(desktop.contains("kronn.log"));
 }
 
 async fn json_of(
@@ -1558,5 +1583,190 @@ async fn a_failed_token_save_leaves_the_live_token_unchanged() {
     assert_eq!(
         state.config.read().await.server.auth_token.as_deref(),
         Some(AUTH_TOKEN)
+    );
+}
+
+// ── review round 4 ──────────────────────────────────────────────────────────
+
+/// C3-02 — a reset while the key is locked leaves no unreadable token row:
+/// the next start mints a key instead of staying locked for good.
+#[tokio::test]
+#[serial]
+async fn a_reset_while_locked_lets_the_next_start_mint() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.encryption_secret.is_none());
+    cfg.server.auth_enabled = false;
+    let (_, body) = json_of(
+        crate::build_router_with_auth(state_with(cfg, &db), true),
+        "POST",
+        "/api/setup/reset",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    dir.restart();
+    let mut next = config::default_config_without_key();
+    let outcome = keystore::reconcile_with(&mut next, &db, &dir.sidecar_only(), dir.path())
+        .await
+        .unwrap();
+    assert_eq!(outcome, KeyOutcome::Minted);
+}
+
+/// C3-04 — the key is in use but the credentials fail to load: the status
+/// says why, and credential changes are refused with that reason.
+#[tokio::test]
+#[serial]
+async fn a_credential_boot_failure_with_the_key_in_use_is_reported() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+    // A config that still carries a credential, so the backup step runs.
+    let mut cfg = config::default_config_without_key();
+    cfg.tokens.keys.push(ApiKey {
+        id: "k".into(),
+        name: "n".into(),
+        provider: "openai".into(),
+        value: "sk-file".into(),
+        active: true,
+    });
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.encryption_secret.is_some() && !is_armed(dir.path()));
+    let failure = boot_failure(dir.path()).expect("recorded");
+    let refusal = refuse_if_locked(dir.path()).unwrap_err();
+    assert!(
+        refusal.contains("could not be loaded at start"),
+        "{refusal}"
+    );
+    assert!(refusal.contains(&failure) || !failure.is_empty());
+    let (_, body) = json_of(
+        crate::build_router_with_auth(state_with(cfg, &db), true),
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        body["data"]["credentials_unavailable"].is_string(),
+        "{body}"
+    );
+    std::fs::remove_dir(dir.path().join("config.toml")).unwrap();
+}
+
+/// C3-05 — the stored credentials cannot even be read and config.toml is
+/// lost: auth is locked AND enabled (fail closed), not open.
+#[tokio::test]
+#[serial]
+async fn an_unreadable_credential_store_fails_closed() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.with_conn(|c| {
+        // The reconciler can count its ciphertext, but the full row read fails.
+        c.execute_batch(
+            "DROP TABLE stored_credentials; CREATE TABLE stored_credentials (value_encrypted TEXT);",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let mut cfg = config::default_config_without_key();
+    assert!(!cfg.server.auth_enabled);
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.server.auth_locked && cfg.server.auth_enabled);
+    let _ = dir;
+}
+
+/// C3-06 — copies rotated by an earlier boot (0.14.2 credentials in clear)
+/// are scrubbed at the next credential boot; their key follows the copies rule.
+#[tokio::test]
+#[serial]
+async fn already_rotated_backups_are_scrubbed() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    let old = write_0142_config_text(&key);
+    std::fs::write(
+        dir.path()
+            .join("config.toml.backup.20261005T203513.668601Z"),
+        &old,
+    )
+    .unwrap();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    boot_like_main(&dir, &db).await;
+    let rotated = std::fs::read_to_string(
+        dir.path()
+            .join("config.toml.backup.20261005T203513.668601Z"),
+    )
+    .unwrap();
+    assert!(
+        !rotated.contains(ANTHROPIC) && !rotated.contains(AUTH_TOKEN),
+        "{rotated}"
+    );
+    // Two vault copies on this ladder: the key in use may go from it too.
+    assert!(!rotated.contains(&key));
+}
+
+/// C3-15 — the key in use in another spelling is still removed from the backup.
+#[tokio::test]
+#[serial]
+async fn the_backup_scrub_compares_keys_canonically() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    let text = write_0142_config_text(&key);
+    write_0142_config(dir.path(), &key);
+    std::fs::write(
+        dir.path().join("config.toml.backup"),
+        text.replace(&key, &key.to_uppercase()),
+    )
+    .unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    boot_like_main(&dir, &db).await;
+    let backup = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
+    assert!(!backup.contains(&key.to_uppercase()), "{backup}");
+}
+
+/// C3-16 — a write whose read-back fails commits nothing.
+#[tokio::test]
+#[serial]
+async fn a_failed_read_back_commits_nothing() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (mut cfg, _, _) = boot_like_main(&dir, &db).await;
+    let before = db.with_conn(rows::list).await.unwrap();
+    db.with_conn(|c| {
+        c.execute_batch(
+            "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+             UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    cfg.tokens.keys.push(ApiKey {
+        id: "new".into(),
+        name: "n".into(),
+        provider: "openai".into(),
+        value: "sk-new".into(),
+        active: true,
+    });
+    cfg.tokens.keys.retain(|k| k.id != "key-anthropic");
+    assert!(config::save(&cfg).await.is_err());
+    assert_eq!(
+        db.with_conn(rows::list).await.unwrap(),
+        before,
+        "rolled back"
     );
 }

@@ -590,7 +590,11 @@ async fn start_backend(
     };
 
     // Open database
-    let database = Arc::new(Database::open().expect("Failed to open database"));
+    // An error (disk too full for the pre-migration backup, a failed migration)
+    // reaches the startup screen instead of panicking the backend thread.
+    let database = Arc::new(Database::open().map_err(|e| {
+        anyhow::anyhow!("Kronn could not open its database: {e:#}")
+    })?);
 
     // Resolve the encryption key and the stored credentials now the DB is open.
     kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
@@ -934,13 +938,33 @@ fn main() {
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stdout)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kronn=info".into()),
-        )
-        .init();
+    // stdout plus the data directory's kronn.log, the log the user can read.
+    {
+        use tracing_subscriber::prelude::*;
+        let file_layer = config::config_dir()
+            .ok()
+            .and_then(|dir| {
+                std::fs::create_dir_all(&dir).ok()?;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("kronn.log"))
+                    .ok()
+            })
+            .map(|file| {
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Arc::new(file))
+            });
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "kronn=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+            .with(file_layer)
+            .init();
+    }
 
     // Acquire ownership before constructing the UI. Reusing another process's
     // HTTP listener is unsafe even when versions match: that server can have a

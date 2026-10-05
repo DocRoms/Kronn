@@ -881,7 +881,19 @@ pub(crate) fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result
         target = dir.join(format!("config.toml.backup.{stamp}-{n}"));
         n += 1;
     }
-    std::fs::rename(backup, &target)?;
+    // The older copy may come from 0.14.2, which kept credentials in clear:
+    // the rotated file keeps its settings and key, never the credentials.
+    let existing = std::fs::read_to_string(backup)?;
+    match crate::core::credential_store::without_credentials(&existing) {
+        Some(scrubbed) => {
+            let tmp = dir.join(".config.toml.backup.rotate.tmp");
+            crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
+            std::fs::rename(&tmp, &target)?;
+            std::fs::remove_file(backup)?;
+        }
+        // Unparseable: kept as it is (it may be the only copy of a key).
+        None => std::fs::rename(backup, &target)?,
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -3047,7 +3059,11 @@ mod tests {
             })
             .collect();
         assert_eq!(rotated.len(), 1, "one rotation, not one per call");
-        assert_eq!(std::fs::read_to_string(rotated[0].path()).unwrap(), old);
+        let kept: toml::Table = std::fs::read_to_string(rotated[0].path())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(kept, old.parse::<toml::Table>().unwrap());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -3056,6 +3072,40 @@ mod tests {
         }
         let current = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
         assert!(current.contains("port = 2"));
+    }
+
+    /// C3-06 — a 0.14.2 backup (credentials in clear) is rotated without its
+    /// credentials, keeping its key.
+    #[test]
+    fn a_rotated_0142_backup_keeps_its_key_but_never_its_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml.backup"),
+            "encryption_secret = \"K_OLD\"\n\n[server]\nport = 1\nauth_token = \"tok-0142\"\n\n\
+             [tokens]\n[[tokens.keys]]\nid = \"k\"\nname = \"n\"\nprovider = \"anthropic\"\n\
+             value = \"sk-ant-0142\"\nactive = true\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
+        backup_config_without_credentials(dir.path()).unwrap();
+        let mut found_key = false;
+        for entry in std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+        {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(
+                !text.contains("tok-0142") && !text.contains("sk-ant-0142"),
+                "{:?}",
+                entry.path()
+            );
+            found_key |= entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("config.toml.backup.")
+                && text.contains("K_OLD");
+        }
+        assert!(found_key, "the rotated copy keeps its encryption_secret");
     }
 
     #[test]
