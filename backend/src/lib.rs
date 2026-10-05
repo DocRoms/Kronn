@@ -31,6 +31,37 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Resolve the encryption key and load the stored credentials, right after the
+/// database opens. Both startup paths call this; an `Err` must stop the boot:
+/// continuing could mint or mirror over the only copy of the key (KT-1007).
+pub async fn resolve_key_and_credentials(
+    config: &mut AppConfig,
+    database: &Arc<Database>,
+) -> anyhow::Result<()> {
+    let key_outcome = match crate::core::keystore::reconcile(config, database).await {
+        Ok(outcome) => {
+            tracing::info!("Encryption key reconciled: {outcome:?}");
+            outcome
+        }
+        Err(e) => {
+            tracing::error!("{e:#}");
+            return Err(e);
+        }
+    };
+    match crate::core::credential_store::boot(
+        config,
+        database.clone(),
+        &crate::core::config::config_dir()?,
+        &key_outcome,
+    )
+    .await
+    {
+        Ok(result) => tracing::info!("Credential store: {result:?}"),
+        Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
+    }
+    Ok(())
+}
+
 /// Persist named connections for legacy provider configuration before runtime
 /// state is constructed. Both standalone and embedded startup paths call this
 /// shared bootstrap after key reconciliation.

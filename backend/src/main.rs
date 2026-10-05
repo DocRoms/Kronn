@@ -148,32 +148,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Resolve the encryption key now that the DB is open — `config::load`
-    // deliberately never mints one. NEVER regenerates a key over existing
-    // encrypted data (any registered column). An unreadable vault or database
-    // stops the boot: continuing could mint or mirror over the only copy.
-    let key_outcome = match kronn::core::keystore::reconcile(&mut app_config, &database).await {
-        Ok(outcome) => {
-            tracing::info!("Encryption key reconciled: {outcome:?}");
-            outcome
-        }
-        Err(e) => {
-            tracing::error!("{e:#}");
-            return Err(e);
-        }
-    };
-    // KT-1007 — provider keys and the auth token live in the encrypted store;
-    // loaded here, before the auth-token handling below reads the token.
-    match kronn::core::credential_store::boot(
-        &mut app_config,
-        database.clone(),
-        &config::config_dir()?,
-        &key_outcome,
-    )
-    .await
-    {
-        Ok(result) => tracing::info!("Credential store: {result:?}"),
-        Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
-    }
+    // deliberately never mints one — then load the encrypted credentials. Runs
+    // before the auth-token handling below, which reads the stored token.
+    kronn::resolve_key_and_credentials(&mut app_config, &database).await?;
 
     kronn::core::config::adopt_env_auth_token(&mut app_config.server, env_token);
     let max_agents = if app_config.server.max_concurrent_agents > 0 {

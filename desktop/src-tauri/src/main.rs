@@ -589,31 +589,8 @@ async fn start_backend(
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
 
-    // Resolve the encryption key now the DB is open (see core::keystore) —
-    // NEVER regenerate over existing encrypted data. An unreadable vault or
-    // database stops the boot: continuing could mint or mirror over the key.
-    let key_outcome = match kronn::core::keystore::reconcile(&mut app_config, &database).await {
-        Ok(outcome) => {
-            tracing::info!("Encryption key reconciled: {outcome:?}");
-            outcome
-        }
-        Err(e) => {
-            tracing::error!("{e:#}");
-            return Err(e);
-        }
-    };
-    // KT-1007 — provider keys and the auth token live in the encrypted store.
-    match kronn::core::credential_store::boot(
-        &mut app_config,
-        database.clone(),
-        &config::config_dir()?,
-        &key_outcome,
-    )
-    .await
-    {
-        Ok(result) => tracing::info!("Credential store: {result:?}"),
-        Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
-    }
+    // Resolve the encryption key and the stored credentials now the DB is open.
+    kronn::resolve_key_and_credentials(&mut app_config, &database).await?;
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(
