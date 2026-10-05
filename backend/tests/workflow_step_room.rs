@@ -211,6 +211,7 @@ fn pending_run() -> WorkflowRun {
         parent_run_started_at: None,
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
     }
 }
 

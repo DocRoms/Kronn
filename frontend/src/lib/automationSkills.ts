@@ -40,6 +40,11 @@ export function writeSkillFavorites(ids: ReadonlySet<string>): void {
   }
 }
 
+/** A skill is "Variabilisé" when it declares Claude Code `arguments` (KT-906). */
+export function isVariabilizedSkill(skill: Pick<Skill, 'arguments'>): boolean {
+  return (skill.arguments?.length ?? 0) > 0;
+}
+
 /** Where the skill comes from: the built-in catalog, a third-party skill
  *  vendored into it, or one the user wrote. */
 export function skillOrigin(skill: Pick<Skill, 'is_builtin' | 'external'>): 'kronn' | 'personal' | 'external' {

@@ -63,6 +63,17 @@ pub struct DbUsage {
     pub tables: Vec<DbTableUsage>,
 }
 
+/// What `POST /api/db/compact` changed, measured on disk around the VACUUM.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DbCompaction {
+    pub file_bytes_before: u64,
+    pub wal_bytes_before: u64,
+    pub file_bytes_after: u64,
+    pub wal_bytes_after: u64,
+    pub duration_ms: u64,
+}
+
 /// Current export schema version. Bump when a new table/field is added to
 /// `DbExport` so import can WARN when restoring an older backup (whose missing
 /// tables must NOT wipe newer data — see `do_import_db`'s selective clear).

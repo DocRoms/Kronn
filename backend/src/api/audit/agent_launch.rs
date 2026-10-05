@@ -95,6 +95,8 @@ pub(super) struct AuditAgentLauncher {
         crate::models::ExternalApiConnection,
         crate::agents::runner::ExternalHttpRuntime,
     )>,
+    /// The models every step of the run reported serving (KT-997).
+    provenance: crate::agents::provenance::AgentProvenanceCapture,
 }
 
 impl AuditAgentLauncher {
@@ -123,6 +125,7 @@ impl AuditAgentLauncher {
             http,
             acp,
             connection: None,
+            provenance: Default::default(),
         }
     }
 
@@ -165,6 +168,32 @@ impl AuditAgentLauncher {
             .map(|(connection, _)| connection.id.clone())
     }
 
+    /// The run's model as recorded on `audit_runs.model`: observed by any of its
+    /// steps so far, else the one Settings or the named connection configure.
+    pub(super) async fn run_model(&self, agent: &AgentType, tier: ModelTier) -> Option<String> {
+        let observed = self
+            .provenance
+            .lock()
+            .map(|state| state.observed_models.clone())
+            .unwrap_or_default();
+        if !observed.is_empty() {
+            return run_model_label(&observed, None);
+        }
+        let configured = match self.connection.as_ref().and_then(|(connection, _)| {
+            crate::http_transport::connection_tier_model(connection, tier)
+        }) {
+            Some(model) => Some(model),
+            None => match &self.http {
+                Some(http) => runner::configured_model_flag(agent, tier, Some(&http.model_tiers)),
+                None => {
+                    let tiers = self.state.config.read().await.agents.model_tiers.clone();
+                    runner::configured_model_flag(agent, tier, Some(&tiers))
+                }
+            },
+        };
+        run_model_label(&[], configured.as_deref())
+    }
+
     /// Whether stopping the agent means tripping a token rather than killing a
     /// process: an HTTP agent lives in Kronn's own tool loop, an ACP agent in a
     /// session Kronn cancels and whose process it shuts down. The PID of such a
@@ -191,9 +220,12 @@ impl AuditAgentLauncher {
         tokens: &TokensConfig,
         cancel: Option<CancellationToken>,
         step_target: &str,
+        activity: Option<crate::agents::activity::AgentActivitySink>,
     ) -> Result<AgentProcess, String> {
         let Some(http) = &self.http else {
             return runner::start_agent_with_config(AgentStartConfig {
+                provenance: Some(self.provenance.clone()),
+                activity,
                 full_access: true,
                 tier,
                 // A CLI agent reaches the project through its own filesystem;
@@ -212,6 +244,8 @@ impl AuditAgentLauncher {
             crate::http_transport::connection_tier_model(connection, tier)
         });
         runner::start_agent_with_config(AgentStartConfig {
+            provenance: Some(self.provenance.clone()),
+            activity,
             full_access: true,
             tier,
             tools: Some(
@@ -234,41 +268,130 @@ impl AuditAgentLauncher {
     }
 }
 
-/// Mirrors an HTTP agent's tool activity into the audit tracker every two
-/// seconds for one step. A CLI reports each tool in its stream-json lines; an
-/// HTTP agent only through its run, and may write no text for minutes.
-/// Dropping the guard stops the probe.
-pub(super) struct ToolActivityMirror(tokio::task::JoinHandle<()>);
+/// How often a step without text is looked at: its tokens and its last tool can
+/// move for minutes without a line arriving (an HTTP tool loop, an ACP session).
+pub(super) const ACTIVITY_TICK: Duration = Duration::from_secs(1);
 
-impl ToolActivityMirror {
-    pub(super) fn start(
-        probe: runner::ToolActivityProbe,
-        tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
-        project_id: String,
+/// The last tool of a step's agent, whichever channel reports it: an HTTP agent
+/// writes it on its run's usage, an ACP agent on the activity sink. The usage
+/// is the run's own counters, which both kinds update without a text line.
+pub(super) struct AuditActivityProbe {
+    http: runner::ToolActivityProbe,
+    acp: Option<tokio::sync::watch::Receiver<Option<crate::models::AgentActivity>>>,
+}
+
+impl AuditActivityProbe {
+    pub(super) fn new(
+        http: runner::ToolActivityProbe,
+        acp: Option<tokio::sync::watch::Receiver<Option<crate::models::AgentActivity>>>,
     ) -> Self {
-        Self(tokio::spawn(async move {
-            let mut shown: Option<(String, u32)> = None;
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let Some(activity) = probe.read() else {
-                    continue;
-                };
-                if shown.as_ref() == Some(&activity) {
-                    continue;
-                }
-                if let Ok(mut t) = tracker.lock() {
-                    t.set_tool_activity(&project_id, activity.0.clone(), activity.1);
-                }
-                shown = Some(activity);
-            }
-        }))
+        Self { http, acp }
+    }
+
+    /// The last tool called and the step's call count, `None` before the first.
+    pub(super) fn tool(&self) -> Option<(String, u32)> {
+        self.http.read().or_else(|| {
+            let activity = self.acp.as_ref()?.borrow().clone()?;
+            let label = match activity.target {
+                Some(target) => format!("{} · {target}", activity.tool),
+                None => activity.tool,
+            };
+            Some((label, activity.calls))
+        })
+    }
+
+    pub(super) fn usage(&self) -> Option<runner::ReportedUsage> {
+        self.http.usage()
     }
 }
 
-impl Drop for ToolActivityMirror {
-    fn drop(&mut self) {
-        self.0.abort();
+/// What changed in a step since it was last looked at. Polled on every text
+/// line and on every `ACTIVITY_TICK`, so a tool chain without prose still moves
+/// the counters; a quiet provider moves nothing.
+pub(super) struct StepActivityWatch {
+    probe: AuditActivityProbe,
+    agent_type: AgentType,
+    seen_usage: crate::db::audit_runs::StepTokens,
+    seen_tool: Option<(String, u32)>,
+}
+
+impl StepActivityWatch {
+    pub(super) fn new(probe: AuditActivityProbe, agent_type: AgentType) -> Self {
+        Self {
+            probe,
+            agent_type,
+            seen_usage: crate::db::audit_runs::StepTokens::UNKNOWN,
+            seen_tool: None,
+        }
     }
+
+    /// The step's usage when it moved since the last call.
+    pub(super) fn tokens_moved(&mut self) -> Option<crate::db::audit_runs::StepTokens> {
+        let reading = crate::db::audit_runs::StepTokens::from_reported(self.probe.usage())
+            .inclusive_for(&self.agent_type);
+        (reading.total().is_some() && reading != self.seen_usage).then(|| {
+            self.seen_usage = reading;
+            reading
+        })
+    }
+
+    /// The last tool and the call count when either moved since the last call.
+    pub(super) fn tool_moved(&mut self) -> Option<(String, u32)> {
+        let current = self.probe.tool()?;
+        (self.seen_tool.as_ref() != Some(&current)).then(|| {
+            self.seen_tool = Some(current.clone());
+            current
+        })
+    }
+}
+
+/// What woke a step's read loop: a line (or the end of the stream), the idle
+/// deadline, or the activity tick.
+pub(super) enum StepWake {
+    Line(Option<String>),
+    Idle,
+    Tick,
+}
+
+/// What a step's attempts cost, as their agents reported it (KT-997). Known only
+/// when every attempt that ran reported one: summing over a silent attempt would
+/// show a floor as the whole.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StepCost {
+    #[default]
+    NoAttempt,
+    Known(u64),
+    Unknown,
+}
+
+impl StepCost {
+    pub(super) fn with_attempt(self, reported_usd_micros: Option<u64>) -> Self {
+        match (self, reported_usd_micros) {
+            (Self::Unknown, _) | (_, None) => Self::Unknown,
+            (Self::NoAttempt, Some(cost)) => Self::Known(cost),
+            (Self::Known(sum), Some(cost)) => Self::Known(sum.saturating_add(cost)),
+        }
+    }
+
+    /// The cost to record; `None` keeps the column NULL (unknown, never 0).
+    pub(super) fn usd_micros(self) -> Option<u64> {
+        match self {
+            Self::Known(cost) => Some(cost),
+            Self::NoAttempt | Self::Unknown => None,
+        }
+    }
+}
+
+/// The model a run is recorded with: the one(s) its runtime reported serving,
+/// else the configured one, labelled so it never passes for an observation.
+pub(super) fn run_model_label(observed: &[String], configured: Option<&str>) -> Option<String> {
+    if !observed.is_empty() {
+        return Some(observed.join(" / "));
+    }
+    configured
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| format!("{model} (configured)"))
 }
 
 #[cfg(test)]

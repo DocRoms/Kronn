@@ -519,28 +519,103 @@ async fn validate_child_targets_db(
     validate_child_targets(start_id, own, &own.on_failure, &workflows)
 }
 
-/// Async wrapper: short-circuits when no SubWorkflow step is present (no DB
-/// hit for the common case), else loads every workflow's steps and runs the
-/// pure validator above.
+/// Async wrapper: loads every workflow's steps, checks the graph below the
+/// saved workflow, then the graphs of the workflows that use it as a child.
 async fn validate_sub_workflow_graph_db(
     state: &AppState,
     start_id: &str,
     steps: &[WorkflowStep],
 ) -> Result<(), String> {
-    if !steps
-        .iter()
-        .any(|s| matches!(s.step_type, StepType::SubWorkflow))
-    {
-        return Ok(());
-    }
     let all = state
         .db
         .with_conn(crate::db::workflows::list_workflows)
         .await
         .map_err(|e| format!("DB error loading workflows for sub-workflow validation: {e}"))?;
-    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> =
-        all.into_iter().map(|w| (w.id, w.steps)).collect();
-    validate_sub_workflow_graph(start_id, steps, &graph)
+    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> = all
+        .iter()
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    validate_sub_workflow_graph(start_id, steps, &graph)?;
+    validate_sub_workflow_parents(start_id, steps, &all)
+}
+
+/// Re-validates, with `start_id`'s new steps, every workflow that reaches it
+/// through SubWorkflow steps: editing a child later must not give a parent a
+/// Gate, a cycle or too deep a nesting.
+pub(crate) fn validate_sub_workflow_parents(
+    start_id: &str,
+    start_steps: &[WorkflowStep],
+    workflows: &[Workflow],
+) -> Result<(), String> {
+    fn reaches(
+        from: &str,
+        target: &str,
+        graph: &std::collections::HashMap<String, Vec<WorkflowStep>>,
+        seen: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !seen.insert(from.to_string()) {
+            return false;
+        }
+        graph.get(from).into_iter().flatten().any(|step| {
+            matches!(step.step_type, StepType::SubWorkflow)
+                && step
+                    .sub_workflow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|child| child == target || reaches(child, target, graph, seen))
+        })
+    }
+    let mut graph: std::collections::HashMap<String, Vec<WorkflowStep>> = workflows
+        .iter()
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    graph.insert(start_id.to_string(), start_steps.to_vec());
+    for parent in workflows.iter().filter(|w| w.id != start_id) {
+        if !reaches(
+            &parent.id,
+            start_id,
+            &graph,
+            &mut std::collections::HashSet::new(),
+        ) {
+            continue;
+        }
+        validate_sub_workflow_graph(&parent.id, &graph[&parent.id], &graph).map_err(|e| {
+            format!(
+                "Le workflow « {} » utilise celui-ci comme sous-workflow : {e}",
+                parent.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// The sub-workflow rules for a workflow imported from a repository's
+/// `kronn/` folder. Targets this instance does not know are skipped here: the
+/// repository names them by another instance's ids.
+pub(crate) fn validate_imported_sub_workflow_graph(
+    imported: &Workflow,
+    workflows: &[Workflow],
+) -> Result<(), String> {
+    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> = workflows
+        .iter()
+        .filter(|w| w.id != imported.id)
+        .map(|w| (w.id.clone(), w.steps.clone()))
+        .collect();
+    let resolvable: Vec<WorkflowStep> = imported
+        .steps
+        .iter()
+        .filter(|step| {
+            !matches!(step.step_type, StepType::SubWorkflow)
+                || step
+                    .sub_workflow_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|target| target == imported.id || graph.contains_key(target))
+        })
+        .cloned()
+        .collect();
+    validate_sub_workflow_graph(&imported.id, &resolvable, &graph)?;
+    validate_sub_workflow_parents(&imported.id, &imported.steps, workflows)
 }
 
 /// Per-step required-field check, extracted from the loop above so the
@@ -1007,125 +1082,45 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
 /// because the runner never invokes a shell. Validating the rendered
 /// content here would either be a false safety blanket (we'd reject
 /// legitimate values) or trivially bypassed.
-/// Shells whose `-c` argument is a script.
-const SCRIPT_SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "fish", "ksh", "ash"];
-
-/// The flags after which an interpreter reads inline code, per binary.
-fn inline_code_flags(cmd: &str) -> &'static [&'static str] {
-    let lower = cmd.to_ascii_lowercase();
-    if SCRIPT_SHELLS.contains(&lower.as_str())
-        || lower.starts_with("python")
-        || lower.starts_with("pypy")
-    {
-        &["-c"]
-    } else if matches!(lower.as_str(), "node" | "nodejs" | "bun") {
-        &["-e", "--eval", "-p", "--print"]
-    } else if matches!(lower.as_str(), "ruby" | "perl") {
-        &["-e", "-E"]
-    } else if lower == "php" {
-        &["-r"]
-    } else if matches!(lower.as_str(), "pwsh" | "powershell") {
-        &["-c", "-command"]
-    } else {
-        &[]
-    }
-}
-
-/// Index of the inline script in `args`, if `cmd` is an interpreter given
-/// inline code. Combined short shell flags count (`-ec`, `-lc`).
-fn inline_script_index(cmd: &str, args: &[String]) -> Option<usize> {
-    let flags = inline_code_flags(cmd);
-    if flags.is_empty() {
-        return None;
-    }
-    let shell = SCRIPT_SHELLS.contains(&cmd.to_ascii_lowercase().as_str());
-    args.iter()
-        .position(|arg| {
-            let lower = arg.to_ascii_lowercase();
-            flags.contains(&lower.as_str())
-                || (shell
-                    && !arg.starts_with("--")
-                    && arg.strip_prefix('-').is_some_and(|letters| {
-                        letters.len() > 1
-                            && letters.chars().all(|c| c.is_ascii_alphabetic())
-                            && letters.contains('c')
-                    }))
-        })
-        .map(|index| index + 1)
-        .filter(|index| *index < args.len())
-}
-
-/// Values Kronn produces itself; every other placeholder may carry text an
-/// outsider controls (tracker fields, step outputs, launch inputs).
-fn is_trusted_template_path(path: &str) -> bool {
-    path == "run.id" || path.starts_with("time.now")
-}
-
-/// Refuse an interpreter script that interpolates untrusted text: the value
-/// would be parsed as code (`$(…)`, `"; …`). Shells accept `{{x|sh}}` outside
-/// any quotes; every interpreter accepts the value as a later argv entry.
-fn inline_script_injection(step: &str, cmd: &str, args: &[String]) -> Option<String> {
-    let index = inline_script_index(cmd, args)?;
-    let script = &args[index];
-    let shell = SCRIPT_SHELLS.contains(&cmd.to_ascii_lowercase().as_str());
-    for (path, quoted, in_quotes) in script_placeholders(script) {
-        if is_trusted_template_path(&path) {
-            continue;
-        }
-        if shell && quoted && !in_quotes {
-            continue;
-        }
-        let reason = if shell && quoted {
-            "`|sh` doit être utilisé hors de tout guillemet"
-        } else {
-            "sa valeur serait interprétée comme du code"
-        };
-        let safe = if shell {
-            format!(
-                "Passe la valeur en argument positionnel : `exec_args=[\"-c\", \"… \\\"$1\\\" …\", \"_\", \"{{{{{path}}}}}\"]`, ou écris `{{{{{path}|sh}}}}` sans guillemets autour."
-            )
-        } else {
-            format!(
-                "Passe la valeur en argument séparé après le script (ex. `sys.argv[1]`, `process.argv[2]`) avec `\"{{{{{path}}}}}\"`, ou via `exec_stdin`."
-            )
-        };
-        return Some(format!(
-            "Step Exec « {step} » : le script inline de `{cmd}` interpole `{{{{{path}}}}}` — {reason}. {safe}"
-        ));
-    }
-    None
-}
-
-/// Placeholders of a shell-like script: (path, has `|sh`, inside quotes).
-fn script_placeholders(script: &str) -> Vec<(String, bool, bool)> {
-    let mut found = Vec::new();
-    let chars: Vec<char> = script.chars().collect();
-    let (mut single, mut double, mut i) = (false, false, 0);
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '{' && chars.get(i + 1) == Some(&'{') {
-            let rest: String = chars[i + 2..].iter().collect();
-            if let Some(end) = rest.find("}}") {
-                let inner = rest[..end].trim();
-                let path = inner.split_once("??").map_or(inner, |(p, _)| p).trim();
-                let (path, quoted) = crate::workflows::template::split_shell_filter(path);
-                found.push((path.to_string(), quoted, single || double));
-                i += 2 + rest[..end].chars().count() + 2;
-                continue;
-            }
-        }
-        match c {
-            '\\' if !single => i += 1,
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            _ => {}
-        }
-        i += 1;
-    }
-    found
-}
-
 fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(), String> {
+    validate_exec_steps_keeping(steps, allowlist, &[])
+}
+
+/// An unchanged command line already stored as unsafe: an unrelated edit of
+/// the workflow must not be blocked by it. It stays refused at run time and
+/// flagged until the user applies a fix.
+fn is_grandfathered(grandfathered: &[UnsafeExecStep], step: &WorkflowStep, phase: &str) -> bool {
+    let (cmd, args) = if phase == "setup" {
+        (step.exec_setup_command.as_deref(), &step.exec_setup_args)
+    } else {
+        (step.exec_command.as_deref(), &step.exec_args)
+    };
+    is_grandfathered_line(grandfathered, &step.name, phase, None, cmd, args)
+}
+
+fn is_grandfathered_line(
+    grandfathered: &[UnsafeExecStep],
+    step_name: &str,
+    phase: &str,
+    alias: Option<&str>,
+    cmd: Option<&str>,
+    args: &[String],
+) -> bool {
+    let cmd = cmd.map(str::trim).unwrap_or_default();
+    grandfathered.iter().any(|known| {
+        known.step_name == step_name
+            && known.phase == phase
+            && known.source_alias.as_deref() == alias
+            && known.command == cmd
+            && known.args == args
+    })
+}
+
+fn validate_exec_steps_keeping(
+    steps: &[WorkflowStep],
+    allowlist: &[String],
+    grandfathered: &[UnsafeExecStep],
+) -> Result<(), String> {
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
     for s in steps {
@@ -1170,6 +1165,23 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                             s.name, source.alias, MAX_TIMEOUT_SECS
                         ));
                     }
+                    let kept = is_grandfathered_line(
+                        grandfathered,
+                        &s.name,
+                        "source",
+                        Some(&source.alias),
+                        Some(cmd),
+                        &exec.args,
+                    );
+                    if !kept {
+                        if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
+                            &format!("{} » / source « {}", s.name, source.alias),
+                            cmd,
+                            &exec.args,
+                        ) {
+                            return Err(error);
+                        }
+                    }
                 }
             }
             continue;
@@ -1213,8 +1225,12 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                 MAX_ARGS
             ));
         }
-        if let Some(error) = inline_script_injection(&s.name, cmd, &s.exec_args) {
-            return Err(error);
+        if !is_grandfathered(grandfathered, s, "main") {
+            if let Some(error) =
+                crate::core::inline_code::validation_error(&s.name, cmd, &s.exec_args)
+            {
+                return Err(error);
+            }
         }
         // 0.8.2 — Catch the "bash + multi-word arg" foot-gun. A user who
         // sets `exec_command=bash, exec_args=["make test"]` thinks they're
@@ -1270,8 +1286,14 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
                     MAX_ARGS
                 ));
             }
-            if let Some(error) = inline_script_injection(&s.name, setup_cmd, &s.exec_setup_args) {
-                return Err(format!("{error} (setup)"));
+            if !is_grandfathered(grandfathered, s, "setup") {
+                if let Some(error) = crate::core::inline_code::validation_error(
+                    &s.name,
+                    setup_cmd,
+                    &s.exec_setup_args,
+                ) {
+                    return Err(format!("{error} (setup)"));
+                }
             }
             let setup_is_shell = matches!(setup_cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
             if setup_is_shell && !s.exec_setup_args.is_empty() {
@@ -1376,24 +1398,19 @@ pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
 
 /// GET /api/workflows
 pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+    // Read connection: a list must not queue behind a run writing its steps.
     match state
         .db
-        .with_conn(|conn| {
+        .with_read_conn(|conn| {
             let workflows = crate::db::workflows::list_workflows(conn)?;
             // Batch-load last runs and project names (avoids N+1 queries)
-            let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
+            let mut last_runs = crate::db::workflows::get_last_run_summaries(conn)?;
             let project_names = crate::db::projects::get_project_names(conn)?;
 
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
-                    let last_run = last_runs.get(&wf.id).map(|r| WorkflowRunSummary {
-                        id: r.id.clone(),
-                        status: r.status.clone(),
-                        started_at: r.started_at,
-                        finished_at: r.finished_at,
-                        tokens_used: r.tokens_used,
-                    });
+                    let last_run = last_runs.remove(&wf.id);
 
                     let project_name = wf
                         .project_id
@@ -1415,6 +1432,11 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Workflo
                         trigger_type,
                         step_count: wf.steps.len() as u32,
                         misconfigured_step_count: count_misconfigured_steps(&wf.steps),
+                        unsafe_step_count: crate::core::inline_code::classify_workflow(
+                            &wf.steps,
+                            &wf.on_failure,
+                        )
+                        .len() as u32,
                         enabled: wf.enabled,
                         pinned: wf.pinned,
                         last_run,
@@ -1443,6 +1465,29 @@ pub async fn get(
         .await
     {
         Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/workflows/{id}/unsafe-steps — Exec command lines that interpolate
+/// a value into inline code, each with a suggested rewrite or the reason a
+/// manual fix is required. Read-only: nothing is applied here.
+pub async fn unsafe_steps(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<UnsafeExecStep>>> {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+        .await
+    {
+        Ok(Some(wf)) => Json(ApiResponse::ok(
+            crate::core::inline_code::classify_workflow(&wf.steps, &wf.on_failure),
+        )),
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
@@ -1804,8 +1849,11 @@ pub async fn update(
         .exec_allowlist
         .as_ref()
         .unwrap_or(&existing.exec_allowlist);
+    let stored_unsafe =
+        crate::core::inline_code::classify_workflow(&existing.steps, &existing.on_failure);
     if let Some(ref new_steps) = req.steps {
-        if let Err(e) = validate_exec_steps(new_steps, effective_allowlist) {
+        if let Err(e) = validate_exec_steps_keeping(new_steps, effective_allowlist, &stored_unsafe)
+        {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_steps) {
@@ -1820,7 +1868,9 @@ pub async fn update(
         }
     }
     if let Some(ref new_on_failure) = req.on_failure {
-        if let Err(e) = validate_exec_steps(new_on_failure, effective_allowlist) {
+        if let Err(e) =
+            validate_exec_steps_keeping(new_on_failure, effective_allowlist, &stored_unsafe)
+        {
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_json_data_steps(new_on_failure) {
@@ -1972,10 +2022,21 @@ pub async fn delete(
 ) -> Json<ApiResponse<()>> {
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id))
+        .with_conn(move |conn| {
+            let blocking = crate::db::workflows::runs_blocking_workflow_delete(conn, &id)?;
+            if blocking > 0 {
+                return Ok(Some(blocking));
+            }
+            crate::db::workflows::delete_workflow(conn, &id)?;
+            Ok(None)
+        })
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(())),
+        Ok(None) => Json(ApiResponse::ok(())),
+        Ok(Some(blocking)) => Json(ApiResponse::err(format!(
+            "{blocking} run(s) of this workflow are in progress, paused or interrupted with a \
+             worktree; finish, cancel or discard them before deleting the workflow"
+        ))),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2849,6 +2910,7 @@ pub(crate) async fn create_manual_run_with_id(
         produced_branches: vec![],
         concurrency_key,
         triggered_by_run_id: launch.triggered_by_run_id.clone(),
+        project_id: wf.project_id.clone(),
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -3749,21 +3811,34 @@ pub async fn decide_run(
     // human racing the auto-approve timer) could both pass it and spawn two
     // concurrent `resume_run`s on the same run. The conditional UPDATE
     // (`… WHERE status = 'WaitingApproval'`) lets exactly ONE caller win.
-    let claim_run_id = run.id.clone();
+    // A run that resumes is re-admitted against the concurrency limit in the
+    // same closure as the claim.
+    let claim_run = run.clone();
+    let claim_workflow = workflow.clone();
     let claim_status = new_status.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status)
+            if claim_status == RunStatus::Running {
+                if let Err(reason) = crate::workflows::concurrency::resume_within_limit(
+                    conn,
+                    &claim_workflow,
+                    &claim_run,
+                )? {
+                    return Ok(Err(reason));
+                }
+            }
+            crate::db::workflows::claim_waiting_run(conn, &claim_run.id, &claim_status).map(Ok)
         })
         .await
     {
-        Ok(true) => {} // we won the claim — proceed
-        Ok(false) => {
+        Ok(Ok(true)) => {} // we won the claim — proceed
+        Ok(Ok(false)) => {
             return Json(ApiResponse::err(
                 "Run was just decided by another caller — decision ignored (no double-resume)",
             ));
         }
+        Ok(Err(reason)) => return Json(ApiResponse::err(reason)),
         Err(e) => return Json(ApiResponse::err(format!("DB error claiming run: {e}"))),
     }
 
@@ -4210,7 +4285,7 @@ pub async fn test_worktree(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let project_path = if let Some(pid) = workflow.project_id.clone() {
+    let project_path = if let Some(pid) = run.project_id.clone().or(workflow.project_id.clone()) {
         match state
             .db
             .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
@@ -4337,7 +4412,7 @@ pub async fn delete_test_worktree(
         }
     };
 
-    let project_path = if let Some(pid) = workflow.project_id.clone() {
+    let project_path = if let Some(pid) = run.project_id.clone().or(workflow.project_id.clone()) {
         match state
             .db
             .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
@@ -5821,20 +5896,46 @@ mod tests {
         s
     }
 
-    #[test]
-    fn an_untrusted_value_interpolated_into_an_inline_script_is_refused() {
-        for (cmd, args) in [
+    /// Inline-code forms that must never accept an interpolated value: Codex's
+    /// heredoc and attached-option bypasses, and their variants.
+    fn hostile_inline_scripts() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
             ("bash", vec!["-c", "echo {{issue.title}}"]),
             ("bash", vec!["-c", "echo '{{issue.title}}'"]),
             ("bash", vec!["-lc", "echo \"{{steps.fetch.data.stdout}}\""]),
             ("sh", vec!["-ec", "echo {{previous_step.output}}"]),
+            ("bash", vec!["-ic", "echo {{issue.title}}"]),
+            ("bash", vec!["-c", "cat <<EOF\n{{issue.title|sh}}\nEOF"]),
+            ("bash", vec!["-c", "eval echo {{issue.title|sh}}"]),
+            ("bash", vec!["-c", "echo {{issue.title|sh}}"]),
             ("bash", vec!["-c", "echo \"{{issue.title|sh}}\""]),
+            ("bash", vec!["-cecho {{issue.title}}"]),
+            ("bash", vec!["--command=echo {{issue.title}}"]),
             ("python3", vec!["-c", "print('{{issue.body}}')"]),
-            ("python3", vec!["-c", "print({{issue.body|sh}})"]),
+            ("python3", vec!["-cprint('{{issue.title}}')"]),
+            ("python3", vec!["-Icprint('{{issue.title}}')"]),
+            ("python3", vec!["-I", "-c", "print({{issue.body|sh}})"]),
             ("node", vec!["-e", "console.log(`{{ticket}}`)"]),
-        ] {
+            ("node", vec!["-econsole.log('{{ticket}}')"]),
+            ("node", vec!["--eval=console.log('{{ticket}}')"]),
+            ("node", vec!["--eval", "console.log('{{ticket}}')"]),
+            ("node", vec!["-p", "'{{ticket}}'"]),
+            ("perl", vec!["-e", "1;", "-e", "print '{{ticket}}'"]),
+            ("perl", vec!["-le", "print '{{ticket}}'"]),
+            ("perl", vec!["-eprint '{{ticket}}'"]),
+            ("ruby", vec!["-e", "puts '{{ticket}}'"]),
+            ("php", vec!["-r", "echo '{{ticket}}';"]),
+            ("pwsh", vec!["-NoProfile", "-Command", "echo '{{ticket}}'"]),
+        ]
+    }
+
+    #[test]
+    fn an_untrusted_value_interpolated_into_inline_code_is_refused() {
+        for (cmd, args) in hostile_inline_scripts() {
             let chain = vec![mk_exec_step("inline", Some(cmd), args.clone(), None)];
-            let err = validate_exec_steps(&chain, &[cmd.to_string()]).unwrap_err();
+            let err = validate_exec_steps(&chain, &[cmd.to_string()])
+                .err()
+                .unwrap_or_else(|| panic!("{cmd} {args:?} was accepted"));
             assert!(err.contains("script inline"), "{cmd} {args:?}: {err}");
         }
     }
@@ -5845,10 +5946,7 @@ mod tests {
             ("bash", vec!["-c", "echo \"$1\"", "_", "{{issue.title}}"]),
             (
                 "bash",
-                vec![
-                    "-c",
-                    "echo {{issue.title|sh}} && echo {{ steps.a.output | sh }}",
-                ],
+                vec!["-ec", "printf '%s' \"$1\"", "_", "{{steps.a.output}}"],
             ),
             (
                 "bash",
@@ -5859,7 +5957,12 @@ mod tests {
                 "python3",
                 vec!["-c", "import sys; print(sys.argv[1])", "{{issue.body}}"],
             ),
+            (
+                "python3",
+                vec!["-cimport sys; print(sys.argv[1])", "{{issue.body}}"],
+            ),
             ("echo", vec!["{{issue.title}}"]),
+            ("make", vec!["-C", "{{steps.a.output}}"]),
         ] {
             let chain = vec![mk_exec_step("inline", Some(cmd), args.clone(), None)];
             assert!(
@@ -5871,11 +5974,74 @@ mod tests {
 
     #[test]
     fn an_untrusted_value_in_an_inline_setup_script_is_refused() {
-        let mut step = mk_exec_step("inline", Some("make"), vec!["test"], None);
-        step.exec_setup_command = Some("bash".into());
-        step.exec_setup_args = vec!["-c".into(), "npm i {{issue.title}}".into()];
-        let err = validate_exec_steps(&[step], &["make".into(), "bash".into()]).unwrap_err();
-        assert!(err.contains("(setup)"), "{err}");
+        for setup_args in [
+            vec!["-c", "npm i {{issue.title}}"],
+            vec!["-c", "cat <<EOF\n{{issue.title|sh}}\nEOF"],
+            vec!["-cnpm i {{issue.title}}"],
+        ] {
+            let mut step = mk_exec_step("inline", Some("make"), vec!["test"], None);
+            step.exec_setup_command = Some("bash".into());
+            step.exec_setup_args = setup_args.iter().map(|arg| arg.to_string()).collect();
+            let err = validate_exec_steps(&[step], &["make".into(), "bash".into()]).unwrap_err();
+            assert!(err.contains("(setup)"), "{setup_args:?}: {err}");
+        }
+    }
+
+    /// Saves then runs each step the way a workflow would: a hostile title
+    /// must never create the marker, whether the validator refuses the step
+    /// or the step runs the positional recipe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hostile_title_never_runs_through_a_saved_exec_step() {
+        let title = "x'\"\nEOF\n$(touch pwned)`touch pwned`;touch pwned #";
+        let mut cases: Vec<(&str, Vec<&str>, bool)> = hostile_inline_scripts()
+            .into_iter()
+            .filter(|(cmd, _)| matches!(*cmd, "bash" | "sh" | "python3"))
+            .map(|(cmd, args)| (cmd, args, false))
+            .collect();
+        cases.push((
+            "bash",
+            vec!["-c", "printf '%s' \"$1\"", "_", "{{issue.title}}"],
+            true,
+        ));
+        cases.push((
+            "python3",
+            vec!["-cimport sys; print(sys.argv[1])", "{{issue.title}}"],
+            true,
+        ));
+        for setup in [false, true] {
+            for (cmd, args, saved) in &cases {
+                let mut step = if setup {
+                    let mut step = mk_exec_step("run", Some("bash"), vec!["-c", "true"], None);
+                    step.exec_setup_command = Some(cmd.to_string());
+                    step.exec_setup_args = args.iter().map(|arg| arg.to_string()).collect();
+                    step
+                } else {
+                    mk_exec_step("run", Some(cmd), args.clone(), None)
+                };
+                step.exec_timeout_secs = Some(30);
+                let allowlist = vec!["bash".to_string(), cmd.to_string()];
+                let accepted = validate_exec_steps(std::slice::from_ref(&step), &allowlist).is_ok();
+                assert_eq!(accepted, *saved, "setup={setup} {cmd} {args:?}");
+                if !accepted {
+                    continue;
+                }
+                let dir = tempfile::tempdir().unwrap();
+                let mut ctx = crate::workflows::template::TemplateContext::new();
+                ctx.set_issue(title, "", "1", "https://tracker.test/1", &[]);
+                crate::workflows::exec_step::execute_exec_step(
+                    &step,
+                    &allowlist,
+                    &dir.path().to_string_lossy(),
+                    &ctx,
+                )
+                .await;
+                assert!(
+                    !dir.path().join("pwned").exists(),
+                    "setup={setup} {cmd} {args:?}: the title ran as code"
+                );
+            }
+        }
     }
 
     #[test]

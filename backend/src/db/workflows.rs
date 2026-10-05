@@ -598,6 +598,7 @@ pub(crate) fn create_batch_run_with_launch_settings(
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: None,
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
@@ -1077,6 +1078,20 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs that forbid deleting their workflow: the delete cascades to every run
+/// row, so a live, paused or resumable run would lose its row while its runner
+/// or worktree is still there (WF-9).
+pub fn runs_blocking_workflow_delete(conn: &Connection, workflow_id: &str) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM workflow_runs
+          WHERE workflow_id = ?1
+            AND (status IN ('Pending', 'Running', 'WaitingApproval')
+                 OR (status = 'Interrupted' AND workspace_path IS NOT NULL))",
+        params![workflow_id],
+        |row| row.get(0),
+    )?)
+}
+
 // ─── Workflow Runs CRUD ─────────────────────────────────────────────────────
 
 pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
@@ -1099,24 +1114,6 @@ pub const MAX_RUNS_UNPAGINATED: u32 = 500;
 
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
     list_runs_paginated(conn, workflow_id, Some(MAX_RUNS_UNPAGINATED), None)
-}
-
-/// 0.8.11 (B7) — auto-purge terminal workflow runs older than `days`. Preserves
-/// any run still referenced as a parent by a retained child (so provenance
-/// chains stay intact) and never touches non-terminal runs. Opt-in: the caller
-/// only invokes this when `run_retention_days > 0`. Returns rows deleted.
-pub fn purge_runs_older_than(conn: &Connection, days: u32) -> Result<usize> {
-    let n = conn.execute(
-        "DELETE FROM workflow_runs
-          WHERE status IN ('Success','Partial','Failed','Cancelled','StoppedByGuard','Interrupted')
-            AND finished_at IS NOT NULL
-            AND finished_at < datetime('now', ?1)
-            AND id NOT IN (
-                SELECT parent_run_id FROM workflow_runs WHERE parent_run_id IS NOT NULL
-            )",
-        params![format!("-{} days", days)],
-    )?;
-    Ok(n)
 }
 
 /// True when at least one workflow run is currently `Running` or `Pending`.
@@ -1171,7 +1168,7 @@ pub fn terminal_workspace_cleanup_candidates(
         "SELECT run.id, workflow.name, project.path, run.workspace_path
            FROM workflow_runs run
            JOIN workflows workflow ON workflow.id = run.workflow_id
-           JOIN projects project ON project.id = workflow.project_id
+           JOIN projects project ON project.id = COALESCE(run.project_id, workflow.project_id)
           WHERE run.workspace_path IS NOT NULL
             AND run.status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')
             AND NOT EXISTS (
@@ -1250,7 +1247,7 @@ pub fn stale_interrupted_workspace_candidates(
                 )
            FROM workflow_runs run
            JOIN workflows workflow ON workflow.id = run.workflow_id
-           LEFT JOIN projects project ON project.id = workflow.project_id
+           LEFT JOIN projects project ON project.id = COALESCE(run.project_id, workflow.project_id)
           WHERE run.workspace_path IS NOT NULL
           ORDER BY run.started_at, run.id",
     )?;
@@ -1359,6 +1356,18 @@ pub fn mark_workspace_cleaned(
             AND status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')",
         params![run_id, workspace_path],
     )? > 0)
+}
+
+/// Clear `workspace_path` on every terminal run that points at a checkout
+/// now gone: the owner and the sub-workflow children that shared it. A
+/// paused or interrupted sharer keeps the path, as resume evidence.
+pub fn forget_removed_workspace(conn: &Connection, workspace_path: &str) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE workflow_runs SET workspace_path = NULL
+          WHERE workspace_path = ?1
+            AND status IN ('Success', 'Partial', 'Failed', 'Cancelled', 'StoppedByGuard')",
+        params![workspace_path],
+    )?)
 }
 
 pub fn list_runs_paginated(
@@ -1682,8 +1691,8 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
         "INSERT INTO workflow_runs (id, workflow_id, status, trigger_context,
          step_results_json, tokens_used, workspace_path, started_at, finished_at,
          run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state,
-         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             run.id,
             run.workflow_id,
@@ -1718,6 +1727,7 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.batch_no_response as i64,
             run.concurrency_key,
             run.triggered_by_run_id,
+            run.project_id,
         ],
     )?;
     crate::db::shared_runs::sync_workflow(conn, run)?;
@@ -2140,35 +2150,40 @@ pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get the last run for a workflow (for summaries).
-/// Batch-load the last run for every workflow in one query (avoids N+1).
-pub fn get_last_runs_all(
-    conn: &Connection,
-) -> Result<std::collections::HashMap<String, WorkflowRun>> {
-    // Must alias columns with wr. prefix since we join to `latest` — can't
-    // reuse the WORKFLOW_RUN_COLS constant directly. Keep the list in sync.
-    // Callers only build a WorkflowRunSummary from this, so the step outputs
-    // were being decoded just to be dropped.
-    let mut stmt = conn.prepare(
-        "SELECT wr.id, wr.workflow_id, wr.status, wr.trigger_context,
-                CASE WHEN json_valid(wr.step_results_json)
-                     THEN (SELECT json_group_array(json_set(value, '$.output', ''))
-                           FROM json_each(wr.step_results_json))
-                     ELSE '[]' END,
-                wr.tokens_used, wr.workspace_path, wr.started_at, wr.finished_at,
-                wr.run_type, wr.batch_total, wr.batch_completed, wr.batch_failed, wr.batch_name,
-                wr.parent_run_id, wr.state
-         FROM workflow_runs wr
-         INNER JOIN (
-             SELECT workflow_id, MAX(started_at) AS max_started
-             FROM workflow_runs GROUP BY workflow_id
-         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started",
-    )?;
+/// The latest run of every workflow, as the five fields the workflow list
+/// shows. Answered from `idx_workflow_runs_summary` alone: every column read
+/// here is stored after the step results, so touching the table would walk
+/// each run's payload pages.
+pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
+            wr.finished_at, wr.tokens_used
+     FROM workflow_runs wr
+     INNER JOIN (
+         SELECT workflow_id, MAX(started_at) AS max_started
+         FROM workflow_runs GROUP BY workflow_id
+     ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started";
 
+/// Batch-load the last run summary of every workflow in one query (no N+1).
+pub fn get_last_run_summaries(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, crate::models::WorkflowRunSummary>> {
+    let mut stmt = conn.prepare(LAST_RUN_SUMMARIES_SQL)?;
+    let rows = stmt.query_map([], |row| {
+        let status: String = row.get(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            crate::models::WorkflowRunSummary {
+                id: row.get(1)?,
+                status: parse_run_status(&status),
+                started_at: parse_dt(row.get::<_, String>(3)?),
+                finished_at: row.get::<_, Option<String>>(4)?.map(parse_dt),
+                tokens_used: row.get::<_, i64>(5)?.max(0) as u64,
+            },
+        ))
+    })?;
     let mut map = std::collections::HashMap::new();
-    let rows = stmt.query_map([], |row| Ok(row_to_run(row)))?;
-    for row in rows.filter_map(|r| r.ok()) {
-        map.insert(row.workflow_id.clone(), row);
+    for row in rows {
+        let (workflow_id, summary) = row?;
+        map.insert(workflow_id, summary);
     }
     Ok(map)
 }
@@ -2187,14 +2202,11 @@ pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<Workf
     Ok(run)
 }
 
-/// Count active runs for a workflow (for concurrency limiting).
+/// Count active runs for a workflow (for concurrency limiting). A run paused
+/// on a gate holds its slot: approving it must not put the workflow over its
+/// limit.
 pub fn count_active_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
-    let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1 AND status IN ('Pending', 'Running')",
-        params![workflow_id],
-        |row| row.get(0),
-    )?;
-    Ok(count)
+    count_admitted_runs(conn, workflow_id, None, None)
 }
 
 /// Active runs of a workflow that rendered the same concurrency key. `None`
@@ -2204,10 +2216,29 @@ pub fn count_active_runs_for_key(
     workflow_id: &str,
     key: Option<&str>,
 ) -> Result<u32> {
+    count_admitted_runs(conn, workflow_id, Some(key), None)
+}
+
+/// Runs holding a concurrency slot, optionally in one key bucket
+/// (`Some(None)` = the empty key) and without `exclude_run_id`.
+pub fn count_admitted_runs(
+    conn: &Connection,
+    workflow_id: &str,
+    key: Option<Option<&str>>,
+    exclude_run_id: Option<&str>,
+) -> Result<u32> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
-          WHERE workflow_id = ?1 AND status IN ('Pending', 'Running') AND concurrency_key IS ?2",
-        params![workflow_id, key],
+          WHERE workflow_id = ?1
+            AND status IN ('Pending', 'Running', 'WaitingApproval')
+            AND (?2 = 0 OR concurrency_key IS ?3)
+            AND id IS NOT ?4",
+        params![
+            workflow_id,
+            key.is_some() as i64,
+            key.flatten(),
+            exclude_run_id
+        ],
         |row| row.get(0),
     )?;
     Ok(count)
@@ -2354,6 +2385,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let batch_no_response: i64 = row.get(17).unwrap_or(0);
     let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
     let triggered_by_run_id: Option<String> = row.get(19).unwrap_or(None);
+    let project_id: Option<String> = row.get(20).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2387,6 +2419,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
             .unwrap_or_default(),
         concurrency_key,
         triggered_by_run_id,
+        project_id,
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2399,7 +2432,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

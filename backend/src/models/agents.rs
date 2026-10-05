@@ -55,6 +55,41 @@ pub struct Skill {
     /// frontmatter field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// Named positional arguments in the Claude Code skills format
+    /// (`arguments:` header, `$name` in the body). Non-empty = "Variabilisé".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arguments: Vec<String>,
+    /// Claude Code `argument-hint`: what autocomplete shows after the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    /// Kronn's own description of the arguments (label, default, control),
+    /// read from the `metadata.kronn-variables` JSON string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<SkillVariable>,
+}
+
+/// Kronn's description of one skill argument. Stored as JSON under the flat
+/// `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SkillVariable {
+    /// One of the names declared in `arguments`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "skill_variable_required")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    /// How Kronn asks for the value; a plain text field when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<crate::models::PromptVariableControl>,
+}
+
+fn skill_variable_required() -> bool {
+    true
 }
 
 /// Auto-trigger regex buckets declared in a skill's frontmatter YAML.

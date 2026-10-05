@@ -137,6 +137,48 @@ The partial audit records the same thing per step (`step_done` carries `tokens`,
 `duration_ms` and `total_tokens`, and `audit_run_steps` gets a row), which it did
 not before.
 
+## Cost and model (KT-997)
+
+- **Where the cost comes from.** Only what a runtime reports itself: Claude
+  Code's `total_cost_usd` (its stream-json `result` line, or the adapter's
+  `Cost` event) and OpenRouter's `usage.cost`, summed per response
+  [src: file: backend/src/agents/runner.rs]. Nothing is recomputed from a rate
+  table.
+- **Per step.** `audit_run_steps.cost_usd_micros` (integer micro-USD) sums the
+  step's attempts. It stays `NULL` when any attempt that ran reported no cost:
+  a sum over a silent attempt would be a floor shown as the whole. A reported
+  zero is recorded as 0. `step_done` carries the same figure as
+  `cost_usd_micros` (`null` when unknown)
+  [src: file: backend/src/api/audit/agent_launch.rs].
+- **The run's model.** `audit_runs.model` is the model(s) the runtime reported
+  serving, from the launch's provenance capture shared by every step (`a / b`
+  when several). With none observed it is the model Settings or the named
+  connection configure for the tier, suffixed ` (configured)`; with neither it
+  stays `NULL`. The orchestration's `ServedModelRecorder` is not reused: it
+  writes to a worker dispatch row.
+- **The timeline's total.** Summed over the finished steps the timeline shows
+  (the newest result of each step, carried ones included): `~x $` when every
+  one reported, `≥ x $ (n steps unknown)` when some did not, `cost ?` when none
+  did. A step still running counts for nothing yet
+  [src: file: frontend/src/lib/audit-cost.ts].
+
+## Activity without text (KT-950)
+
+- **One probe, both channels.** An HTTP agent writes its last tool and call
+  count on its run's usage; an ACP agent on the activity sink, which now counts
+  the calls where they pass (`AgentActivity.calls`) so a reader polling it misses
+  none. `AuditActivityProbe` reads either
+  [src: file: backend/src/api/audit/agent_launch.rs].
+- **Ticks, not lines.** For an agent without stream-json, both pipelines look at
+  the probe on every line and every `ACTIVITY_TICK` (1 s): a moved tool sends
+  `tool_call` with `calls`, moved tokens send `step_progress`, and both update the
+  tracker the progress poll reads. A provider that is only thinking moves
+  nothing. The tick does not push back the Full audit's 60 s zombie deadline.
+- **Keep-alive.** A detached audit stream silent for 15 s sends an SSE comment
+  (`: keep-alive`) [src: file: backend/src/api/audit/mod.rs]. A comment is not an
+  event: no client handler sees it, so it holds the connection without passing
+  for model activity.
+
 ## What this does not cover
 
 - `full_audit`'s and `partial_audit`'s start of a **direct CLI** agent is
@@ -146,5 +188,5 @@ not before.
 - Whether an ACP runtime other than OpenCode continues after a refusal is the
   runtime's own behaviour; only OpenCode's `continue_loop_on_deny` is known and
   set.
-- The partial audit's live `step_progress` event is not emitted: its per-step
-  figure arrives with `step_done`.
+- The partial audit emits `step_progress` only for an agent without stream-json
+  (on its ticks); a Claude stream-json step's figure arrives with `step_done`.

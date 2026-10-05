@@ -789,6 +789,9 @@ jobs:
       - name: Cleanup authorisation from durable state
         run: cargo test --lib db::orchestration
 
+      - name: Windows to WSL agent launches
+        run: cargo test --lib agents::wsl
+
   ci-quality-gates:
     # Keep every quality job independently parallel, then make their complete
     # result explicit. Configure this one check as required in branch

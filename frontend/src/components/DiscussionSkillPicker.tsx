@@ -5,6 +5,7 @@ import { missingSkillLabel, skillPickerModel } from '../lib/discussionSkills';
 import type { Project, ProjectUsedSkill, Skill } from '../types/generated';
 import type { AutomationSkillEntry } from '../lib/automationSkills';
 import './DiscussionSkillPicker.css';
+import { SkillVariablesBadge } from './SkillVariablesBadge';
 
 interface Props {
   /** The discussion's project, `null` for a general discussion. */
@@ -96,6 +97,7 @@ export function DiscussionSkillPicker({
       >
         {active && <Check size={9} aria-hidden="true" />}
         {entry.skill.icon} {entry.skill.name}
+        <SkillVariablesBadge skill={entry.skill} />
         {origin && <small className="skill-picker-origin">{origin}</small>}
       </button>
     );

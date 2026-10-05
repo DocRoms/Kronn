@@ -4,6 +4,7 @@ import { config as configApi, contacts as contactsApi, type NetworkExposure } fr
 import { gravatarUrl } from '../../lib/gravatar';
 import { userError } from '../../lib/userError';
 import { invokeTauri, isTauriRuntime } from '../../lib/tauri';
+import { flushUiPreferences } from '../../lib/uiPreferences';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { ContextHelp } from '../ContextHelp';
@@ -59,6 +60,8 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
 
   const restartApp = async () => {
     try {
+      // The relaunched app may come back on another origin (port fallback).
+      await flushUiPreferences();
       await invokeTauri('restart_app');
     } catch { /* Web mode or restart unavailable. */ }
   };

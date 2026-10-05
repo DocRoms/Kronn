@@ -3,6 +3,14 @@ import { userError } from '../userError';
 
 describe('userError', () => {
   describe('passes backend ApiResponse strings through', () => {
+    it('keeps a long inline-code refusal whole, fix included', () => {
+      const refusal = 'Quick Exec « Ticket » : le script inline de `python3` interpole `{{ticket}}` — '
+        + 'dans du code, une valeur peut toujours être exécutée (heredoc, eval, guillemets), même filtrée par `|sh`. '
+        + 'passe la valeur en argument séparé après le script… Arguments proposés : ["-c","import sys\\nprint(sys.argv[1])","{{ticket}}"]';
+      expect(userError(new Error(refusal))).toBe(refusal);
+      expect(userError(refusal.replace('Quick Exec', 'Step Exec'))).toBe(refusal.replace('Quick Exec', 'Step Exec'));
+    });
+
     it('keeps "Project path" prefix verbatim', () => {
       expect(userError('Project path not found: /home/foo')).toBe(
         'Project path not found: /home/foo',

@@ -1337,6 +1337,10 @@ pub struct WorkflowRun {
     /// `parent_run_id`, the two runs have independent lifecycles.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triggered_by_run_id: Option<String>,
+    /// The project resolved at launch: the workflow's own, or the launcher's
+    /// for a global workflow. Resume and worktree cleanup read it first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render
@@ -1521,6 +1525,9 @@ pub struct AgentActivity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     pub at: DateTime<Utc>,
+    /// Tool calls the launch has started so far, this one included.
+    #[serde(default)]
+    pub calls: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1729,12 +1736,42 @@ pub struct WorkflowSummary {
     /// AI-generated workflow that still needs wiring, without fetching its
     /// full step list. 0 = ready to run.
     pub misconfigured_step_count: u32,
+    /// Exec command lines (main or setup) that interpolate a value into
+    /// inline code: refused at run time until fixed (KT-1017).
+    #[serde(default)]
+    pub unsafe_step_count: u32,
     pub enabled: bool,
     /// User-pinned / favorite — the list surfaces pinned workflows first.
     #[serde(default)]
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
+}
+
+/// An Exec command line that interpolates a template value into inline code
+/// (`bash -c`, `python3 -c`…). It is refused at run time; `suggested_args`
+/// is a provably equivalent rewrite, `manual_fix` says why there is none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnsafeExecStep {
+    pub step_name: String,
+    /// The step belongs to the `on_failure` chain.
+    pub on_failure: bool,
+    /// `main` (`exec_command`), `setup` (`exec_setup_command`) or `source`
+    /// (an inline Quick Exec of a CollectApiData step).
+    pub phase: String,
+    /// The CollectApiData source alias when `phase` is `source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_alias: Option<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    /// The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).
+    pub placeholder: String,
+    /// `inline_code_interpolation` or `malformed_placeholder`.
+    pub reason: String,
+    pub suggested_args: Option<Vec<String>>,
+    pub manual_fix: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

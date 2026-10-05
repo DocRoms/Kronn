@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
+import { UnsafeStepsPanel } from './UnsafeStepsPanel';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
-import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project } from '../../types/generated';
+import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project, UnsafeExecStep } from '../../types/generated';
 import {
   Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
@@ -203,6 +204,8 @@ export interface WorkflowDetailProps {
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
+  /** KT-1017 — apply the suggested rewrite of an unsafe Exec command line. */
+  onApplyUnsafeFix?: (issue: UnsafeExecStep) => Promise<void>;
   totalRuns?: number;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
@@ -1575,7 +1578,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1861,6 +1864,10 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
           )}
         </div>
       </div>
+
+      {onApplyUnsafeFix && (
+        <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} />
+      )}
 
       {/* Trigger info */}
       <div className="wf-info-row">

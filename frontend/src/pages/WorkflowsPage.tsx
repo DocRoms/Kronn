@@ -13,7 +13,7 @@ import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, RunStatus, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
-  JsonValue, Skill,
+  JsonValue, Skill, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -991,6 +991,44 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return () => window.clearTimeout(timeoutId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflowList]);
+
+  // KT-1017 — writes the suggested rewrite the user reviewed and accepted.
+  const applyUnsafeFix = async (issue: UnsafeExecStep) => {
+    const workflow = detailWorkflow;
+    const fixed = issue.suggested_args;
+    if (!workflow || !fixed) return;
+    const rewrite = (chain: WorkflowStep[]) => chain.map(step => {
+      if (step.name !== issue.step_name) return step;
+      if (issue.phase === 'source') {
+        const config = step.collect_api_data;
+        if (!config) return step;
+        return {
+          ...step,
+          collect_api_data: {
+            ...config,
+            sources: config.sources.map(source =>
+              source.alias === issue.source_alias && source.quick_exec
+                ? { ...source, quick_exec: { ...source.quick_exec, args: fixed } }
+                : source),
+          },
+        };
+      }
+      return issue.phase === 'setup'
+        ? { ...step, exec_setup_args: fixed }
+        : { ...step, exec_args: fixed };
+    });
+    try {
+      const updated = await workflowsApi.update(
+        workflow.id,
+        issue.on_failure ? { on_failure: rewrite(workflow.on_failure ?? []) } : { steps: rewrite(workflow.steps) },
+      );
+      setDetailWorkflow(current => current?.id === workflow.id ? updated : current);
+      void refetch();
+      toastProp?.(t('wf.unsafeApplied', issue.step_name), 'success');
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+    }
+  };
 
   const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => {
     const workflow = detailWorkflow;
@@ -2655,6 +2693,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         <Layers size={11} />
                         {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
                       </span>
+                      {wf.unsafe_step_count > 0 && (
+                        <span
+                          className="wf-needs-config-badge wf-unsafe-badge"
+                          title={t('wf.unsafeBadgeTip')}
+                        >
+                          <AlertTriangle size={10} />
+                          {t('wf.unsafeBadge').replace('{0}', String(wf.unsafe_step_count))}
+                        </span>
+                      )}
                       {wf.misconfigured_step_count > 0 && (
                         <span
                           className="wf-needs-config-badge"
@@ -2765,6 +2812,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 runs={detailRuns}
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
+                onApplyUnsafeFix={applyUnsafeFix}
                 agentChoices={compareAgentChoices}
                 totalRuns={detailRunTotal}
                 hasMoreRuns={hasMoreDetailRuns}

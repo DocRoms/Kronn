@@ -44,7 +44,12 @@ pub(crate) use helpers::{
 
 pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>>;
 
+/// Silence after which an audit stream sends a keep-alive.
+pub(super) const SSE_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Poll the producer independently so disconnecting a subscriber cannot stop an audit.
+/// A silent producer gets an SSE comment every `SSE_KEEP_ALIVE`: it holds the
+/// connection open and, not being an event, can never pass for model activity.
 pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
     tokio::spawn(async move {
@@ -53,7 +58,10 @@ pub(super) fn detach_sse_stream(mut producer: SseStream) -> SseStream {
         }
     });
     Box::pin(futures::stream::unfold(rx, |mut rx| async {
-        rx.recv().await.map(|item| (item, rx))
+        match tokio::time::timeout(SSE_KEEP_ALIVE, rx.recv()).await {
+            Ok(item) => item.map(|item| (item, rx)),
+            Err(_) => Some((Ok(Event::default().comment("keep-alive")), rx)),
+        }
     }))
 }
 
@@ -87,6 +95,53 @@ mod detach_sse_stream_tests {
         .await
         .expect("producer must finish after its subscriber is dropped");
         assert_eq!(progress.load(Ordering::SeqCst), 5);
+    }
+
+    /// A producer silent for minutes (a model thinking, a tool chain without
+    /// prose) gets keep-alive comments only: nothing a client reads as an event.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_producer_gets_keep_alive_comments_never_events() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let producer: SseStream = Box::pin(async_stream::try_stream! {
+            yield Event::default().event("step_start").data("{}");
+            let _ = released.await;
+            yield Event::default().event("done").data("{}");
+        });
+        let mut detached = detach_sse_stream(producer);
+        let render = |event: Event| {
+            use axum::response::IntoResponse;
+            let stream = futures::stream::iter([Ok::<_, Infallible>(event)]);
+            axum::response::sse::Sse::new(stream).into_response()
+        };
+        let body_of = |event: Event| async move {
+            let bytes = axum::body::to_bytes(render(event).into_body(), 1 << 16)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        };
+
+        let first = detached.next().await.unwrap().unwrap();
+        assert!(body_of(first).await.contains("event: step_start"));
+        let started = tokio::time::Instant::now();
+        for _ in 0..12 {
+            let frame = body_of(detached.next().await.unwrap().unwrap()).await;
+            assert!(
+                frame.starts_with(':'),
+                "a keep-alive is a comment: {frame:?}"
+            );
+            assert!(
+                !frame.contains("event:") && !frame.contains("data:"),
+                "{frame:?}"
+            );
+        }
+        assert!(
+            started.elapsed() >= super::SSE_KEEP_ALIVE * 12,
+            "three silent minutes"
+        );
+        release.send(()).unwrap();
+        let last = detached.next().await.unwrap().unwrap();
+        assert!(body_of(last).await.contains("event: done"));
+        assert!(detached.next().await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

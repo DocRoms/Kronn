@@ -35,6 +35,9 @@ pub async fn create(
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
     }
+    if let Some(error) = inline_code_error(&request) {
+        return Json(ApiResponse::err(error));
+    }
     let now = Utc::now();
     let item = QuickExec {
         id: Uuid::new_v4().to_string(),
@@ -80,6 +83,14 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick Exec not found")),
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
+    // An unchanged stored line stays saveable (it is still refused at run
+    // time); a new or changed one must be safe.
+    let unchanged = existing.command == request.command.trim() && existing.args == request.args;
+    if !unchanged {
+        if let Some(error) = inline_code_error(&request) {
+            return Json(ApiResponse::err(error));
+        }
+    }
     let updated = QuickExec {
         id: existing.id,
         name: request.name.trim().to_string(),
@@ -622,6 +633,16 @@ pub async fn import(
     }
 }
 
+/// Inline code (`python3 -c`, `node -e`…) that interpolates a value: refused
+/// with the same rule as a workflow Exec step (KT-1017).
+fn inline_code_error(request: &CreateQuickExecRequest) -> Option<String> {
+    crate::core::inline_code::quick_exec_validation_error(
+        request.name.trim(),
+        request.command.trim(),
+        &request.args,
+    )
+}
+
 fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
     if request.name.trim().is_empty() || request.name.chars().count() > 200 {
         return Err("Name must be 1-200 characters".to_string());
@@ -694,6 +715,37 @@ mod tests {
             output_format: CollectQuickExecOutputFormat::Json,
             variables: vec![],
         }
+    }
+
+    #[test]
+    fn inline_code_interpolation_is_refused_with_the_recipe() {
+        let mut unsafe_request = request("python3");
+        unsafe_request.args = vec!["-c".into(), "print('{{ticket}}')".into()];
+        let error = inline_code_error(&unsafe_request).unwrap();
+        assert!(error.contains("Quick Exec « Collect AWS »"), "{error}");
+        assert!(
+            error.contains("{{ticket}}") && error.contains("sys.argv"),
+            "{error}"
+        );
+        assert!(error.contains("Arguments proposés"), "{error}");
+        for args in [
+            vec!["-cprint('{{ticket}}')"],
+            vec!["--command=print('{{ticket}}')"],
+        ] {
+            unsafe_request.args = args.iter().map(|arg| arg.to_string()).collect();
+            assert!(inline_code_error(&unsafe_request).is_some(), "{args:?}");
+        }
+
+        let mut safe = request("python3");
+        safe.args = vec![
+            "-c".into(),
+            "import sys; print(sys.argv[1])".into(),
+            "{{ticket}}".into(),
+        ];
+        assert!(inline_code_error(&safe).is_none());
+        let mut plain = request("aws");
+        plain.args = vec!["s3".into(), "ls".into(), "{{bucket}}".into()];
+        assert!(inline_code_error(&plain).is_none());
     }
 
     #[test]

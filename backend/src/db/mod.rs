@@ -51,8 +51,10 @@ pub mod resource_changes;
 pub mod resource_identities;
 pub mod review_ledger;
 pub mod run_outcome;
+pub mod run_retention;
 pub mod run_state;
 pub mod shared_runs;
+pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
@@ -65,6 +67,42 @@ mod tests;
 
 #[cfg(test)]
 mod release_gate_tests;
+
+#[cfg(test)]
+mod large_db_measure;
+
+/// `EXPLAIN QUERY PLAN` details of `sql`, one line per plan node.
+#[cfg(test)]
+pub(crate) fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut statement = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("query plan");
+    // Parameters stay unbound: the plan does not depend on their values.
+    let mut rows = statement.raw_query();
+    let mut details = Vec::new();
+    while let Some(row) = rows.next().expect("query plan row") {
+        details.push(row.get::<_, String>(3).expect("query plan detail"));
+    }
+    details
+}
+
+/// Plan lines that read one of `aliases` from its table rather than from a
+/// covering index. On `workflow_runs` such a read walks the run's step results
+/// to reach any later column.
+#[cfg(test)]
+pub(crate) fn table_reads_outside_index(plan: &[String], aliases: &[&str]) -> Vec<String> {
+    plan.iter()
+        .filter(|line| {
+            let mut words = line.split_whitespace();
+            let verb = words.next().unwrap_or_default();
+            let target = words.next().unwrap_or_default();
+            matches!(verb, "SCAN" | "SEARCH")
+                && aliases.contains(&target)
+                && !line.contains("COVERING INDEX")
+        })
+        .cloned()
+        .collect()
+}
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};

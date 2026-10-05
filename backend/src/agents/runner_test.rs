@@ -360,6 +360,9 @@ mod tests {
             auto_triggers: None,
             external: false,
             source_url: None,
+            arguments: Vec::new(),
+            argument_hint: None,
+            variables: Vec::new(),
         };
         let agent = AgentType::OpenCode;
         let mut process = start_agent_with_config(AgentStartConfig {

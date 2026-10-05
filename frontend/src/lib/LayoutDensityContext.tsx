@@ -22,6 +22,7 @@ import {
   LayoutDensityContext,
   type LayoutDensity,
 } from './layoutDensity';
+import { safeSetItem } from './safeStorage';
 
 const STORAGE_KEY = 'kronn:layoutDensity';
 
@@ -45,7 +46,7 @@ export function LayoutDensityProvider({ children }: { children: ReactNode }) {
   const [density, setDensityState] = useState<LayoutDensity>(loadInitial);
 
   const setDensity = useCallback((d: LayoutDensity) => {
-    try { localStorage.setItem(STORAGE_KEY, d); } catch { /* noop */ }
+    safeSetItem(STORAGE_KEY, d);
     setDensityState(d);
   }, []);
 

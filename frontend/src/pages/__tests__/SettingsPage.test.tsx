@@ -781,6 +781,31 @@ describe('SettingsPage', () => {
     expect(select.value).toBe('0');
   });
 
+  it('loads and persists how long finished runs keep their step outputs', async () => {
+    // KT-984 — on by default (30 days); "keep forever" is the explicit 0.
+    (configApi.setServerConfig as ReturnType<typeof vi.fn>).mockClear();
+    const getServerConfig = configApi.getServerConfig as ReturnType<typeof vi.fn>;
+    const defaultServerConfig = getServerConfig.getMockImplementation();
+    getServerConfig.mockResolvedValue({
+      host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5,
+      agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240,
+      auth_enabled: true, discussion_notes_enabled: true, execution_variable_retention_days: 30,
+      run_payload_retention_days: 90,
+    });
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const select = screen.getByLabelText('Sorties des étapes des runs terminés') as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('90'));
+    expect(document.getElementById('settings-database')).toContainElement(select);
+
+    await act(async () => { fireEvent.change(select, { target: { value: '0' } }); });
+    await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({
+      run_payload_retention_days: 0,
+    }));
+    expect(select.value).toBe('0');
+    getServerConfig.mockImplementation(defaultServerConfig!);
+  });
+
   it('warns when inactivity can never outlast the absolute execution limit', async () => {
     (configApi.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValue({
       host: '127.0.0.1',

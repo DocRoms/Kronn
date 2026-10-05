@@ -422,6 +422,8 @@ pub async fn partial_audit(
         let mut unchanged_steps: Vec<usize> = Vec::new();
         // KT-927 — unknown until an agent reports usage, never 0.
         let mut run_tokens = super::agent_launch::RunTokens::default();
+        // The model last written on the run row, so a step writes it only when it changes.
+        let mut recorded_model: Option<String> = None;
 
         for (progress_idx, &step) in requested_steps.iter().enumerate() {
             // KT-927 — a Stop between two steps. The partial pipeline had no
@@ -553,6 +555,7 @@ pub async fn partial_audit(
             };
             let mut attempt: usize = 0;
             let mut citation_feedback: Option<String> = None;
+            let mut step_cost = super::agent_launch::StepCost::default();
             'attempts: loop {
             attempt += 1;
             let mut step_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
@@ -570,6 +573,7 @@ pub async fn partial_audit(
                     tracker.agent_cancels.insert(project_id_for_progress.clone(), cancel.clone());
                 }
             }
+            let (activity_sink, activity_rx) = tokio::sync::watch::channel(None);
             match agent_launcher.start(
                 &agent_type,
                 audit_tier,
@@ -579,6 +583,7 @@ pub async fn partial_audit(
                 &tokens,
                 attempt_cancel.clone(),
                 analysis_step.target_file,
+                Some(activity_sink),
             ).await {
                 Ok(mut process) => {
                     // Only a direct CLI agent has a PID worth killing: the
@@ -591,18 +596,69 @@ pub async fn partial_audit(
                         }
                     }
                     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
-                    // An HTTP agent's tool activity, for the card's live chips.
-                    let _tool_activity = (!is_stream_json).then(|| {
-                        super::agent_launch::ToolActivityMirror::start(
-                            process.tool_activity_probe(),
-                            audit_tracker.clone(),
-                            project_id_for_progress.clone(),
+                    // Same activity watch as the Full pipeline: a tool chain
+                    // without prose still moves the tool chip and the tokens.
+                    let mut activity = (!is_stream_json).then(|| {
+                        super::agent_launch::StepActivityWatch::new(
+                            super::agent_launch::AuditActivityProbe::new(
+                                process.tool_activity_probe(),
+                                Some(activity_rx.clone()),
+                            ),
+                            agent_type.clone(),
                         )
                     });
-                    while let Some(line) = process.next_line().await {
+                    let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
+                    activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut stream_cost: Option<u64> = None;
+                    loop {
+                        let wake = tokio::select! {
+                            maybe_line = process.next_line() => super::agent_launch::StepWake::Line(maybe_line),
+                            _ = activity_tick.tick(), if activity.is_some() => super::agent_launch::StepWake::Tick,
+                        };
+                        let line = match wake {
+                            super::agent_launch::StepWake::Line(Some(line)) => line,
+                            super::agent_launch::StepWake::Line(None) => break,
+                            super::agent_launch::StepWake::Idle => continue,
+                            super::agent_launch::StepWake::Tick => {
+                                let Some(watch) = activity.as_mut() else { continue };
+                                if let Some((tool, calls)) = watch.tool_moved() {
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.set_tool_activity(&project_id_for_progress, tool.clone(), calls);
+                                    }
+                                    yield Event::default().event("tool_call").data(
+                                        serde_json::json!({ "step": step, "tool": tool, "calls": calls }).to_string()
+                                    );
+                                }
+                                if let Some(reading) = watch.tokens_moved() {
+                                    step_usage = reading;
+                                    if let Some(step_tokens) = step_usage.total() {
+                                        let cumulative = run_tokens.with(step_tokens);
+                                        if let Ok(mut t) = audit_tracker.lock() {
+                                            t.update_chips(&project_id_for_progress, Some(step_tokens), Some(cumulative), None);
+                                        }
+                                        yield Event::default().event("step_progress").data(
+                                            serde_json::json!({
+                                                "step": step,
+                                                "step_tokens": step_tokens,
+                                                "total_tokens_so_far": cumulative,
+                                            }).to_string()
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                        };
                         if is_stream_json {
-                            if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } =
-                                runner::parse_claude_stream_line(&line)
+                            let event = runner::parse_claude_stream_line(&line);
+                            let reported_cost = match &event {
+                                runner::StreamJsonEvent::Usage { cost_usd, .. } => *cost_usd,
+                                runner::StreamJsonEvent::TerminalError(failure) => failure.cost_usd,
+                                _ => None,
+                            };
+                            if let Some(cost) = reported_cost.and_then(crate::agents::chat_codec::usd_to_micros) {
+                                stream_cost = Some(cost);
+                            }
+                            if let runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, .. } = event
                             {
                                 // Claude reports cumulative usage per call:
                                 // the largest reading is the step's.
@@ -631,6 +687,9 @@ pub async fn partial_audit(
                             step_usage = reading;
                         }
                     }
+                    drop(activity);
+                    // KT-997 — this attempt's cost, summed with the step's earlier ones.
+                    step_cost = step_cost.with_attempt(process.reported_cost_usd_micros().or(stream_cost));
 
                     let status = process.child.wait().await;
                     process.fix_ownership();
@@ -889,6 +948,8 @@ pub async fn partial_audit(
                         "tokens": step_usage.total(),
                         "duration_ms": duration_ms,
                         "total_tokens": run_tokens.total(),
+                        // `null` — not 0 — when an attempt's agent reported no cost.
+                        "cost_usd_micros": step_cost.usd_micros(),
                     });
                     yield Event::default().event("step_done").data(step_done.to_string());
                     {
@@ -928,6 +989,7 @@ pub async fn partial_audit(
                         serde_json::json!({
                             "step": step, "success": false,
                             "outcome": "failed", "file": file_label,
+                            "cost_usd_micros": step_cost.usd_micros(),
                         }).to_string()
                     );
                     {
@@ -950,6 +1012,24 @@ pub async fn partial_audit(
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");
                         }
+                    }
+                }
+            }
+            // KT-997 — the step's cost and the run's model, once the row is finalized.
+            if let Some(cost) = step_cost.usd_micros() {
+                let run_id = audit_run_id.clone();
+                if let Err(e) = state.db.with_conn(move |conn| {
+                    crate::db::audit_runs::set_step_cost(conn, &run_id, step as u32, cost)
+                }).await {
+                    tracing::error!("Failed to record the cost of partial audit step {step}: {e}");
+                }
+            }
+            if let Some(model) = agent_launcher.run_model(&agent_type, audit_tier).await {
+                if recorded_model.as_deref() != Some(model.as_str()) {
+                    let (run_id, value) = (audit_run_id.clone(), model.clone());
+                    match state.db.with_conn(move |conn| crate::db::audit_runs::set_run_model(conn, &run_id, &value)).await {
+                        Ok(()) => recorded_model = Some(model),
+                        Err(e) => tracing::warn!("Could not record the partial audit run's model: {e}"),
                     }
                 }
             }

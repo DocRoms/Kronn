@@ -1946,6 +1946,13 @@ fn import_document(
                 &mut resource.on_failure,
                 Some(project_id),
             );
+            // The editor's save-time rules: approval must never see a
+            // definition the editor would have refused.
+            crate::api::workflows::validate_workflow_for_import(&resource)
+                .map_err(anyhow::Error::msg)?;
+            let local = crate::db::workflows::list_workflows(conn)?;
+            crate::api::workflows::validate_imported_sub_workflow_graph(&resource, &local)
+                .map_err(anyhow::Error::msg)?;
             if existing_id.is_some() {
                 crate::db::workflows::update_workflow(conn, &resource)?;
             } else {
@@ -3270,6 +3277,105 @@ mod tests {
             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
         }))
         .unwrap()
+    }
+
+    fn workflow_document(
+        slug: &str,
+        steps: serde_json::Value,
+    ) -> crate::core::repository_resources::RepositoryDocument {
+        crate::core::repository_resources::RepositoryDocument {
+            schema_version: 1,
+            kind: ProjectRepositoryResourceKind::Workflow,
+            slug: slug.into(),
+            updated_at: Utc::now(),
+            requires: vec![],
+            resource: serde_json::to_value(sample_workflow_json(
+                "foreign-id",
+                slug,
+                "foreign-project",
+                steps,
+            ))
+            .unwrap(),
+            redacted_fields: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kronn_import_runs_the_editor_save_rules() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let outcome = state
+            .db
+            .with_conn(|conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                crate::db::workflows::insert_workflow(
+                    conn,
+                    &sample_workflow_json(
+                        "wf-local-gated",
+                        "Gated",
+                        "project-1",
+                        serde_json::json!([
+                            {"name": "review", "step_type": {"type": "Gate"}, "gate_message": "Go?"}
+                        ]),
+                    ),
+                )?;
+                let exec_outside_allowlist = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_document(
+                        "exec-outside-allowlist",
+                        serde_json::json!([
+                            {"name": "wipe", "step_type": {"type": "Exec"}, "exec_command": "rm", "exec_args": ["-rf", "."]}
+                        ]),
+                    ),
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+                let calls_gated_child = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_document(
+                        "calls-gated-child",
+                        serde_json::json!([
+                            {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-local-gated"}
+                        ]),
+                    ),
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+                let valid = import_document(
+                    conn,
+                    "project-1",
+                    &key,
+                    &workflow_document(
+                        "valid-élan",
+                        serde_json::json!([
+                            {"name": "data", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}},
+                            {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "id-on-another-machine"}
+                        ]),
+                    ),
+                )
+                .map_err(|e| e.to_string());
+                let stored = crate::db::workflows::list_workflows(conn)?.len();
+                Ok::<_, anyhow::Error>((exec_outside_allowlist, calls_gated_child, valid, stored))
+            })
+            .await
+            .unwrap();
+        let (exec_outside_allowlist, calls_gated_child, valid, stored) = outcome;
+        assert!(
+            exec_outside_allowlist.is_err(),
+            "{exec_outside_allowlist:?}"
+        );
+        let gated = calls_gated_child.unwrap_err();
+        assert!(gated.contains("Gate"), "{gated}");
+        valid.expect("a valid definition still imports; an unknown child id is left to KT-917");
+        assert_eq!(
+            stored, 2,
+            "only the local child and the valid import are stored"
+        );
     }
 
     #[tokio::test]

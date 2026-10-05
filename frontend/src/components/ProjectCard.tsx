@@ -819,8 +819,11 @@ export function ProjectCard({
         // calling (Read, Glob, mcp__atlassian__..., …). Display
         // briefly as a chip — last-write-wins is fine; the user
         // mostly cares about "is something happening?".
-        onToolCall: (_step, tool) => {
+        onToolCall: (_step, tool, calls) => {
           setAuditCurrentTool(tool);
+          // KT-950 — an HTTP or ACP agent's tool activity is read off its run,
+          // which counts every call, even those between two reads.
+          if (typeof calls === 'number') { setAuditToolCallCount(calls); return; }
           // 0.8.4 (#319 / B3) — bump the per-step tool-call counter so
           // the chip reads `🔧 Tool (N)`. Increments on every tool
           // call regardless of name change — even Read → Read → Read

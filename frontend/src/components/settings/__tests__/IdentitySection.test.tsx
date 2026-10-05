@@ -35,6 +35,9 @@ const { config, contacts } = vi.hoisted(() => ({
 
 vi.mock('../../../lib/api', () => ({ config, contacts }));
 
+const { flushUiPreferences } = vi.hoisted(() => ({ flushUiPreferences: vi.fn() }));
+vi.mock('../../../lib/uiPreferences', () => ({ flushUiPreferences }));
+
 import { IdentitySection } from '../IdentitySection';
 
 const t = (key: string, ...args: (string | number)[]) =>
@@ -253,6 +256,21 @@ describe('IdentitySection — network exposure toggle', () => {
     expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
     expect(screen.getByText('settings.exposeRestartRequired')).toBeInTheDocument();
     expect(toggle).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('saves the interface preferences server-side before the desktop restarts', async () => {
+    const calls: string[] = [];
+    flushUiPreferences.mockImplementation(async () => { calls.push('flush'); });
+    const invoke = vi.fn(async (command: string) => { calls.push(command); });
+    window.__TAURI__ = { core: { invoke: invoke as never } };
+    try {
+      config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+      await mountIdentity();
+      await act(async () => { fireEvent.click(screen.getByText('settings.exposeRestartBtn')); });
+      await waitFor(() => expect(calls).toEqual(['flush', 'restart_app']));
+    } finally {
+      delete window.__TAURI__;
+    }
   });
 
   it('shows the CLI restart hint (not a Tauri button) in web mode', async () => {

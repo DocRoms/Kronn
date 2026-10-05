@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { safeSetItem } from '../lib/safeStorage';
 
 function readChoice(storageKey: string): boolean | null {
   try {
@@ -23,11 +24,7 @@ export function usePersistentFold(storageKey: string, defaultOpen: boolean) {
   const toggle = useCallback(() => {
     const next = !open;
     setChoice(next);
-    try {
-      localStorage.setItem(storageKey, next ? '1' : '0');
-    } catch {
-      // Storage can be disabled or full — the fold stays usable in memory.
-    }
+    safeSetItem(storageKey, next ? '1' : '0');
   }, [open, storageKey]);
 
   return [open, toggle] as const;

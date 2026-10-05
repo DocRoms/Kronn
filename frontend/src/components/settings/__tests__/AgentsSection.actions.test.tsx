@@ -29,6 +29,7 @@ const {
   detectMock,
   versionCheckMock,
   setAgentAccessMock,
+  effectiveAccessMock,
   setAgentMentionColorMock,
   setAgentConcurrencyMock,
   usageGetMock,
@@ -44,6 +45,7 @@ const {
   detectMock: vi.fn(),
   versionCheckMock: vi.fn(),
   setAgentAccessMock: vi.fn(),
+  effectiveAccessMock: vi.fn(),
   setAgentMentionColorMock: vi.fn(),
   setAgentConcurrencyMock: vi.fn(),
   usageGetMock: vi.fn(),
@@ -58,6 +60,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
   config: {
     getServerConfig: getServerConfigMock as never,
     setAgentAccess: setAgentAccessMock as never,
+    getAgentAccessEffective: effectiveAccessMock as never,
     setAgentMentionColor: setAgentMentionColorMock as never,
     setAgentConcurrency: setAgentConcurrencyMock as never,
     getModelTiers: getModelTiersMock as never,
@@ -148,6 +151,8 @@ beforeEach(() => {
   setAgentConcurrencyMock.mockResolvedValue(undefined);
   setAgentAccessMock.mockReset();
   setAgentAccessMock.mockResolvedValue(undefined);
+  effectiveAccessMock.mockReset();
+  effectiveAccessMock.mockResolvedValue([]);
   setAgentMentionColorMock.mockReset();
   setAgentMentionColorMock.mockResolvedValue(undefined);
   usageGetMock.mockReset();
@@ -506,6 +511,27 @@ describe('AgentsSection — full-access switch', () => {
     fireEvent.click(within(screen.getByRole('alertdialog')).getByText('config.fullAccessConfirmEnable'));
   }
 
+  it('locks the switch as always on when the launch forces it (Codex in Docker)', async () => {
+    effectiveAccessMock.mockResolvedValue([{ agent: 'Codex', full_access: true, reason: 'forced_in_container' }]);
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    await waitFor(() => expect(screen.getByRole('switch')).toBeDisabled());
+    expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('config.fullAccessForcedInContainer')).toBeInTheDocument();
+  });
+
+  it('keeps the switch usable when the effective access equals the setting', async () => {
+    effectiveAccessMock.mockResolvedValue([{ agent: 'Codex', full_access: false }]);
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    await act(async () => {});
+    expect(screen.getByRole('switch')).not.toBeDisabled();
+  });
+
   it('shows the switch on the card without opening the configuration panel', () => {
     renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
@@ -516,17 +542,21 @@ describe('AgentsSection — full-access switch', () => {
     expect(sw.getAttribute('aria-label')).toBe('config.fullAccessSwitchAria');
   });
 
-  it('offers a switch for Copilot but none for Vibe or Kiro, which ignore the flag', () => {
+  it('offers a switch for every CLI agent that reads the flag, and none for Ollama', () => {
     renderSection({
       agents: [
         makeAgent({ name: 'AgentCopilot', agent_type: 'CopilotCli', installed: true, enabled: true }),
         makeAgent({ name: 'AgentVibe', agent_type: 'Vibe', installed: true, enabled: true }),
         makeAgent({ name: 'AgentKiro', agent_type: 'Kiro', installed: true, enabled: true }),
+        makeAgent({ name: 'AgentOllama', agent_type: 'Ollama', installed: true, enabled: true }),
       ],
       agentAccess: accessConfig(),
     });
-    expect(screen.getAllByRole('switch')).toHaveLength(1);
+    expect(screen.getAllByRole('switch')).toHaveLength(3);
     expect(screen.getByTestId('agent-full-access-CopilotCli')).toBeTruthy();
+    expect(screen.getByTestId('agent-full-access-Vibe')).toBeTruthy();
+    expect(screen.getByTestId('agent-full-access-Kiro')).toBeTruthy();
+    expect(screen.queryByTestId('agent-full-access-Ollama')).toBeNull();
   });
 
   it('renders the permission switch reflecting full_access=false', () => {

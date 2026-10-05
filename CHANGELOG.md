@@ -13,6 +13,30 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- The Agents page shows a one-time notice listing the agents that really run
+  with full access, whether by setting or forced in Docker, with the risks and a
+  link to the switches (KT-975).
+- Under Docker, Codex always runs without its own sandbox, which cannot start
+  inside the container; the full-access switch now shows that state as locked
+  and always on instead of "Restricted" (KT-975).
+
+- Run retention is on by default (KT-984): every 6 hours, in chunks that
+  leave the database free between them, Kronn empties the step outputs of
+  workflow runs finished more than 30 days ago and keeps the runs, their
+  steps, statuses, timings and tokens. Runs in progress, paused or
+  interrupted, batch and compare runs, runs that still own a worktree and runs
+  referenced elsewhere (child runs, discussions, ratings, live pages,
+  questions, room activity) are never touched. A run's worktree path is
+  cleared as soon as the worktree is removed, so a finished run does not wait
+  for a restart to become eligible. The delay is set in
+  Settings → Database ("keep forever" turns it off). Settings → Database also
+  offers to compact the database, which gives the freed space back to the
+  disk and reports the size before and after; on a generated 4 GB base the
+  file went from 4.1 GB to 833 MB. The opt-in deletion of old runs
+  (`run_retention_days`) now follows the same rules in chunks instead of one
+  boot-time delete that also removed comparisons and their ratings, and
+  deleting a workflow is refused while one of its runs is live, paused or
+  interrupted with a worktree.
 - Full access is now a visible, accessible switch on each agent card, with a
   risk dialog before it is enabled, and the setup wizard has an Access step
   that offers it agent by agent, off by default (KT-975).
@@ -20,6 +44,12 @@ Release notes for 0.9.3 and earlier are available in the
   community server `@benborla29/mcp-server-mysql`: host, user and password,
   with an optional port and database, read-only unless a write flag is set on
   the server.
+- A skill can declare variables in the Claude Code format: an `arguments`
+  list used as `$name` in its body, an optional `argument-hint`, and Kronn's
+  label, default and control for each one as JSON under
+  `metadata.kronn-variables`. Kronn reads, validates and writes them back
+  unchanged, and such a skill shows a "Variabilisé" badge in every skill list,
+  its hover naming the placeholders (KT-906).
 
 - The project card says when the branch has lost its audit evidence while
   another commit still carries `docs/.kronn.json`, names that commit and its
@@ -29,9 +59,63 @@ Release notes for 0.9.3 and earlier are available in the
   instance, an attestation, legacy evidence) with their date and provenance
   instead of staying empty. The timeline loads in one request instead of up to
   thirteen.
+- The audit timeline shows what each step cost, as the agent reported it
+  (Claude Code's `total_cost_usd`, OpenRouter's `usage.cost`), summed over the
+  step's attempts, and the audit's total: exact when every step reported,
+  "≥ x $" naming the unknown steps otherwise. A step whose agent reported no
+  cost reads "cost ?", never 0. Each run records the model its agent served,
+  or the configured one labelled as such, and `step_done` carries the step's
+  cost (KT-997).
+
+- Saved workflows whose Exec step puts a value into inline code (`bash -c`,
+  `python3 -c`, `node -e`…) are now flagged with an "unsafe interpolation"
+  badge, and such a step no longer runs: the run stops at that step, after
+  the earlier steps, with an error naming the step, the value and the fix,
+  whatever started the run (KT-1017). In the workflow, "Suggest a fix" shows
+  the rewrite as a diff, the value moved into a separate argument (`$1`,
+  `sys.argv[1]`, `process.argv[1]`), and applies it only when you click
+  Apply. When no rewrite is provably equivalent (heredoc, single quotes,
+  part of a longer string), it says a manual fix is required and gives the
+  recipe. Editing something else in such a workflow keeps working. The
+  inline Quick Exec sources of a CollectApiData step are checked, counted and
+  fixable the same way.
 
 ### Fixed
 
+- Kronn on Windows starting Claude or Codex installed in WSL now passes them
+  what they need across the boundary: every variable it sets for the launch is
+  listed in `WSLENV` (appended to the user's own list), and the Windows paths
+  it puts in the arguments, including the bridge command inside the inline MCP
+  configuration, the sandbox settings and Codex overrides, become WSL paths.
+  `KRONN_WSL_BACKEND_URL` gives a WSL agent a backend URL it can reach in
+  WSL2's NAT mode, and a warning says so when networking is not mirrored. A
+  Gemini, Copilot, Kiro, OpenCode or Vibe found only inside WSL is refused
+  with a clear message instead of failing to start (KT-981).
+
+- An audit step that only calls tools, without a word of text, now shows its
+  last tool, its call count and its tokens while it works, for HTTP agents and
+  ACP agents alike, through one probe; the counters no longer wait for a text
+  line. A silent audit stream sends keep-alive comments every 15 seconds,
+  which hold the connection without passing for model activity (KT-950).
+
+- Importing a plugin bundle now shows, per plugin whose bundled command line
+  differs from the catalogue's, the usual and the proposed command (secret-looking
+  arguments masked) with an unchecked "I accept these arguments" box. Consent is
+  per plugin, and re-importing an already imported bundle can add it (KT-1010).
+- An old single-plugin JSON from the removed per-plugin export dropped into the
+  bundle import is recognised and imported as a one-plugin bundle, with the same
+  review; a malformed one gets a clear error (KT-833).
+
+- Large databases stay responsive (KT-1019). The token statistics and the
+  workflow list no longer read every run's step results to reach a few
+  columns: a covering index answers them, on the read connection. Scheduled
+  and manual backups copy a read snapshot with `VACUUM INTO` instead of
+  holding the write connection, so runs and discussions keep writing during
+  the copy, and they are refused with a clear log when the disk lacks the
+  space. The backup taken before a migration is written to a temporary file
+  and renamed, so a full disk no longer replaces the previous good backup,
+  and a failed copy stops the upgrade instead of migrating without a backup
+  (`KRONN_MIGRATION_BACKUP=0` upgrades without one, on purpose).
 - The desktop release pipeline now fails before building when the pushed tag
   differs from `VERSION` or a version marker is stale, builds the release job
   from the requested tag on a manual run, and expects exactly the installers
@@ -51,8 +135,8 @@ Release notes for 0.9.3 and earlier are available in the
   are affected, and the report after applying lists created, merged, rewritten
   and removed counts (KT-833).
 - Turning on full access for GitHub Copilot CLI failed with "Agent does not
-  support access flags", and Vibe and Kiro accepted a flag they ignore. The
-  backend now accepts exactly the five agents that honor it (KT-975).
+  support access flags". The backend now accepts every CLI agent the interface
+  offers, and each one describes what it really widens (KT-975).
 - A guarded action (save, create, toggle) now always runs with the current
   props and translations instead of the ones from the first render, and a
   browser with disabled or full storage no longer crashes the Discussions,
@@ -147,6 +231,16 @@ Release notes for 0.9.3 and earlier are available in the
   or, in a shell script, use the new `{{value|sh}}` filter, which renders one
   single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
   workflows keep running unchanged until they are next edited.
+- The desktop app keeps its local port from one launch to the next, so the
+  interface settings stored by the browser no longer reset at every launch or
+  after "Allow connections from other devices" restarts it (KT-972). The port
+  is saved in `desktop-port.json` in the data directory and can be pinned
+  there; a busy port is replaced for that launch only. The port is held from
+  the moment it is chosen, and the app only opens a backend that proves it is
+  the one it just started, never another Kronn answering on the same port.
+  Interface preferences (theme, tour progress, folds and sidebars, favourites,
+  default project, dismissed update) are also kept by the backend and
+  restored on a new origin; drafts and unsent messages stay on the device.
 
 - A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
   ran with the discussion's full access and without its delivery context, so
@@ -184,6 +278,49 @@ Release notes for 0.9.3 and earlier are available in the
   read. Both now reach the run's usage as integer micro-USD, summed per
   response, and stay unknown (never zero) when not reported. Showing it per
   audit step comes later.
+
+- A workflow run now keeps the project it was launched in (KT-1015). A global
+  workflow launched from a project lost that project after a gate approval or a
+  resume and continued with no working directory, and its worktree was never
+  cleaned at startup. A sub-workflow pinned to another project now runs in that
+  project's repository instead of the parent's worktree; as a foreach child it
+  is refused, since it would have to share the parent's worktree.
+- One failing workflow no longer cancels the scheduler's tick (KT-1016): a
+  missing variable or an unreachable tracker stopped the loop, and every cron
+  occurrence of the workflows after it was lost for good. A tracker issue is
+  now marked processed only once its run is admitted, so an issue refused by
+  the concurrency limit or the preflight is polled again instead of never
+  running.
+- Workflow run lifecycle holes (KT-1018). Approving a gate whose worktree had
+  disappeared continued the run in the main checkout; it now fails with the
+  reason instead. A run paused on a gate keeps its concurrency slot, and a gate
+  approval or an interrupted resume is refused while the limit is reached. A
+  run that stops on an error removes its worktree right away (keeping a branch
+  that holds unintegrated commits) instead of waiting for the next start, and
+  a failing or hung `before_remove` hook no longer keeps the worktree. Adding a
+  Gate to a workflow another one uses as a sub-workflow is refused, and a
+  workflow imported from a repository's `kronn/` folder goes through the
+  editor's save rules. Isolated workflow worktrees get the project's agent
+  configs (`.mcp.json` and the others), so an Agent step keeps the project's
+  MCP servers and its strict MCP config instead of the host's.
+- Workflow worktrees no longer pile up as `prunable` entries (KT-985). A
+  worktree a step created inside its run's worktree (`.kronn/pr-N`) is now
+  removed with it, and at startup Kronn drops the stale entries of its own
+  worktrees under `.kronn/` in every project, leaving the user's other
+  worktrees alone. A run still keeps a branch that holds commits no base has,
+  whether it succeeded, failed or was cancelled.
+
+  Exec step (KT-1017). Saving a workflow now refuses any template value in an
+  interpreter's inline code (`bash -c`, `python3 -c`, `node -e`…, attached
+  forms like `-cCODE` or `--eval=CODE` included), except `{{run.id}}` and
+  `{{time.now…}}`, and says how to write it safely: pass the value as a later
+  argument the interpreter never parses
+  (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`). A new `{{value|sh}}`
+  filter renders one single-quoted shell word, but it is a quoting helper, not
+  a way into inline code. Quick Exec applies the same rule when it is saved
+  (an unchanged stored line stays editable, and still does not run), and the
+  Quick Exec form and the workflow editor now show such a refusal in full,
+  with the suggested arguments, instead of a generic error.
 
 ### Changed
 

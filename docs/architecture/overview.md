@@ -175,6 +175,7 @@ Three Docker services behind nginx gateway:
     than silently appearing live on a dead socket.
   - **Protocol**: JSON tagged union `WsMessage` — variants: `presence`, `ping`, `pong`. Phase 3 (discussion sharing + pause IA) planned.
 - **Cross-platform**: `core/env.rs` provides `is_docker()` and `host_os_label()`. Docker-specific logic (chown, safe.directory, /host-home) is conditional. Agent uninstall commands use `#[cfg(unix)]`/`#[cfg(windows)]`. The Tauri desktop app embeds the backend and exposes the bounded `wait_for_backend` bootstrap command to its packaged frontend.
+- **Desktop origin (KT-972)**: the webview's origin is `http://127.0.0.1:<port>`, and localStorage is per origin. `desktop/src-tauri/src/port.rs` binds the port saved in `desktop-port.json` (data dir, read in `main()` before any config load) and hands the listener to `start_backend` (`TcpListener::from_std`; only the "allow other devices" mode re-binds on `0.0.0.0`). A busy port falls back to a free one for that launch and never replaces the saved value. Each launch sets a random nonce through `kronn::api::health::set_instance_nonce`; `/api/health` serves its SHA-256 as `instance`, and `wait_for_backend` only navigates when it matches, so another Kronn answering on the port is never adopted. User-visible preferences are mirrored in the `ui_preferences` table (`GET/PUT /api/ui-preferences`, 64 KiB, `kronn:` keys, whole-map replace) by `frontend/src/lib/uiPreferences.ts`: a never-hydrated origin takes the server copy before the first render (bounded wait), then changes are written through. Drafts, the message outbox, caches and secret toggles stay per device; `kronn:webSessionId` is synced only from the desktop shell.
 
 ### Security & auth
 
@@ -423,6 +424,14 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
+- **Worktrees nested in a run worktree (KT-985).** A step may add its own
+  worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
+  directory alone leaves that entry `prunable` in `git worktree list`, so
+  cleanup and the boot purge remove nested worktrees first, then drop the
+  prunable entries under `<repo>/.kronn/`. Boot repeats that prune for every
+  project. It never runs a blanket `git worktree prune`: that would also drop
+  a user's own worktree on an unmounted drive.
+  [src: file: backend/src/core/worktree.rs:898-978]
   Removal uses `git worktree remove` without `--force`; the run's own
   `kronn/…` branch is deleted only when fully integrated, by compare-and-swap
   on the commit that was checked. No workspace hook runs. The run keeps its
@@ -501,7 +510,7 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
 - `StepOutputFormat::TypedSchema` (JSON-schema-validated step output).
 - `Workflow.artifacts` + `---ARTIFACT:name---` envelope persisted to workspace files.
 - `StepType::Gate` (`WaitingApproval` + `POST /api/workflows/.../decide` + optional webhook).
-- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses template placeholders at save time except `{{x|sh}}` outside quotes, `{{run.id}}` and `{{time.now…}}`).
+- `StepType::Exec` (allowlisted binaries, argv literal, never `sh -c` by Kronn itself; an allowlisted interpreter's inline script, e.g. `bash -c`, refuses every template placeholder at save time except `{{run.id}}` and `{{time.now…}}`, attached forms like `-cCODE` and `--eval=CODE` included; values travel as later argv entries). One classifier (`backend/src/core/inline_code.rs`) serves the save-time validator, the run-time refusal in `exec_step.rs` (every trigger, Quick Exec included) and `GET /api/workflows/{id}/unsafe-steps`, which also returns the suggested positional rewrite or the reason a manual fix is required; an update keeps an unchanged unsafe line so unrelated edits still save.
 - `ConditionAction::Goto { max_iterations }` loops + `WorkflowRun.state` (`---STATE:k=v---`, `{{state.X}}`, `{{iter.X}}`).
 - `Workflow.on_failure` rollback steps (only on `Failed`, not on `Cancelled`/`StoppedByGuard`/Gate-reject).
 - Per-item Export/Import for Workflows + Quick Prompts. Workflow bundle v2

@@ -527,6 +527,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Checkouts deleted without git (or nested inside a removed run worktree)
+    // leave admin entries that slow every `git worktree` call.
+    let pruned = kronn::workflows::workspace::prune_orphan_worktrees(&state.db).await;
+    if pruned > 0 {
+        tracing::info!(pruned, "Orphan Kronn worktree entries pruned");
+    }
+
     // Partial-response recovery — agents whose `full_response` was being
     // checkpointed into discussions.partial_response when the previous
     // process died. Convert each into an Agent message with an "interrupted"
@@ -590,25 +597,8 @@ async fn main() -> anyhow::Result<()> {
     kronn::api::discussions::start_agent_dispatcher(state.clone());
     kronn::api::agent_jobs::start_agent_resume_runner(state.clone());
 
-    // 0.8.11 (B7) — opt-in run retention. Only when the operator set
-    // `run_retention_days > 0`; parent runs referenced by a retained child are
-    // preserved by the query. Default 0 = keep all history (no surprise loss).
-    let retention_days = state.config.read().await.server.run_retention_days;
-    if retention_days > 0 {
-        match state
-            .db
-            .with_conn(move |conn| {
-                kronn::db::workflows::purge_runs_older_than(conn, retention_days)
-            })
-            .await
-        {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(
-                "Run retention: purged {n} workflow run(s) older than {retention_days} days",
-            ),
-            Err(e) => tracing::warn!("Run retention purge failed: {}", e),
-        }
-    }
+    // KT-984 — run retention runs as a periodic, chunked task, never at boot.
+    kronn::core::run_retention::spawn(state.db.clone(), state.config.clone());
 
     match state
         .db

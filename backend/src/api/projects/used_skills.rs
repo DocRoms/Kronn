@@ -339,6 +339,18 @@ fn repository_skill(id: &str, used: &ProjectUsedSkill, text: &str) -> (Skill, bo
         auto_triggers: None,
         external: false,
         source_url: None,
+        arguments: file
+            .as_ref()
+            .map(|file| file.arguments.clone())
+            .unwrap_or_default(),
+        argument_hint: file.as_ref().and_then(|file| file.argument_hint.clone()),
+        variables: file
+            .as_ref()
+            .and_then(|file| {
+                let json = file.metadata.get(crate::core::agent_skill::VARIABLES_KEY)?;
+                crate::core::agent_skill::parse_variables(json, &file.arguments).ok()
+            })
+            .unwrap_or_default(),
     };
     (skill, truncated)
 }

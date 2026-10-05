@@ -37,11 +37,28 @@ type AgentRow = (
     u32,
 );
 
+/// Workflow token total. Answered from `idx_workflow_runs_summary`:
+/// `tokens_used` is stored after the run's step results.
+pub(crate) const WORKFLOW_TOKENS_SQL: &str =
+    "SELECT COALESCE(SUM(tokens_used), 0) FROM workflow_runs WHERE tokens_used > 0";
+
+/// Top workflows by tokens. Aggregated over the runs first, from the same
+/// covering index, then joined to the few workflows that remain.
+pub(crate) const TOP_WORKFLOWS_SQL: &str = "SELECT w.id, w.name, totals.tokens
+     FROM (SELECT workflow_id, SUM(tokens_used) AS tokens
+             FROM workflow_runs
+            WHERE tokens_used > 0
+            GROUP BY workflow_id) totals
+     JOIN workflows w ON w.id = totals.workflow_id
+     ORDER BY totals.tokens DESC
+     LIMIT 5";
+
 /// GET /api/stats/tokens
 pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<TokenUsageSummary>> {
+    // Read-only aggregation: on the read connection it never queues writers.
     match state
         .db
-        .with_conn(|conn| {
+        .with_read_conn(|conn| {
             // ── 1. Discussion tokens (from messages table) ──
             let mut disc_stmt = conn.prepare(
                 "SELECT m.agent_type, d.project_id, p.name,
@@ -74,11 +91,7 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
 
             // ── 2. Workflow tokens (from workflow_runs table) ──
             let workflow_tokens: u64 = conn
-                .query_row(
-                    "SELECT COALESCE(SUM(tokens_used), 0) FROM workflow_runs WHERE tokens_used > 0",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
+                .query_row(WORKFLOW_TOKENS_SQL, [], |row| row.get::<_, i64>(0))
                 .unwrap_or(0) as u64;
 
             // ── 3. By provider (recorded cost — provenance unguaranteed, justified estimate, or honest unknown) ──
@@ -198,15 +211,7 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
             // ── 6. Top workflows ──
             // workflow_runs carries no per-run agent attribution, so its cost
             // is categorically unknown — never priced against Claude's table.
-            let mut top_wf_stmt = conn.prepare(
-                "SELECT w.id, w.name, SUM(r.tokens_used)
-             FROM workflow_runs r
-             JOIN workflows w ON r.workflow_id = w.id
-             WHERE r.tokens_used > 0
-             GROUP BY w.id
-             ORDER BY SUM(r.tokens_used) DESC
-             LIMIT 5",
-            )?;
+            let mut top_wf_stmt = conn.prepare(TOP_WORKFLOWS_SQL)?;
             let top_workflows: Vec<UsageEntry> = top_wf_stmt
                 .query_map([], |row| {
                     let tokens = row.get::<_, i64>(2).unwrap_or(0) as u64;
@@ -310,7 +315,7 @@ pub async fn token_usage(State(state): State<AppState>) -> Json<ApiResponse<Toke
 pub async fn agent_usage(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<AgentUsageSummary>>> {
-    match state.db.with_conn(|conn| {
+    match state.db.with_read_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT m.agent_type, d.project_id, p.name, SUM(m.tokens_used) as total, SUM(m.cost_usd), COUNT(*) as msg_count
              FROM messages m
@@ -362,5 +367,69 @@ pub async fn agent_usage(
     }).await {
         Ok(data) => Json(ApiResponse::ok(data)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn migrated() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn workflow_token_stats_never_read_run_payloads() {
+        // KT-1019 — both statements scanned workflow_runs to reach
+        // tokens_used, walking every run's step results on each page open.
+        let conn = migrated();
+        for sql in [WORKFLOW_TOKENS_SQL, TOP_WORKFLOWS_SQL] {
+            let plan = crate::db::query_plan(&conn, sql);
+            assert!(
+                crate::db::table_reads_outside_index(&plan, &["workflow_runs", "r"]).is_empty(),
+                "{sql} must read workflow_runs from a covering index: {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_workflows_sum_each_workflow_and_keep_the_five_biggest() {
+        let conn = migrated();
+        for index in 0..7 {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES (?1, ?2, '\"Manual\"', '[]', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')",
+                rusqlite::params![format!("wf-{index}"), format!("Flux é{index}")],
+            )
+            .unwrap();
+            for run in 0..2 {
+                conn.execute(
+                    "INSERT INTO workflow_runs (id, workflow_id, status, tokens_used, started_at)
+                     VALUES (?1, ?2, 'Success', ?3, '2026-10-01T00:00:00Z')",
+                    rusqlite::params![
+                        format!("run-{index}-{run}"),
+                        format!("wf-{index}"),
+                        index * 10
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let total: i64 = conn
+            .query_row(WORKFLOW_TOKENS_SQL, [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 2 * (10 + 20 + 30 + 40 + 50 + 60));
+        let top: Vec<(String, String, i64)> = conn
+            .prepare(TOP_WORKFLOWS_SQL)
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(top.len(), 5);
+        assert_eq!(top[0], ("wf-6".into(), "Flux é6".into(), 120));
+        assert_eq!(top[4].0, "wf-2");
     }
 }

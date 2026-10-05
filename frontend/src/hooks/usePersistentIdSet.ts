@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { safeSetItem } from '../lib/safeStorage';
 
 function readIds(storageKey: string): Set<string> {
   try {
@@ -35,11 +36,7 @@ export function usePersistentIdSet(
     // stale. Waiting here prevents a first render from overwriting favorites
     // restored from storage before the collection has loaded.
     if (!ready) return;
-    try {
-      localStorage.setItem(storageKey, JSON.stringify([...ids]));
-    } catch {
-      // Storage can be disabled or full. Favorites remain usable in memory.
-    }
+    safeSetItem(storageKey, JSON.stringify([...ids]));
   }, [ids, ready, storageKey]);
 
   const toggle = useCallback((id: string) => {

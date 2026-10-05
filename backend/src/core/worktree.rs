@@ -885,61 +885,123 @@ pub fn create_discussion_worktree(
     // Fix gitdir paths so the worktree works from the host too (not just inside Docker)
     fix_worktree_paths(repo_path, &worktree_path);
 
-    // Copy .mcp.json from repo root to worktree (it's gitignored)
-    let mcp_src = repo_path.join(".mcp.json");
-    if mcp_src.exists() {
-        let mcp_dst = worktree_path.join(".mcp.json");
-        if let Err(e) = std::fs::copy(&mcp_src, &mcp_dst) {
-            tracing::warn!("Failed to copy .mcp.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .mcp.json to worktree");
-        }
-    }
-
-    // Copy .vibe/config.toml if it exists (for Vibe agent)
-    let vibe_src = repo_path.join(".vibe").join("config.toml");
-    if vibe_src.exists() {
-        let vibe_dir = worktree_path.join(".vibe");
-        let _ = std::fs::create_dir_all(&vibe_dir);
-        let vibe_dst = vibe_dir.join("config.toml");
-        if let Err(e) = std::fs::copy(&vibe_src, &vibe_dst) {
-            tracing::warn!("Failed to copy .vibe/config.toml to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .vibe/config.toml to worktree");
-        }
-    }
-
-    // Copy .kiro/settings/mcp.json if it exists (for Kiro agent)
-    let kiro_src = repo_path.join(".kiro").join("settings").join("mcp.json");
-    if kiro_src.exists() {
-        let kiro_dir = worktree_path.join(".kiro").join("settings");
-        let _ = std::fs::create_dir_all(&kiro_dir);
-        let kiro_dst = kiro_dir.join("mcp.json");
-        if let Err(e) = std::fs::copy(&kiro_src, &kiro_dst) {
-            tracing::warn!("Failed to copy .kiro/settings/mcp.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .kiro/settings/mcp.json to worktree");
-        }
-    }
-
-    // Copy .gemini/settings.json if it exists (for Gemini CLI agent)
-    let gemini_src = repo_path.join(".gemini").join("settings.json");
-    if gemini_src.exists() {
-        let gemini_dir = worktree_path.join(".gemini");
-        let _ = std::fs::create_dir_all(&gemini_dir);
-        let gemini_dst = gemini_dir.join("settings.json");
-        if let Err(e) = std::fs::copy(&gemini_src, &gemini_dst) {
-            tracing::warn!("Failed to copy .gemini/settings.json to worktree: {}", e);
-        } else {
-            tracing::info!("Copied .gemini/settings.json to worktree");
-        }
-    }
+    copy_agent_configs(repo_path, &worktree_path);
 
     Ok(WorktreeInfo {
         path: worktree_path.to_string_lossy().to_string(),
         branch,
         is_main_repo: false,
     })
+}
+
+/// One `git worktree list --porcelain` entry.
+struct WorktreeEntry {
+    path: PathBuf,
+    prunable: bool,
+}
+
+fn worktree_entries(repo_path: &Path) -> Vec<WorktreeEntry> {
+    let Ok(output) = sync_cmd("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut entries: Vec<WorktreeEntry> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            entries.push(WorktreeEntry {
+                path: PathBuf::from(path),
+                prunable: false,
+            });
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            if let Some(last) = entries.last_mut() {
+                last.prunable = true;
+            }
+        }
+    }
+    entries
+}
+
+/// Strictly below `root`, whether git recorded the path as spelled or as
+/// canonicalized (`/var` vs `/private/var` on macOS).
+fn is_strictly_inside(path: &Path, root: &Path) -> bool {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    [root, canonical_root.as_path()].iter().any(|root| {
+        [path, canonical_path.as_path()]
+            .iter()
+            .any(|path| path.starts_with(root) && path != root)
+    })
+}
+
+fn force_remove_worktree(repo_path: &Path, path: &Path) -> bool {
+    let removed = sync_cmd("git")
+        .args(["worktree", "remove", "--force"])
+        .arg(path)
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !removed && path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+    removed || !path.exists()
+}
+
+/// Removes the worktrees registered inside `parent`, deepest first. A workflow
+/// step may add one under its run's worktree (`<run>/.kronn/pr-N`); deleting
+/// the run's directory alone would leave its admin entry behind as prunable.
+pub fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
+    let mut nested: Vec<PathBuf> = worktree_entries(repo_path)
+        .into_iter()
+        .map(|entry| entry.path)
+        .filter(|path| is_strictly_inside(path, parent))
+        .collect();
+    nested.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    nested
+        .iter()
+        .filter(|path| force_remove_worktree(repo_path, path))
+        .count()
+}
+
+/// Drops the admin entries of Kronn's worktrees whose checkout is gone. Scoped
+/// to `<repo>/.kronn/`: a blanket `git worktree prune` would also drop a user's
+/// own worktree sitting on an unmounted drive.
+pub fn prune_kronn_worktrees(repo_path: &Path) -> usize {
+    let kronn_root = repo_path.join(".kronn");
+    worktree_entries(repo_path)
+        .into_iter()
+        .filter(|entry| entry.prunable && is_strictly_inside(&entry.path, &kronn_root))
+        .filter(|entry| force_remove_worktree(repo_path, &entry.path))
+        .count()
+}
+
+/// The agents' project configs are gitignored, so a new worktree lacks them:
+/// without `.mcp.json` a Claude agent gets no `--strict-mcp-config` and
+/// inherits the host's personal MCP servers instead of the project's.
+pub(crate) fn copy_agent_configs(repo_path: &Path, worktree_path: &Path) {
+    const FILES: [&[&str]; 4] = [
+        &[".mcp.json"],
+        &[".vibe", "config.toml"],
+        &[".kiro", "settings", "mcp.json"],
+        &[".gemini", "settings.json"],
+    ];
+    for parts in FILES {
+        let relative: PathBuf = parts.iter().collect();
+        let source = repo_path.join(&relative);
+        if !source.is_file() {
+            continue;
+        }
+        let target = worktree_path.join(&relative);
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::copy(&source, &target) {
+            Ok(_) => tracing::info!("Copied {} to worktree", relative.display()),
+            Err(e) => tracing::warn!("Failed to copy {} to worktree: {}", relative.display(), e),
+        }
+    }
 }
 
 /// Re-attach an existing branch to a new worktree path.

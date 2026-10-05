@@ -67,7 +67,11 @@ export type AgentActivity = { tool: string,
  * The call's most informative input (file, command, pattern or URL),
  * truncated. `None` until the input is complete or when it has none.
  */
-target?: string | null, at: string, };
+target?: string | null, at: string,
+/**
+ * Tool calls the launch has started so far, this one included.
+ */
+calls: number, };
 
 export type AgentApiCallRequest = {
 /**
@@ -290,6 +294,15 @@ runtime_warning?: string | null,
  * so a stale shadowing copy silently changes the model an alias serves.
  */
 shadowed_installs?: Array<ShadowedInstall>, };
+
+/**
+ * One agent's access as a launch will really apply it.
+ */
+export type AgentEffectiveAccess = { agent: AgentType, full_access: boolean,
+/**
+ * Why it differs from the stored setting, when it does.
+ */
+reason?: string, };
 
 /**
  * Where Kronn writes a project's agent files (KT-971).
@@ -1780,6 +1793,11 @@ size_bytes: number,
  * Timestamp the backup was taken (ISO-8601 UTC).
  */
 taken_at: string, };
+
+/**
+ * What `POST /api/db/compact` changed, measured on disk around the VACUUM.
+ */
+export type DbCompaction = { file_bytes_before: number, wal_bytes_before: number, file_bytes_after: number, wal_bytes_after: number, duration_ms: number, };
 
 export type DbExport = { version: number, exported_at: string, projects: Array<Project>, discussions: Array<Discussion>, workflows: Array<Workflow>, mcp_servers: Array<McpServer>, mcp_configs: Array<McpConfig>, custom_skills: Array<Skill>, custom_directives: Array<Directive>, custom_profiles: Array<AgentProfile>, contacts: Array<Contact>, quick_prompts: Array<QuickPrompt>,
 /**
@@ -3485,6 +3503,12 @@ dedup_key: string, title: string,
  */
 highlight: string, context?: string | null, impact: string, action_required: ImportantAction, references: ImportantReferences, };
 
+export type ImportBundlePreview = { bundle_id: string, already_imported: boolean, includes_values: boolean,
+/**
+ * The file was a single-plugin JSON from the old per-plugin export.
+ */
+legacy: boolean, plugins: Array<ImportPreviewPlugin>, };
+
 export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
 
 export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
@@ -3500,10 +3524,24 @@ imported_configs: Array<ImportedPluginConfig>, skipped_plugins: number, includes
 
 export type ImportPluginBundleRequest = { content: string, passphrase?: string | null,
 /**
- * Explicit consent to apply bundled custom arguments. They replace the
- * plugin's whole command line, so they are dropped unless this is true.
+ * Source config ids whose bundled custom arguments the importer accepted.
+ * They replace the plugin's whole command line, so every other plugin's
+ * arguments are dropped.
  */
-accept_args_override?: boolean, };
+accept_args_for?: Array<string>, };
+
+/**
+ * One plugin as the import would treat it, before anything is written.
+ */
+export type ImportPreviewPlugin = { source_config_id: string, label: string, server_name: string,
+/**
+ * The command line the plugin runs today (catalogue), for stdio plugins.
+ */
+usual_args: Array<string> | null,
+/**
+ * The bundle's proposed command line, secret-looking parts masked.
+ */
+proposed_args: Array<string> | null, args_differ: boolean, importable: boolean, issue: string | null, };
 
 export type ImportProjectRepositoryResourceRequest = { kind: ProjectRepositoryResourceKind, slug: string,
 /**
@@ -6597,13 +6635,17 @@ domain: string | null,
  */
 failure_notify_url: string | null,
 /**
- * 0.8.11 (B7) — auto-purge workflow runs older than N days at boot.
- * `0` (default) = DISABLED: never delete run history automatically (a fast
- * cron's run table is 76% of the DB, but silently dropping the user's
- * history is worse than size). Set to e.g. 90 to bound growth; parent runs
- * still referenced by a retained child are always preserved.
+ * Delete whole workflow runs older than N days. `0` (default) never
+ * deletes run history. Applies the same rules as the payload trim below
+ * (plain, terminal, unreferenced runs that own no worktree), in chunks.
  */
 run_retention_days: number,
+/**
+ * KT-984 — blank the step outputs of workflow runs finished more than N
+ * days ago, keeping every run row and its metadata. `0` keeps outputs
+ * forever. Default 30; see `db::run_retention` for what is never touched.
+ */
+run_payload_retention_days: number,
 /**
  * Encrypted execution-variable snapshot retention. `0` keeps metadata
  * but disables value retention. Product default: 30 days.
@@ -6808,7 +6850,11 @@ discussion_weight: DiscussionWeightConfig,
  * Default retention for encrypted execution-variable snapshots.
  * Zero purges values as soon as the run reaches a terminal state.
  */
-execution_variable_retention_days: number, };
+execution_variable_retention_days: number,
+/**
+ * Days a finished workflow run keeps its step outputs. Zero keeps them.
+ */
+run_payload_retention_days: number, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -6960,7 +7006,21 @@ external?: boolean,
  * (clickable in the UI for attribution). Set via the `source_url`
  * frontmatter field.
  */
-source_url?: string | null, };
+source_url?: string | null,
+/**
+ * Named positional arguments in the Claude Code skills format
+ * (`arguments:` header, `$name` in the body). Non-empty = "Variabilisé".
+ */
+arguments?: Array<string>,
+/**
+ * Claude Code `argument-hint`: what autocomplete shows after the name.
+ */
+argument_hint?: string | null,
+/**
+ * Kronn's own description of the arguments (label, default, control),
+ * read from the `metadata.kronn-variables` JSON string.
+ */
+variables?: Array<SkillVariable>, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
@@ -7064,6 +7124,20 @@ paths: Array<string>,
  * there.
  */
 at_target: boolean, };
+
+/**
+ * Kronn's description of one skill argument. Stored as JSON under the flat
+ * `kronn-variables` metadata key: the Agent Skills `metadata` is a string map.
+ */
+export type SkillVariable = {
+/**
+ * One of the names declared in `arguments`.
+ */
+name: string, label?: string, description?: string | null, required: boolean, default_value?: string | null,
+/**
+ * How Kronn asks for the value; a plain text field when absent.
+ */
+control?: PromptVariableControl | null, };
 
 /**
  * One extracted `[src: …]` marker plus its mechanical verdict.
@@ -7921,6 +7995,34 @@ state?: Record<string, string>, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
+/**
+ * An Exec command line that interpolates a template value into inline code
+ * (`bash -c`, `python3 -c`…). It is refused at run time; `suggested_args`
+ * is a provably equivalent rewrite, `manual_fix` says why there is none.
+ */
+export type UnsafeExecStep = { step_name: string,
+/**
+ * The step belongs to the `on_failure` chain.
+ */
+on_failure: boolean,
+/**
+ * `main` (`exec_command`), `setup` (`exec_setup_command`) or `source`
+ * (an inline Quick Exec of a CollectApiData step).
+ */
+phase: string,
+/**
+ * The CollectApiData source alias when `phase` is `source`.
+ */
+source_alias?: string, command: string, args: Array<string>,
+/**
+ * The offending placeholder, e.g. `{{issue.title}}` (empty when malformed).
+ */
+placeholder: string,
+/**
+ * `inline_code_interpolation` or `malformed_placeholder`.
+ */
+reason: string, suggested_args: Array<string> | null, manual_fix: string | null, };
+
 export type UpdateBatchCompareManualScoreRequest = {
 /**
  * `None` clears the human rating; otherwise the accepted range is 1..=5.
@@ -8608,6 +8710,11 @@ concurrency_key?: string | null,
  */
 triggered_by_run_id?: string | null,
 /**
+ * The project resolved at launch: the workflow's own, or the launcher's
+ * for a global workflow. Resume and worktree cleanup read it first.
+ */
+project_id?: string | null,
+/**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
  * workflow id + name + tick time so the UI can render
@@ -8997,7 +9104,12 @@ export type WorkflowSummary = { id: string, name: string, project_id: string | n
  * AI-generated workflow that still needs wiring, without fetching its
  * full step list. 0 = ready to run.
  */
-misconfigured_step_count: number, enabled: boolean,
+misconfigured_step_count: number,
+/**
+ * Exec command lines (main or setup) that interpolate a value into
+ * inline code: refused at run time until fixed (KT-1017).
+ */
+unsafe_step_count: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */

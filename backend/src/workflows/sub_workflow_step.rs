@@ -94,6 +94,26 @@ pub(crate) fn secret_mapping_error(
     None
 }
 
+/// The project a child runs in: its own when pinned, else the parent run's.
+pub(crate) fn child_project_id(
+    child: &Workflow,
+    parent_project_id: Option<&str>,
+) -> Option<String> {
+    child
+        .project_id
+        .clone()
+        .or_else(|| parent_project_id.map(str::to_string))
+}
+
+/// A child pinned to another project must not attach to the parent's
+/// worktree: that checkout belongs to another repository.
+pub(crate) fn pinned_to_another_project(child: &Workflow, parent_project_id: Option<&str>) -> bool {
+    child
+        .project_id
+        .as_deref()
+        .is_some_and(|child_project| Some(child_project) != parent_project_id)
+}
+
 /// Every mapped name must be a launch variable of the child.
 pub(crate) fn undeclared_mapping_error(step: &WorkflowStep, child: &Workflow) -> Option<String> {
     let mut names: Vec<_> = step.sub_workflow_variables.keys().collect();
@@ -156,10 +176,7 @@ async fn prepare_child_snapshot(
         )
     };
     let declarations = child.variables.clone();
-    let project_id = child
-        .project_id
-        .clone()
-        .or_else(|| parent_project_id.map(str::to_string));
+    let project_id = child_project_id(child, parent_project_id);
     let run_id = child_run_id.to_string();
     let prepared = state
         .db
@@ -359,9 +376,15 @@ pub async fn execute_sub_workflow_step(
         produced_branches: vec![],
         concurrency_key: None,
         triggered_by_run_id: None,
+        project_id: child_project_id(&child_wf, launch.parent_project_id),
         parent_workflow_id: None,
         parent_workflow_name: None,
         parent_run_started_at: None,
+    };
+    let child_workspace = if pinned_to_another_project(&child_wf, launch.parent_project_id) {
+        None
+    } else {
+        parent_workspace
     };
     let to_insert = child_run.clone();
     if let Err(e) = state
@@ -391,9 +414,9 @@ pub async fn execute_sub_workflow_step(
         &mut child_run,
         tokens_config,
         agents_config,
-        None,             // no live SSE for the child in Phase 1; the tree endpoint reads DB
-        Some(budget),     // SHARED budget — child counts against the tree-wide quota
-        parent_workspace, // Phase 2 — share the parent's worktree when present
+        None,            // no live SSE for the child in Phase 1; the tree endpoint reads DB
+        Some(budget),    // SHARED budget — child counts against the tree-wide quota
+        child_workspace, // Phase 2 — share the parent's worktree when present
     ))
     .await;
     if let Err(e) = exec_res {
@@ -710,6 +733,16 @@ async fn execute_foreach(
 
     if let Some(error) = undeclared_mapping_error(step, &child_wf) {
         return fail(step, start, error);
+    }
+    if pinned_to_another_project(&child_wf, launch.parent_project_id) {
+        return fail(
+            step,
+            start,
+            format!(
+                "Sub-workflow « {} » is pinned to another project: a foreach child shares the parent's worktree, so it must run in the parent's project.",
+                child_wf.name
+            ),
+        );
     }
 
     // A2 resume reconciliation — three sources, trusted in this order:
@@ -1038,6 +1071,7 @@ async fn execute_foreach(
                 produced_branches: vec![],
                 concurrency_key: None,
                 triggered_by_run_id: None,
+                project_id: child_project_id(&child_wf, launch.parent_project_id),
                 parent_workflow_id: None,
                 parent_workflow_name: None,
                 parent_run_started_at: None,
@@ -1351,6 +1385,7 @@ mod tests {
             produced_branches: vec![],
             concurrency_key: None,
             triggered_by_run_id: None,
+            project_id: None,
             parent_workflow_id: None,
             parent_workflow_name: None,
             parent_run_started_at: None,
@@ -1898,5 +1933,102 @@ mod tests {
             "{}",
             secret.result.output
         );
+    }
+
+    // ─── KT-1018 — a child edited later is checked against its parents ───
+
+    fn workflow_json(id: &str, steps: serde_json::Value) -> crate::models::Workflow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "project_id": null,
+            "trigger": {"type": "Manual"}, "steps": steps, "actions": [],
+            "safety": {}, "workspace_config": null, "concurrency_limit": null,
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    fn gate_steps() -> serde_json::Value {
+        serde_json::json!([
+            {"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}},
+            {"name": "review", "step_type": {"type": "Gate"}, "gate_message": "Go?"}
+        ])
+    }
+
+    #[test]
+    fn a_gate_added_to_a_child_is_refused_through_every_parent() {
+        let parent = workflow_json(
+            "wf-parent",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-middle"}]),
+        );
+        let middle = workflow_json(
+            "wf-middle",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-leaf"}]),
+        );
+        let leaf = workflow_json(
+            "wf-leaf",
+            serde_json::json!([{"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {}}]),
+        );
+        let unrelated = workflow_json("wf-unrelated", serde_json::json!([]));
+        let all = vec![parent, middle, leaf.clone(), unrelated];
+        let with_gate = workflow_json("wf-leaf", gate_steps()).steps;
+
+        let error =
+            crate::api::workflows::validate_sub_workflow_parents("wf-leaf", &with_gate, &all)
+                .unwrap_err();
+        assert!(error.contains("Gate"), "{error}");
+        assert!(
+            crate::api::workflows::validate_sub_workflow_parents("wf-leaf", &leaf.steps, &all)
+                .is_ok()
+        );
+        assert!(
+            crate::api::workflows::validate_sub_workflow_parents("wf-unrelated", &with_gate, &all)
+                .is_ok(),
+            "a workflow nobody calls may hold a gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn editing_a_child_to_add_a_gate_is_refused_by_the_update_endpoint() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let parent = workflow_json(
+            "wf-edit-parent",
+            serde_json::json!([{"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-edit-child"}]),
+        );
+        let child = workflow_json(
+            "wf-edit-child",
+            serde_json::json!([{"name": "work", "step_type": {"type": "JsonData"}, "json_data_payload": {}}]),
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &child)?;
+                crate::db::workflows::insert_workflow(conn, &parent)
+            })
+            .await
+            .unwrap();
+        let request: crate::models::UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({ "steps": gate_steps() })).unwrap();
+
+        let response = crate::api::workflows::update(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("wf-edit-child".to_string()),
+            axum::Json(request),
+        )
+        .await;
+
+        let error = response.0.error.expect("refused");
+        assert!(error.contains("wf-edit-parent"), "{error}");
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_workflow(conn, "wf-edit-child"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.steps.len(), 1, "the edit was not saved");
     }
 }
