@@ -71,7 +71,15 @@ fn kind_key(kind: ResourceKind) -> String {
 
 fn canonical(mut value: Value, kind: ResourceKind) -> Value {
     if let Some(object) = value.as_object_mut() {
-        for key in ["id", "created_at", "updated_at", "pinned", "enabled"] {
+        // A local approval does not make a stored copy differ from the import.
+        for key in [
+            "id",
+            "created_at",
+            "updated_at",
+            "pinned",
+            "enabled",
+            "unmodelled_args_approved",
+        ] {
             object.remove(key);
         }
         if kind == ResourceKind::Workflow {
@@ -80,6 +88,7 @@ fn canonical(mut value: Value, kind: ResourceKind) -> Value {
                     for step in steps {
                         if let Some(step) = step.as_object_mut() {
                             step.remove("id");
+                            step.remove("exec_unmodelled_args_approved");
                         }
                     }
                 }
@@ -189,7 +198,10 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
         validate_page(&page)?;
         resources.push(Resource::new(ResourceKind::Artifact, page)?);
     }
-    for workflow in bundle.referenced_workflows {
+    // An artifact may come from another instance: only a human of this one approves.
+    for mut workflow in bundle.referenced_workflows {
+        super::super::workflows::clear_human_approvals(&mut workflow.steps);
+        super::super::workflows::clear_human_approvals(&mut workflow.on_failure);
         super::super::workflows::validate_workflow_for_import(&workflow)
             .map_err(anyhow::Error::msg)?;
         resources.push(Resource::new(ResourceKind::Workflow, workflow)?);
@@ -202,13 +214,14 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
         validate_prompt_variables(&api.variables).map_err(anyhow::Error::msg)?;
         resources.push(Resource::new(ResourceKind::QuickApi, api)?);
     }
-    for exec in bundle.referenced_quick_execs {
+    for mut exec in bundle.referenced_quick_execs {
+        exec.unmodelled_args_approved = None;
         validate_prompt_variables(&exec.variables).map_err(anyhow::Error::msg)?;
         if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
             &exec.name,
             &exec.command,
             &exec.args,
-            exec.unmodelled_args_approved == Some(true),
+            false,
         ) {
             bail!(error);
         }

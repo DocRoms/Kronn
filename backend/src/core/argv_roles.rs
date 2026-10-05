@@ -128,10 +128,31 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
         _ if UNMODELLED_EVALUATORS.contains(&name.as_str()) => vec![Role::Option; args.len()],
         _ => match flag_spec(&name) {
             Some(spec) => flag_roles(args, tainted, &spec),
-            None if is_data_only(cmd) => vec![Role::Data; args.len()],
+            None if is_data_only(cmd) => data_only_roles(&name, args, tainted),
             None => vec![Role::Unmodelled; args.len()],
         },
     }
+}
+
+/// Data-only programs still parse options (`rm -rf`, `date -s`): a value is
+/// checked at run time until a literal `--` ends them. `echo`, `test` and
+/// `[` read no option a value could turn on, and do not end options on `--`.
+fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
+    if matches!(name, "echo" | "test" | "[" | "true" | "false") {
+        return vec![Role::Data; args.len()];
+    }
+    let mut options_end = false;
+    let mut roles = Vec::with_capacity(args.len());
+    for (i, arg) in args.iter().enumerate() {
+        let value = is_tainted(tainted, i);
+        roles.push(if value && !options_end {
+            Role::RuntimeOption
+        } else {
+            Role::Data
+        });
+        options_end |= !value && arg == "--";
+    }
+    roles
 }
 
 fn is_tainted(tainted: &[bool], i: usize) -> bool {
@@ -2463,6 +2484,48 @@ mod tests {
         for program in DATA_ONLY_PROGRAMS {
             assert!(is_modelled_program(program), "{program}");
             assert!(!refused(program, &["{{x}}"]), "{program}");
+        }
+    }
+
+    /// A data-only program still reads options: a value rendering to one
+    /// (`rm {{x}}` as `-rf`) is refused at run time, unless a literal `--`
+    /// precedes it.
+    #[test]
+    fn a_data_only_operand_rendering_to_an_option_is_refused_at_run_time() {
+        let tainted = |items: &[&str]| -> Vec<String> { line(items) };
+        for program in [
+            "rm", "cp", "mv", "chmod", "chown", "ln", "tee", "date", "grep", "jq", "printf",
+            "touch", "mkdir", "/bin/rm",
+        ] {
+            let templates = tainted(&["{{x}}", "target"]);
+            let refusal = |rendered: &[&str]| {
+                rendered_refusal("s", program, &templates, &line(rendered), false)
+            };
+            assert!(refusal(&["-rf", "target"]).is_some(), "{program} -rf");
+            assert!(refusal(&["--no-preserve-root", "target"]).is_some(), "{program} --");
+            assert!(refusal(&["Équipe 🦀", "target"]).is_none(), "{program} plain value");
+
+            let templates = tainted(&["-v", "{{x}}", "{{y}}"]);
+            let rendered = line(&["-v", "a", "-rf"]);
+            assert!(
+                rendered_refusal("s", program, &templates, &rendered, false).is_some(),
+                "{program}: every value before `--` is checked"
+            );
+
+            let templates = tainted(&["--", "{{x}}"]);
+            let rendered = line(&["--", "-rf"]);
+            assert!(
+                rendered_refusal("s", program, &templates, &rendered, false).is_none(),
+                "{program}: a literal `--` ends options"
+            );
+        }
+        // A value rendering to `--` does not end options for the next one.
+        let templates = line(&["{{x}}", "{{y}}"]);
+        assert!(rendered_refusal("s", "rm", &templates, &line(&["--", "-rf"]), false).is_some());
+        // `echo` and `test` read no option a value could turn on.
+        for program in ["echo", "test"] {
+            let templates = line(&["{{x}}"]);
+            assert!(rendered_refusal("s", program, &templates, &line(&["-n"]), false).is_none());
         }
     }
 }

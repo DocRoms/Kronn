@@ -537,7 +537,12 @@ Release notes for 0.9.3 and earlier are available in the
   program named. The step editor and the Quick Exec form show a checkbox for
   such a line ("terraform receives values from the run; I confirm it treats
   its arguments as plain data"); only a human can tick it, an agent's save
-  never sets it, and a bundle or an import through an agent drops it.
+  never sets it, and a bundle, an Artifact import or an import through an
+  agent drops it.
+- A run value given to a data-only program that still reads options (`rm`,
+  `cp`, `mv`, `chmod`, `date`, `grep`…) is refused at run time when it renders
+  to an option (`rm {{x}}` as `-rf`), unless a literal `--` precedes it
+  (KT-1017).
 
 ### Changed
 

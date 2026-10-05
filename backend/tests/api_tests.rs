@@ -2284,6 +2284,69 @@ async fn artifact_import_reuses_identical_automations_copies_publishers_and_reje
     assert_eq!(workflow_import_database_snapshot(&state).await, after);
 }
 
+/// An artifact can come from another instance: an approval it carries is
+/// dropped, so only a human of this instance approves an unmodelled program.
+#[tokio::test]
+async fn artifact_import_drops_the_unmodelled_program_approval_it_carries() {
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["referenced_quick_execs"][0]["unmodelled_args_approved"] = serde_json::json!(true);
+    for workflow in bundle["referenced_workflows"].as_array_mut().unwrap() {
+        for step in workflow["steps"].as_array_mut().unwrap() {
+            step["exec_unmodelled_args_approved"] = serde_json::json!(true);
+        }
+    }
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let mut request = serde_json::json!({
+        "content": bundle.to_string(), "approved_quick_exec_ids": ["qe-portable"]
+    });
+    let (_, preview) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    request["preview_digest"] = preview["data"]["digest"].clone();
+    let (_, imported) = post_json(app.clone(), "/api/pages/import", request).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    state
+        .db
+        .with_conn(|conn| {
+            let execs = kronn::db::quick_execs::list_quick_execs(conn)?;
+            assert!(!execs.is_empty());
+            assert!(execs.iter().all(|e| e.unmodelled_args_approved.is_none()));
+            let workflows = kronn::db::workflows::list_workflows(conn)?;
+            assert!(!workflows.is_empty());
+            for workflow in workflows {
+                assert!(workflow
+                    .steps
+                    .iter()
+                    .chain(&workflow.on_failure)
+                    .all(|s| s.exec_unmodelled_args_approved.is_none()));
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    // An unmodelled program with a templated argument is refused, approval or not.
+    bundle["referenced_quick_execs"][0]["command"] = serde_json::json!("terraform");
+    bundle["referenced_quick_execs"][0]["args"] = serde_json::json!(["plan", "{{x}}"]);
+    let (_, refused) = post_json(
+        app,
+        "/api/pages/import/preview",
+        serde_json::json!({"content": bundle.to_string(), "approved_quick_exec_ids": ["qe-portable"]}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap_or_default().contains("terraform"),
+        "{refused}"
+    );
+}
+
 #[tokio::test]
 async fn artifact_import_requires_each_new_command_to_be_approved_in_the_reviewed_digest() {
     let (source, _) = workflow_portability_fixture().await;

@@ -868,7 +868,7 @@ pub fn rendered_refusal(
         "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
          valeur extérieure et tombe là où `{cmd}` lit encore des options ou du code. Ouvre le \
          workflow et applique la correction proposée, ou place les valeurs après le code inline \
-         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php, git)."
+         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php, git, rm, cp…)."
     ))
 }
 
