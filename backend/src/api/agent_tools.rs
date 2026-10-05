@@ -1785,6 +1785,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let Json(res) = crate::api::quick_execs::run(
                     State(self.state.clone()),
                     Path(saved.id.clone()),
+                    None,
                     Json(request),
                 )
                 .await;
@@ -1920,6 +1921,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let Json(res) = crate::api::quick_apis::run_qa(
                     State(self.state.clone()),
                     Path(qa.id),
+                    None,
                     Json(crate::models::RunQuickApiRequest {
                         variables,
                         workflow_run_id: self.workflow_run_id.clone(),
@@ -1995,6 +1997,7 @@ impl ToolExecutor for KronnToolExecutor {
                 }
                 let Json(res) = crate::api::planning::list_tasks(
                     State(self.state.clone()),
+                    None,
                     axum::extract::Query(query),
                 )
                 .await;

@@ -2124,6 +2124,8 @@ impl AgentIo for AgentProcess {
         AgentProcess::reported_cost_usd_micros(self)
     }
     async fn kill(&mut self) {
+        // A cancelled launch's token dies now, not when the handle is dropped.
+        self.bridge_token = None;
         self.rx.close();
         if let Some(cancel) = &self.http_cancel {
             cancel.cancel();
@@ -4059,7 +4061,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // rejected full transcript with a resumed native session and duplicate its
     // history.
     let acp_resume_id = (!task_worker).then_some(config.cli_resume_id).flatten();
-    let bridge = mint_launch_bridge_token(&config);
+    // Every launch carries its own token; one that cannot be minted does not
+    // start, rather than leaving its bridge on loopback trust.
+    let bridge = Some(mint_launch_bridge_token(&config)?);
     let bridge_value = bridge.as_ref().map(|guard| guard.value().to_owned());
     match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
@@ -4473,10 +4477,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 }
 
 /// Mint the launch's bridge token, bound to its own discussions, its task
-/// execution and its workflow run. `None` when the launch names none of them.
+/// execution and its workflow run, else to its project, else to nothing (a
+/// token that reads catalogues only).
 fn mint_launch_bridge_token(
     config: &AgentStartConfig<'_>,
-) -> Option<crate::core::bridge_token::BridgeTokenGuard> {
+) -> Result<crate::core::bridge_token::BridgeTokenGuard, String> {
     let mut discussion_ids: Vec<String> = Vec::new();
     for id in [
         config.discussion_id,
@@ -4505,7 +4510,9 @@ fn mint_launch_bridge_token(
         workflow_run_id: config
             .workflow_step_context
             .map(|context| context.run_id.clone()),
+        project_id: config.project_id.map(str::to_owned),
     })
+    .map_err(|error| format!("Agent launch refused: {error}"))
 }
 
 /// Common inputs to every ACP session-start path (native and adapted alike).

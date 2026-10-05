@@ -93,6 +93,11 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
             "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-b', 'p2')",
             [],
         )?;
+        // The global config the fixture's quick APIs use.
+        conn.execute(
+            "INSERT INTO mcp_configs(id, server_id, label, is_global) VALUES ('c', 'synthetic-api', 'c', 1)",
+            [],
+        )?;
         conn.execute(
             "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
              VALUES ('room-del', 'room-del', 'p1', ?1, ?1)",
@@ -601,12 +606,11 @@ async fn api_call_runs_for_the_token_s_project_never_the_config_s() {
         })),
     )
     .await;
-    assert_eq!(status, 200);
-    assert_eq!(response["success"], false, "{response}");
+    assert_eq!(status, 403, "{response}");
     assert!(
         response["error"]
             .as_str()
-            .is_some_and(|error| error.contains("not available to this agent's project")),
+            .is_some_and(|error| error.contains("cfg-b")),
         "{response}"
     );
 }

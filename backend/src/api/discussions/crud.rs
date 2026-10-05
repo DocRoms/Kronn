@@ -21,8 +21,36 @@ use super::{MAX_CONTENT_LEN, MAX_TITLE_LEN};
 
 pub async fn list(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Query(pq): Query<PaginationQuery>,
 ) -> Json<ApiResponse<Vec<DiscussionListItem>>> {
+    // A Kronn-launched agent lists its project's and its own discussions,
+    // filtered in the query so its pages are full.
+    if let Some(axum::Extension(caller)) = bridge {
+        let (limit, offset) = if pq.page > 0 {
+            let per_page = pq.per_page.min(200);
+            (Some(per_page), Some((pq.page - 1) * per_page))
+        } else {
+            (None, None)
+        };
+        return match state
+            .db
+            .with_read_conn(move |conn| {
+                let discussions = crate::db::discussions::list_discussions_for_bridge(
+                    conn,
+                    caller.project.as_deref(),
+                    &caller.own_discussions,
+                    limit,
+                    offset,
+                )?;
+                with_pending_counts(conn, discussions)
+            })
+            .await
+        {
+            Ok(discussions) => Json(ApiResponse::ok(discussions)),
+            Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+        };
+    }
     // page > 0 → paginated response; page == 0 (default) → return all
     // (backward compat for frontend polling). See PaginationQuery doc.
     if pq.page > 0 {

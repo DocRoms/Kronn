@@ -160,9 +160,14 @@ pub async fn delete(
 pub async fn run(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<RunQuickExecRequest>,
 ) -> Json<ApiResponse<RunQuickExecResponse>> {
-    let launch = request.launch.clone().unwrap_or_default();
+    let mut launch = request.launch.clone().unwrap_or_default();
+    // A Kronn-launched agent runs a shared Quick Exec for its own project only.
+    if let Some(axum::Extension(caller)) = &bridge {
+        launch.project_id = caller.project.clone();
+    }
     let run_id = uuid::Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {

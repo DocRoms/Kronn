@@ -362,9 +362,25 @@ pub async fn import_qa(
 pub async fn run_qa(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
-    let launch = req.launch.clone().unwrap_or_default();
+    let mut launch = req.launch.clone().unwrap_or_default();
+    // A Kronn-launched agent runs a shared Quick API for its own project only,
+    // with a config that project can see (never the config's own project).
+    if let Some(axum::Extension(caller)) = &bridge {
+        launch.project_id = caller.project.clone();
+        if let Err(refusal) = crate::api::agent_api::config_visible_to(
+            &state,
+            None,
+            Some(id.clone()),
+            caller.project.as_deref(),
+        )
+        .await
+        {
+            return Json(ApiResponse::err(refusal));
+        }
+    }
     let run_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
     let queued = crate::models::SharedRun {

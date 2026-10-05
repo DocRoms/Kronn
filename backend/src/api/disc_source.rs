@@ -1361,16 +1361,54 @@ pub struct DiscSearchQuery {
 /// `GET /api/disc/search?q=…&limit=…`
 pub async fn disc_search(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Query(q): Query<DiscSearchQuery>,
 ) -> Json<ApiResponse<Vec<crate::db::disc_source::DiscSearchHit>>> {
     if q.q.trim().is_empty() {
         return Json(ApiResponse::err("query string `q` must not be empty"));
     }
     let limit = q.limit.unwrap_or(20);
+    let caller = bridge.map(|axum::Extension(caller)| caller);
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::disc_source::search_discussions(conn, &q.q, limit, q.include_notes, q.scope)
+            let Some(caller) = caller else {
+                return crate::db::disc_source::search_discussions(
+                    conn,
+                    &q.q,
+                    limit,
+                    q.include_notes,
+                    q.scope,
+                );
+            };
+            // A Kronn-launched agent searches its project's and its own
+            // discussions: hits elsewhere are skipped before the limit applies.
+            let wide = crate::db::disc_source::search_discussions(
+                conn,
+                &q.q,
+                limit.saturating_mul(20).clamp(limit, 2_000),
+                q.include_notes,
+                q.scope,
+            )?;
+            let mut kept = Vec::new();
+            for hit in wide {
+                let project: Option<Option<String>> =
+                    rusqlite::OptionalExtension::optional(conn.query_row(
+                        "SELECT project_id FROM discussions WHERE id = ?1",
+                        [&hit.disc_id],
+                        |row| row.get(0),
+                    ))?;
+                let in_scope = caller.own_discussions.contains(&hit.disc_id)
+                    || matches!((&project, &caller.project),
+                        (Some(Some(found)), Some(bound)) if found == bound);
+                if in_scope {
+                    kept.push(hit);
+                }
+                if kept.len() as u32 >= limit {
+                    break;
+                }
+            }
+            Ok(kept)
         })
         .await;
     match result {
