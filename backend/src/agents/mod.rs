@@ -550,6 +550,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
                     &loc.path,
                     resolved_version,
                     std::env::var_os("PATH"),
+                    SHADOW_PROBE_TIMEOUT,
                 )
                 .await
             }
@@ -875,13 +876,19 @@ pub fn apply_configured_status(agents: &mut [AgentDetection], config: &AppConfig
     }
 }
 
+/// How long a stale copy may take to print its version before it is skipped:
+/// detection must not wait on a broken install.
+const SHADOW_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Other copies of `binary` on `search_path` that the resolved one shadows, kept
-/// only when their version differs from `resolved_version`.
+/// only when their version differs from `resolved_version`. A copy that does
+/// not answer within `probe_timeout` is skipped.
 async fn shadowed_installs_in(
     binary: &str,
     resolved: &str,
     resolved_version: &str,
     search_path: Option<std::ffi::OsString>,
+    probe_timeout: std::time::Duration,
 ) -> Vec<ShadowedInstall> {
     let Some(search_path) = search_path else {
         return Vec::new();
@@ -900,8 +907,7 @@ async fn shadowed_installs_in(
             continue;
         }
         let path = candidate.to_string_lossy().to_string();
-        let probe =
-            tokio::time::timeout(std::time::Duration::from_secs(3), get_version_from(&path)).await;
+        let probe = tokio::time::timeout(probe_timeout, get_version_from(&path)).await;
         if let Ok(Ok(version)) = probe {
             if version != resolved_version {
                 shadowed.push(ShadowedInstall { path, version });
@@ -1905,6 +1911,11 @@ mod tests {
 
     // ─── shadowed_installs_in: stale copies hidden by PATH order ────────────
 
+    /// The production 3 s budget is a policy, not what these tests check: a
+    /// shell spawn on a loaded test machine can exceed it.
+    #[cfg(unix)]
+    const TEST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     #[cfg(unix)]
     fn fake_cli(dir: &std::path::Path, version: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -1937,6 +1948,7 @@ mod tests {
             &resolved.to_string_lossy(),
             "2.1.282",
             Some(search),
+            TEST_PROBE_TIMEOUT,
         )
         .await;
 
@@ -1965,6 +1977,7 @@ mod tests {
             &resolved.to_string_lossy(),
             "2.1.282",
             Some(search),
+            TEST_PROBE_TIMEOUT,
         )
         .await;
 
