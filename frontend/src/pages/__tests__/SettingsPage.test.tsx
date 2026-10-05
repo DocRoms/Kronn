@@ -11,6 +11,7 @@ vi.mock('../../lib/api', () => ({
     getContinualLearningEnabled: vi.fn().mockResolvedValue(false),
     saveContinualLearningEnabled: vi.fn().mockResolvedValue(undefined),
     getTokens: vi.fn().mockResolvedValue({ keys: [], overrides: {} }),
+    dbUsage: vi.fn().mockResolvedValue({ file_bytes: 1024, wal_bytes: 0, free_bytes: 0, tables: [] }),
     dbInfo: vi.fn().mockResolvedValue({
       size_bytes: 1024,
       project_count: 5,
@@ -786,6 +787,10 @@ describe('SettingsPage', () => {
       run_payload_retention_days: 0,
     }));
     expect(select.value).toBe('0');
+    // Turning retention off raises the banner; the other choices lower it.
+    expect(await screen.findByTestId('run-retention-banner')).toBeInTheDocument();
+    await act(async () => { fireEvent.change(select, { target: { value: '30' } }); });
+    await waitFor(() => expect(screen.queryByTestId('run-retention-banner')).toBeNull());
     getServerConfig.mockImplementation(defaultServerConfig!);
   });
 

@@ -487,6 +487,26 @@ mod tests {
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
+    fn run_payload_retention_is_on_for_a_new_install_and_off_for_an_existing_one() {
+        let fresh = default_config();
+        assert_eq!(fresh.server.run_payload_retention_days, 30);
+
+        // A config.toml written before the field existed has no such line.
+        let toml = toml::to_string_pretty(&fresh).unwrap();
+        assert!(toml.contains("run_payload_retention_days = 30"));
+        let legacy: String = toml
+            .lines()
+            .filter(|l| !l.starts_with("run_payload_retention_days"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let existing: crate::models::AppConfig = toml::from_str(&legacy).unwrap();
+        assert_eq!(existing.server.run_payload_retention_days, 0);
+
+        let kept: crate::models::AppConfig = toml::from_str(&toml).unwrap();
+        assert_eq!(kept.server.run_payload_retention_days, 30);
+    }
+
+    #[test]
     fn default_config_is_valid() {
         let cfg = default_config();
         assert!(!cfg.server.host.is_empty(), "host must be non-empty");

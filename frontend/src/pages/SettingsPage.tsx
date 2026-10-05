@@ -68,6 +68,7 @@ import { ContinualLearningSection } from '../components/settings/ContinualLearni
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
+import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
 import { UserContextEditor } from '../components/UserContextEditor';
@@ -177,6 +178,22 @@ export function SettingsPage({
   // Shared failure path for settings mutations — pre-fix these catches were
   // console.warn-only, so a failed save/delete looked like a success (the
   // silent-error UX audit, 2026-07). Log for diagnostics + visible toast.
+  const focusRetentionSetting = useCallback(() => {
+    const el = document.getElementById(RETENTION_FOCUS_TARGET);
+    el?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    el?.focus();
+  }, []);
+
+  // Another page can send the user straight to the retention setting.
+  useEffect(() => {
+    let pending: string | null = null;
+    try {
+      pending = sessionStorage.getItem(RETENTION_FOCUS_KEY);
+      sessionStorage.removeItem(RETENTION_FOCUS_KEY);
+    } catch { /* storage unavailable: land on the page top */ }
+    if (pending === RETENTION_FOCUS_TARGET) focusRetentionSetting();
+  }, [focusRetentionSetting]);
+
   const toastActionFailed = useCallback((err: unknown) => {
     console.warn('Settings action failed:', err);
     toast(t('common.actionFailed', userError(err)), 'error');
@@ -1858,6 +1875,8 @@ export function SettingsPage({
             </div>
           )}
 
+          <RunRetentionBanner retentionDays={runPayloadRetentionDays} onOpenSetting={focusRetentionSetting} />
+
           <DbUsageChart />
 
           <label className="set-db-retention">
@@ -1892,6 +1911,7 @@ export function SettingsPage({
             <span className="set-form-label">{t('config.runPayloadRetention')}</span>
             <select
               className="set-input set-input-sm cursor-pointer"
+              id={RETENTION_FOCUS_TARGET}
               value={runPayloadRetentionDays}
               aria-label={t('config.runPayloadRetention')}
               onChange={async event => {
