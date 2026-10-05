@@ -226,6 +226,10 @@ pub async fn ws_handler(
 
     let config = state.config.read().await;
     let auth_required = config.server.auth_enabled && config.server.auth_token.is_some();
+    // Locked auth (token not decryptable): no connection is the trusted frontend.
+    let auth_locked = config.server.auth_locked
+        && config.server.auth_enabled
+        && config.server.auth_token.is_none();
     let strict_localhost = config.server.auth_strict_localhost;
     let has_valid_token = match config.server.auth_token.as_deref() {
         Some(expected) => {
@@ -239,13 +243,14 @@ pub async fn ws_handler(
     };
     drop(config);
 
-    let is_local = ws_client_is_local(WsTrust {
-        client_ip: peer_ip,
-        in_docker,
-        auth_required,
-        strict_localhost,
-        has_valid_token,
-    });
+    let is_local = !auth_locked
+        && ws_client_is_local(WsTrust {
+            client_ip: peer_ip,
+            in_docker,
+            auth_required,
+            strict_localhost,
+            has_valid_token,
+        });
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip, is_local))
 }
 

@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, FolderGit2, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { discussionActions as discussionActionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
-import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable } from '../types/generated';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import type { DiscussionAction, DiscussionActionValue, LivePageAction, PromptVariable, StepAgentOverride } from '../types/generated';
 import { PromptVariableInput } from './workflows/PromptVariableInput';
 import { RunStatusCard } from './RunStatusCard';
 import { RunOutcomePanel } from './RunOutcomePanel';
+import { WorkflowStepAgents, type StepAgentChoices } from './WorkflowStepAgents';
 import './DiscussionActionCard.css';
 
 interface Props {
@@ -22,6 +24,8 @@ export interface KronnActionOperations<T extends KronnAction> {
   launch: (actionId: string, request: {
     variables: Record<string, string>;
     bindings?: Record<string, string>;
+    /** Only present when the reader changed a step's agent (KT-1025). */
+    step_agents?: Record<string, StepAgentOverride>;
   }) => Promise<T>;
   /** Back to the offer once a run is over, to launch the same row again. Only
    * a Page provides it: a discussion fence is one intention, launched once. */
@@ -162,10 +166,10 @@ export function KronnActionCard<T extends KronnAction>({
       return next;
     });
   }, [prefill]);
+  const [stepAgents, setStepAgents] = useState<StepAgentChoices>({});
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const inFlightRef = useRef(false);
 
   useEffect(() => {
     if (!ACTIVE_STATES.has(current.state)) return;
@@ -193,9 +197,8 @@ export function KronnActionCard<T extends KronnAction>({
     onChanged(next);
   };
 
-  const runOnce = async (operation: () => Promise<T>) => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
+  // Two synchronous clicks must not launch twice: the guard is a ref, not `busy`.
+  const runOnce = useAsyncGuard(async (operation: () => Promise<T>) => {
     setBusy(true);
     setError(null);
     try {
@@ -204,16 +207,18 @@ export function KronnActionCard<T extends KronnAction>({
       if (next.state === 'proposed') {
         touchedRef.current.clear();
         setValues(initialValues(next, prefill));
+        setStepAgents({});
       }
       update(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      inFlightRef.current = false;
       setBusy(false);
     }
-  };
+  });
 
+  const editableValues = current.values.filter(isEditableValue);
+  const resolvedValues = current.values.filter(value => !isEditableValue(value));
   const terminal = TERMINAL_STATES.has(current.state);
   const kindLabel = t(`disc.action.kind.${current.kind}`);
   const resultDiscussionId = current.result_discussion_id;
@@ -270,32 +275,22 @@ export function KronnActionCard<T extends KronnAction>({
 
       {expanded && current.state === 'proposed' && current.values.length > 0 && (
         <div className="discussion-action-card__fields">
-          {current.values.map(value => {
-            const editable = isEditableValue(value);
+          {editableValues.map(value => {
             const provenance = provenanceLabel(value, t, bindings?.[value.name]);
             return (
               <div key={value.name} className="discussion-action-card__field">
                 <span className="discussion-action-card__label">
                   {value.label || value.name}{isEffectivelyRequired(value) ? ' *' : ''}
                 </span>
-                {editable ? (
-                  <PromptVariableInput
-                    variable={promptVariable(value, t)}
-                    value={values[value.name] ?? ''}
-                    onChange={next => {
-                      touchedRef.current.add(value.name);
-                      setValues(currentValues => ({ ...currentValues, [value.name]: next }));
-                    }}
-                    disabled={busy}
-                  />
-                ) : (
-                  <input
-                    className="wf-input discussion-action-card__resolved"
-                    value={t('disc.action.resolvedAtLaunch')}
-                    disabled
-                    aria-label={value.label || value.name}
-                  />
-                )}
+                <PromptVariableInput
+                  variable={promptVariable(value, t)}
+                  value={values[value.name] ?? ''}
+                  onChange={next => {
+                    touchedRef.current.add(value.name);
+                    setValues(currentValues => ({ ...currentValues, [value.name]: next }));
+                  }}
+                  disabled={busy}
+                />
                 {(value.description || provenance) && (
                   <small>{value.description}{value.description && provenance ? ' · ' : ''}{provenance}</small>
                 )}
@@ -315,7 +310,39 @@ export function KronnActionCard<T extends KronnAction>({
               </div>
             );
           })}
+          {/* Values Kronn resolves itself are not fields: listed once, folded,
+              so the reader sees what will be used without hunting through them. */}
+          {resolvedValues.length > 0 && (
+            <details className="discussion-action-card__details" data-testid="action-card-resolved">
+              <summary>
+                {resolvedValues.length === 1
+                  ? t('disc.action.resolvedValues.one')
+                  : t('disc.action.resolvedValues.other', resolvedValues.length)}
+              </summary>
+              <ul className="discussion-action-card__resolved-list">
+                {resolvedValues.map(value => {
+                  const provenance = provenanceLabel(value, t, bindings?.[value.name]);
+                  return (
+                    <li key={value.name}>
+                      <strong>{value.label || value.name}</strong>
+                      {value.description && <span>{value.description}</span>}
+                      {provenance && <small>{provenance}</small>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
+          )}
         </div>
+      )}
+
+      {expanded && current.state === 'proposed' && current.kind === 'workflow' && (
+        <WorkflowStepAgents
+          workflowId={current.target_id}
+          value={stepAgents}
+          onChange={setStepAgents}
+          disabled={busy}
+        />
       )}
 
       {expanded && current.state === 'launching' && !current.shared_run_id && (
@@ -371,7 +398,12 @@ export function KronnActionCard<T extends KronnAction>({
               type="button"
               className="discussion-action-card__launch"
               disabled={busy || missingRequired || stalePageSource}
-              onClick={() => void runOnce(() => operations.launch(current.id, { variables: values, bindings }))}
+              onClick={() => void runOnce(() => operations.launch(current.id, {
+                variables: values,
+                bindings,
+                // Without a change the request stays exactly what it was before KT-1025.
+                ...(Object.keys(stepAgents).length > 0 ? { step_agents: stepAgents } : {}),
+              }))}
             >
               {busy ? <Loader2 size={13} className="spin" aria-hidden /> : <Play size={13} aria-hidden />}
               {t('disc.action.launch')}
@@ -406,7 +438,10 @@ export function KronnActionCard<T extends KronnAction>({
 const discussionActionOperations: KronnActionOperations<DiscussionAction> = {
   get: actionId => discussionActionsApi.get(actionId),
   cancel: actionId => discussionActionsApi.cancel(actionId),
-  launch: (actionId, request) => discussionActionsApi.launch(actionId, { variables: request.variables }),
+  launch: (actionId, request) => discussionActionsApi.launch(actionId, {
+    variables: request.variables,
+    ...(request.step_agents ? { step_agents: request.step_agents } : {}),
+  }),
 };
 
 export function DiscussionActionCard({ action, onChanged, onOpenDiscussion }: Props) {

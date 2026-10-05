@@ -76,7 +76,8 @@ Release notes for 0.9.3 and earlier are available in the
   (Claude Code's `total_cost_usd`, OpenRouter's `usage.cost`), summed over the
   step's attempts, and the audit's total: exact when every step reported,
   "≥ x $" naming the unknown steps otherwise. A step whose agent reported no
-  cost reads "cost ?", never 0. Each run records the model its agent served,
+  cost reads "cost ?", never 0, and so does an HTTP step where any response
+  came without a cost, instead of showing a partial sum. Each run records the model its agent served,
   or the configured one labelled as such, and `step_done` carries the step's
   cost (KT-997).
 
@@ -131,17 +132,48 @@ Release notes for 0.9.3 and earlier are available in the
   and the body are checked), never a route that returns or moves a secret,
   and effects are logged with its id. A workflow it triggers without naming a
   project runs for the room's project when the workflow serves it (KT-851),
-  and is refused otherwise. The bridge reads `KRONN_BRIDGE_TOKEN`
+  and is refused otherwise. Ids are resolved like the handler resolves them
+  (`KT-12` included) and an unknown id is refused; lists, searches and lookups
+  only show the token's project; an API call runs for the token's project with
+  a config that project can see; deleting the room kills its token; the
+  WebSocket bus refuses it. The bridge reads `KRONN_BRIDGE_TOKEN`
   first. Loopback requests without a token keep today's trust until the
   per-action human proof ships in 0.15 (KT-1006).
+- An Exec step that runs a repository script can declare the script and the
+  modules it loads, as paths relative to the repository of the workflow's
+  home project (KT-918). Saving refuses a path outside the repository, a
+  missing file or a symlink that leads out of it, and records each file's
+  content hash, which enters the workflow's approval fingerprint; a save made
+  by an agent never records a hash, so only a human approves. Before the
+  command runs, Kronn checks every file against its approved hash and copies
+  it into the run's artifacts directory; the command runs from that copy,
+  with the run's checkout in `KRONN_WORKTREE`. A file changed since approval,
+  even by one line, stops the step before anything runs and the error names
+  it; the step editor shows each file as approved or changed and re-approves
+  the current content on save. A workflow published to `kronn/` names the
+  files and their hashes, never their content. Absolute imports and packages
+  found outside the copy are not covered.
+
+- Launching a workflow, you can see and change the agent, model and effort of
+  each Agent step, for that run only (KT-1025). The launch card, in a
+  discussion or on a Live Page, has a folded "Details" block that lists the
+  Agent steps with what is planned and the agent and model selectors; without a
+  change the launch request is the same as before. The trigger route, the
+  discussion and Live Page action launches and the MCP `workflow_trigger` tool
+  accept `step_agents`. An unknown or non-Agent step, an agent that is not
+  installed or enabled, or tools or a token budget the chosen agent cannot use
+  is refused before the run starts, with a message that says why. The choice
+  is stored on the run, so it still applies after a Gate approval or a resume,
+  and the step shows the agent it really ran on; the workflow is never
+  modified.
 
 ### Fixed
 
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task
-  validations included) and the API-call credential CLIs get a built
-  environment (a reviewed allow-list, then the launch's own
+  validations included), the API-call credential CLIs and every `git` process
+  (whose repository hooks run inside it) get a built environment (a reviewed allow-list, then the launch's own
   values). No child receives `KRONN_AUTH_TOKEN`, `KRONN_ENCRYPTION_KEK`, or
   another agent's provider key, nor a GitHub token from the backend's
   environment (only a connected project's, native ACP agents included), and
@@ -155,7 +187,35 @@ Release notes for 0.9.3 and earlier are available in the
   `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
   outside it, symlinks followed, and `find -exec`/`-delete` and
   `git diff --no-index` are refused (KT-1006).
-
+- The encryption key can no longer be lost to an unreadable vault or to
+  encrypted data the boot did not look at (KT-1007). A denied or locked
+  keychain, or an unreadable `encryption_key` file, now stops Kronn at startup
+  with a message saying what to do, instead of being read as empty and
+  overwritten; a key is generated only when no encrypted column holds data
+  (MCP settings, execution-variable snapshots and stored credentials, all
+  listed in one registry checked against the database schema). When no key
+  decrypts existing data, Kronn keeps running for a restore but holds no key,
+  so nothing new is encrypted under a key that no vault keeps. Two keys that
+  each decrypt part of the data stop the startup with nothing written, and a
+  vault holding another key is never overwritten; starting once with
+  `KRONN_REENCRYPT_FROM=<fingerprint>` moves one key's data under the other
+  without deleting either. A stored API token that can no longer be decrypted
+  locks the API (only health and the recovery routes answer, the interface
+  shows a "Kronn is locked" restore screen, and an exposed install still
+  starts) instead of leaving it open; a credential start-up that fails locks
+  it too. Invalid key values are never adopted, and a missing `config.toml`
+  no longer offers a random key that could be kept for good.
+- Replacing the recovery passphrase now asks for the current one, and
+  `recovery.key` records which key it wraps, so a blob for another key never
+  counts as a recovery copy (KT-1007).
+- Restoring a recovery passphrase on a running instance no longer swaps its
+  key (which split secrets between two keys): an import keeps the source
+  machine's recovery data beside this machine's, and Plugins → "Re-encrypt
+  imported secrets" re-encrypts the imported secrets under this machine's key
+  (KT-1007).
+- Reset keeps a copy of the key that `config.toml` still has to hold and now
+  also clears execution-variable snapshots, stored credentials and GitHub
+  tokens (KT-1007).
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
   listed in `WSLENV` (appended to the user's own list), and the Windows paths
@@ -406,7 +466,17 @@ Release notes for 0.9.3 and earlier are available in the
   options (`["{{mode}}", "{{issue.title}}"]` with `{{mode}}` rendering to
   `-c`): it is accepted only after the inline code of a shell or Python,
   after `--`, or after a script file, and the run-time check verifies the
-  rendered command with the origin of each argument.
+  rendered command with the origin of each argument. The same rule now
+  sees through programs that launch others (`env`, `sudo`, `timeout`,
+  `nice`, `xargs`, `busybox`…) and covers other evaluators (`awk`, `sed`,
+  `osascript`, `lua`, `tclsh`, `Rscript`, `find -exec`, `git -c`, `ssh`,
+  `docker run`, `npx -c`), whatever path or version suffix names them
+  (`/usr/bin/python3.12`, `node18`, `.exe`); a value can never be the program
+  itself; and the workflow bundle, the workflow and Artifact imports, the
+  Quick Exec import and the `kronn/` import apply it too. An unsafe line is
+  kept on save only when it is exactly the stored one (same step, position,
+  name and arguments), and an unquoted shell value no longer gets an
+  automatic fix, since `"$1"` would not print the same thing.
 
 ### Changed
 
@@ -425,6 +495,18 @@ Release notes for 0.9.3 and earlier are available in the
 - The project and discussion terminal runs its command without a shell:
   quotes still group words, but `$VAR`, `~` and globs are passed literally
   (`find . -name "*.rs"` still works) (KT-1006).
+- `config.toml` no longer holds secrets (KT-1007): provider and External API
+  connection keys and the API auth token are stored encrypted in the database,
+  and the encryption key stays in the OS keychain or the `encryption_key` file,
+  kept in `config.toml` until two independent copies exist (two key stores, or
+  one plus a recovery passphrase for that key); a sidecar-only install
+  without a passphrase keeps it there. The first start moves
+  existing values, checks each one decrypts back, keeps the previous file
+  encrypted as `config.toml.pre-credential-store.enc`, and can be interrupted
+  and rerun without loss. The `config.toml.backup` copy made before database
+  migrations is written owner-only and without credentials. Downgrading to
+  0.14.2 hides the stored keys until the next upgrade. See
+  `docs/operations/key-management.md`.
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from
@@ -434,6 +516,11 @@ Release notes for 0.9.3 and earlier are available in the
   CHANGELOG section above the install table, and the AppImage advice only when
   an AppImage is attached. A missing platform or CHANGELOG section fails the
   release job instead of publishing a draft that names absent files.
+- A workflow launch card, in a discussion or on a Live Page, shows only the
+  values you can fill as fields. The values Kronn resolves itself go into one
+  folded line, "N values resolved at launch", closed by default, that lists
+  each one's name, description and origin, without greyed-out fields
+  (KT-1024).
 
 ## [0.14.2] - 2026-10-03
 

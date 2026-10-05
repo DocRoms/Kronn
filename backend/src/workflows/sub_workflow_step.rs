@@ -2020,10 +2020,11 @@ mod tests {
         let request: crate::models::UpdateWorkflowRequest =
             serde_json::from_value(serde_json::json!({ "steps": gate_steps() })).unwrap();
 
-        let response = crate::api::workflows::update(
-            axum::extract::State(state.clone()),
-            axum::extract::Path("wf-edit-child".to_string()),
-            axum::Json(request),
+        let response = crate::api::workflows::update_as(
+            state.clone(),
+            "wf-edit-child".to_string(),
+            request,
+            crate::api::workflows::WorkflowWriter::Human,
         )
         .await;
 

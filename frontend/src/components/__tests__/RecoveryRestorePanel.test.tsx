@@ -12,6 +12,8 @@ import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/re
 const { config } = vi.hoisted(() => ({
   config: {
     restoreRecovery: vi.fn(),
+    reencryptImported: vi.fn(),
+    getRecoveryStatus: vi.fn(),
   },
 }));
 
@@ -25,7 +27,11 @@ describe('RecoveryRestorePanel', () => {
   const toast = vi.fn();
   const onRestored = vi.fn();
 
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Locked instance by default: the restore flow.
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: true });
+  });
   afterEach(() => cleanup());
 
   it('renders collapsed and expands on click', () => {
@@ -68,5 +74,25 @@ describe('RecoveryRestorePanel', () => {
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith('Wrong recovery passphrase or corrupt recovery data', 'error'));
     expect(onRestored).not.toHaveBeenCalled();
+  });
+
+  it('on a running instance re-encrypts imported secrets instead of swapping the key', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: false });
+    config.reencryptImported.mockResolvedValue({ rewritten: 2, already_current: 5, untouched: 0 });
+    render(<RecoveryRestorePanel toast={toast} t={(k: string, ...a: (string | number)[]) => a.length ? `${k}:${a.join(',')}` : k} onRestored={onRestored} />);
+    await waitFor(() => expect(screen.getByText('mcp.recovery.reencryptCta')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('recovery-restore-cta'));
+    fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'source pass' } });
+    fireEvent.click(screen.getByTestId('recovery-restore-submit'));
+    await waitFor(() => expect(config.reencryptImported).toHaveBeenCalledWith('source pass', undefined));
+    expect(config.restoreRecovery).not.toHaveBeenCalled();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('mcp.recovery.reencrypted:2', 'success'));
+    expect(onRestored).toHaveBeenCalled();
+  });
+
+  it('mode restore never asks the backend and starts open when asked', async () => {
+    render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} mode="restore" initiallyOpen />);
+    expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
+    expect(config.getRecoveryStatus).not.toHaveBeenCalled();
   });
 });

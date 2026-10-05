@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import { TourProvider } from '../../components/tour/TourProvider';
@@ -810,6 +810,67 @@ describe('SettingsPage', () => {
     await act(async () => { fireEvent.change(select, { target: { value: '30' } }); });
     await waitFor(() => expect(screen.queryByTestId('run-retention-banner')).toBeNull());
     getServerConfig.mockImplementation(defaultServerConfig!);
+  });
+
+  describe('run retention loading (KT-984)', () => {
+    const getServerConfig = configApi.getServerConfig as ReturnType<typeof vi.fn>;
+    const setServerConfig = configApi.setServerConfig as ReturnType<typeof vi.fn>;
+    const label = 'Sorties des étapes des runs terminés';
+    const base = {
+      host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5,
+      agent_stall_timeout_min: 5, agent_global_timeout_min: 30, local_agent_global_timeout_min: 240,
+      auth_enabled: true, discussion_notes_enabled: true, execution_variable_retention_days: 30,
+    };
+    let original: ReturnType<typeof getServerConfig.getMockImplementation>;
+    beforeEach(() => { original = getServerConfig.getMockImplementation(); setServerConfig.mockClear(); });
+    afterEach(() => { getServerConfig.mockImplementation(original!); });
+
+    it('shows no value, writes nothing, and keeps the select disabled until the server answers', async () => {
+      let answer!: (cfg: unknown) => void;
+      getServerConfig.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+      await wrap(<SettingsPage {...defaultProps} />);
+      const select = screen.getByLabelText(label) as HTMLSelectElement;
+      expect(select).toBeDisabled();
+      expect(select.value).toBe('');
+      expect(screen.queryByTestId('run-retention-banner')).toBeNull();
+      await act(async () => { answer({ ...base, run_payload_retention_days: 0 }); });
+      await waitFor(() => expect(select).toBeEnabled());
+      expect(select.value).toBe('0');
+      expect(await screen.findByTestId('run-retention-banner')).toBeInTheDocument();
+      await act(async () => { await Promise.resolve(); });
+      expect(setServerConfig).not.toHaveBeenCalled();
+    });
+
+    it('reads a server without the field as off, never as 30 days', async () => {
+      getServerConfig.mockResolvedValue({ ...base });
+      await wrap(<SettingsPage {...defaultProps} />);
+      const select = screen.getByLabelText(label) as HTMLSelectElement;
+      await waitFor(() => expect(select).toBeEnabled());
+      expect(select.value).toBe('0');
+      expect(await screen.findByTestId('run-retention-banner')).toBeInTheDocument();
+      await act(async () => { await Promise.resolve(); });
+    });
+
+    it('shows an error, not a guessed value, when the load fails', async () => {
+      getServerConfig.mockRejectedValue(new Error('offline'));
+      await wrap(<SettingsPage {...defaultProps} />);
+      const select = screen.getByLabelText(label) as HTMLSelectElement;
+      expect(await screen.findByText(/réglage de rétention n.a pas pu être chargé/)).toBeInTheDocument();
+      expect(select).toBeDisabled();
+      expect(select.value).not.toBe('30');
+      expect(setServerConfig).not.toHaveBeenCalled();
+    });
+
+    it('writes 30 when the suggested value is chosen', async () => {
+      getServerConfig.mockResolvedValue({ ...base, run_payload_retention_days: 0 });
+      await wrap(<SettingsPage {...defaultProps} />);
+      const select = screen.getByLabelText(label) as HTMLSelectElement;
+      await waitFor(() => expect(select).toBeEnabled());
+      await screen.findByTestId('run-retention-banner');
+      await act(async () => { fireEvent.change(select, { target: { value: '30' } }); });
+      await waitFor(() => expect(setServerConfig).toHaveBeenCalledWith({ run_payload_retention_days: 30 }));
+      await waitFor(() => expect(screen.queryByTestId('run-retention-banner')).toBeNull());
+    });
   });
 
   it('warns when inactivity can never outlast the absolute execution limit', async () => {

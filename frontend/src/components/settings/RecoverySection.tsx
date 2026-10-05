@@ -27,6 +27,8 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [passphrase, setPassphrase] = useState('');
   const [confirm, setConfirm] = useState('');
+  // Replacing an existing passphrase must prove the current one (backend refuses otherwise).
+  const [current, setCurrent] = useState('');
   const [saving, setSaving] = useState(false);
   // The code is returned ONCE by /recovery/set — held only in component state,
   // never persisted UI-side.
@@ -38,17 +40,21 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       .catch(() => setConfigured(null));
   }, []);
 
-  const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving;
+  const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving
+    && (!configured || current.length > 0);
 
   const save = async () => {
     if (!canSave) return;
     setSaving(true);
     try {
-      const res = await configApi.setRecovery(passphrase);
+      const res = configured
+        ? await configApi.setRecovery(passphrase, current)
+        : await configApi.setRecovery(passphrase);
       setRecoveryCode(res.recovery_code);
       setConfigured(true);
       setPassphrase('');
       setConfirm('');
+      setCurrent('');
       toast(t('settings.recovery.saved'), 'success');
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), 'error');
@@ -130,6 +136,17 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                 what3words.com/échouer.insérons.labeur
               </a>
             </p>
+            {configured && (
+              <input
+                type="password"
+                className="set-input"
+                value={current}
+                autoComplete="current-password"
+                placeholder={t('settings.recovery.currentPlaceholder')}
+                onChange={e => setCurrent(e.target.value)}
+                data-testid="recovery-current"
+              />
+            )}
             <input
               type="password"
               className="set-input"

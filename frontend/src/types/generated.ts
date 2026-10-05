@@ -3094,6 +3094,26 @@ export type EvidenceTarget = "task" | "review_finding";
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
 /**
+ * One repository file an Exec step runs (KT-918): its repository-relative
+ * path and the approved content hash. An empty hash is pinned to the current
+ * content when the workflow is saved.
+ */
+export type ExecScriptFile = { path: string, sha256: string, };
+
+/**
+ * Where a declared file stands against its approved hash.
+ */
+export type ExecScriptFileState = "approved" | "changed" | "pending" | "invalid";
+
+export type ExecScriptFileStatus = { path: string, state: ExecScriptFileState, current_sha256?: string, error?: string, };
+
+/**
+ * `POST /api/workflows/exec-scripts/status`: the declared files of one step
+ * checked against the home project's repository.
+ */
+export type ExecScriptStatusRequest = { project_id?: string, files: Array<ExecScriptFile>, };
+
+/**
  * Compact sidebar edge. The canonical relation already lives on
  * `task_executions`; this projection avoids overloading the workflow-run FK on
  * discussions or making clients fetch every execution detail separately.
@@ -3756,7 +3776,11 @@ custom_prompt?: string | null,
  */
 resume_run_id?: string | null, };
 
-export type LaunchDiscussionActionRequest = { variables?: Record<string, string>, };
+export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
+/**
+ * A workflow action's agents for some Agent steps, this launch only (KT-1025).
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
 /**
@@ -3767,7 +3791,11 @@ export type LaunchLivePageActionRequest = { variables?: Record<string, string>,
  * — a caller can choose which existing row to bind to, never inject an
  * arbitrary resolved value.
  */
-bindings?: Record<string, string>, };
+bindings?: Record<string, string>,
+/**
+ * A workflow action's agents for some Agent steps, this launch only (KT-1025).
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
@@ -6040,7 +6068,26 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
-export type RecoveryStatus = { configured: boolean, };
+export type RecoveryStatus = { configured: boolean,
+/**
+ * `recovery.key` is known (by its fingerprint) to wrap the key in use. An
+ * older blob without fingerprint, or one for another key, is `false`.
+ */
+matches_key: boolean,
+/**
+ * No key in memory: restore is the way back (KT-1007).
+ */
+key_locked: boolean,
+/**
+ * No verified recovery passphrase: Kronn keeps every local copy of the key
+ * (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
+ */
+key_copies_kept: boolean,
+/**
+ * config.toml still carries the key (no vault could hold it, or one copy
+ * alone would remain without a recovery passphrase).
+ */
+config_holds_key: boolean, };
 
 export type RedactedField = {
 /**
@@ -6051,6 +6098,11 @@ kind: string, resource_id: string, name: string,
  * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
  */
 field: string, };
+
+/**
+ * What `POST /api/config/recovery/reencrypt` did.
+ */
+export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
@@ -6701,9 +6753,8 @@ run_retention_days: number,
 /**
  * KT-984 — blank the step outputs of workflow runs finished more than N
  * days ago, keeping every run row and its metadata. `0` keeps outputs
- * forever. A fresh install starts at 30 (`core::config::default_config`); a
- * config.toml without the field, i.e. an existing install, reads 0 until
- * the user turns it on. See `db::run_retention` for what is never touched.
+ * forever. Off on every install until the user chooses a window (Settings
+ * suggests 30). See `db::run_retention` for what is never touched.
  */
 run_payload_retention_days: number,
 /**
@@ -7330,6 +7381,13 @@ user_bytes: number,
  * Sum of everything measured, selection and user context included.
  */
 total_bytes: number, };
+
+/**
+ * The agent one Agent step runs on for a single run (KT-1025). It replaces
+ * the step's agent, model and effort; every other step setting is kept.
+ * `None` for model or effort means the agent's default.
+ */
+export type StepAgentOverride = { agent: AgentType, model?: string, reasoning_effort?: string, };
 
 export type StepConditionRule = { contains: string, action: ConditionAction, };
 
@@ -8074,7 +8132,12 @@ state?: Record<string, string>,
 /**
  * The project to run a multi-project workflow for (KT-851).
  */
-project_id?: string, };
+project_id?: string,
+/**
+ * This run's agent for some Agent steps, keyed by step id or name
+ * (KT-1025). Stored on the run; the workflow is never modified.
+ */
+step_agents?: { [key in string]: StepAgentOverride }, };
 
 export type UnlinkPlanningDiscussionRequest = { discussion_id: string, actor?: PlanningActor, };
 
@@ -9113,6 +9176,13 @@ exec_setup_args?: Array<string>,
  * the main `exec_command` only, not `exec_setup_command`.
  */
 exec_stdin?: string | null,
+/**
+ * KT-918 — repository files the main command runs (the entry script and
+ * the modules it loads), relative to the repository of the workflow's
+ * home project. Each carries the approved content hash; the step runs a
+ * verified copy and fails before running when a file no longer matches.
+ */
+exec_script_files?: Array<ExecScriptFile>,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

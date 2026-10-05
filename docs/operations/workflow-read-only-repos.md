@@ -115,6 +115,46 @@ lives under the Kronn data directory (`run-artifacts/<run id>`, owner-only).
 A gate rejection ends the run without executing it again: its directory goes
 at the next startup.
 
+### Approved repository scripts (KT-918)
+
+An Exec step that runs a script from the repository declares it, with every
+module it loads, in `exec_script_files` (one path per line in the step editor,
+relative to the repository of the workflow's home project). Saving refuses a
+path outside the repository, a missing file and a symlink leading out of it,
+then records each file's SHA-256: the person saving approves that content.
+A save through an agent (a bridge token or a Kronn agent tool) checks the
+paths but leaves an empty hash empty, so the step refuses to run ("no
+approved hash") until a human saves the workflow from the UI.
+[src: file: backend/src/core/approved_scripts.rs:1]
+
+```json
+{"name": "framing", "step_type": {"type": "Exec"}, "exec_command": "node",
+ "exec_args": [".agents/skills/ticket-framing/scripts/jira.cjs", "read"],
+ "exec_script_files": [
+   {"path": ".agents/skills/ticket-framing/scripts/jira.cjs", "sha256": ""},
+   {"path": ".agents/skills/ticket-framing/scripts/lib/http.cjs", "sha256": ""}]}
+```
+
+At each execution Kronn reads the files from the home project's checkout,
+never from the run's worktree, checks them against the approved hashes and
+writes them to `{{run.artifacts_dir}}/approved-scripts/<step>/` with the same
+layout. A mismatch fails the step before the setup or main command runs and
+names the file; the step editor then shows it as "changed since approval" and
+"Approve the current content" re-pins it at the next save. The main command
+runs with the copy as its working directory, so `node <declared path>` and a
+helper loaded through `process.cwd()` or the script's own directory come from
+the copy. The run's checkout is in `KRONN_WORKTREE`, the copy in
+`KRONN_APPROVED_SCRIPTS_DIR`. The setup command still runs in the checkout.
+[src: file: backend/src/workflows/exec_step.rs:102]
+
+Limits: only the declared files are verified. Absolute imports, paths built
+from `KRONN_WORKTREE` and interpreter search paths outside the copy are not
+covered: a bare `require('pkg')` walks up `node_modules` from the copy (the
+repository's `node_modules` is not found), and Python reads its own
+site-packages. `NODE_PATH` and `PYTHONPATH` are not inherited from the backend.
+Arguments that name worktree files must use `KRONN_WORKTREE` or an absolute
+path, since the cwd is the copy. The copy goes with the artifacts directory.
+
 ## Qualification
 
 The automated policy and dispatch regressions use temporary repositories and

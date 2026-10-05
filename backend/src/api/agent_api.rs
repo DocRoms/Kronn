@@ -204,8 +204,18 @@ fn json_body_error(body: &Option<serde_json::Value>) -> Option<String> {
 /// canonical envelope into the agent-friendly response shape.
 pub async fn agent_api_call(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<AgentApiCallRequest>,
 ) -> Json<ApiResponse<AgentApiCallResponse>> {
+    // A Kronn-launched agent's call runs for its token's project, never for
+    // one derived from the body or from the chosen config (KT-1006); the
+    // executor then refuses a config that project cannot see.
+    if let Some(axum::Extension(caller)) = bridge {
+        if let Err(refusal) = bridge_config_visible(&state, &req, caller.project.as_deref()).await {
+            return Json(ApiResponse::err(refusal));
+        }
+        return agent_api_call_scoped(&state, req, caller.project).await;
+    }
     // 1. Resolve project_id. Three sources, by priority:
     //   a) explicit `project_id` on the request (agent knows the
     //      scope; e.g. passing what `mcp_list.configs[].project_ids[0]`
@@ -258,6 +268,63 @@ pub async fn agent_api_call(
         None
     };
 
+    agent_api_call_scoped(&state, req, project_id).await
+}
+
+/// A bridge caller may use only a config its own project sees: global, linked
+/// to that project, or opted into General for a project-less token. Checked
+/// here because the executor would otherwise fall back to the config's own
+/// first project for a project-less call.
+async fn bridge_config_visible(
+    state: &AppState,
+    req: &AgentApiCallRequest,
+    bound: Option<&str>,
+) -> Result<(), String> {
+    let config_id = req.api_config_id.clone();
+    let quick_api_id = req.quick_api_id.clone();
+    let config = state
+        .db
+        .with_read_conn(move |conn| {
+            let config_id = match config_id {
+                Some(id) => Some(id),
+                None => match quick_api_id {
+                    Some(qa) => {
+                        crate::db::quick_apis::get_quick_api(conn, &qa)?.map(|qa| qa.api_config_id)
+                    }
+                    None => None,
+                },
+            };
+            match config_id {
+                Some(id) => crate::db::mcps::get_config(conn, &id),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|error| format!("DB error checking the API config: {error}"))?;
+    let Some(config) = config else {
+        return Err("API config not found".into());
+    };
+    let visible = config.is_global
+        || match bound {
+            Some(project) => config.project_ids.iter().any(|id| id == project),
+            None => config.include_general,
+        };
+    if visible {
+        Ok(())
+    } else {
+        Err(format!(
+            "API config `{}` is not available to this agent's project",
+            config.id
+        ))
+    }
+}
+
+/// The broker call itself, for an already decided project scope.
+async fn agent_api_call_scoped(
+    state: &AppState,
+    req: AgentApiCallRequest,
+    project_id: Option<String>,
+) -> Json<ApiResponse<AgentApiCallResponse>> {
     // 2. Validate the request shape. Either plugin_slug+config_id OR
     //    quick_api_id is required — without one of them the executor
     //    has no plugin to call.
@@ -313,7 +380,7 @@ pub async fn agent_api_call(
         execute_api_call_step_with_db_as(
             &step,
             project_id.as_deref(),
-            &state,
+            state,
             &ctx,
             SecurityPolicy::production(),
             log_context,
@@ -323,7 +390,7 @@ pub async fn agent_api_call(
         execute_api_call_step_with_db(
             &step,
             project_id.as_deref(),
-            &state,
+            state,
             &ctx,
             SecurityPolicy::production(),
         )

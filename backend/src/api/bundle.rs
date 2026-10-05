@@ -333,6 +333,14 @@ pub async fn create_bundle(
         });
     }
 
+    // Exec lines get the same save-time rules as the editor (allowlist,
+    // inline-code interpolation), for the parent and every child.
+    for workflow in std::iter::once(&wf_to_insert).chain(prepared_children.iter()) {
+        if let Err(error) = crate::api::workflows::validate_exec_definition(workflow) {
+            return Json(ApiResponse::err(error));
+        }
+    }
+
     // SubWorkflow graph guard (cycle / depth / dangling / no-gate). The
     // bundle endpoint otherwise skips this validation entirely; with
     // child workflows in play it MUST run. Build the graph from existing

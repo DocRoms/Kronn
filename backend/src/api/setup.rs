@@ -1748,47 +1748,31 @@ fn build_export_zip(
     Ok(buf.into_inner())
 }
 
-/// Install a recovery blob carried by an imported backup — without EVER
-/// destroying existing recovery material: a differing local blob (it protects
-/// the LOCAL key) is copied to `recovery.key.backup` first. Once installed, the
-/// Plugins restore panel works with the source machine's passphrase alone.
+/// Keep a recovery blob carried by an imported backup: it wraps the SOURCE
+/// machine's key, so it never replaces this machine's `recovery.key` (that one
+/// protects the local key) and never overwrites an earlier import. It serves
+/// "re-encrypt imported secrets" with the source machine's passphrase.
 /// Returns user-facing warnings for the ImportResult.
 fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
-    let mut warnings = Vec::new();
     let Ok(blob) = crate::core::recovery::from_code(code) else {
-        warnings
-            .push("The backup carries a recovery blob but it is malformed — ignored.".to_string());
-        return warnings;
+        return vec![
+            "The backup carries a recovery blob but it is malformed — ignored.".to_string(),
+        ];
     };
-    match crate::core::recovery::load_blob(dir) {
-        Some(existing) if existing == blob => {} // already in place — nothing to do
-        Some(_) => {
-            let _ = std::fs::copy(
-                dir.join(crate::core::recovery::RECOVERY_FILENAME),
-                dir.join("recovery.key.backup"),
-            );
-            if crate::core::recovery::save_blob(dir, &blob).is_ok() {
-                warnings.push(
-                    "The backup's recovery blob was installed (this machine's previous one was \
-                     kept as recovery.key.backup). If imported plugin secrets are unreadable, \
-                     use Plugins → 'Restore from recovery passphrase' with the passphrase set \
-                     on the SOURCE machine."
-                        .to_string(),
-                );
-            }
-        }
-        None => {
-            if crate::core::recovery::save_blob(dir, &blob).is_ok() {
-                warnings.push(
-                    "The backup's recovery blob was installed. If imported plugin secrets are \
-                     unreadable, use Plugins → 'Restore from recovery passphrase' with the \
-                     passphrase set on the SOURCE machine."
-                        .to_string(),
-                );
-            }
-        }
+    if crate::core::recovery::load_blob(dir).as_ref() == Some(&blob)
+        || crate::core::recovery::imported_blobs(dir).contains(&blob)
+    {
+        return Vec::new(); // already kept
     }
-    warnings
+    match crate::core::recovery::save_imported_blob(dir, &blob) {
+        Ok(name) => vec![format!(
+            "The backup's recovery data (the source machine's key) was kept as {name}; this \
+             machine's recovery passphrase is unchanged. If imported plugin secrets are \
+             unreadable, use Plugins → 'Re-encrypt imported secrets' with the passphrase set on \
+             the SOURCE machine: they are re-encrypted under this machine's key."
+        )],
+        Err(e) => vec![format!("The backup's recovery data could not be kept: {e}")],
+    }
 }
 
 /// Which table-clear statements a selective import runs for this payload. Only
@@ -2293,20 +2277,34 @@ pub async fn import_data(
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
 pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
-    // Delete config file
-    if let Ok(path) = config::config_path() {
-        let _ = tokio::fs::remove_file(&path).await;
-        tracing::info!("Config reset: {}", path.display());
+    // Remove the settings; a needed copy of the key stays in a key-only file.
+    if let Err(e) = config::reset_to_key_only().await {
+        return Json(ApiResponse::err(format!(
+            "Reset failed, nothing was cleared: {e}"
+        )));
+    }
+    tracing::info!("Config reset");
+
+    // Reset in-memory config to defaults, keeping the active key: a fresh
+    // random one would encrypt new secrets under a key no vault holds.
+    let mut cfg = state.config.write().await;
+    let active_key = cfg.encryption_secret.clone();
+    *cfg = config::default_config();
+    cfg.encryption_secret = active_key;
+    if let Ok(dir) = config::config_dir() {
+        if let Err(e) = crate::core::credential_store::forget_all(&dir, &state.db).await {
+            tracing::error!("Failed to clear stored credentials during reset: {e}");
+        }
     }
 
-    // Reset in-memory config to defaults
-    let mut cfg = state.config.write().await;
-    *cfg = config::default_config();
-
-    // Clear all data from DB
+    // Clear all data from DB, every encrypted column's table included.
     if let Err(e) = state.db.with_conn(|conn| {
+        conn.execute_batch("DELETE FROM mcp_config_projects;")?;
+        for col in crate::core::keystore::ENCRYPTED_COLUMNS {
+            conn.execute(&format!("DELETE FROM {}", col.table), [])?;
+        }
         conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; DELETE FROM projects;"
+            "DELETE FROM messages; DELETE FROM discussions; DELETE FROM mcp_servers; DELETE FROM projects;"
         )?;
         Ok(())
     }).await {
@@ -2321,6 +2319,9 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
 #[derive(serde::Deserialize)]
 pub struct SetRecoveryRequest {
     pub passphrase: String,
+    /// Required to replace an existing recovery passphrase.
+    #[serde(default)]
+    pub current_passphrase: Option<String>,
 }
 
 #[derive(serde::Serialize, ts_rs::TS)]
@@ -2335,6 +2336,17 @@ pub struct SetRecoveryResponse {
 #[ts(export)]
 pub struct RecoveryStatus {
     pub configured: bool,
+    /// `recovery.key` is known (by its fingerprint) to wrap the key in use. An
+    /// older blob without fingerprint, or one for another key, is `false`.
+    pub matches_key: bool,
+    /// No key in memory: restore is the way back (KT-1007).
+    pub key_locked: bool,
+    /// No verified recovery passphrase: Kronn keeps every local copy of the key
+    /// (vault, sidecar, config.toml when needed) and deletes none (KT-1007).
+    pub key_copies_kept: bool,
+    /// config.toml still carries the key (no vault could hold it, or one copy
+    /// alone would remain without a recovery passphrase).
+    pub config_holds_key: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2347,11 +2359,31 @@ pub struct RestoreRecoveryRequest {
 }
 
 /// GET /api/config/recovery/status — is a recovery passphrase configured?
-pub async fn recovery_status() -> Json<ApiResponse<RecoveryStatus>> {
-    let configured = config::config_dir()
-        .map(|d| crate::core::recovery::is_configured(&d))
-        .unwrap_or(false);
-    Json(ApiResponse::ok(RecoveryStatus { configured }))
+pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<RecoveryStatus>> {
+    let dir = config::config_dir().ok();
+    let key = state.config.read().await.encryption_secret.clone();
+    Json(ApiResponse::ok(recovery_status_in(
+        dir.as_deref(),
+        key.as_deref(),
+    )))
+}
+
+fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> RecoveryStatus {
+    let configured = dir.is_some_and(crate::core::recovery::is_configured);
+    let matches_key = match (dir, key) {
+        (Some(d), Some(k)) => {
+            crate::core::recovery::matches_key(d, k)
+                == crate::core::recovery::RecoveryMatch::Matches
+        }
+        _ => false,
+    };
+    RecoveryStatus {
+        configured,
+        matches_key,
+        key_locked: key.is_none(),
+        key_copies_kept: !matches_key,
+        config_holds_key: dir.is_some_and(|d| config::retained_disk_key(d).is_some()),
+    }
 }
 
 /// POST /api/config/recovery/set — wrap the active key under a passphrase and
@@ -2362,7 +2394,11 @@ pub async fn set_recovery(
     Json(req): Json<SetRecoveryRequest>,
 ) -> Json<ApiResponse<SetRecoveryResponse>> {
     let config = state.config.read().await;
-    match crate::core::keystore::set_recovery_passphrase(&config, &req.passphrase) {
+    match crate::core::keystore::set_recovery_passphrase(
+        &config,
+        &req.passphrase,
+        req.current_passphrase.as_deref(),
+    ) {
         Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
@@ -2392,7 +2428,64 @@ pub async fn restore_recovery(
     )
     .await
     {
-        Ok(_) => Json(ApiResponse::ok(())),
+        Ok(outcome) => {
+            // The key is back: load the stored credentials it unlocks.
+            if let Err(e) = crate::core::credential_store::boot(
+                &mut config,
+                state.db.clone(),
+                &dir,
+                &outcome,
+                None,
+            )
+            .await
+            {
+                tracing::error!("Credential store after key restore: {e:#}");
+            }
+            if config.server.auth_token.is_some() {
+                config.server.auth_locked = false;
+            }
+            Json(ApiResponse::ok(()))
+        }
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
+/// What `POST /api/config/recovery/reencrypt` did.
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ReencryptResponse {
+    pub rewritten: u32,
+    pub already_current: u32,
+    pub untouched: u32,
+}
+
+/// POST /api/config/recovery/reencrypt — re-encrypt secrets imported from
+/// another machine under THIS instance's key, with that machine's recovery
+/// passphrase (+ optional code; the newest imported blob otherwise). The
+/// instance key never changes. Auth-gated like the destructive endpoints.
+pub async fn reencrypt_imported(
+    State(state): State<AppState>,
+    Json(req): Json<RestoreRecoveryRequest>,
+) -> Json<ApiResponse<ReencryptResponse>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    let config = state.config.read().await;
+    match crate::core::keystore::reencrypt_imported(
+        &config,
+        &state.db,
+        &req.passphrase,
+        req.recovery_code.as_deref(),
+        &dir,
+    )
+    .await
+    {
+        Ok(r) => Json(ApiResponse::ok(ReencryptResponse {
+            rewritten: r.rewritten as u32,
+            already_current: r.already_current as u32,
+            untouched: r.untouched as u32,
+        })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
 }
@@ -3353,6 +3446,41 @@ mod tests {
     }
 
     #[test]
+    fn recovery_status_reports_kept_copies_and_the_config_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::core::crypto::generate_secret();
+        let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(!status.configured && status.key_copies_kept && !status.config_holds_key);
+        assert!(!status.matches_key && !status.key_locked);
+
+        // A blob for another key: configured, but no recovery copy of this key.
+        config::retain_disk_key(dir.path(), "abcd");
+        crate::core::recovery::save_blob(
+            dir.path(),
+            &crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pw")
+                .unwrap(),
+        )
+        .unwrap();
+        let status = recovery_status_in(Some(dir.path()), Some(&key));
+        config::release_disk_key(dir.path());
+        assert!(status.configured && !status.matches_key && status.key_copies_kept);
+        assert!(status.config_holds_key);
+
+        crate::core::recovery::save_blob(
+            dir.path(),
+            &crate::core::recovery::wrap_key(&key, "pw").unwrap(),
+        )
+        .unwrap();
+        let status = recovery_status_in(Some(dir.path()), Some(&key));
+        assert!(status.matches_key && !status.key_copies_kept);
+
+        let locked = recovery_status_in(Some(dir.path()), None);
+        assert!(locked.key_locked && !locked.matches_key);
+        let none = recovery_status_in(None, None);
+        assert!(!none.configured && none.key_copies_kept);
+    }
+
+    #[test]
     fn build_export_config_strips_secrets() {
         let mut cfg = config::default_config();
         cfg.server.auth_token = Some("secret-token".into());
@@ -3731,63 +3859,36 @@ mod tests {
         );
     }
 
-    /// Import must NEVER destroy local recovery material: a differing local blob
-    /// is kept as recovery.key.backup before the imported one is installed.
+    /// Import must NEVER touch local recovery material: the source blob is kept
+    /// under a timestamped name, and a second import does not overwrite the first.
     #[test]
-    fn persist_imported_recovery_backs_up_a_differing_local_blob() {
+    fn persist_imported_recovery_never_replaces_the_local_blob_nor_an_earlier_import() {
+        use crate::core::recovery;
         let tmp = tempfile::tempdir().unwrap();
-
-        // Local machine has its own blob (protects the LOCAL key).
         let local =
-            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "local-pass")
-                .unwrap();
-        crate::core::recovery::save_blob(tmp.path(), &local).unwrap();
+            recovery::wrap_key(&crate::core::crypto::generate_secret(), "local-pass").unwrap();
+        recovery::save_blob(tmp.path(), &local).unwrap();
 
-        // Imported backup carries a different blob (the SOURCE machine's).
-        let imported =
-            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "source-pass")
-                .unwrap();
-        let warnings =
-            persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
-
+        let first =
+            recovery::wrap_key(&crate::core::crypto::generate_secret(), "source-pass").unwrap();
+        let second =
+            recovery::wrap_key(&crate::core::crypto::generate_secret(), "other-pass").unwrap();
+        let warnings = persist_imported_recovery(tmp.path(), &recovery::to_code(&first));
         assert!(
-            !warnings.is_empty(),
-            "replacing a local blob must be surfaced"
+            warnings[0].contains("Re-encrypt imported secrets"),
+            "{warnings:?}"
         );
-        // The imported blob is now the active one…
-        assert_eq!(
-            crate::core::recovery::load_blob(tmp.path()).unwrap(),
-            imported
-        );
-        // …and the local one survives as a backup.
-        let backup = std::fs::read_to_string(tmp.path().join("recovery.key.backup")).unwrap();
-        assert_eq!(
-            crate::core::recovery::from_code(backup.trim()).unwrap(),
-            local
-        );
-    }
+        persist_imported_recovery(tmp.path(), &recovery::to_code(&second));
+        // Re-importing the same blob adds nothing.
+        assert!(persist_imported_recovery(tmp.path(), &recovery::to_code(&second)).is_empty());
 
-    #[test]
-    fn persist_imported_recovery_installs_when_no_local_blob() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        let imported =
-            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pp").unwrap();
-        let warnings =
-            persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
-
-        assert!(
-            !warnings.is_empty(),
-            "the user must be told how to use the installed blob"
-        );
         assert_eq!(
-            crate::core::recovery::load_blob(tmp.path()).unwrap(),
-            imported
+            recovery::load_blob(tmp.path()).unwrap(),
+            local,
+            "recovery.key untouched"
         );
-        assert!(
-            !tmp.path().join("recovery.key.backup").exists(),
-            "no backup when nothing replaced"
-        );
+        assert_eq!(recovery::imported_blobs(tmp.path()), vec![second, first]);
+        assert!(persist_imported_recovery(tmp.path(), "garbage")[0].contains("malformed"));
     }
 
     // ─── 0.8.6 phase 4 — default_model_tier ───────────────────────────

@@ -42,8 +42,8 @@ are not an independent billing reconciliation.
 A cost the provider reports itself (OpenRouter's `usage.cost`, requested with
 `usage.include` on OpenRouter only; Claude Code's `total_cost_usd`) is summed
 per response as integer micro-USD and exposed by `reported_cost_usd_micros`;
-`None` means unknown, never zero (KT-997). Persisting it per audit step is not
-done yet.
+`None` means unknown, never zero (KT-997). If any response of the run reported
+no cost, the sum is partial and the run's cost is `None` as well.
 [src: file: backend/src/agents/chat_codec.rs:160]
 [src: file: backend/src/api/audit/full.rs:1276]
 [src: file: backend/src/api/audit/drift.rs:599]

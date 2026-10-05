@@ -245,6 +245,13 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
     }
     for exec in bundle.referenced_quick_execs {
         validate_prompt_variables(&exec.variables).map_err(anyhow::Error::msg)?;
+        if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
+            &exec.name,
+            &exec.command,
+            &exec.args,
+        ) {
+            bail!(error);
+        }
         resources.push(Resource::new(ResourceKind::QuickExec, exec)?);
     }
     if resources.len() > MAX_BUNDLE_ITEMS {

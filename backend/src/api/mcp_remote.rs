@@ -90,6 +90,9 @@ pub struct McpTriggerWorkflowRequest {
     /// A bridge token adds its own project when the caller names none.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// This run's agent for some Agent steps (KT-1025).
+    #[serde(default)]
+    pub step_agents: Option<crate::models::StepAgents>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,6 +147,7 @@ pub async fn workflow_trigger(
         Default::default(),
         crate::core::launch_context::LaunchContext {
             requested_project_id: req.project_id,
+            step_agents: req.step_agents.unwrap_or_default(),
             ..Default::default()
         },
     )

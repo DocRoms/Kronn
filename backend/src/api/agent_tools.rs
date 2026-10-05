@@ -1959,9 +1959,12 @@ impl ToolExecutor for KronnToolExecutor {
                 req.project_id = self.project_id.clone();
                 req.workflow_run_id = self.workflow_run_id.clone();
                 req.agent = Some(self.actor_id.clone());
-                let Json(res) =
-                    crate::api::agent_api::agent_api_call(State(self.state.clone()), Json(req))
-                        .await;
+                let Json(res) = crate::api::agent_api::agent_api_call(
+                    State(self.state.clone()),
+                    None,
+                    Json(req),
+                )
+                .await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "plan_get" => {

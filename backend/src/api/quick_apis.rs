@@ -627,6 +627,7 @@ pub async fn run_qa(
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        exec_script_files: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 
@@ -1096,6 +1097,7 @@ pub async fn batch_run_qa(
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        exec_script_files: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 

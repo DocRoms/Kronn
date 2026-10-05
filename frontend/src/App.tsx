@@ -13,6 +13,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
 import { LoadingState } from './components/LoadingState';
+import { AuthLockedScreen } from './components/AuthLockedScreen';
+import { ApiRequestError } from './lib/apiRequestError';
 import { armBootScreen } from './lib/bootScreen';
 import { standaloneLivePageMosaic, standaloneLivePageRoute } from './lib/live-page-navigation';
 import { discussionMosaicRoute } from './lib/discussion-mosaic-navigation';
@@ -31,6 +33,8 @@ export function App() {
   // The backend has not answered for a while: still the loader, plus a calm
   // note and a retry. A restart with migrations can outlast the quick retries.
   const [slowStart, setSlowStart] = useState(false);
+  // The API refuses everything but key recovery (stored auth token unreadable).
+  const [authLocked, setAuthLocked] = useState(false);
   // Under Docker, agent installs land in the container (not the host) → the
   // wizard disables Install and points to the host `kronn` CLI. Default false
   // (native/Tauri) until health resolves; a failed probe leaves it false.
@@ -61,7 +65,12 @@ export function App() {
         retries.current = 0;
         applySetupStatus(status);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        if (error instanceof ApiRequestError && error.code === 'auth_locked') {
+          setAuthLocked(true);
+          setLoading(false);
+          return;
+        }
         // Auto-retry up to 5 times with 2s delay (backend may still be starting)
         if (retries.current < 5) {
           retries.current += 1;
@@ -153,6 +162,10 @@ export function App() {
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
   }, []);
+
+  if (authLocked) {
+    return <AuthLockedScreen onRestored={() => window.location.reload()} />;
+  }
 
   if (loading) {
     return <LoadingState fullscreen phase={slowStart ? 'slow' : 'connecting'} onRetry={slowStart ? () => fetchStatus(true) : undefined} />;

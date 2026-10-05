@@ -286,6 +286,16 @@ fn resolve_task_id(conn: &Connection, reference: &str) -> Result<String> {
     Ok(reference.to_string())
 }
 
+/// The task id a reference (`KT-12` or an id) names, as every planning
+/// handler resolves it; `None` when it names no task.
+pub fn lookup_task_id(conn: &Connection, reference: &str) -> Result<Option<String>> {
+    match resolve_task_id(conn, reference) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) if error.to_string().contains("not found") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn ensure_parent_is_valid(conn: &Connection, task_id: Option<&str>, parent_id: &str) -> Result<()> {
     ensure_task_exists(conn, parent_id)?;
     if task_id == Some(parent_id) {

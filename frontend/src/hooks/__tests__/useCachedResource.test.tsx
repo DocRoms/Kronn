@@ -88,4 +88,56 @@ describe('useCachedResource', () => {
     const second = renderHook(() => useCachedResource<string>({ key: 'k', load }));
     expect(second.result.current.data).toBeNull();
   });
+
+  it('keeps the new result when an older response arrives late after a remount', async () => {
+    const old = deferred<string>();
+    const fresh = deferred<string>();
+    const load = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    const first = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    first.unmount();
+    const second = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    await act(async () => { fresh.resolve('new result'); });
+    expect(second.result.current.data).toBe('new result');
+    await act(async () => { old.resolve('old result'); });
+    // Read the shared cache again: the last render alone would hide a stale write.
+    second.rerender();
+    expect(second.result.current.data).toBe('new result');
+  });
+
+  it('ignores a response that lands after the resource was invalidated', async () => {
+    const pending = deferred<string>();
+    const load = vi.fn().mockReturnValueOnce(pending.promise);
+    const { result, rerender } = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    invalidateCachedResource('k');
+    await act(async () => { pending.resolve('stale'); });
+    rerender();
+    expect(result.current.data).toBeNull();
+  });
+
+  it('drops a late partial from an older request but takes the newer one in order', async () => {
+    let oldPublish!: (value: string) => void;
+    const oldFull = deferred<string>();
+    const newFull = deferred<string>();
+    const load = vi.fn()
+      .mockImplementationOnce(async (_f: boolean, publish: (value: string) => void) => {
+        oldPublish = publish;
+        return oldFull.promise;
+      })
+      .mockImplementationOnce(async (_f: boolean, publish: (value: string) => void) => {
+        publish('new partial');
+        return newFull.promise;
+      });
+    const first = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    first.unmount();
+    const second = renderHook(() => useCachedResource<string>({ key: 'k', load }));
+    await waitFor(() => expect(second.result.current.data).toBe('new partial'));
+    await act(async () => { oldPublish('old partial'); });
+    second.rerender();
+    expect(second.result.current.data).toBe('new partial');
+    await act(async () => { newFull.resolve('new full'); });
+    expect(second.result.current.data).toBe('new full');
+    await act(async () => { oldFull.resolve('old full'); });
+    second.rerender();
+    expect(second.result.current.data).toBe('new full');
+  });
 });

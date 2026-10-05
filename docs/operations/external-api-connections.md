@@ -110,14 +110,12 @@ an edit preserves the current key, while an explicit blank value clears it.
 [src: file: backend/src/api/external_api_connections.rs:425-454]
 [src: file: backend/src/api/external_api_connections.rs:524-603]
 
-The current implementation stores connection keys as `ApiKey.value` entries in
-Kronn's local serialized configuration. `#[ts(skip)]` keeps that value out of
-the generated TypeScript model; it is not an encryption marker. On Unix,
-temporary configuration files are written with mode `0600`, and Kronn applies
-owner-only permissions to its configuration directory (`0700`) and file
-(`0600`). [src: file: backend/src/models/setup.rs:352-360]
-[src: file: backend/src/core/config.rs:203-208]
-[src: file: backend/src/core/config.rs:338-345]
+Connection keys are `ApiKey` entries of the live configuration, persisted
+encrypted with the instance key in the `stored_credentials` table since 0.14.3
+(KT-1007): `config::save` stores them there, reads them back, and writes
+`config.toml` without them. `#[ts(skip)]` only keeps the value out of the
+generated TypeScript model. See [key-management.md](key-management.md).
+[src: file: backend/src/core/credential_store.rs:245-283]
 
 Deletion is not transactional across SQLite and the local configuration. Kronn
 deletes the connection row first, then removes the matching token entry and

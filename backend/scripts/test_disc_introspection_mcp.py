@@ -5035,6 +5035,18 @@ class WorkflowTriggerTests(unittest.TestCase):
         _, _, body = self.fake_http.call_args.args
         self.assertNotIn("variables", body)
 
+    def test_forwards_step_agents_unchanged(self):
+        # KT-1025 — the backend validates each entry and names a bad one.
+        choice = {"implement": {"agent": "Codex", "model": "gpt-5", "reasoning_effort": "high"}}
+        self.mod.call_workflow_trigger({"workflow_id": "wf-1", "step_agents": choice})
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["step_agents"], choice)
+
+    def test_omits_empty_step_agents(self):
+        self.mod.call_workflow_trigger({"workflow_id": "wf-1", "step_agents": {}})
+        _, _, body = self.fake_http.call_args.args
+        self.assertNotIn("step_agents", body)
+
     def test_undeclared_key_is_named_instead_of_silently_dropped(self):
         # KT-738 — `vars` (not `variables`) used to be dropped silently, so
         # the backend answered an unrelated "Variable X is required" instead

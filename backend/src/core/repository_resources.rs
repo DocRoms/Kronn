@@ -3182,4 +3182,51 @@ mod tests {
         assert!(author.is_none());
         assert_eq!(dates.updated_at("kronn/absent.yaml"), (None, None));
     }
+
+    // KT-918 — a published workflow names its scripts and their approved
+    // hashes; the script content stays in the repository, never copied.
+    #[test]
+    fn a_published_workflow_references_its_scripts_without_copying_them() {
+        let hash = sha256(b"console.log('jira');\n");
+        let workflow_with = |hash: &str| -> Workflow {
+            serde_json::from_value(serde_json::json!({
+                "id": "wf-framing", "name": "Framing", "project_id": "project-1",
+                "trigger": {"type": "Manual"},
+                "exec_allowlist": ["node"],
+                "steps": [{
+                    "name": "jira", "step_type": {"type": "Exec"},
+                    "exec_command": "node",
+                    "exec_args": [".agents/skills/ticket-framing/scripts/jira.cjs", "read"],
+                    "exec_script_files": [
+                        {"path": ".agents/skills/ticket-framing/scripts/jira.cjs", "sha256": hash}
+                    ]
+                }],
+                "actions": [], "safety": {}, "enabled": true,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:10Z"
+            }))
+            .unwrap()
+        };
+        let rendered = render_workflow(&workflow_with(&hash), "framing").unwrap();
+
+        assert_eq!(
+            rendered.files.keys().collect::<Vec<_>>(),
+            vec!["kronn/workflows/framing.yaml"]
+        );
+        let text = String::from_utf8(rendered.files.values().next().unwrap().clone()).unwrap();
+        assert!(!text.contains("console.log"), "{text}");
+        let declared = &rendered.document.resource["steps"][0]["exec_script_files"][0];
+        assert_eq!(
+            declared["path"],
+            ".agents/skills/ticket-framing/scripts/jira.cjs"
+        );
+        assert_eq!(declared["sha256"], hash.as_str());
+        assert!(rendered.document.redacted_fields.is_empty());
+
+        // The script hashes are part of the approval fingerprint.
+        let other = render_workflow(&workflow_with(&"0".repeat(64)), "framing").unwrap();
+        assert_ne!(
+            approval_hash(&rendered.document),
+            approval_hash(&other.document)
+        );
+    }
 }

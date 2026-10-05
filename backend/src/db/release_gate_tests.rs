@@ -845,10 +845,17 @@ async fn persistent_0_12_upgrade_preserves_data_configuration_and_rollback_snaps
         .await
         .unwrap();
     assert_eq!(std::fs::read(&config_path).unwrap(), config.as_bytes());
-    assert_eq!(
-        std::fs::read(dir.path().join("config.toml.backup")).unwrap(),
-        config.as_bytes()
-    );
+    // The rollback copy keeps every setting but never the credentials (KT-1007).
+    let snapshot: toml::Table = std::fs::read_to_string(dir.path().join("config.toml.backup"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut expected_snapshot: toml::Table = config.parse().unwrap();
+    expected_snapshot["server"]
+        .as_table_mut()
+        .unwrap()
+        .remove("auth_token");
+    assert_eq!(snapshot, expected_snapshot);
 
     let backup_path = db_path.with_extension("db.backup");
     let backup = Connection::open(&backup_path).unwrap();

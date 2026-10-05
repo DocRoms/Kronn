@@ -6398,6 +6398,300 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     );
 }
 
+/// KT-1025 — a workflow whose `draft` Agent step runs on Claude Code,
+/// followed by a Gate, with the encryption key a manual launch needs.
+async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
+    let state = test_state();
+    let secret = kronn::core::crypto::generate_secret();
+    {
+        let mut config = state.config.write().await;
+        config.encryption_secret = Some(secret);
+        // A declared LiteLLM proxy needs no local binary: the choice is available anywhere.
+        config.agents.lite_llm.base_url = Some("http://127.0.0.1:9".into());
+    }
+    let now = chrono::Utc::now();
+    let workflow = kronn::models::Workflow {
+        project_scope: None,
+        id: workflow_id.into(),
+        name: "Launch agent choice".into(),
+        project_id: None,
+        trigger: kronn::models::WorkflowTrigger::Manual,
+        steps: vec![
+            kronn::models::WorkflowStep {
+                name: "draft".into(),
+                step_type: kronn::models::StepType::Agent,
+                agent: kronn::models::AgentType::ClaudeCode,
+                prompt_template: "Draft".into(),
+                ..Default::default()
+            },
+            kronn::models::WorkflowStep {
+                name: "review".into(),
+                step_type: kronn::models::StepType::Gate,
+                ..Default::default()
+            },
+        ],
+        actions: vec![],
+        safety: kronn::models::WorkflowSafety {
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
+        },
+        workspace_config: None,
+        concurrency_limit: None,
+        concurrency_key: None,
+        guards: None,
+        artifacts: HashMap::new(),
+        on_failure: vec![],
+        exec_allowlist: vec![],
+        variables: vec![],
+        enabled: true,
+        pinned: false,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &workflow))
+        .await
+        .unwrap();
+    state
+}
+
+async fn run_count(state: &AppState, workflow_id: &str) -> usize {
+    let id = workflow_id.to_string();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::list_runs_paginated(conn, &id, None, None))
+        .await
+        .unwrap()
+        .len()
+}
+
+async fn stored_agent_choice(state: &AppState, run_id: &str) -> Value {
+    let id = run_id.to_string();
+    let run = state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::get_run(conn, &id))
+        .await
+        .unwrap()
+        .expect("persisted run");
+    let key = kronn::workflows::step_agents::TRIGGER_CONTEXT_KEY;
+    run.trigger_context.unwrap()[key].clone()
+}
+
+async fn draft_agent(state: &AppState, workflow_id: &str) -> kronn::models::AgentType {
+    let id = workflow_id.to_string();
+    state
+        .db
+        .with_conn(move |conn| kronn::db::workflows::get_workflow(conn, &id))
+        .await
+        .unwrap()
+        .unwrap()
+        .steps[0]
+        .agent
+        .clone()
+}
+
+/// The first SSE events of a trigger, without waiting for the run to end.
+async fn trigger_events(state: &AppState, uri: &str, body: Value) -> Vec<(String, Value)> {
+    let response = build_router_with_auth(state.clone(), false)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while let Ok(Some(Ok(frame))) =
+        tokio::time::timeout(std::time::Duration::from_secs(15), body.frame()).await
+    {
+        if let Some(data) = frame.data_ref() {
+            text.push_str(&String::from_utf8_lossy(data));
+        }
+        if text.contains("event: run_start") || text.contains("event: error") {
+            break;
+        }
+    }
+    let mut events = Vec::new();
+    let mut name = String::new();
+    for line in text.lines() {
+        if let Some(event) = line.strip_prefix("event: ") {
+            name = event.to_string();
+        } else if let Some(data) = line.strip_prefix("data: ") {
+            events.push((
+                name.clone(),
+                serde_json::from_str(data).unwrap_or(Value::Null),
+            ));
+        }
+    }
+    events
+}
+
+#[tokio::test]
+async fn trigger_route_runs_an_agent_step_on_the_agent_chosen_at_launch_and_refuses_a_wrong_choice()
+{
+    let workflow_id = "launch-choice-ui";
+    let state = launch_agent_choice_state(workflow_id).await;
+    let uri = format!("/api/workflows/{workflow_id}/trigger");
+
+    for (step_agents, expected) in [
+        (
+            serde_json::json!({"review": {"agent": "LiteLlm"}}),
+            "only Agent steps",
+        ),
+        (
+            serde_json::json!({"ghost": {"agent": "LiteLlm"}}),
+            "no step `ghost`",
+        ),
+        (
+            serde_json::json!({"draft": {"agent": "LiteLlm", "reasoning_effort": "a\nb"}}),
+            "one line",
+        ),
+    ] {
+        let events = trigger_events(
+            &state,
+            &uri,
+            serde_json::json!({"step_agents": step_agents}),
+        )
+        .await;
+        let (name, data) = events.first().expect("an event").clone();
+        assert_eq!(name, "error", "{events:?}");
+        assert!(data["error"].as_str().unwrap().contains(expected), "{data}");
+    }
+    assert_eq!(
+        run_count(&state, workflow_id).await,
+        0,
+        "refused before the run starts"
+    );
+
+    let events = trigger_events(
+        &state,
+        &uri,
+        serde_json::json!({"step_agents": {"draft": {"agent": "LiteLlm", "model": "m-1"}}}),
+    )
+    .await;
+    let run_id = events
+        .iter()
+        .find_map(|(name, data)| {
+            (name == "run_start").then(|| data["run_id"].as_str().unwrap().to_string())
+        })
+        .unwrap_or_else(|| panic!("no run_start: {events:?}"));
+    let choice = stored_agent_choice(&state, &run_id).await;
+    let entries = choice.as_object().expect("the choice is stored on the run");
+    assert_eq!(entries.len(), 1);
+    let stored = entries.values().next().unwrap();
+    assert_eq!(stored["agent"], "LiteLlm");
+    assert_eq!(stored["model"], "m-1");
+    assert_eq!(
+        draft_agent(&state, workflow_id).await,
+        kronn::models::AgentType::ClaudeCode,
+        "the workflow itself is never modified"
+    );
+}
+
+#[tokio::test]
+async fn mcp_workflow_trigger_accepts_step_agents_and_refuses_a_wrong_choice() {
+    let workflow_id = "launch-choice-mcp";
+    let state = launch_agent_choice_state(workflow_id).await;
+
+    let (status, body) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/mcp/workflow-trigger",
+        serde_json::json!({"workflow_id": workflow_id, "step_agents": {"review": {"agent": "LiteLlm"}}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("only Agent steps"),
+        "{body}"
+    );
+
+    assert_eq!(run_count(&state, workflow_id).await, 0);
+
+    let (_, body) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/mcp/workflow-trigger",
+        serde_json::json!({"workflow_id": workflow_id, "step_agents": {"draft": {"agent": "LiteLlm", "reasoning_effort": "high"}}}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let run_id = body["data"]["run_id"].as_str().unwrap().to_string();
+    let choice = stored_agent_choice(&state, &run_id).await;
+    let stored = choice.as_object().unwrap().values().next().unwrap().clone();
+    assert_eq!(stored["agent"], "LiteLlm");
+    assert_eq!(stored["reasoning_effort"], "high");
+    assert_eq!(
+        draft_agent(&state, workflow_id).await,
+        kronn::models::AgentType::ClaudeCode
+    );
+}
+
+/// A discussion action refuses a wrong choice before claiming, so the card
+/// stays launchable; a non-workflow action takes no agent choice at all.
+#[tokio::test]
+async fn discussion_action_launch_refuses_a_wrong_agent_choice_and_stays_proposed() {
+    let workflow_id = "launch-choice-disc";
+    let state = launch_agent_choice_state(workflow_id).await;
+    let app = build_router_with_auth(state.clone(), false);
+    let content = format!(
+        "```kronn-action\n{{\"kind\":\"workflow\",\"target_id\":\"{workflow_id}\"}}\n```\n\n```kronn-action\n{{\"kind\":\"quick_exec\",\"target_id\":\"qe-none\"}}\n```"
+    );
+    state
+        .db
+        .with_conn(move |connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at) VALUES ('disc-choice', 'Choice', ?1, ?1)",
+                [&now],
+            )?;
+            let msg = agent_action_message("msg-choice", &content);
+            kronn::db::discussions::insert_message(connection, "disc-choice", &msg)
+        })
+        .await
+        .unwrap();
+
+    let action_id = "action:msg-choice:0";
+    let (_, refused) = post_json(
+        app.clone(),
+        &format!("/api/discussion-actions/{action_id}/launch"),
+        serde_json::json!({"variables": {}, "step_agents": {"review": {"agent": "LiteLlm"}}}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("only Agent steps"),
+        "{refused}"
+    );
+    let (_, still) = get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
+    assert_eq!(still["data"]["state"], "proposed", "{still}");
+    assert_eq!(run_count(&state, workflow_id).await, 0);
+
+    let (_, refused) = post_json(
+        app.clone(),
+        "/api/discussion-actions/action:msg-choice:1/launch",
+        serde_json::json!({"variables": {}, "step_agents": {"draft": {"agent": "LiteLlm"}}}),
+    )
+    .await;
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("only to a workflow action"),
+        "{refused}"
+    );
+}
+
 /// Build a test router backed by an in-memory database (auth disabled).
 fn test_app() -> Router {
     build_router_with_auth(test_state(), false)
@@ -15674,8 +15968,9 @@ async fn disc_sync_request_resends_missing_messages() {
         .unwrap();
 
     // The host must re-broadcast the missing message as a ChatMessage, with its
-    // role/identity preserved.
-    let found = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // role/identity preserved. The loop returns on arrival; the bound only
+    // catches a message that never comes, so it is generous for loaded runs.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while let Some(Ok(frame)) = StreamExt::next(&mut receiver).await {
             if let tokio_tungstenite::tungstenite::Message::Text(txt) = frame {
                 if let Ok(WsMessage::ChatMessage {
@@ -25599,7 +25894,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
                     name: "greet".into(),
                     step_type: kronn::models::StepType::Exec,
                     exec_command: Some("bash".into()),
-                    exec_args: vec!["-c".into(), "echo {{issue.title}}".into()],
+                    exec_args: vec!["-c".into(), "echo \"{{issue.title}}\"".into()],
                     ..Default::default()
                 }],
                 actions: vec![],
@@ -25653,7 +25948,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         "name": "greet",
         "step_type": {"type": "Exec"},
         "exec_command": "bash",
-        "exec_args": ["-c", "echo {{issue.title}}"],
+        "exec_args": ["-c", "echo \"{{issue.title}}\""],
     }]);
     let (_, renamed) = put_json_root(
         app.clone(),
@@ -25745,6 +26040,14 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
         .await
         .unwrap();
 
+    let mut described = body("Legacy", serde_json::json!(["-c", "print('{{ticket}}')"]));
+    described["description"] = serde_json::json!("now documented");
+    let (_, kept) = put_json_root(app.clone(), "/api/quick-execs/qe-legacy", described).await;
+    assert_eq!(
+        kept["success"], true,
+        "an unchanged line stays editable: {kept}"
+    );
+
     let (_, renamed) = put_json_root(
         app.clone(),
         "/api/quick-execs/qe-legacy",
@@ -25752,8 +26055,8 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
     )
     .await;
     assert_eq!(
-        renamed["success"], true,
-        "an unchanged line stays editable: {renamed}"
+        renamed["success"], false,
+        "a renamed Quick Exec is a new line: {renamed}"
     );
 
     let (_, changed) = put_json_root(
@@ -26177,4 +26480,310 @@ mod github_connection_api {
         std::env::remove_var("KRONN_GITHUB_API_BASE");
         kronn::core::github_connection::override_machine_token_for_tests(None);
     }
+}
+
+/// A refusal from the inline-code rule names the offending placeholder.
+fn assert_inline_refusal(body: &Value, label: &str) {
+    assert_eq!(body["success"], false, "{label}: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("{{issue.title}}") || error.contains("{{ticket}}"),
+        "{label}: {error}"
+    );
+}
+
+fn unsafe_exec_step(name: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo \"{{issue.title}}\""]
+    })
+}
+
+fn safe_exec_step(name: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]
+    })
+}
+
+fn workflow_request(steps: Value) -> Value {
+    serde_json::json!({
+        "name": "Write path",
+        "project_id": null,
+        "trigger": {"type": "Manual"},
+        "steps": steps,
+        "exec_allowlist": ["bash", "python3"]
+    })
+}
+
+/// KT-1017 — every write path that creates an Exec line, a Quick Exec or an
+/// inline CollectApiData source refuses an unsafe inline interpolation:
+/// create, bundle (parent and child), workflow import (step and bundled
+/// Quick Exec), Artifact import, Quick Exec import. MCP draft, update and
+/// clone go through these same HTTP endpoints.
+#[tokio::test]
+async fn every_write_path_refuses_an_unsafe_inline_line() {
+    let app = test_app();
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([unsafe_exec_step("greet")])),
+    )
+    .await;
+    assert_inline_refusal(&created, "create");
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([safe_exec_step("greet")])),
+    )
+    .await;
+    assert_eq!(created["success"], true, "create safe: {created}");
+
+    let (_, source) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([{
+            "name": "collect",
+            "step_type": {"type": "CollectApiData"},
+            "collect_api_data": {"sources": [{
+                "alias": "ticket",
+                "quick_exec": {"command": "python3", "args": ["-c", "print('{{issue.title}}')"], "output_format": "text"},
+                "required": true
+            }]}
+        }])),
+    )
+    .await;
+    assert_inline_refusal(&source, "inline source");
+
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({"workflow": workflow_request(serde_json::json!([unsafe_exec_step("greet")]))}),
+    )
+    .await;
+    assert_inline_refusal(&bundle, "bundle parent");
+    let mut child = workflow_request(serde_json::json!([unsafe_exec_step("inner")]));
+    child["bundle_id"] = serde_json::json!("child");
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([{
+                "name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"
+            }]))
+        }),
+    )
+    .await;
+    assert_inline_refusal(&bundle, "bundle child");
+
+    let quick_exec = serde_json::json!({
+        "kind": "kronn.quick_exec",
+        "version": 1,
+        "exported_at": "2026-01-01T00:00:00Z",
+        "quick_exec": {
+            "id": "qe-x", "name": "Ticket", "icon": "⌘", "description": "", "project_id": null,
+            "command": "python3", "args": ["-c", "print('{{ticket}}')"], "timeout_secs": 10,
+            "output_format": "text", "variables": [], "pinned": false,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }
+    });
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/quick-execs/import",
+        serde_json::json!({"content": quick_exec.to_string(), "project_id": null}),
+    )
+    .await;
+    assert_inline_refusal(&imported, "quick exec import");
+}
+
+#[tokio::test]
+async fn workflow_and_artifact_imports_refuse_unsafe_inline_lines() {
+    let (_, exported) = workflow_portability_fixture().await;
+
+    let mut unsafe_step = exported.clone();
+    unsafe_step["workflow"]["exec_allowlist"] = serde_json::json!(["bash", "echo"]);
+    unsafe_step["workflow"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(unsafe_exec_step("greet"));
+    let mut unsafe_exec = exported.clone();
+    unsafe_exec["referenced_quick_execs"][0]["command"] = serde_json::json!("python3");
+    unsafe_exec["referenced_quick_execs"][0]["args"] =
+        serde_json::json!(["-c", "print('{{ticket}}')"]);
+    let app = build_router_with_auth(test_state(), false);
+    for (label, bundle) in [("step", unsafe_step), ("bundled quick exec", unsafe_exec)] {
+        let (_, body) = post_json(
+            app.clone(),
+            "/api/workflows/import",
+            serde_json::json!({"content": serde_json::to_string(&bundle).unwrap(), "project_id": null}),
+        )
+        .await;
+        assert_inline_refusal(&body, label);
+    }
+
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, page) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut artifact = page["data"].clone();
+    artifact["referenced_quick_execs"][0]["command"] = serde_json::json!("python3");
+    artifact["referenced_quick_execs"][0]["args"] =
+        serde_json::json!(["-c", "print('{{ticket}}')"]);
+    let app = build_router_with_auth(test_state(), false);
+    let request = serde_json::json!({"content": artifact.to_string()});
+    let (_, preview) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_ne!(
+        preview["data"]["can_import"], true,
+        "artifact preview: {preview}"
+    );
+    let (_, imported) = post_json(app, "/api/pages/import", request).await;
+    assert_inline_refusal(&imported, "artifact import");
+}
+
+/// The unchanged-line exception keys on the exact stored line: same chain,
+/// same position, same step name, same command and args. A rename, a
+/// reorder or a changed placeholder makes the line new, and it is refused.
+#[tokio::test]
+async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let steps: Vec<kronn::models::WorkflowStep> = serde_json::from_value(serde_json::json!([
+        unsafe_exec_step("greet"),
+        safe_exec_step("other")
+    ]))
+    .unwrap();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                project_scope: None,
+                id: "workflow-identity".into(),
+                name: "Identity".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps,
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["bash".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let uri = "/api/workflows/workflow-identity";
+    let put = |steps: Value| put_json_root(app.clone(), uri, serde_json::json!({"steps": steps}));
+
+    let (_, same) = put(serde_json::json!([
+        unsafe_exec_step("greet"),
+        safe_exec_step("other")
+    ]))
+    .await;
+    assert_eq!(same["success"], true, "unchanged: {same}");
+
+    let (_, renamed) = put(serde_json::json!([
+        unsafe_exec_step("hello"),
+        safe_exec_step("other")
+    ]))
+    .await;
+    assert_eq!(renamed["success"], false, "renamed step: {renamed}");
+
+    let (_, reordered) = put(serde_json::json!([
+        safe_exec_step("other"),
+        unsafe_exec_step("greet")
+    ]))
+    .await;
+    assert_eq!(reordered["success"], false, "reordered: {reordered}");
+
+    let mut changed = unsafe_exec_step("greet");
+    changed["exec_args"] = serde_json::json!(["-c", "echo \"{{issue.body}}\""]);
+    let (_, changed) = put(serde_json::json!([changed, safe_exec_step("other")])).await;
+    assert_eq!(changed["success"], false, "changed placeholder: {changed}");
+}
+
+/// KT-918 — the write paths that check Exec definitions also check the shape
+/// of declared script files: a path leaving the repository is refused by the
+/// bundle (parent and child) and by a workflow import.
+#[tokio::test]
+async fn bundle_and_import_refuse_a_script_path_leaving_the_repository() {
+    let escaping = || {
+        serde_json::json!({
+            "name": "framing",
+            "step_type": {"type": "Exec"},
+            "exec_command": "bash",
+            "exec_args": ["scripts/run.sh"],
+            "exec_script_files": [{"path": "../outside.sh"}]
+        })
+    };
+    let assert_refused = |body: &Value, label: &str| {
+        assert_eq!(body["success"], false, "{label}: {body}");
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("relative to the repository"),
+            "{label}: {error}"
+        );
+    };
+    let app = test_app();
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({"workflow": workflow_request(serde_json::json!([escaping()]))}),
+    )
+    .await;
+    assert_refused(&bundle, "bundle parent");
+    let mut child = workflow_request(serde_json::json!([escaping()]));
+    child["bundle_id"] = serde_json::json!("child");
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([{
+                "name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"
+            }]))
+        }),
+    )
+    .await;
+    assert_refused(&bundle, "bundle child");
+
+    let (_, exported) = workflow_portability_fixture().await;
+    let mut import = exported.clone();
+    import["workflow"]["exec_allowlist"] = serde_json::json!(["bash"]);
+    import["workflow"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(escaping());
+    let app = build_router_with_auth(test_state(), false);
+    let (_, body) = post_json(
+        app,
+        "/api/workflows/import",
+        serde_json::json!({"content": serde_json::to_string(&import).unwrap(), "project_id": null}),
+    )
+    .await;
+    assert_refused(&body, "workflow import");
 }

@@ -21,6 +21,8 @@ pub struct LaunchContext {
     /// A project chosen explicitly for a multi-project workflow (KT-851);
     /// unlike `project_id`, refused when the workflow does not serve it.
     pub requested_project_id: Option<String>,
+    /// Agents chosen at launch for some Agent steps of a workflow (KT-1025).
+    pub step_agents: crate::models::StepAgents,
 }
 
 impl LaunchContext {
@@ -31,6 +33,7 @@ impl LaunchContext {
             context: HashMap::new(),
             triggered_by_run_id: None,
             requested_project_id: None,
+            step_agents: Default::default(),
         }
     }
 
@@ -44,6 +47,7 @@ impl LaunchContext {
             context: HashMap::new(),
             triggered_by_run_id: None,
             requested_project_id: None,
+            step_agents: Default::default(),
         }
     }
 

@@ -55,6 +55,7 @@ pub mod run_outcome;
 pub mod run_retention;
 pub mod run_state;
 pub mod shared_runs;
+pub mod stored_credentials;
 pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;

@@ -88,6 +88,18 @@ beforeEach(() => {
 });
 
 describe('App', () => {
+  it('shows the key-restore screen, not the loader, when the API is auth locked', async () => {
+    const { ApiRequestError } = await import('../lib/apiRequestError');
+    (setupApi.getStatus as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ApiRequestError('API authentication is locked', 'auth_locked'),
+    );
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('auth-locked-screen')).toBeTruthy());
+    expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(setupApi.getStatus).toHaveBeenCalledTimes(1);
+  });
+
   it('shows loading screen initially', () => {
     (setupApi.getStatus as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
     render(<App />);
