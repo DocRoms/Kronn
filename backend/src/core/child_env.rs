@@ -154,6 +154,54 @@ const GIT_NAMES: &[&str] = &[
     "SSH_ASKPASS",
 ];
 
+/// `gh` and `glab` configuration: where their own login lives and which host
+/// they talk to. Their tokens are never inherited (a connected project's comes
+/// from `core::github_connection`).
+const GIT_HOST_NAMES: &[&str] = &[
+    "GH_CONFIG_DIR",
+    "GH_HOST",
+    "GH_PROMPT_DISABLED",
+    "GH_NO_UPDATE_NOTIFIER",
+    "GLAB_CONFIG_DIR",
+    "GITLAB_HOST",
+    "GL_HOST",
+];
+
+/// Package managers' own locations: registries, caches, toolchain roots. No
+/// registry token: a repository's config file could print it.
+const DEPENDENCY_CHECK_NAMES: &[&str] = &[
+    "GOPROXY",
+    "GOPRIVATE",
+    "GONOPROXY",
+    "GONOSUMDB",
+    "GOSUMDB",
+    "GOINSECURE",
+    "GOFLAGS",
+    "GOMODCACHE",
+    "GOCACHE",
+    "GOENV",
+    "GOTOOLCHAIN",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_USER_HOME",
+    "BUNDLE_USER_CONFIG",
+    "BUNDLE_APP_CONFIG",
+    "BUNDLE_PATH",
+    "RBENV_ROOT",
+    "RBENV_VERSION",
+    "DOTNET_ROOT",
+    "DOTNET_CLI_HOME",
+    "NUGET_PACKAGES",
+    "POETRY_HOME",
+    "POETRY_CONFIG_DIR",
+    "POETRY_CACHE_DIR",
+    "COMPOSER_HOME",
+    "COMPOSER_CACHE_DIR",
+];
+
+/// Docker's and Compose's own settings (daemon, context, TLS paths, project).
+const DOCKER_PREFIXES: &[&str] = &["DOCKER_", "COMPOSE_"];
+
 /// Cloud CLIs an API connection may use to mint its credential (`az`, `gcloud`).
 const CREDENTIAL_CLI_PREFIXES: &[&str] = &["AZURE_", "CLOUDSDK_", "AWS_"];
 const CREDENTIAL_CLI_NAMES: &[&str] = &["GOOGLE_APPLICATION_CREDENTIALS"];
@@ -285,6 +333,15 @@ pub enum ChildRoute {
     /// Every `git` process Kronn starts: a repository's hooks, filters and
     /// drivers run inside it, and agents can write repositories.
     Git,
+    /// `gh` and `glab`: they start git in the repository themselves.
+    GitHost,
+    /// A dependency check: package managers read the repository's config.
+    DependencyCheck,
+    /// `docker` and `docker compose`: Compose interpolates the environment
+    /// into a repository's compose file.
+    Docker,
+    /// Any other program Kronn starts for itself (installers, system probes).
+    Tool,
 }
 
 impl ChildRoute {
@@ -297,7 +354,11 @@ impl ChildRoute {
                 name_in(name, CREDENTIAL_CLI_NAMES) || has_prefix(name, CREDENTIAL_CLI_PREFIXES)
             }
             Self::Git => name_in(name, GIT_NAMES),
-            Self::ProjectExec | Self::WorkflowExec | Self::QuickExec => false,
+            Self::GitHost => name_in(name, GIT_NAMES) || name_in(name, GIT_HOST_NAMES),
+            Self::DependencyCheck => name_in(name, DEPENDENCY_CHECK_NAMES),
+            // A prefix grants a family, never a credential inside it.
+            Self::Docker => has_prefix(name, DOCKER_PREFIXES) && !looks_secret(name),
+            Self::ProjectExec | Self::WorkflowExec | Self::QuickExec | Self::Tool => false,
         }
     }
 
@@ -589,6 +650,128 @@ pub fn isolate_with_github_and_values(
 pub fn isolate(command: &mut std::process::Command, route: ChildRoute) {
     reset(command, route);
     seal(command, route, &[]);
+}
+
+/// Test helpers shared by the spawn sites' environment tests.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    /// Never inherited by any route: what a leak test plants in the parent.
+    pub const SECRET_NAMES: &[&str] = &[
+        "KRONN_AUTH_TOKEN",
+        "KRONN_ENCRYPTION_KEK",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "KRONN_SPAWN_SENTINEL_API_KEY",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        "DOCKER_AUTH_TOKEN",
+    ];
+
+    /// Also put the sentinel in the real process environment, so a command
+    /// that skips the builder and inherits it fails the dump assertions.
+    pub fn plant_real_sentinel() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| std::env::set_var("KRONN_SPAWN_SENTINEL_API_KEY", "sentinel-real"));
+    }
+
+    /// A backend environment: `path` plus every name of [`SECRET_NAMES`].
+    pub fn parent_with_secrets(path: &str, home: &str) -> Vec<(String, String)> {
+        let mut parent = vec![
+            ("PATH".to_string(), path.to_string()),
+            ("HOME".to_string(), home.to_string()),
+        ];
+        parent.extend(
+            SECRET_NAMES
+                .iter()
+                .map(|name| (name.to_string(), format!("sentinel-{name}"))),
+        );
+        parent
+    }
+
+    /// Run `body` with [`parent_with_secrets`] as the backend's environment.
+    pub fn with_secret_parent<T>(path: &str, home: &str, body: impl FnOnce() -> T) -> T {
+        let parent = parent_with_secrets(path, home);
+        let borrowed: Vec<(&str, &str)> = parent
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        super::with_parent_env(&borrowed, body)
+    }
+
+    /// What a command will hand its child, by name.
+    pub fn env_of(command: &std::process::Command) -> BTreeMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(name, value)| {
+                value.map(|value| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// The command was built (its PATH comes from the builder) and carries
+    /// none of [`SECRET_NAMES`] except those in `allowed`.
+    pub fn assert_built_without_secrets(
+        command: &std::process::Command,
+        expected_path: &str,
+        allowed: &[&str],
+    ) {
+        let env = env_of(command);
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some(expected_path),
+            "the environment was not built: {env:?}"
+        );
+        for name in SECRET_NAMES {
+            if !allowed.contains(name) {
+                assert!(!env.contains_key(*name), "{name} reached the child");
+            }
+        }
+    }
+
+    /// A fake `name` in `dir` that writes its environment to the returned file.
+    #[cfg(unix)]
+    pub fn env_dumping_program(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let out = dir.join(format!("{name}.env"));
+        let script = dir.join(name);
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\n/usr/bin/env > '{}'\n", out.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        out
+    }
+
+    /// The environment a fake program recorded, by name.
+    pub fn read_dump(out: &Path) -> BTreeMap<String, String> {
+        std::fs::read_to_string(out)
+            .unwrap_or_else(|error| panic!("{} was not written: {error}", out.display()))
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// No name of [`SECRET_NAMES`] (except `allowed`) in a recorded environment.
+    pub fn assert_dump_without_secrets(env: &BTreeMap<String, String>, allowed: &[&str]) {
+        for name in SECRET_NAMES {
+            if !allowed.contains(name) {
+                assert!(
+                    !env.contains_key(*name),
+                    "{name} reached the child: {env:?}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

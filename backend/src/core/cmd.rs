@@ -95,6 +95,21 @@ pub fn sync_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
     cmd
 }
 
+/// [`async_cmd`] for a program Kronn runs for itself (installer, system
+/// probe): the base allow-list only, never the backend's environment.
+pub fn tool_cmd<S: AsRef<OsStr>>(program: S) -> tokio::process::Command {
+    let mut cmd = async_cmd(program);
+    crate::core::child_env::isolate(cmd.as_std_mut(), crate::core::child_env::ChildRoute::Tool);
+    cmd
+}
+
+/// [`sync_cmd`] counterpart of [`tool_cmd`].
+pub fn sync_tool_cmd<S: AsRef<OsStr>>(program: S) -> std::process::Command {
+    let mut cmd = sync_cmd(program);
+    crate::core::child_env::isolate(&mut cmd, crate::core::child_env::ChildRoute::Tool);
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +167,30 @@ mod tests {
         git(&["add", "f.txt"]);
         git(&["commit", "-q", "-m", "fixture"]);
         std::env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
+    }
+
+    /// A program Kronn runs for itself gets the base allow-list only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tool_command_runs_without_the_backend_environment() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let dir = tempfile::tempdir().unwrap();
+        let out_async = probe::env_dumping_program(dir.path(), "kronn-tool");
+        let path = format!("{}:/usr/bin:/bin", dir.path().display());
+        let home = dir.path().to_str().unwrap();
+        let (mut async_command, mut sync_command) = probe::with_secret_parent(&path, home, || {
+            (tool_cmd("kronn-tool"), sync_tool_cmd("kronn-tool"))
+        });
+        probe::assert_built_without_secrets(async_command.as_std(), &path, &[]);
+        probe::assert_built_without_secrets(&sync_command, &path, &[]);
+        assert!(async_command.status().await.unwrap().success());
+        let recorded = probe::read_dump(&out_async);
+        probe::assert_dump_without_secrets(&recorded, &[]);
+        assert_eq!(recorded.get("HOME").map(String::as_str), Some(home));
+        std::fs::remove_file(&out_async).unwrap();
+        assert!(sync_command.status().unwrap().success());
+        probe::assert_dump_without_secrets(&probe::read_dump(&out_async), &[]);
     }
 
     #[test]
