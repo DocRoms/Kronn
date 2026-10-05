@@ -592,13 +592,14 @@ fn gitlab_cli_hostname(value: &str) -> Result<String, String> {
     })
 }
 
-/// Use the user's local `glab auth login` session without extracting or
-/// persisting its token. This is also the recovery path when a saved PAT is
-/// stale. Environment token overrides are deliberately removed because glab
-/// gives them precedence over its stored credentials.
-async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, String> {
-    let hostname = gitlab_cli_hostname(host)?;
+/// The `glab api` process listing a user's projects: the git-host
+/// environment (KT-1006) without any token or host override.
+fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
     let mut command = crate::core::cmd::async_cmd("glab");
+    crate::core::child_env::isolate(
+        command.as_std_mut(),
+        crate::core::child_env::ChildRoute::GitHost,
+    );
     command
         .args([
             "api",
@@ -607,7 +608,7 @@ async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, Strin
             "--output",
             "json",
             "--hostname",
-            &hostname,
+            hostname,
         ])
         .env_remove("GITLAB_TOKEN")
         .env_remove("GITLAB_ACCESS_TOKEN")
@@ -615,7 +616,16 @@ async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, Strin
         .env_remove("GITLAB_HOST")
         .env_remove("GL_HOST")
         .kill_on_drop(true);
+    command
+}
 
+/// Use the user's local `glab auth login` session without extracting or
+/// persisting its token. This is also the recovery path when a saved PAT is
+/// stale. Environment token overrides are deliberately removed because glab
+/// gives them precedence over its stored credentials.
+async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, String> {
+    let hostname = gitlab_cli_hostname(host)?;
+    let mut command = gitlab_cli_command(&hostname);
     let output = tokio::time::timeout(std::time::Duration::from_secs(20), command.output())
         .await
         .map_err(|_| "glab API request timed out after 20 seconds".to_string())?
@@ -712,6 +722,15 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_glab_listing_gets_no_backend_secret_and_no_token() {
+        use crate::core::child_env::probe;
+        let command = probe::with_secret_parent("/usr/bin", "/home/u", || {
+            gitlab_cli_command("gitlab.example.com")
+        });
+        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
+    }
 
     #[test]
     fn normalize_repo_url_strips_https_github_prefix() {

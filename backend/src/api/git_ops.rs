@@ -182,18 +182,27 @@ pub fn run_git_diff_range(
 }
 
 /// Run `git status` in the given repo directory and return structured status.
+/// A PR lookup there uses `gh`'s own login only.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
-    run_git_status_page(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT)
+    run_git_status_page(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, &[])
 }
 
 /// Run `git status` with an explicitly bounded commit-history page. File
 /// status remains complete and independent from commit pagination.
+/// `github_env` is the project's GitHub variables for the PR lookup.
 pub fn run_git_status_page(
     repo_path: &Path,
     commit_offset: u32,
     commit_limit: u32,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, commit_offset, commit_limit, true, true)
+    run_git_status_impl(
+        repo_path,
+        commit_offset,
+        commit_limit,
+        true,
+        Some(github_env),
+    )
 }
 
 /// Same status without the network PR lookup: a PR link already known from an
@@ -203,7 +212,7 @@ pub fn run_git_status_page_without_pr_lookup(
     commit_offset: u32,
     commit_limit: u32,
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, commit_offset, commit_limit, true, false)
+    run_git_status_impl(repo_path, commit_offset, commit_limit, true, None)
 }
 
 /// Selected discussion workspaces replace branch-relative evidence with their
@@ -211,8 +220,15 @@ pub fn run_git_status_page_without_pr_lookup(
 /// still collecting the independent working-tree and repository metadata.
 pub(crate) fn run_git_status_without_commit_evidence(
     repo_path: &Path,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, false, true)
+    run_git_status_impl(
+        repo_path,
+        0,
+        GIT_COMMIT_PAGE_DEFAULT,
+        false,
+        Some(github_env),
+    )
 }
 
 fn run_git_status_impl(
@@ -220,7 +236,8 @@ fn run_git_status_impl(
     commit_offset: u32,
     commit_limit: u32,
     include_commit_evidence: bool,
-    lookup_pr: bool,
+    // `None`: no network PR lookup; `Some`: the GitHub variables for it.
+    lookup_pr: Option<&[(String, String)]>,
 ) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
         let output = sync_cmd("git")
@@ -381,10 +398,9 @@ fn run_git_status_impl(
 
     // Check if there's an open PR/MR for this branch
     let pr_url = if !branch.is_empty() && !is_default_branch {
-        if lookup_pr {
-            cached_pr_url(repo_path, &branch)
-        } else {
-            known_pr_url(repo_path, &branch)
+        match lookup_pr {
+            Some(github_env) => cached_pr_url(repo_path, &branch, github_env),
+            None => known_pr_url(repo_path, &branch),
         }
     } else {
         None
@@ -1778,14 +1794,39 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
     }
 }
 
+/// `gh` or `glab` in a repository. They start git there themselves, so they
+/// get the git-host environment, never the backend's (KT-1006); `gh` also
+/// gets the project's GitHub variables, then `github_token` when one is set.
+fn host_cli_command(
+    program: &str,
+    repo_path: &Path,
+    github_env: &[(String, String)],
+    github_token: Option<&str>,
+) -> std::process::Command {
+    use crate::core::child_env::{self, ChildRoute};
+    let mut command = sync_cmd(program);
+    command.current_dir(repo_path);
+    child_env::reset(&mut command, ChildRoute::GitHost);
+    if program == "gh" {
+        crate::core::github_connection::apply_launch_env(&mut command, github_env);
+        if let Some(token) = github_token {
+            command.env("GH_TOKEN", token);
+        }
+    }
+    child_env::seal(&mut command, ChildRoute::GitHost, child_env::GITHUB_ENV);
+    command
+}
+
 /// Create a pull/merge request via gh (GitHub) or glab (GitLab) CLI.
 /// Automatically pushes the current branch first if it has no upstream.
+/// `github_env` is the project's GitHub variables (`env_for_launch`).
 pub fn run_create_pr(
     repo_path: &Path,
     title: &str,
     body: &str,
     base: &str,
     github_token: Option<&str>,
+    github_env: &[(String, String)],
 ) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
     let has_upstream = sync_cmd("git")
@@ -1822,9 +1863,8 @@ pub fn run_create_pr(
                 args.push("--description");
                 args.push(body);
             }
-            sync_cmd("glab")
+            host_cli_command("glab", repo_path, github_env, None)
                 .args(&args)
-                .current_dir(repo_path)
                 .output()
                 .map_err(|e| format!("Failed to run glab: {} (is glab installed?)", e))?
         }
@@ -1837,12 +1877,9 @@ pub fn run_create_pr(
                 args.push("--body");
                 args.push(body);
             }
-            let mut cmd = sync_cmd("gh");
-            cmd.args(&args).current_dir(repo_path);
-            if let Some(token) = github_token {
-                cmd.env("GH_TOKEN", token);
-            }
-            cmd.output()
+            host_cli_command("gh", repo_path, github_env, github_token)
+                .args(&args)
+                .output()
                 .map_err(|e| format!("Failed to run gh: {} (is gh installed?)", e))?
         }
     };
@@ -1877,7 +1914,11 @@ static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
 
 /// [`check_pr_url`], reused for [`PR_URL_TTL`] per repository and branch,
 /// "no PR" included.
-pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
+pub fn cached_pr_url(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> Option<String> {
     let key = (repo_path.to_path_buf(), branch.to_string());
     if let Ok(cache) = PR_URLS.lock() {
         if let Some((url, at)) = cache.get(&key) {
@@ -1886,7 +1927,7 @@ pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
             }
         }
     }
-    let url = check_pr_url(repo_path, branch);
+    let url = check_pr_url(repo_path, branch, github_env);
     if let Ok(mut cache) = PR_URLS.lock() {
         cache.retain(|_, (_, at)| at.elapsed() < PR_URL_TTL);
         cache.insert(key, (url.clone(), std::time::Instant::now()));
@@ -1936,23 +1977,12 @@ fn output_within(
 }
 
 /// Check if an open PR/MR exists for a branch.
-pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
-    let provider = detect_provider(repo_path);
-    let mut command = match provider {
-        "gitlab" => {
-            let mut command = sync_cmd("glab");
-            command.args([
-                "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
-            ]);
-            command
-        }
-        _ => {
-            let mut command = sync_cmd("gh");
-            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
-            command
-        }
-    };
-    command.current_dir(repo_path);
+pub fn check_pr_url(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> Option<String> {
+    let command = pr_lookup_command(repo_path, branch, github_env);
     let output = output_within(command, PR_URL_LOOKUP_LIMIT)?;
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1963,6 +1993,28 @@ pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
         }
     } else {
         None
+    }
+}
+
+/// The `gh pr view` / `glab mr view` process [`check_pr_url`] starts.
+fn pr_lookup_command(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> std::process::Command {
+    match detect_provider(repo_path) {
+        "gitlab" => {
+            let mut command = host_cli_command("glab", repo_path, github_env, None);
+            command.args([
+                "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
+            ]);
+            command
+        }
+        _ => {
+            let mut command = host_cli_command("gh", repo_path, github_env, None);
+            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
+            command
+        }
     }
 }
 
@@ -2012,6 +2064,59 @@ pub fn default_pr_template(branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// `gh` and `glab` start git in the repository: they get the git-host
+    /// environment and the project's GitHub token, never the backend's.
+    #[cfg(unix)]
+    #[test]
+    fn gh_and_glab_run_without_the_backend_environment() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let bin = tempfile::tempdir().unwrap();
+        let gh_out = probe::env_dumping_program(bin.path(), "gh");
+        let glab_out = probe::env_dumping_program(bin.path(), "glab");
+        let path = format!(
+            "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            bin.path().display()
+        );
+        let repo = |remote: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+                assert!(sync_cmd("git")
+                    .args(&args)
+                    .current_dir(dir.path())
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            dir
+        };
+        let github = repo("https://github.com/acme/app.git");
+        let gitlab = repo("https://gitlab.com/acme/app.git");
+        let project_env = vec![("GH_TOKEN".to_string(), "project-token".to_string())];
+        let home = bin.path().to_str().unwrap();
+        let create = probe::with_secret_parent(&path, home, || {
+            check_pr_url(github.path(), "feature", &project_env);
+            check_pr_url(gitlab.path(), "feature", &project_env);
+            host_cli_command("gh", github.path(), &project_env, Some("explicit-token"))
+        });
+
+        let gh = probe::read_dump(&gh_out);
+        probe::assert_dump_without_secrets(&gh, &["GH_TOKEN"]);
+        assert_eq!(
+            gh.get("GH_TOKEN").map(String::as_str),
+            Some("project-token"),
+            "gh gets the connected project's token, not the backend's"
+        );
+        let glab = probe::read_dump(&glab_out);
+        probe::assert_dump_without_secrets(&glab, &[]);
+
+        probe::assert_built_without_secrets(&create, &path, &["GH_TOKEN"]);
+        assert_eq!(
+            probe::env_of(&create).get("GH_TOKEN").map(String::as_str),
+            Some("explicit-token")
+        );
+    }
     #[test]
     fn status_without_pr_lookup_reports_only_a_link_already_known() {
         let dir = tempfile::tempdir().unwrap();
@@ -2698,7 +2803,7 @@ filename src/main.rs
             );
         }
 
-        let first = run_git_status_page(repo.path(), 0, 40).unwrap();
+        let first = run_git_status_page(repo.path(), 0, 40, &[]).unwrap();
         assert_eq!(first.commits_total, 305);
         assert_eq!(first.commits_offset, 0);
         assert_eq!(first.commits.len(), 40);
@@ -2706,14 +2811,14 @@ filename src/main.rs
         assert_eq!(first.commits[0].subject, "history 304");
         assert_eq!(first.commits[39].subject, "history 265");
 
-        let second = run_git_status_page(repo.path(), 40, 40).unwrap();
+        let second = run_git_status_page(repo.path(), 40, 40, &[]).unwrap();
         assert_eq!(second.commits_total, 305);
         assert_eq!(second.commits_offset, 40);
         assert_eq!(second.commits.len(), 40);
         assert!(second.commits_truncated);
         assert_eq!(second.commits[0].subject, "history 264");
 
-        let last = run_git_status_page(repo.path(), 300, 1_000).unwrap();
+        let last = run_git_status_page(repo.path(), 300, 1_000, &[]).unwrap();
         assert_eq!(last.commits_total, 305);
         assert_eq!(last.commits_offset, 300);
         assert_eq!(last.commits.len(), 5);

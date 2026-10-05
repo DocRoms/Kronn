@@ -206,11 +206,22 @@ fn env_machine_token() -> Option<Zeroizing<String>> {
         .map(Zeroizing::new)
 }
 
-async fn gh_cli_token() -> Option<Zeroizing<String>> {
+/// `gh auth token`: the git-host environment only (KT-1006), so it answers
+/// from its own login, never from a token in the backend's environment.
+fn gh_auth_token_command() -> tokio::process::Command {
     let mut cmd = crate::core::cmd::async_cmd("gh");
+    crate::core::child_env::isolate(
+        cmd.as_std_mut(),
+        crate::core::child_env::ChildRoute::GitHost,
+    );
     cmd.args(["auth", "token"])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
+    cmd
+}
+
+async fn gh_cli_token() -> Option<Zeroizing<String>> {
+    let mut cmd = gh_auth_token_command();
     let output = match tokio::time::timeout(GH_TOKEN_TIMEOUT, cmd.output()).await {
         Ok(Ok(output)) if output.status.success() => output,
         Ok(Ok(_)) | Ok(Err(_)) => return None,

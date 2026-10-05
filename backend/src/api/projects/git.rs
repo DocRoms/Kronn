@@ -39,6 +39,7 @@ fn status_page(
     commit_offset: u32,
     commit_limit: u32,
     skip_pr_lookup: bool,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
     if skip_pr_lookup {
         crate::api::git_ops::run_git_status_page_without_pr_lookup(
@@ -47,7 +48,7 @@ fn status_page(
             commit_limit,
         )
     } else {
-        crate::api::git_ops::run_git_status_page(repo_path, commit_offset, commit_limit)
+        crate::api::git_ops::run_git_status_page(repo_path, commit_offset, commit_limit, github_env)
     }
 }
 
@@ -228,6 +229,12 @@ pub async fn git_status(
             })
     };
 
+    // The PR lookup's `gh` gets this project's GitHub variables, if connected.
+    let github_env = if query.skip_pr_lookup {
+        Vec::new()
+    } else {
+        crate::core::github_connection::env_for_launch(Some(&id)).await
+    };
     if query.refresh {
         // Explicit re-check: compute inline, as before.
         let exclusions_for_compute = exclusions.clone();
@@ -235,7 +242,13 @@ pub async fn git_status(
         let commit_limit = query.commit_limit;
         let skip_pr_lookup = query.skip_pr_lookup;
         let result = tokio::task::spawn_blocking(move || {
-            let mut status = status_page(&repo_path, commit_offset, commit_limit, skip_pr_lookup)?;
+            let mut status = status_page(
+                &repo_path,
+                commit_offset,
+                commit_limit,
+                skip_pr_lookup,
+                &github_env,
+            )?;
             status.languages = crate::api::ai_docs::compute_source_language_stats(
                 &repo_path,
                 &exclusions_for_compute,
@@ -274,6 +287,7 @@ pub async fn git_status(
             commit_offset,
             commit_limit,
             skip_pr_lookup,
+            &github_env,
         )
     })
     .await
@@ -731,6 +745,7 @@ pub async fn create_pr(
     let body = req.body.clone();
     let base = req.base.clone();
     let github_token = resolve_github_token_from_state(&state).await;
+    let github_env = crate::core::github_connection::env_for_launch(Some(&id)).await;
     let result = tokio::task::spawn_blocking(move || {
         crate::api::git_ops::run_create_pr(
             &repo_path,
@@ -738,6 +753,7 @@ pub async fn create_pr(
             &body,
             &base,
             github_token.as_deref(),
+            &github_env,
         )
     })
     .await

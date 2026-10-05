@@ -433,3 +433,10 @@ fn launch_env_drops_inherited_tokens_and_keeps_explicit_ones() {
         assert_eq!(value(&cmd, name), Some(Some("gho_project".into())));
     }
 }
+
+#[test]
+fn gh_auth_token_answers_from_its_own_login_only() {
+    use crate::core::child_env::probe;
+    let command = probe::with_secret_parent("/usr/bin", "/home/u", super::gh_auth_token_command);
+    probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
+}

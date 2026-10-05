@@ -27,6 +27,21 @@ async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
         .flatten()
 }
 
+/// The GitHub variables a process started for this discussion's project gets
+/// (empty when the project is not connected or there is none).
+async fn discussion_github_env(state: &AppState, discussion_id: &str) -> Vec<(String, String)> {
+    let did = discussion_id.to_string();
+    let project_id = state
+        .db
+        .with_read_conn(move |conn| {
+            Ok(crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.project_id))
+        })
+        .await
+        .ok()
+        .flatten();
+    crate::core::github_connection::env_for_launch(project_id.as_deref()).await
+}
+
 async fn resolve_discussion_work_dir(
     state: &AppState,
     discussion_id: &str,
@@ -198,10 +213,11 @@ async fn status_for_selected_workspace(
         .or(live_head)
         .or_else(|| workspace.head_sha.clone());
     let has_durable_range = workspace.base_sha.is_some() && head.is_some();
+    let github_env = crate::core::github_connection::env_for_launch(Some(&project.id)).await;
     let mut status = if has_durable_range {
-        super::git_ops::run_git_status_without_commit_evidence(&repo)?
+        super::git_ops::run_git_status_without_commit_evidence(&repo, &github_env)?
     } else {
-        super::git_ops::run_git_status_page(&repo, commit_offset, commit_limit)?
+        super::git_ops::run_git_status_page(&repo, commit_offset, commit_limit, &github_env)?
     };
     status.workspace = Some(workspace_provenance(
         &workspace,
@@ -329,9 +345,10 @@ pub async fn disc_git_status(
     let status_dir = work_dir.clone();
     let commit_offset = query.commit_offset;
     let commit_limit = query.commit_limit;
+    let github_env = discussion_github_env(&state, &id).await;
 
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_status_page(&status_dir, commit_offset, commit_limit)
+        super::git_ops::run_git_status_page(&status_dir, commit_offset, commit_limit, &github_env)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
@@ -1119,16 +1136,7 @@ pub async fn disc_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let did = id.clone();
-    let project_id = state
-        .db
-        .with_read_conn(move |conn| {
-            Ok(crate::db::discussions::get_discussion(conn, &did)?.and_then(|d| d.project_id))
-        })
-        .await
-        .ok()
-        .flatten();
-    let github_env = crate::core::github_connection::env_for_launch(project_id.as_deref()).await;
+    let github_env = discussion_github_env(&state, &id).await;
     let result =
         tokio::task::spawn_blocking(move || super::git_ops::run_exec(&work_dir, &cmd, &github_env))
             .await
@@ -1156,8 +1164,16 @@ pub async fn disc_create_pr(
     let body = req.body;
     let base = req.base;
     let github_token = resolve_github_token_from_state(&state).await;
+    let github_env = discussion_github_env(&state, &id).await;
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_create_pr(&work_dir, &title, &body, &base, github_token.as_deref())
+        super::git_ops::run_create_pr(
+            &work_dir,
+            &title,
+            &body,
+            &base,
+            github_token.as_deref(),
+            &github_env,
+        )
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
