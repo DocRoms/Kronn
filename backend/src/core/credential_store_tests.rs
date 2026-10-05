@@ -1058,3 +1058,92 @@ fn both_mains_lock_before_loading_and_drop_the_env_token() {
     );
     assert!(desktop.contains("config::load().await"));
 }
+
+async fn json_of(
+    router: axum::Router,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// C2-05 — while the store cannot be armed (key lost after the migration), no
+/// save writes a provider key or a token to config.toml in clear: the API
+/// refuses the change, and a direct save of a new credential fails.
+#[tokio::test]
+#[serial]
+async fn a_locked_store_never_writes_credentials_to_config_toml() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let key = migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(!is_armed(dir.path()));
+    // Auth off so the handler itself is reached.
+    cfg.server.auth_enabled = false;
+    let state = crate::AppState::new_defaults(
+        Arc::new(tokio::sync::RwLock::new(cfg.clone())),
+        db.clone(),
+        crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/api-keys",
+        serde_json::json!({"name": "n", "provider": "openai", "value": "sk-locked-new-value"}),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("locked"));
+    let (_, body) = json_of(
+        router,
+        "POST",
+        "/api/config/auth-token/regenerate",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    assert!(
+        state.config.read().await.tokens.keys.is_empty(),
+        "memory untouched"
+    );
+
+    // An unrelated save still works and writes no secret.
+    cfg.language = "es".into();
+    config::save(&cfg).await.unwrap();
+    // A credential pushed in memory anyway is refused by the save itself.
+    cfg.tokens.keys.push(ApiKey {
+        id: "sneaky".into(),
+        name: "n".into(),
+        provider: "openai".into(),
+        value: "sk-should-never-land".into(),
+        active: true,
+    });
+    assert!(config::save(&cfg).await.is_err());
+    let text = dir.config_text();
+    assert!(!text.contains("sk-locked-new-value") && !text.contains("sk-should-never-land"));
+    assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
+    let _ = key;
+}

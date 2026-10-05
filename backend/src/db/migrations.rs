@@ -858,9 +858,36 @@ fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
             "config.toml is not valid TOML; no backup written",
         ));
     };
+    let backup = dir.join("config.toml.backup");
+    match std::fs::read_to_string(&backup) {
+        Ok(existing) if existing == scrubbed => return Ok(()),
+        // An older backup may hold a key the current file no longer has: keep
+        // it under a timestamped name instead of overwriting it.
+        Ok(_) => rotate_config_backup(dir, &backup)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let tmp = dir.join(".config.toml.backup.tmp");
     crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
-    std::fs::rename(&tmp, dir.join("config.toml.backup"))
+    std::fs::rename(&tmp, backup)
+}
+
+/// Move `backup` to `config.toml.backup.<UTC timestamp>` (owner-only).
+fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result<()> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
+    let mut target = dir.join(format!("config.toml.backup.{stamp}"));
+    let mut n = 1;
+    while target.exists() {
+        target = dir.join(format!("config.toml.backup.{stamp}-{n}"));
+        n += 1;
+    }
+    std::fs::rename(backup, &target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Apply one migration inside the caller-owned transaction.
@@ -2995,6 +3022,40 @@ mod tests {
             let mode = std::fs::metadata(&cfg_backup).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    /// An existing backup with other content (an older key) is kept under a
+    /// timestamped owner-only name, never overwritten; identical content is
+    /// not rotated again.
+    #[test]
+    fn a_different_existing_backup_is_rotated_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = "encryption_secret = \"K_OLD\"\n\n[server]\nport = 1\n";
+        std::fs::write(dir.path().join("config.toml.backup"), old).unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
+
+        backup_config_without_credentials(dir.path()).unwrap();
+        backup_config_without_credentials(dir.path()).unwrap();
+
+        let rotated: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.toml.backup.")
+            })
+            .collect();
+        assert_eq!(rotated.len(), 1, "one rotation, not one per call");
+        assert_eq!(std::fs::read_to_string(rotated[0].path()).unwrap(), old);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = rotated[0].metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let current = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
+        assert!(current.contains("port = 2"));
     }
 
     #[test]

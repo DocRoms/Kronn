@@ -209,6 +209,47 @@ async fn write_and_verify(
     .await
 }
 
+/// Why credentials cannot be changed while the store is not armed.
+pub const LOCKED_MESSAGE: &str = "The encryption key is locked: provider keys and the API token \
+     cannot be stored until it is restored (Settings → Recovery)";
+
+/// Per data directory, the credentials config.toml held when the boot found
+/// the store unarmable. Absent: no boot ran (tests), so saves stay as before.
+static FILE_AT_BOOT: LazyLock<std::sync::Mutex<HashMap<PathBuf, Vec<PlainCredential>>>> =
+    LazyLock::new(Default::default);
+
+fn file_credentials_at_boot(dir: &Path) -> Option<Vec<PlainCredential>> {
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(dir)
+        .cloned()
+}
+
+fn note_file_credentials(dir: &Path, config: &AppConfig) {
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(dir.to_path_buf(), from_config(config));
+}
+
+/// `Err(LOCKED_MESSAGE)` when a boot ran and the store is not armed: callers
+/// about to add or change a credential refuse before touching the config.
+pub fn refuse_if_locked(dir: &Path) -> std::result::Result<(), String> {
+    if !is_armed(dir) && file_credentials_at_boot(dir).is_some() {
+        return Err(LOCKED_MESSAGE.to_string());
+    }
+    Ok(())
+}
+
+/// [`refuse_if_locked`] for the current data directory.
+pub fn refuse_credential_change() -> std::result::Result<(), String> {
+    match crate::core::config::config_dir() {
+        Ok(dir) => refuse_if_locked(&dir),
+        Err(_) => Ok(()),
+    }
+}
+
 struct Armed {
     db: Arc<Database>,
     /// Rows the current key cannot decrypt: never rewritten nor deleted, unless
@@ -237,6 +278,10 @@ pub fn is_armed(dir: &Path) -> bool {
 /// Stop routing `dir`'s credentials to the store (tests, data-dir switch).
 pub fn disarm(dir: &Path) {
     armed_map().remove(dir);
+    FILE_AT_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(dir);
 }
 
 /// Called by `config::save` before it writes `config.toml`. Returns `true`
@@ -244,6 +289,22 @@ pub fn disarm(dir: &Path) {
 /// leave them out; `false` when the store is not armed for `dir`.
 pub(crate) async fn sync_for_save(dir: &Path, config: &AppConfig) -> Result<bool> {
     let Some(armed) = armed_for(dir) else {
+        // Not armed after a boot: config.toml may keep only what it already
+        // held; a credential it did not hold is refused, never written in clear.
+        if let Some(allowed) = file_credentials_at_boot(dir) {
+            let new_one = from_config(config).into_iter().find(|c| {
+                !allowed
+                    .iter()
+                    .any(|a| a.kind == c.kind && a.id == c.id && a.value == c.value)
+            });
+            if let Some(c) = new_one {
+                anyhow::bail!(
+                    "{LOCKED_MESSAGE} (refused to write {}:{} to config.toml in plaintext)",
+                    c.kind,
+                    c.id
+                );
+            }
+        }
         return Ok(false);
     };
     let desired = from_config(config);
@@ -313,6 +374,8 @@ pub async fn boot(
     key_outcome: &KeyOutcome,
     env_auth_token: Option<&str>,
 ) -> Result<Option<CredentialBoot>> {
+    // Until armed below, saves may only keep what config.toml holds now.
+    note_file_credentials(dir, config);
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
         // A stored token we cannot read is "auth locked", never "no auth".
         if config.server.auth_token.is_none() {

@@ -632,7 +632,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Auto-discover and import API keys from agent config files (~/.vibe/.env, ~/.codex/auth.json, etc.)
-    {
+    // Skipped while the credential store is locked: they would go to config.toml in clear.
+    if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
         let mut config = state.config.write().await;
         let mut imported = 0u32;

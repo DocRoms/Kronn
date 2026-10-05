@@ -244,6 +244,9 @@ pub async fn save_api_key(
     if req.value.is_empty() || req.value.contains('*') {
         return Json(ApiResponse::err("Invalid key value"));
     }
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
 
     let key = if let Some(ref id) = req.id {
         // Update existing
@@ -1011,32 +1014,51 @@ pub async fn set_network_exposure(
 ) -> Json<ApiResponse<NetworkExposure>> {
     {
         let mut config = state.config.write().await;
-        config.server.host = if req.exposed {
+        // Change a copy, adopt it only once saved: a failed save must not leave
+        // a live token or host that was never stored.
+        let mut next = config.clone();
+        next.server.host = if req.exposed {
             "0.0.0.0".to_string()
         } else {
             "127.0.0.1".to_string()
         };
         if req.exposed {
-            config.server.auth_enabled = true;
-            if config.server.auth_token.as_deref().unwrap_or("").is_empty() {
-                config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+            next.server.auth_enabled = true;
+            if next.server.auth_token.as_deref().unwrap_or("").is_empty() {
+                if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+                    return Json(ApiResponse::err(locked));
+                }
+                next.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+                next.server.auth_token_session_only = false;
+                next.server.auth_locked = false;
             }
         }
-        if let Err(e) = config::save(&config).await {
+        if let Err(e) = config::save(&next).await {
             return Json(ApiResponse::err(format!("Failed to save: {}", e)));
         }
+        *config = next;
     }
     get_network_exposure(State(state)).await
 }
 
 /// POST /api/config/auth-token/regenerate
 pub async fn regenerate_auth_token(State(state): State<AppState>) -> Json<ApiResponse<String>> {
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
     let mut config = state.config.write().await;
     let new_token = uuid::Uuid::new_v4().to_string();
-    config.server.auth_token = Some(new_token.clone());
-    config.server.auth_enabled = true;
-    match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(new_token)),
+    // Change a copy, adopt it only once stored.
+    let mut next = config.clone();
+    next.server.auth_token = Some(new_token.clone());
+    next.server.auth_token_session_only = false;
+    next.server.auth_enabled = true;
+    match config::save(&next).await {
+        Ok(_) => {
+            next.server.auth_locked = false;
+            *config = next;
+            Json(ApiResponse::ok(new_token))
+        }
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -1206,6 +1228,9 @@ pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiRespons
 pub async fn discover_keys(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<DiscoverKeysResponse>> {
+    if let Err(locked) = crate::core::credential_store::refuse_credential_change() {
+        return Json(ApiResponse::err(locked));
+    }
     let discovered = crate::core::key_discovery::discover_keys().await;
     let mut config = state.config.write().await;
     let mut imported_count = 0u32;

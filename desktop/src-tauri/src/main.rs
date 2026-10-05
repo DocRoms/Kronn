@@ -704,8 +704,9 @@ async fn start_backend(
 
     kronn::api::discussions::start_agent_dispatcher(state.clone());
 
-    // Auto-discover API keys
-    {
+    // Auto-discover API keys (skipped while the credential store is locked:
+    // they would go to config.toml in clear).
+    if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
         let mut cfg = state.config.write().await;
         let mut imported = 0u32;
