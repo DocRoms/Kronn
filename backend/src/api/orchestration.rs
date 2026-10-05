@@ -3647,7 +3647,57 @@ async fn validation_build_path(
         return Ok(cwd.to_path_buf());
     };
 
+    let mut metadata = validation_metadata_command(&words, cwd)?;
+    let mut child = metadata.spawn().map_err(|error| {
+        format!(
+            "cannot resolve Cargo target for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let output = wait_for_metadata_output(&mut child, METADATA_TIMEOUT)
+        .await
+        .map_err(|reason| {
+            format!(
+                "cannot resolve Cargo target for validation in {}: {reason}",
+                cwd.display(),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot resolve Cargo target for validation in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!(
+            "Cargo returned invalid metadata for validation in {}: {error}",
+            cwd.display()
+        )
+    })?;
+    let target = metadata
+        .get("target_directory")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "Cargo metadata has no target_directory for {}",
+                cwd.display()
+            )
+        })?;
+    Ok(std::path::PathBuf::from(target))
+}
+
+/// The `cargo metadata` process [`validation_build_path`] starts for a
+/// validation's Cargo argv (`words`, without `cargo`).
+fn validation_metadata_command(
+    words: &[&str],
+    cwd: &std::path::Path,
+) -> Result<tokio::process::Command, String> {
     let mut metadata = crate::core::cmd::async_cmd("cargo");
+    // Cargo reads the repository's `.cargo/config.toml`: the Quick Exec
+    // environment, as for the validation itself (KT-1006).
+    let route = crate::core::child_env::ChildRoute::QuickExec;
+    crate::core::child_env::reset(metadata.as_std_mut(), route);
     metadata
         .current_dir(cwd)
         // Resolution must neither fetch dependencies nor wait forever before a
@@ -3694,48 +3744,13 @@ async fn validation_build_path(
         }
         index += 1;
     }
+    crate::core::child_env::seal(metadata.as_std_mut(), route, &[]);
     metadata
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         // `wait_for_metadata_output` owns timeout cleanup and reaps the child.
         .kill_on_drop(true);
-    let mut child = metadata.spawn().map_err(|error| {
-        format!(
-            "cannot resolve Cargo target for validation in {}: {error}",
-            cwd.display()
-        )
-    })?;
-    let output = wait_for_metadata_output(&mut child, METADATA_TIMEOUT)
-        .await
-        .map_err(|reason| {
-            format!(
-                "cannot resolve Cargo target for validation in {}: {reason}",
-                cwd.display(),
-            )
-        })?;
-    if !output.status.success() {
-        return Err(format!(
-            "cannot resolve Cargo target for validation in {}: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        format!(
-            "Cargo returned invalid metadata for validation in {}: {error}",
-            cwd.display()
-        )
-    })?;
-    let target = metadata
-        .get("target_directory")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            format!(
-                "Cargo metadata has no target_directory for {}",
-                cwd.display()
-            )
-        })?;
-    Ok(std::path::PathBuf::from(target))
+    Ok(metadata)
 }
 
 /// Return Cargo's literal argv for the forms Quick Exec already launches.
@@ -16614,6 +16629,25 @@ mod tests {
 
         let resolved = validation_build_path(&spec, project.path()).await.unwrap();
         assert_eq!(resolved, target);
+    }
+
+    /// `cargo metadata` reads the repository's Cargo config: it gets the
+    /// Quick Exec environment, never a backend secret.
+    #[test]
+    fn cargo_metadata_runs_with_the_quick_exec_environment() {
+        use crate::core::child_env::probe;
+        let dir = tempfile::tempdir().unwrap();
+        let command = probe::with_secret_parent("/usr/bin", "/home/u", || {
+            validation_metadata_command(&["check", "--target-dir", "/elsewhere"], dir.path())
+                .unwrap()
+        });
+        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
+        assert_eq!(
+            probe::env_of(command.as_std())
+                .get("CARGO_TARGET_DIR")
+                .map(String::as_str),
+            Some("/elsewhere")
+        );
     }
 
     #[tokio::test]
