@@ -223,6 +223,7 @@ pub fn validate_prompt_variables(variables: &[PromptVariable]) -> Result<(), Str
         if variable.name.trim().is_empty() || !names.insert(variable.name.trim()) {
             return Err("Variable names must be non-empty and unique".into());
         }
+        crate::workflows::template::refuse_reserved_names([variable.name.as_str()])?;
         variable.validate_source()?;
         variable.validate_control()?;
     }

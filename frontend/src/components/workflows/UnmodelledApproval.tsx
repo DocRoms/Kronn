@@ -9,14 +9,16 @@ import { useT } from '../../lib/I18nContext';
 interface UnmodelledApprovalProps {
   command: string;
   args: string[];
+  /** The step's stdin template, which an unmodelled program may also read. */
+  stdin?: string;
   approved: boolean;
   onChange: (approved: boolean) => void;
 }
 
-export function UnmodelledApproval({ command, args, approved, onChange }: UnmodelledApprovalProps) {
+export function UnmodelledApproval({ command, args, stdin, approved, onChange }: UnmodelledApprovalProps) {
   const { t } = useT();
   const [program, setProgram] = useState<string | null>(null);
-  const key = JSON.stringify([command, args]);
+  const key = JSON.stringify([command, args, stdin ?? null]);
 
   useEffect(() => {
     if (!command.trim()) {
@@ -26,12 +28,12 @@ export function UnmodelledApproval({ command, args, approved, onChange }: Unmode
     let cancelled = false;
     const timer = setTimeout(() => {
       Promise.resolve()
-        .then(() => workflowsApi.execLineCheck({ command, args }))
+        .then(() => workflowsApi.execLineCheck(stdin ? { command, args, stdin } : { command, args }))
         .then(check => { if (!cancelled) setProgram(check.unmodelled_program ?? null); })
         .catch(() => { if (!cancelled) setProgram(null); });
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-    // `key` carries command and args.
+    // `key` carries command, args and stdin.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 

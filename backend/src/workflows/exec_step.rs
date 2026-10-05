@@ -1774,7 +1774,7 @@ mod tests {
         crate::core::approved_scripts::validate_and_pin(home.path(), &mut step.exec_script_files)
             .unwrap();
         let mut ctx = TemplateContext::new();
-        ctx.set("run.artifacts_dir", artifacts.path().to_string_lossy());
+        ctx.set_builtin("run.artifacts_dir", artifacts.path().to_string_lossy());
         let allow = vec!["python3".to_string()];
         let work_dir = worktree.path().to_string_lossy().to_string();
         let home_dir = home.path().to_string_lossy().to_string();

@@ -584,6 +584,18 @@ Release notes for 0.9.3 and earlier are available in the
   `cp`, `mv`, `chmod`, `date`, `grep`…) is refused at run time when it renders
   to an option (`rm {{x}}` as `-rf`), unless a literal `--` precedes it
   (KT-1017).
+- A template value glued to an option (`-{{x}}`, `--{{x}}`, `-v{{x}}`) is
+  refused unless the option before it is one the program reads a value from
+  (`mysql -u{{user}}`, `git commit -m{{msg}}`, `--name={{value}}`) (KT-1017).
+  `sqlite3 --cmd`/`--init`, the command after BSD `script FILE`, and jq's
+  `-f`/`-L` files are code like `-cmd`, `script -c` and an inline program.
+- An `exec_stdin` value reaching a program Kronn does not model is refused
+  unless a human approved the step, as for its arguments (KT-1017).
+- `run.*`, `time.*` and `now*` are reserved: a workflow, launch, trigger or
+  CollectApiData variable of that name is refused at save and at trigger, and
+  `{{run.id}}` / `{{time.now}}` always resolve to Kronn's own values
+  (KT-1017). An approved CollectApiData source is no longer refused at run
+  time.
 
 ### Changed
 

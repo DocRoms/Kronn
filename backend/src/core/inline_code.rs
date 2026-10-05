@@ -365,7 +365,20 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 .map(str::trim)
                 .unwrap_or_default();
             if let Some(stdin) = step.exec_stdin.as_deref() {
-                if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin) {
+                if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin, approved)
+                {
+                    let unmodelled = stdin_unmodelled_program(command, &step.exec_args);
+                    let manual_fix = match &unmodelled {
+                        Some(program) => unmodelled_message(
+                            &format!("Step Exec « {} » (stdin)", step.name),
+                            program,
+                            placeholder.trim_start_matches("{{").trim_end_matches("}}"),
+                        ),
+                        None => "correction manuelle requise : le programme lit son code sur \
+                                 stdin ; donne-lui un script ou du code inline sans valeur, et \
+                                 passe la valeur en argument séparé"
+                            .into(),
+                    };
                     found.push(UnsafeExecStep {
                         step_name: step.name.clone(),
                         on_failure,
@@ -374,14 +387,13 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                         command: command.to_string(),
                         args: stdin_line(&step.exec_args, stdin),
                         placeholder,
-                        reason: "stdin_program".into(),
+                        reason: if unmodelled.is_some() {
+                            "unmodelled_program".into()
+                        } else {
+                            "stdin_program".into()
+                        },
                         suggested_args: None,
-                        manual_fix: Some(
-                            "correction manuelle requise : le programme lit son code sur stdin ; \
-                             donne-lui un script ou du code inline sans valeur, et passe la \
-                             valeur en argument séparé"
-                                .into(),
-                        ),
+                        manual_fix: Some(manual_fix),
                     });
                 }
             }
@@ -413,8 +425,16 @@ pub fn stdin_validation_error(
     cmd: &str,
     args: &[String],
     stdin: &str,
+    approved: bool,
 ) -> Option<String> {
-    let path = stdin_finding(cmd, args, stdin)?;
+    let path = stdin_finding(cmd, args, stdin, approved)?;
+    if let Some(program) = stdin_unmodelled_program(cmd, args) {
+        return Some(unmodelled_message(
+            &format!("Step Exec « {step} » (stdin)"),
+            &program,
+            path.trim_start_matches("{{").trim_end_matches("}}"),
+        ));
+    }
     Some(format!(
         "Step Exec « {step} » : `{cmd}` lit son programme sur stdin, et `exec_stdin` y place \
          `{path}` — la valeur serait exécutée. Donne le code au programme (script ou code inline \
@@ -423,9 +443,13 @@ pub fn stdin_validation_error(
     ))
 }
 
-/// The first untrusted placeholder of `stdin` when `cmd args` runs stdin.
-fn stdin_finding(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
+/// The first untrusted placeholder of `stdin` when `cmd args` runs stdin, or
+/// when stdin reaches a program Kronn does not model and no human approved it.
+fn stdin_finding(cmd: &str, args: &[String], stdin: &str, approved: bool) -> Option<String> {
     let finding = untrusted_in(stdin)?;
+    if approved && stdin_unmodelled_program(cmd, args).is_some() {
+        return None;
+    }
     if !reads_program_from_stdin(cmd, args) {
         return None;
     }
@@ -433,6 +457,16 @@ fn stdin_finding(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
         Some(path) => format!("{{{{{path}}}}}"),
         None => "un placeholder mal formé".to_string(),
     })
+}
+
+/// The program that reads stdin, after wrappers, when Kronn does not model it.
+pub fn stdin_unmodelled_program(cmd: &str, args: &[String]) -> Option<String> {
+    let program = crate::core::argv_roles::launched_program(cmd, args)
+        .map_or_else(|| cmd.trim().to_string(), |(inner, _)| inner);
+    let name = base_name(&program);
+    (!crate::core::argv_roles::is_modelled_program(&program)
+        && !crate::core::argv_roles::is_unmodelled_evaluator(&name))
+    .then_some(program)
 }
 
 /// The identity of a stdin line for the unchanged-line exception: the
@@ -716,7 +750,11 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 || arg == "--interactive"
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
         }),
-        _ => crate::core::argv_roles::is_unmodelled_evaluator(&name),
+        // A program Kronn does not model may read stdin as code.
+        _ => {
+            crate::core::argv_roles::is_unmodelled_evaluator(&name)
+                || !crate::core::argv_roles::is_modelled_program(cmd)
+        }
     }
 }
 
@@ -846,6 +884,16 @@ pub fn rendered_refusal(
                     "make" | "gmake" | "bmake"
                 ) && rendered[i].contains('=')))
     });
+    // `-u{{user}}` rendered with an empty value leaves `-u` alone, which then
+    // takes the next argument as its value.
+    let emptied = (0..rendered.len()).find(|&i| {
+        tainted.get(i).copied().unwrap_or(false)
+            && saved.get(i) == Some(&Role::Data)
+            && !templates[i].starts_with("--")
+            && templates[i].split("{{").next().is_some_and(|prefix| {
+                prefix.len() == 2 && prefix.starts_with('-') && rendered[i] == prefix
+            })
+    });
     // The structure the program parses: rendered text, except that an
     // option the author wrote (`-u{{user}}`) keeps its template, so the
     // value cannot be read as more option letters.
@@ -863,7 +911,8 @@ pub fn rendered_refusal(
         .collect();
     let index = first_tainted_position_with(cmd, &parsed, &tainted, approved)
         .or_else(|| first_tainted_position_with(cmd, templates, &tainted, approved))
-        .or(option_like)?;
+        .or(option_like)
+        .or(emptied)?;
     Some(format!(
         "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
          valeur extérieure et tombe là où `{cmd}` lit encore des options ou du code. Ouvre le \
@@ -2002,23 +2051,75 @@ mod tests {
         }
     }
 
+    /// A templated stdin reaching a program Kronn does not model is refused
+    /// unless a human approved the step; data-only programs and modelled data
+    /// readers keep it, wrappers are followed.
+    #[test]
+    fn a_templated_stdin_to_an_unmodelled_program_needs_a_human_approval() {
+        let duckdb = args(&["db.duckdb"]);
+        let error = stdin_validation_error("s", "duckdb", &duckdb, "{{issue.title}}", false);
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("duckdb")),
+            "{error:?}"
+        );
+        assert!(stdin_validation_error("s", "duckdb", &duckdb, "{{issue.title}}", true).is_none());
+        assert!(stdin_validation_error(
+            "s",
+            "env",
+            &args(&["A=1", "duckdb", "db.duckdb"]),
+            "{{issue.title}}",
+            false
+        )
+        .is_some());
+        assert!(stdin_validation_error("s", "duckdb", &duckdb, "select 1", false).is_none());
+        for (cmd, line) in [("cat", vec![]), ("wc", vec!["-l"]), ("jq", vec!["."])] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{issue.title}}", false).is_none(),
+                "{cmd}"
+            );
+        }
+        // An evaluator stays refused, approval or not.
+        assert!(stdin_validation_error("s", "bash", &[], "{{issue.title}}", true).is_some());
+        let step = crate::models::WorkflowStep {
+            name: "load".into(),
+            step_type: crate::models::StepType::Exec,
+            exec_command: Some("duckdb".into()),
+            exec_args: duckdb.clone(),
+            exec_stdin: Some("{{issue.title}}".into()),
+            ..Default::default()
+        };
+        assert!(runtime_refusal(&step).is_some());
+        let approved = crate::models::WorkflowStep {
+            exec_unmodelled_args_approved: Some(true),
+            ..step
+        };
+        assert!(runtime_refusal(&approved).is_none());
+    }
+
     #[test]
     fn a_templated_stdin_is_refused_only_where_it_is_code() {
-        assert!(stdin_validation_error("s", "bash", &[], "{{issue.title}}").is_some());
+        assert!(stdin_validation_error("s", "bash", &[], "{{issue.title}}", false).is_some());
         assert!(
-            stdin_validation_error("s", "python3", &args(&["-"]), "x {{issue.title}}").is_some()
+            stdin_validation_error("s", "python3", &args(&["-"]), "x {{issue.title}}", false)
+                .is_some()
         );
-        assert!(stdin_validation_error("s", "bash", &[], "echo {{run.id}}").is_none());
+        assert!(stdin_validation_error("s", "bash", &[], "echo {{run.id}}", false).is_none());
         assert!(stdin_validation_error(
             "s",
             "python3",
             &args(&["-c", "import sys; print(sys.stdin.read())"]),
-            "{{issue.title}}"
+            "{{issue.title}}",
+            false
         )
         .is_none());
-        assert!(
-            stdin_validation_error("s", "jq", &args(&["."]), "{{steps.fetch.data_json}}").is_none()
-        );
+        assert!(stdin_validation_error(
+            "s",
+            "jq",
+            &args(&["."]),
+            "{{steps.fetch.data_json}}",
+            false
+        )
+        .is_none());
         let step = crate::models::WorkflowStep {
             name: "run".into(),
             step_type: crate::models::StepType::Exec,

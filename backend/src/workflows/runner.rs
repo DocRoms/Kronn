@@ -1298,10 +1298,10 @@ async fn execute_run_body(
         }
     }
     // After trigger fields and variables, so neither can stand in for the run.
-    ctx.set("run.id", run.id.clone());
+    ctx.set_builtin("run.id", run.id.clone());
     // KT-910 — Exec steps write here, Agent steps that name it read it.
     match super::run_artifacts::ensure(&run.id) {
-        Ok(dir) => ctx.set("run.artifacts_dir", dir.to_string_lossy().to_string()),
+        Ok(dir) => ctx.set_builtin("run.artifacts_dir", dir.to_string_lossy().to_string()),
         Err(error) => tracing::warn!(
             run_id = %run.id,
             "run artifacts directory unavailable: {error}"
@@ -7417,7 +7417,7 @@ mod tests {
     #[test]
     fn only_a_claude_or_codex_step_naming_the_directory_reads_it() {
         let mut ctx = TemplateContext::new();
-        ctx.set("run.artifacts_dir", "/data/run-artifacts/run-1");
+        ctx.set_builtin("run.artifacts_dir", "/data/run-artifacts/run-1");
         let mut step = fake_step("constat");
         step.agent = AgentType::ClaudeCode;
         let prompt = "Look at /data/run-artifacts/run-1/S1.png";

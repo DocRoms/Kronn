@@ -3090,7 +3090,11 @@ unmodelled_program: string | null, };
 /**
  * A command line to check for the step editor and the Quick Exec form.
  */
-export type ExecLineCheckRequest = { command: string, args?: Array<string>, };
+export type ExecLineCheckRequest = { command: string, args?: Array<string>,
+/**
+ * The step's `exec_stdin` template, when it has one.
+ */
+stdin?: string | null, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
