@@ -590,7 +590,7 @@ async fn start_backend(
     let database = Arc::new(Database::open().expect("Failed to open database"));
 
     // Resolve the encryption key and the stored credentials now the DB is open.
-    kronn::resolve_key_and_credentials(&mut app_config, &database).await?;
+    kronn::resolve_key_and_credentials(&mut app_config, &database, None).await?;
 
     // Before any launch: which projects hand their agents a GitHub token (D2).
     match kronn::core::github_connection::load_grants(

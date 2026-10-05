@@ -149,7 +149,7 @@ async fn boot_like_main(
     let outcome = keystore::reconcile_with(&mut cfg, db, &dir.sidecar(), dir.path())
         .await
         .unwrap();
-    let result = boot(&mut cfg, db.clone(), dir.path(), &outcome)
+    let result = boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
         .await
         .unwrap();
     (cfg, outcome, result)
@@ -356,7 +356,7 @@ async fn the_key_stays_in_config_toml_when_no_vault_can_hold_it() {
         keystore::reconcile_with(&mut cfg, &db, &KeyStore::from_vaults(vec![]), dir.path())
             .await
             .unwrap();
-    boot(&mut cfg, db.clone(), dir.path(), &outcome)
+    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
         .await
         .unwrap();
     let text = dir.config_text();
@@ -377,6 +377,7 @@ async fn a_locked_key_leaves_config_toml_untouched() {
         db.clone(),
         dir.path(),
         &KeyOutcome::Locked { encrypted_rows: 1 },
+        None,
     )
     .await
     .unwrap();
@@ -553,4 +554,63 @@ fn merge_prefers_the_file_and_keeps_table_order() {
         .map(|c| (c.id.as_str(), c.value.as_str()))
         .collect();
     assert_eq!(got, vec![("a", "new"), ("b", "b"), ("c", "c")]);
+}
+
+/// An operator-set KRONN_AUTH_TOKEN goes into the encrypted store, never into
+/// config.toml, and leaves the process environment.
+#[tokio::test]
+#[serial]
+async fn an_env_auth_token_is_stored_encrypted_and_leaves_the_environment() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    std::env::set_var("KRONN_AUTH_TOKEN", " operator-env-token-0007 ");
+    let env_token = config::take_env_auth_token();
+    assert_eq!(env_token.as_deref(), Some("operator-env-token-0007"));
+    assert!(
+        std::env::var("KRONN_AUTH_TOKEN").is_err(),
+        "removed from the env"
+    );
+
+    let mut cfg = config::default_config();
+    crate::resolve_key_and_credentials(&mut cfg, &db, env_token)
+        .await
+        .unwrap();
+    assert_eq!(
+        cfg.server.auth_token.as_deref(),
+        Some("operator-env-token-0007")
+    );
+    assert!(cfg.server.auth_enabled, "setting the token asks for auth");
+    assert!(!dir.config_text().contains("operator-env-token-0007"));
+    let key = cfg.encryption_secret.clone().unwrap();
+    let stored = db.with_conn(rows::list).await.unwrap();
+    let token_row = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN).unwrap();
+    assert!(!token_row
+        .value_encrypted
+        .contains("operator-env-token-0007"));
+    assert_eq!(
+        decrypt_value(&token_row.value_encrypted, &key).unwrap(),
+        "operator-env-token-0007"
+    );
+
+    // Next start without the variable: the stored token is still the one.
+    dir.restart();
+    let mut again = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut again, &db, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        again.server.auth_token.as_deref(),
+        Some("operator-env-token-0007")
+    );
+
+    // A different env token does not replace the stored one.
+    dir.restart();
+    let mut third = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut third, &db, Some("another".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        third.server.auth_token.as_deref(),
+        Some("operator-env-token-0007")
+    );
 }

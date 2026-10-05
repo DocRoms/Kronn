@@ -2422,9 +2422,14 @@ pub async fn restore_recovery(
     {
         Ok(outcome) => {
             // The key is back: load the stored credentials it unlocks.
-            if let Err(e) =
-                crate::core::credential_store::boot(&mut config, state.db.clone(), &dir, &outcome)
-                    .await
+            if let Err(e) = crate::core::credential_store::boot(
+                &mut config,
+                state.db.clone(),
+                &dir,
+                &outcome,
+                None,
+            )
+            .await
             {
                 tracing::error!("Credential store after key restore: {e:#}");
             }

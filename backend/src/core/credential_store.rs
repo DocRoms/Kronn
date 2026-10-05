@@ -274,6 +274,7 @@ pub async fn boot(
     db: Arc<Database>,
     dir: &Path,
     key_outcome: &KeyOutcome,
+    env_auth_token: Option<&str>,
 ) -> Result<Option<CredentialBoot>> {
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
         tracing::warn!(
@@ -321,7 +322,12 @@ pub async fn boot(
 
     let auth_key = (KIND_AUTH_TOKEN.to_string(), AUTH_TOKEN_ID.to_string());
     let mut generated_auth_token = false;
-    if !merged.iter().any(|c| c.kind == KIND_AUTH_TOKEN) && !preserve.contains(&auth_key) {
+    let has_token =
+        merged.iter().any(|c| c.kind == KIND_AUTH_TOKEN) || preserve.contains(&auth_key);
+    if let (Some(token), false) = (env_auth_token.filter(|t| !t.is_empty()), has_token) {
+        // The operator's KRONN_AUTH_TOKEN becomes the stored token.
+        merged.push(PlainCredential::auth_token(token.to_string()));
+    } else if !has_token {
         // First launch: auth defaults on natively, off under Docker (see
         // `core::env::auth_on_by_default`).
         merged.push(PlainCredential::auth_token(

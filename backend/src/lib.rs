@@ -34,9 +34,12 @@ pub use crate::workflows::WorkflowEngine;
 /// Resolve the encryption key and load the stored credentials, right after the
 /// database opens. Both startup paths call this; an `Err` must stop the boot:
 /// continuing could mint or mirror over the only copy of the key (KT-1007).
+/// `env_auth_token` (an operator-set `KRONN_AUTH_TOKEN`, already removed from
+/// the environment) becomes the stored token when none exists, and enables auth.
 pub async fn resolve_key_and_credentials(
     config: &mut AppConfig,
     database: &Arc<Database>,
+    env_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
     let key_outcome = match crate::core::keystore::reconcile(config, database).await {
         Ok(outcome) => {
@@ -53,12 +56,15 @@ pub async fn resolve_key_and_credentials(
         database.clone(),
         &crate::core::config::config_dir()?,
         &key_outcome,
+        env_auth_token.as_deref(),
     )
     .await
     {
         Ok(result) => tracing::info!("Credential store: {result:?}"),
         Err(e) => tracing::error!("Credential store not armed, config.toml left as it is: {e:#}"),
     }
+    // A different stored token wins (with a warning), as config.toml did before.
+    crate::core::config::adopt_env_auth_token(&mut config.server, env_auth_token);
     Ok(())
 }
 

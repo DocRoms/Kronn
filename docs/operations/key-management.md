@@ -59,8 +59,12 @@ the previous file untouched.
    exists anywhere. Locked key: the store stays off and `config.toml` is left
    as it is. [src: file: backend/src/core/credential_store.rs:272-379]
 
-The standalone backend runs steps 2-4 before its auth-token handling
-(`KRONN_AUTH_TOKEN` alignment, LAN guard), which read the token from step 4.
+An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
+environment before the database opens (`config::take_env_auth_token`). Step 4
+stores it as the auth token when none is stored yet; a different stored token
+wins, with a warning, as the `config.toml` one did before. Either way auth is
+enabled and the value never reaches `config.toml` or a child process. The
+LAN guard and the auth middleware read the resulting token.
 
 ## The one-time migration from 0.14.2
 

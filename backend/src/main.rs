@@ -128,8 +128,7 @@ async fn main() -> anyhow::Result<()> {
     // An operator-set KRONN_AUTH_TOKEN enables auth through the config, then
     // leaves this process's environment: children never inherit the admin
     // token. Kronn-launched agents receive a scoped bridge token per launch.
-    let env_token = std::env::var("KRONN_AUTH_TOKEN").ok();
-    std::env::remove_var("KRONN_AUTH_TOKEN");
+    let env_token = kronn::core::config::take_env_auth_token();
 
     // Exactly ONE backend per data dir. Refuse to start if another instance
     // already holds the lock — prevents two processes (a stale one, or P2P peers
@@ -150,9 +149,8 @@ async fn main() -> anyhow::Result<()> {
     // Resolve the encryption key now that the DB is open — `config::load`
     // deliberately never mints one — then load the encrypted credentials. Runs
     // before the auth-token handling below, which reads the stored token.
-    kronn::resolve_key_and_credentials(&mut app_config, &database).await?;
+    kronn::resolve_key_and_credentials(&mut app_config, &database, env_token).await?;
 
-    kronn::core::config::adopt_env_auth_token(&mut app_config.server, env_token);
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
     } else {

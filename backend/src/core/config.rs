@@ -403,6 +403,16 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 /// middleware reads, and enable auth: setting it is asking for auth. The
 /// caller removes the variable from the process environment, so no child
 /// process inherits the admin token (KT-1006).
+/// Read an operator-set `KRONN_AUTH_TOKEN` and remove it from this process's
+/// environment, so no child can inherit the admin token (KT-1006).
+pub fn take_env_auth_token() -> Option<String> {
+    let token = std::env::var("KRONN_AUTH_TOKEN").ok();
+    std::env::remove_var("KRONN_AUTH_TOKEN");
+    token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
 pub fn adopt_env_auth_token(server: &mut ServerConfig, env_token: Option<String>) {
     let Some(token) = env_token.filter(|token| !token.is_empty()) else {
         return;
@@ -1270,6 +1280,8 @@ mod tests {
     fn main_never_exports_the_admin_token() {
         let main = include_str!("../main.rs");
         assert!(!main.contains("set_var(\"KRONN_AUTH_TOKEN\""));
-        assert!(main.contains("remove_var(\"KRONN_AUTH_TOKEN\")"));
+        // `take_env_auth_token` reads and removes it (behaviour tested in
+        // credential_store::tests::an_env_auth_token_is_stored_encrypted...).
+        assert!(main.contains("take_env_auth_token()"));
     }
 }
