@@ -80,6 +80,24 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
              VALUES ('wf-global', 'wf-global', NULL, '{\"type\":\"Manual\"}', '[]', ?1, ?1)",
             [&now],
         )?;
+        // A synthetic API plugin config linked to p2 only.
+        conn.execute(
+            "INSERT INTO mcp_servers(id, name, transport) VALUES ('synthetic-api', 'Synthetic', 'stdio')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO mcp_configs(id, server_id, label) VALUES ('cfg-b', 'synthetic-api', 'cfg-b')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-b', 'p2')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO discussions(id, title, project_id, created_at, updated_at) \
+             VALUES ('room-del', 'room-del', 'p1', ?1, ?1)",
+            [&now],
+        )?;
         for (suffix, project, number) in [("a", "p1", 9001), ("b", "p2", 9002)] {
             conn.execute(
                 "INSERT INTO workflows(id, name, project_id, trigger_json, steps_json, created_at, updated_at) \
@@ -507,4 +525,227 @@ async fn a_shared_workflow_triggered_from_a_room_runs_for_the_room_s_project() {
         status, 403,
         "a workflow that does not serve p1 stays refused"
     );
+}
+
+fn bridge_for(room: &str) -> kronn::core::bridge_token::BridgeTokenGuard {
+    mint(BridgeScope {
+        discussion_ids: vec![room.into()],
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// `KT-9002` is project B's task by reference: refused like its id, in the
+/// path and in the body; a reference that names nothing is refused too.
+#[tokio::test]
+async fn task_references_are_resolved_before_the_scope_check() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (method, path, body) in [
+        ("GET", "/api/planning/tasks/KT-9002", None),
+        (
+            "PATCH",
+            "/api/planning/tasks/KT-9002",
+            Some(json!({"title": "x"})),
+        ),
+        ("GET", "/api/planning/tasks/kt-9002", None),
+        (
+            "POST",
+            "/api/planning/tasks/task-a/blockers",
+            Some(json!({"blocker_task_id": "KT-9002"})),
+        ),
+        (
+            "POST",
+            "/api/orchestration/tool/executions/KT-9002/status",
+            Some(json!({})),
+        ),
+        (
+            "POST",
+            "/api/orchestration/tool/launch",
+            Some(json!({"task_id": "KT-9002"})),
+        ),
+        ("GET", "/api/planning/tasks/KT-99999", None),
+        ("GET", "/api/workflows/no-such-workflow", None),
+    ] {
+        let (status, response) = call(&app, method, path, Some(&token), body).await;
+        assert_eq!(status, 403, "{method} {path}: {response}");
+    }
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/planning/tasks/KT-9001",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "own task by reference: {response}");
+}
+
+/// A bridge on p1 naming p2's API config, with no discussion, project or
+/// quick API id, is refused before any request leaves.
+#[tokio::test]
+async fn api_call_runs_for_the_token_s_project_never_the_config_s() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(guard.value()),
+        Some(json!({
+            "api_plugin_slug": "synthetic-api",
+            "api_config_id": "cfg-b",
+            "endpoint_path": "/anything",
+            "method": "GET"
+        })),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(response["success"], false, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not available to this agent's project")),
+        "{response}"
+    );
+}
+
+/// Lists, searches and lookups show a p1 token none of p2's resources.
+#[tokio::test]
+async fn lists_and_lookups_only_show_the_token_s_project() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (path, own, foreign) in [
+        ("/api/quick-apis", "qa-a", "qa-b"),
+        ("/api/quick-prompts", "qp-a", "qp-b"),
+        ("/api/quick-execs", "qe-a", "qe-b"),
+        ("/api/workflows", "wf-a", "wf-b"),
+        ("/api/planning/tasks", "task-a", "task-b"),
+        ("/api/discussions", "room-a2", "room-b"),
+        ("/api/disc/search?q=room", "room-a", "room-b"),
+    ] {
+        let (status, response) = call(&app, "GET", path, Some(&token), None).await;
+        assert_eq!(status, 200, "{path}: {response}");
+        let text = response.to_string();
+        assert!(
+            text.contains(own),
+            "{path} lost the token's own {own}: {text}"
+        );
+        assert!(
+            !text.contains(foreign),
+            "{path} shows p2's {foreign}: {text}"
+        );
+    }
+    // p2's API config: listed for the operator, hidden from the p1 token.
+    let (_, operator_view) = call(&app, "GET", "/api/mcps", None, None).await;
+    assert!(
+        operator_view.to_string().contains("cfg-b"),
+        "{operator_view}"
+    );
+    let (status, token_view) = call(&app, "GET", "/api/mcps", Some(&token), None).await;
+    assert_eq!(status, 200);
+    assert!(!token_view.to_string().contains("cfg-b"), "{token_view}");
+    for id in ["room-b", "task-b", "wf-b", "qp-b"] {
+        let (status, response) = call(
+            &app,
+            "GET",
+            &format!("/api/resolve/{id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, 403, "resolve {id}: {response}");
+    }
+    let (status, _) = call(&app, "GET", "/api/resolve/task-a", Some(&token), None).await;
+    assert_eq!(status, 200);
+}
+
+/// Deleting the token's room kills the token, even after a call resolved it.
+#[tokio::test]
+async fn deleting_the_room_revokes_its_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-del");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-del/meta",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    db.with_conn(|conn| {
+        conn.execute("DELETE FROM discussions WHERE id = 'room-del'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, _) = call(&app, "GET", "/api/discussions", Some(guard.value()), None).await;
+    assert_eq!(status, 401, "the deleted room's token is dead");
+}
+
+/// The WebSocket upgrade: a bridge token never opens the event bus, a wrong
+/// or expired credential is refused, no credential keeps loopback trust.
+#[tokio::test]
+async fn the_websocket_refuses_bridge_and_invalid_credentials() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let live = guard.value().to_owned();
+    let (status, _) = call(&app, "GET", "/api/ws", Some(&live), None).await;
+    assert_eq!(status, 403, "a live bridge token is refused on the bus");
+    let (status, _) = call(&app, "GET", &format!("/api/ws?token={live}"), None, None).await;
+    assert_eq!(status, 403, "also through the query");
+    for bad in ["kbt_expired", "wrong"] {
+        let (status, _) = call(&app, "GET", "/api/ws", Some(bad), None).await;
+        assert_eq!(status, 401, "{bad}");
+        let (status, _) = call(&app, "GET", &format!("/api/ws?token={bad}"), None, None).await;
+        assert_eq!(status, 401, "{bad} in the query");
+    }
+    // No credential, or the operator's: the request reaches the upgrade
+    // handler (which refuses a non-upgrade request on its own).
+    for bearer in [None, Some("operator-bearer-never-sent-here")] {
+        let (status, _) = call(&app, "GET", "/api/ws", bearer, None).await;
+        assert!(status != 401 && status != 403, "{bearer:?}: {status}");
+    }
+}
+
+/// A locked instance (stored auth token not decryptable) refuses bridge
+/// tokens everywhere with 423, the recovery routes and the WebSocket included.
+#[tokio::test]
+async fn a_locked_instance_refuses_bridge_tokens_everywhere() {
+    let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());
+    let mut config = kronn::core::config::default_config();
+    config.server.auth_enabled = true;
+    config.server.auth_strict_localhost = false;
+    config.server.auth_token = None;
+    config.server.auth_locked = true;
+    let state = AppState::new_defaults(
+        Arc::new(RwLock::new(config)),
+        db,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
+    let app = build_router_with_auth(state, true);
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    for (method, path, body) in [
+        ("GET", "/api/discussions", None),
+        ("POST", "/api/disc/append", Some(append("room-a", "locked"))),
+        ("GET", "/api/config/recovery/status", None),
+        (
+            "POST",
+            "/api/config/recovery/restore",
+            Some(json!({"passphrase": "x"})),
+        ),
+        ("GET", "/api/ws", None),
+    ] {
+        let (status, _) = call(&app, method, path, Some(&token), body).await;
+        assert_eq!(status, 423, "{method} {path}");
+    }
+    let (status, _) = call(&app, "GET", &format!("/api/ws?token={token}"), None, None).await;
+    assert_eq!(status, 423, "WS query credential while locked");
+    // The local recovery status itself stays reachable without a token.
+    let (status, _) = call(&app, "GET", "/api/config/recovery/status", None, None).await;
+    assert!(status != 423 && status != 401, "{status}");
 }

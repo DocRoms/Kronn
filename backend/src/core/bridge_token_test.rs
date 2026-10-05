@@ -132,7 +132,6 @@ fn grant(discussions: &[&str]) -> BridgeGrant {
     BridgeGrant {
         id: "test".into(),
         scope: scope(discussions),
-        project: Mutex::new(None),
         adopted: Mutex::new(Vec::new()),
     }
 }
@@ -193,9 +192,9 @@ fn reads_stay_inside_the_token_s_project_for_path_and_body_ids() {
     assert!(authorize(&grant, list, Some("p1"), &own_project, world).is_ok());
     // A project-less token cannot name a project at all.
     assert!(authorize(&grant, list, None, &own_project, world).is_err());
-    // Unknown ids pass: the handler answers 404 itself.
+    // An id that resolves to nothing is refused, never let through.
     let missing = [(Kind::Task, "zzz".to_string())];
-    assert!(authorize(&grant, list, Some("p1"), &missing, world).is_ok());
+    assert!(authorize(&grant, list, Some("p1"), &missing, world).is_err());
 }
 
 #[test]

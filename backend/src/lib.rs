@@ -514,8 +514,14 @@ async fn auth_middleware(
     }
 
     // Skip auth for WebSocket endpoint — ws.rs handles authentication
-    // via invite code verification in the first Presence message.
+    // via invite code verification in the first Presence message. A credential
+    // presented anyway must be the operator token: a bridge token never opens
+    // the event bus, and a wrong one never falls back to loopback trust.
     if request.uri().path() == "/api/ws" {
+        let query = request.uri().query().map(str::to_owned);
+        if let Some(status) = ws_credential_refusal(&state, &headers, query.as_deref()).await {
+            return Err(status);
+        }
         return Ok(next.run(request).await);
     }
 
@@ -540,7 +546,13 @@ async fn auth_middleware(
     // that bring the key back stay open, and only to a local caller.
     if auth_locked {
         let local = !strict_localhost && request_is_local_ip(&headers, &request);
-        if auth_locked_allows(request.uri().path(), local) {
+        let bridge_bearer = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|token| token.starts_with(crate::core::bridge_token::TOKEN_PREFIX));
+        // A bridge token never reaches the recovery routes, locked or not.
+        if !bridge_bearer && auth_locked_allows(request.uri().path(), local) {
             return Ok(next.run(request).await);
         }
         return Ok(auth_locked_refusal());
@@ -610,6 +622,56 @@ fn auth_locked_refusal() -> axum::response::Response {
         })),
     )
         .into_response()
+}
+
+/// The refusal for a WebSocket upgrade presenting a credential (bearer header
+/// or `token` query) other than the operator token: 403 for a live bridge
+/// token, 401 for anything else. `None` = no credential, or the operator's.
+async fn ws_credential_refusal(
+    state: &AppState,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Option<StatusCode> {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_owned);
+    let query_token = query.and_then(|query| {
+        query.split('&').find_map(|pair| {
+            pair.strip_prefix("token=")
+                .map(crate::core::bridge_token::percent_decode)
+        })
+    });
+    let presented: Vec<String> = bearer.into_iter().chain(query_token).collect();
+    if presented.is_empty() {
+        return None;
+    }
+    let (expected, locked) = {
+        let config = state.config.read().await;
+        let server = &config.server;
+        (
+            server.auth_token.clone(),
+            server.auth_locked && server.auth_enabled && server.auth_token.is_none(),
+        )
+    };
+    // Locked, no credential can be checked: refused like every other route.
+    if locked {
+        return Some(StatusCode::LOCKED);
+    }
+    if presented
+        .iter()
+        .all(|credential| expected.as_deref() == Some(credential.as_str()))
+    {
+        return None;
+    }
+    if presented
+        .iter()
+        .any(|credential| crate::core::bridge_token::lookup(credential).is_some())
+    {
+        return Some(StatusCode::FORBIDDEN);
+    }
+    Some(StatusCode::UNAUTHORIZED)
 }
 
 /// Largest JSON body a bridge-token request may carry (its ids are read before
@@ -692,16 +754,8 @@ async fn bridge_gate(
     let resolver = grant.clone();
     let project = state
         .db
-        .with_read_conn(move |conn| {
-            if let Some(project) = resolver.cached_project() {
-                return Ok(Ok(project));
-            }
-            let resolved = bridge_token::resolve_scope_project(conn, &resolver.scope)?;
-            if let Ok(project) = &resolved {
-                resolver.cache_project(project.clone());
-            }
-            Ok(resolved)
-        })
+        // Re-read on every call: a deleted discussion or run kills the token.
+        .with_read_conn(move |conn| bridge_token::resolve_scope_project(conn, &resolver.scope))
         .await;
     let project = match project {
         Ok(Ok(project)) => project,
@@ -727,11 +781,12 @@ async fn bridge_gate(
     };
     let ids = bridge_token::collect_ids(route, &path_params, query.as_deref(), json.as_ref());
     let checked = grant.clone();
+    let bound = project.clone();
     let decision = state
         .db
         .with_read_conn(move |conn| {
             Ok(
-                bridge_token::authorize(&checked, route, project.as_deref(), &ids, |kind, id| {
+                bridge_token::authorize(&checked, route, bound.as_deref(), &ids, |kind, id| {
                     bridge_token::residence(conn, kind, id).map_err(|error| {
                         bridge_token::Refusal(format!("scope lookup failed: {error}"))
                     })
@@ -756,13 +811,98 @@ async fn bridge_gate(
         tracing::info!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
             "bridge token effect");
     }
+    // Handlers that pick a project themselves read the grant's instead.
+    parts.extensions.insert(bridge_token::BridgeCaller {
+        token_id: grant.id.clone(),
+        project: project.clone(),
+    });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))
         .await;
     if pattern == "/api/disc/create" && response.status().is_success() {
         return adopt_created_discussion(&grant, response).await;
     }
+    if bridge_token::scopes_response(route) && response.status().is_success() {
+        return scope_bridge_response(state, grant, project, response).await;
+    }
     response
+}
+
+/// Lists, searches and lookups answer a bridge token with its project's
+/// resources only: entries outside it are dropped, a lone object outside it
+/// is refused. The handler's data is read back, never trusted as scoped.
+async fn scope_bridge_response(
+    state: &AppState,
+    grant: std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
+    project: Option<String>,
+    response: axum::response::Response,
+) -> axum::response::Response {
+    use crate::core::bridge_token;
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
+        return bridge_refusal(StatusCode::INTERNAL_SERVER_ERROR, "response too large");
+    };
+    let Ok(mut envelope) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        // Not JSON (raw text such as a convention document): nothing scoped.
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let Some(data) = envelope.get_mut("data").filter(|data| !data.is_null()) else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let discussions = bridge_token::discussions_to_resolve(data);
+    let resolved = bridge_token::resolved_resource(data);
+    let lookup = state
+        .db
+        .with_read_conn(move |conn| {
+            let mut projects = HashMap::new();
+            for id in discussions {
+                if let Some(bridge_token::Residence::Projects(found)) =
+                    bridge_token::residence(conn, bridge_token::Kind::Discussion, &id)?
+                {
+                    projects.insert(id, found.into_iter().next());
+                } else if conn
+                    .query_row("SELECT 1 FROM discussions WHERE id = ?1", [&id], |_| Ok(()))
+                    .is_ok()
+                {
+                    projects.insert(id, None);
+                }
+            }
+            let place = match resolved {
+                Some((kind, id)) => {
+                    Some((kind, id.clone(), bridge_token::residence(conn, kind, &id)?))
+                }
+                None => None,
+            };
+            Ok((projects, place))
+        })
+        .await;
+    let Ok((projects, place)) = lookup else {
+        return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
+    };
+    if let Some((kind, id, residence)) = place {
+        let ids = [(kind, id)];
+        let mut known = Some(residence);
+        let route = bridge_token::route_for("GET", "/api/resolve/{id}").expect("listed route");
+        if let Err(refusal) =
+            bridge_token::authorize(&grant, route, project.as_deref(), &ids, |_, _| {
+                Ok(known.take().flatten())
+            })
+        {
+            return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
+        }
+    }
+    if let Err(refusal) = bridge_token::scope_response(data, &grant, project.as_deref(), &projects)
+    {
+        return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
+    }
+    let Ok(scoped) = serde_json::to_vec(&envelope) else {
+        return bridge_refusal(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "response encoding failed",
+        );
+    };
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(scoped))
 }
 
 /// A discussion a launch creates becomes one of its own, so it can write there.
