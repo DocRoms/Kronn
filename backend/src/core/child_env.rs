@@ -138,6 +138,22 @@ const BASE_NAMES: &[&str] = &[
 /// Docker image sets `NPM_CONFIG_PREFIX`; a token-like npm key is still sealed).
 const BASE_PREFIXES: &[&str] = &["LC_", "SSL_CERT_", "NPM_CONFIG_", "npm_config_"];
 
+/// Git's own settings a user may export: identity, SSH, config location,
+/// prompts. Repository selectors (`GIT_DIR`, `GIT_WORK_TREE`…) are never
+/// inherited; Kronn sets them explicitly where it needs them.
+const GIT_NAMES: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TERMINAL_PROMPT",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+];
+
 /// Cloud CLIs an API connection may use to mint its credential (`az`, `gcloud`).
 const CREDENTIAL_CLI_PREFIXES: &[&str] = &["AZURE_", "CLOUDSDK_", "AWS_"];
 const CREDENTIAL_CLI_NAMES: &[&str] = &["GOOGLE_APPLICATION_CREDENTIALS"];
@@ -266,6 +282,9 @@ pub enum ChildRoute {
     QuickExec,
     /// A credential CLI an API connection declares (`az`, `gcloud`).
     CredentialCli,
+    /// Every `git` process Kronn starts: a repository's hooks, filters and
+    /// drivers run inside it, and agents can write repositories.
+    Git,
 }
 
 impl ChildRoute {
@@ -277,6 +296,7 @@ impl ChildRoute {
             Self::CredentialCli => {
                 name_in(name, CREDENTIAL_CLI_NAMES) || has_prefix(name, CREDENTIAL_CLI_PREFIXES)
             }
+            Self::Git => name_in(name, GIT_NAMES),
             Self::ProjectExec | Self::WorkflowExec | Self::QuickExec => false,
         }
     }
