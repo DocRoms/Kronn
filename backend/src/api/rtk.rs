@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
-use crate::core::cmd::async_cmd;
 use crate::models::{AgentType, ApiResponse};
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -216,7 +215,7 @@ pub async fn activate(
 
         tracing::info!("Spawning: rtk {:?} (agent={:?}, HOME={home})", args, agent);
 
-        match async_cmd("rtk").args(&args).output().await {
+        match crate::core::cmd::tool_cmd("rtk").args(&args).output().await {
             Ok(out) => {
                 let mut success = out.status.success();
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -328,7 +327,7 @@ pub async fn deactivate(
             agent
         );
 
-        match async_cmd("rtk").args(&args).output().await {
+        match crate::core::cmd::tool_cmd("rtk").args(&args).output().await {
             Ok(out) => {
                 let success = out.status.success();
                 let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -511,7 +510,7 @@ pub async fn savings() -> Json<ApiResponse<RtkSavings>> {
         return Json(ApiResponse::ok(empty));
     }
 
-    let output = match async_cmd("rtk")
+    let output = match crate::core::cmd::tool_cmd("rtk")
         .args(["gain", "--all", "--format", "json"])
         .output()
         .await

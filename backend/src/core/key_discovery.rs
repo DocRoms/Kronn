@@ -154,8 +154,8 @@ fn default_key_name() -> String {
             return h;
         }
     }
-    // sync_cmd ensures no console window flashes on Windows.
-    if let Ok(output) = crate::core::cmd::sync_cmd("hostname").output() {
+    // sync_tool_cmd: no console window on Windows, no backend environment.
+    if let Ok(output) = crate::core::cmd::sync_tool_cmd("hostname").output() {
         if output.status.success() {
             let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !h.is_empty() {

@@ -66,7 +66,7 @@ const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]
 /// environment (KT-1006) and the project's GitHub variables only when the
 /// project is connected (D2); callers only add argv, cwd and stdio.
 fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process::Command {
-    let mut command = async_cmd(program);
+    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
     crate::core::child_env::isolate_with_github(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -84,7 +84,7 @@ fn approved_script_child(
     copy_dir: &Path,
 ) -> tokio::process::Command {
     use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
-    let mut command = async_cmd(program);
+    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
     crate::core::child_env::isolate_with_github_and_values(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -335,6 +335,7 @@ async fn execute_exec_step_inner(
         raw_command,
         &step.exec_args,
         &rendered_args,
+        step.exec_unmodelled_args_approved == Some(true),
     ) {
         return fail(step, start, refusal);
     }
@@ -415,6 +416,7 @@ async fn execute_exec_step_inner(
             setup_cmd,
             &step.exec_setup_args,
             &setup_args,
+            step.exec_unmodelled_args_approved == Some(true),
         ) {
             return fail(step, start, format!("{refusal} (setup)"));
         }
@@ -970,6 +972,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -1612,6 +1615,78 @@ mod tests {
                 "nothing ran"
             );
         }
+    }
+
+    /// Review findings, executed: a shell script after `-cx`, and a
+    /// templated stdin given to a program that runs stdin, never run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clustered_c_script_and_a_stdin_program_are_refused_before_running() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue("touch pwned", "", "1", "https://tracker.test/1", &[]);
+        let clustered = exec_step("greet", Some("bash"), vec!["-cx", "{{issue.title}}"], None);
+        let mut stdin = exec_step("greet", Some("bash"), vec![], None);
+        stdin.exec_stdin = Some("{{issue.title}}".into());
+        let mut python_stdin = exec_step("greet", Some("python3"), vec!["-"], None);
+        python_stdin.exec_stdin = Some("import os; os.system('{{issue.title}}')".into());
+        for step in [clustered, stdin, python_stdin] {
+            let dir = tempfile::tempdir().unwrap();
+            let outcome = execute_exec_step(
+                &step,
+                &["bash".to_string(), "python3".to_string()],
+                &dir.path().to_string_lossy(),
+                &ctx,
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                RunStatus::Failed,
+                "{}",
+                outcome.result.output
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                0,
+                "nothing ran"
+            );
+        }
+    }
+
+    /// A value reaching a program Kronn does not model is refused before it
+    /// runs, unless a human approved the step.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unmodelled_program_runs_only_with_a_human_approval() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue(
+            "--compress-program=touch",
+            "",
+            "1",
+            "https://tracker.test/1",
+            &[],
+        );
+        let mut step = exec_step("sorted", Some("sort"), vec!["{{issue.title}}"], None);
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let refused = execute_exec_step(&step, &["sort".to_string()], &workdir, &ctx).await;
+        assert_eq!(refused.result.status, RunStatus::Failed);
+        assert!(
+            refused.result.output.contains("refusé avant exécution"),
+            "{}",
+            refused.result.output
+        );
+        assert!(
+            refused.result.output.contains("sort"),
+            "{}",
+            refused.result.output
+        );
+        step.exec_unmodelled_args_approved = Some(true);
+        let approved = execute_exec_step(&step, &["sort".to_string()], &workdir, &ctx).await;
+        assert!(
+            !approved.result.output.contains("refusé avant exécution"),
+            "{}",
+            approved.result.output
+        );
     }
 
     /// The envelope escapes stdout; markers must still come back as printed.

@@ -1,0 +1,24 @@
+# Same rule as backend/clippy.toml: every child process is built by
+# `kronn::core::cmd`, which gives it the environment of its route (KT-1006,
+# design note agent-secret-boundary §9).
+# `allow-invalid`: libc paths absent on one platform (vfork on macOS, all on Windows).
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use core::cmd::{sync_cmd, git_cmd, sync_tool_cmd} with a ChildRoute" },
+    { path = "tokio::process::Command::new", reason = "use core::cmd::{async_cmd, async_git_cmd, tool_cmd} with a ChildRoute" },
+    { path = "open::that", reason = "use core::cmd::open_in_system" },
+    { path = "open::that_detached", reason = "use core::cmd::open_in_system" },
+    { path = "open::that_in_background", reason = "use core::cmd::open_in_system" },
+    { path = "open::with", reason = "use core::cmd::open_in_system" },
+    { path = "open::with_detached", reason = "use core::cmd::open_in_system" },
+    { path = "open::with_in_background", reason = "use core::cmd::open_in_system" },
+    { path = "tauri_plugin_shell::Shell::command", reason = "spawn through kronn::core::cmd" },
+    { path = "tauri_plugin_shell::Shell::sidecar", reason = "spawn through kronn::core::cmd" },
+    { path = "libc::fork", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::vfork", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::execv", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::execve", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::execvp", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::posix_spawn", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::posix_spawnp", reason = "spawn through core::cmd", allow-invalid = true },
+    { path = "libc::system", reason = "spawn through core::cmd", allow-invalid = true },
+]

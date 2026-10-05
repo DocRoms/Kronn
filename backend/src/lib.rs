@@ -1,3 +1,6 @@
+// Test fixtures may start processes directly; production code cannot (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod acp;
 pub mod agents;
 pub mod api;
@@ -592,10 +595,9 @@ async fn auth_middleware(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let has_valid_token = match (&expected_token, bearer) {
-        (Some(expected), Some(bearer)) => bearer == expected,
-        _ => false,
-    };
+    let has_valid_token = bearer.is_some_and(|bearer| {
+        crate::core::bridge_token::operator_token_matches(expected_token.as_deref(), bearer)
+    });
     // A bridge token is a narrower statement than the origin: it never falls
     // back to loopback trust, even when dead (KT-1006).
     if let Some(token) = bearer.filter(|token| {
@@ -685,10 +687,9 @@ async fn ws_credential_refusal(
     if locked {
         return Some(StatusCode::LOCKED);
     }
-    if presented
-        .iter()
-        .all(|credential| expected.as_deref() == Some(credential.as_str()))
-    {
+    if presented.iter().all(|credential| {
+        crate::core::bridge_token::operator_token_matches(expected.as_deref(), credential)
+    }) {
         return None;
     }
     if presented
@@ -749,10 +750,14 @@ async fn bridge_gate(
                 .iter()
                 .map(|(name, value)| (name.to_owned(), value.to_owned()))
                 .collect(),
+            // A declared id that cannot be read must not pass unchecked.
+            Err(_) if !route.params.is_empty() => {
+                return bridge_refusal(StatusCode::BAD_REQUEST, "invalid path parameters")
+            }
             Err(_) => Vec::new(),
         };
     let query = parts.uri.query().map(str::to_owned);
-    let is_json = parts
+    let content_type = parts
         .headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -763,8 +768,19 @@ async fn bridge_gate(
                 .unwrap_or("")
                 .trim()
                 .to_ascii_lowercase()
-        })
+        });
+    let is_json = content_type
+        .as_deref()
         .is_some_and(|mime| mime == "application/json" || mime.ends_with("+json"));
+    // A body the gate cannot read is not a way around its checks: only the
+    // context-file upload is multipart.
+    let multipart_upload = pattern == "/api/discussions/{id}/context-files";
+    if !is_json && content_type.is_some() && !multipart_upload && method != "GET" {
+        return bridge_refusal(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "a bridge-token request body must be JSON",
+        );
+    }
     let (body, json) = if is_json {
         let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
             return bridge_refusal(
@@ -772,23 +788,34 @@ async fn bridge_gate(
                 "bridge request body too large",
             );
         };
-        let json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-        (axum::body::Body::from(bytes), json)
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body");
+        };
+        (axum::body::Body::from(bytes), Some(json))
     } else {
         (body, None)
     };
     let resolver = grant.clone();
-    let project = state
+    let binding = state
         .db
         // Re-read on every call: a deleted discussion or run kills the token.
         .with_read_conn(move |conn| bridge_token::resolve_scope_project(conn, &resolver.scope))
         .await;
-    let project = match project {
-        Ok(Ok(project)) => project,
-        Ok(Err(())) => {
+    let project = match binding {
+        Ok(bridge_token::ScopeBinding::Bound(project)) => match grant.freeze(project) {
+            Ok(project) => project,
+            Err(refusal) => return bridge_refusal(StatusCode::UNAUTHORIZED, &refusal.0),
+        },
+        Ok(bridge_token::ScopeBinding::Dead) => {
             return bridge_refusal(
                 StatusCode::UNAUTHORIZED,
                 "bridge token's discussion or run no longer exists",
+            )
+        }
+        Ok(bridge_token::ScopeBinding::Conflict) => {
+            return bridge_refusal(
+                StatusCode::UNAUTHORIZED,
+                "bridge token's discussions belong to different projects",
             )
         }
         Err(error) => {
@@ -796,21 +823,43 @@ async fn bridge_gate(
             return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
         }
     };
-    // A trigger naming no project runs for the token's project (KT-851).
-    let injected = bridge_token::with_bound_project(route, project.as_deref(), json.clone());
-    let (body, json) = match injected {
-        Some(json) => match serde_json::to_vec(&json) {
-            Ok(bytes) => (axum::body::Body::from(bytes), Some(json)),
+    if grant.scope.owns_nothing()
+        && project.is_none()
+        && !bridge_token::unbound_route_allowed(route)
+    {
+        return bridge_refusal(
+            StatusCode::FORBIDDEN,
+            "this launch has no discussion, run or project: its bridge token reads catalogues only",
+        );
+    }
+    let (body, json) = match bridge_token::prepare_body(route, project.as_deref(), json.as_ref()) {
+        Ok(Some(prepared)) => match serde_json::to_vec(&prepared) {
+            Ok(bytes) => (axum::body::Body::from(bytes), Some(prepared)),
             Err(_) => return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body"),
         },
-        None => (body, json),
+        Ok(None) => (body, json),
+        Err(refusal) => {
+            tracing::warn!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
+                reason = %refusal.0, "bridge token refused");
+            return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
+        }
     };
-    let ids = bridge_token::collect_ids(route, &path_params, query.as_deref(), json.as_ref());
+    let ids = match bridge_token::collect_ids(route, &path_params, query.as_deref(), json.as_ref())
+    {
+        Ok(ids) => ids,
+        Err(refusal) => return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0),
+    };
     let checked = grant.clone();
     let bound = project.clone();
     let decision = state
         .db
         .with_read_conn(move |conn| {
+            let mut ids = ids;
+            ids.extend(bridge_token::credential_targets(
+                conn,
+                route,
+                json.as_ref(),
+            )?);
             Ok(
                 bridge_token::authorize(&checked, route, bound.as_deref(), &ids, |kind, id| {
                     bridge_token::residence(conn, kind, id).map_err(|error| {
@@ -837,28 +886,28 @@ async fn bridge_gate(
         tracing::info!(target: "kronn::bridge_token", token = %grant.id, %method, route = %pattern,
             "bridge token effect");
     }
-    // Handlers that pick a project themselves read the grant's instead.
+    // Handlers that pick a project or a list themselves read the grant's.
     parts.extensions.insert(bridge_token::BridgeCaller {
         token_id: grant.id.clone(),
         project: project.clone(),
+        own_discussions: grant.own_discussions(),
     });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))
         .await;
-    if pattern == "/api/disc/create" && response.status().is_success() {
-        return adopt_created_discussion(&grant, response).await;
-    }
     if bridge_token::scopes_response(route) && response.status().is_success() {
-        return scope_bridge_response(state, grant, project, response).await;
+        return scope_bridge_response(state, route, grant, project, response).await;
     }
     response
 }
 
-/// Lists, searches and lookups answer a bridge token with its project's
-/// resources only: entries outside it are dropped, a lone object outside it
-/// is refused. The handler's data is read back, never trusted as scoped.
+/// Every bridge-token response is read back and scoped, whatever the verb:
+/// entries outside the token's scope are dropped (counts follow), an object
+/// outside it is refused. A discussion the launch just created is adopted
+/// first, so it reads as its own.
 async fn scope_bridge_response(
     state: &AppState,
+    route: &'static crate::core::bridge_token::BridgeRoute,
     grant: std::sync::Arc<crate::core::bridge_token::BridgeGrant>,
     project: Option<String>,
     response: axum::response::Response,
@@ -872,52 +921,33 @@ async fn scope_bridge_response(
         // Not JSON (raw text such as a convention document): nothing scoped.
         return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
     };
+    // Only a fresh row counts: an idempotent replay returns a discussion
+    // chosen by caller-supplied session ids, which proves nothing.
+    if route.pattern == "/api/disc/create" && envelope["data"]["created"] == true {
+        if let Some(id) = envelope["data"]["disc_id"].as_str() {
+            grant.adopt_discussion(id);
+        }
+    }
     let Some(data) = envelope.get_mut("data").filter(|data| !data.is_null()) else {
         return axum::response::Response::from_parts(parts, axum::body::Body::from(bytes));
     };
-    let discussions = bridge_token::discussions_to_resolve(data);
-    let resolved = bridge_token::resolved_resource(data);
+    let wanted = bridge_token::response_ids(route, data);
     let lookup = state
         .db
         .with_read_conn(move |conn| {
-            let mut projects = HashMap::new();
-            for id in discussions {
-                if let Some(bridge_token::Residence::Projects(found)) =
-                    bridge_token::residence(conn, bridge_token::Kind::Discussion, &id)?
-                {
-                    projects.insert(id, found.into_iter().next());
-                } else if conn
-                    .query_row("SELECT 1 FROM discussions WHERE id = ?1", [&id], |_| Ok(()))
-                    .is_ok()
-                {
-                    projects.insert(id, None);
-                }
+            let mut residences = bridge_token::Residences::new();
+            for (kind, id) in wanted {
+                let place = bridge_token::residence(conn, kind, &id)?;
+                residences.insert((kind, id), place);
             }
-            let place = match resolved {
-                Some((kind, id)) => {
-                    Some((kind, id.clone(), bridge_token::residence(conn, kind, &id)?))
-                }
-                None => None,
-            };
-            Ok((projects, place))
+            Ok(residences)
         })
         .await;
-    let Ok((projects, place)) = lookup else {
+    let Ok(residences) = lookup else {
         return bridge_refusal(StatusCode::SERVICE_UNAVAILABLE, "bridge scope check failed");
     };
-    if let Some((kind, id, residence)) = place {
-        let ids = [(kind, id)];
-        let mut known = Some(residence);
-        let route = bridge_token::route_for("GET", "/api/resolve/{id}").expect("listed route");
-        if let Err(refusal) =
-            bridge_token::authorize(&grant, route, project.as_deref(), &ids, |_, _| {
-                Ok(known.take().flatten())
-            })
-        {
-            return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
-        }
-    }
-    if let Err(refusal) = bridge_token::scope_response(data, &grant, project.as_deref(), &projects)
+    if let Err(refusal) =
+        bridge_token::scope_response(route, data, &grant, project.as_deref(), &residences)
     {
         return bridge_refusal(StatusCode::FORBIDDEN, &refusal.0);
     }
@@ -929,28 +959,6 @@ async fn scope_bridge_response(
     };
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     axum::response::Response::from_parts(parts, axum::body::Body::from(scoped))
-}
-
-/// A discussion a launch creates becomes one of its own, so it can write there.
-/// Only a fresh row counts: an idempotent replay returns a discussion chosen
-/// by caller-supplied session ids, which proves nothing.
-async fn adopt_created_discussion(
-    grant: &crate::core::bridge_token::BridgeGrant,
-    response: axum::response::Response,
-) -> axum::response::Response {
-    let (parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, BRIDGE_BODY_LIMIT).await else {
-        return bridge_refusal(StatusCode::INTERNAL_SERVER_ERROR, "response too large");
-    };
-    if let Ok(created) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-        let data = &created["data"];
-        if data["created"] == serde_json::Value::Bool(true) {
-            if let Some(id) = data["disc_id"].as_str() {
-                grant.adopt_discussion(id);
-            }
-        }
-    }
-    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
 /// POST endpoints that irreversibly destroy user data, change key material or
@@ -1967,6 +1975,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/workflows/{id}/unsafe-steps",
             get(api::workflows::unsafe_steps),
+        )
+        .route(
+            "/api/exec/line-check",
+            post(api::workflows::exec_line_check),
         )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(

@@ -841,6 +841,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "217_stored_credentials",
         include_str!("sql/217_stored_credentials.sql"),
     ),
+    (
+        "218_quick_exec_unmodelled_args_approved",
+        include_str!("sql/218_quick_exec_unmodelled_args_approved.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

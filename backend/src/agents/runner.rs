@@ -11,7 +11,7 @@ use super::ollama_memory::{
     KvShape, MachineFacts, ModelCeiling,
 };
 use super::provenance::{self, AgentProvenanceCapture};
-use crate::core::cmd::{async_cmd, sync_cmd};
+use crate::core::cmd::async_cmd;
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
@@ -2124,6 +2124,8 @@ impl AgentIo for AgentProcess {
         AgentProcess::reported_cost_usd_micros(self)
     }
     async fn kill(&mut self) {
+        // A cancelled launch's token dies now, not when the handle is dropped.
+        self.bridge_token = None;
         self.rx.close();
         if let Some(cancel) = &self.http_cancel {
             cancel.cancel();
@@ -2271,7 +2273,7 @@ impl AgentIo for AgentProcess {
                     "Terminating process tree for agent PID {} with taskkill",
                     pid
                 );
-                if let Ok(output) = async_cmd("taskkill")
+                if let Ok(output) = crate::core::cmd::tool_cmd("taskkill")
                     .args(&["/PID", &pid.to_string(), "/T", "/F"])
                     .output()
                     .await
@@ -2491,7 +2493,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     // Skip if container user already matches the desired UID (expected when
     // APP_UID build arg matches KRONN_HOST_UID — the normal case after the fix).
-    if let Ok(output) = sync_cmd("id")
+    if let Ok(output) = crate::core::cmd::sync_tool_cmd("id")
         .arg("-u")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2505,7 +2507,7 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     let ownership = format!("{}:{}", uid, gid);
     // Only fix files in the work directory, not system files
-    let status = sync_cmd("chown")
+    let status = crate::core::cmd::sync_tool_cmd("chown")
         .args(["-R", &ownership])
         .arg(work_dir)
         .stdout(Stdio::null())
@@ -4059,7 +4061,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // rejected full transcript with a resumed native session and duplicate its
     // history.
     let acp_resume_id = (!task_worker).then_some(config.cli_resume_id).flatten();
-    let bridge = mint_launch_bridge_token(&config);
+    // Every launch carries its own token; one that cannot be minted does not
+    // start, rather than leaving its bridge on loopback trust.
+    let bridge = Some(mint_launch_bridge_token(&config)?);
     let bridge_value = bridge.as_ref().map(|guard| guard.value().to_owned());
     match acp_route {
         crate::acp::AcpProductionRoute::NativeAcp => {
@@ -4473,10 +4477,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 }
 
 /// Mint the launch's bridge token, bound to its own discussions, its task
-/// execution and its workflow run. `None` when the launch names none of them.
+/// execution and its workflow run, else to its project, else to nothing (a
+/// token that reads catalogues only).
 fn mint_launch_bridge_token(
     config: &AgentStartConfig<'_>,
-) -> Option<crate::core::bridge_token::BridgeTokenGuard> {
+) -> Result<crate::core::bridge_token::BridgeTokenGuard, String> {
     let mut discussion_ids: Vec<String> = Vec::new();
     for id in [
         config.discussion_id,
@@ -4505,7 +4510,9 @@ fn mint_launch_bridge_token(
         workflow_run_id: config
             .workflow_step_context
             .map(|context| context.run_id.clone()),
+        project_id: config.project_id.map(str::to_owned),
     })
+    .map_err(|error| format!("Agent launch refused: {error}"))
 }
 
 /// Common inputs to every ACP session-start path (native and adapted alike).
@@ -4950,7 +4957,7 @@ async fn run_acp_session(
 
     // Match the async agent task to the AgentProcess lifecycle without treating
     // the ACP child itself as a line-producing text process.
-    let mut lifeline = match async_cmd("sh")
+    let mut lifeline = match crate::core::cmd::tool_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -5294,7 +5301,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
     }
 
     tracing::info!("kiro-cli not found, installing Linux kiro-cli...");
-    let output = async_cmd("sh")
+    let output = crate::core::cmd::tool_cmd("sh")
         .args([
             "-c",
             "command -v unzip >/dev/null 2>&1 || { echo 'Missing dependency: unzip' >&2; exit 127; }; \
@@ -5580,7 +5587,7 @@ pub(crate) fn ram_derived_ceiling(total_bytes: Option<u64>) -> u64 {
 pub(crate) fn total_system_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "macos")]
     {
-        let output = crate::core::cmd::sync_cmd("sysctl")
+        let output = crate::core::cmd::sync_tool_cmd("sysctl")
             .args(["-n", "hw.memsize"])
             .output()
             .ok()?;
@@ -8702,7 +8709,7 @@ async fn start_ollama_http_with_idle(
     // with truncated/empty output. Now: task writes "0\n" on a clean `done`,
     // "1\n" on stream/in-band errors, and if the task dies without writing
     // anything, `read` hits EOF and the lifeline exits 1 — fail-safe.
-    let mut dummy_child = crate::core::cmd::async_cmd("sh")
+    let mut dummy_child = crate::core::cmd::tool_cmd("sh")
         .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -11443,7 +11450,7 @@ fn claude_sandbox_catalogue_receipt(
     let mut worktrees = std::collections::BTreeSet::new();
     for root in repo_roots {
         let unreadable = || claude_sandbox_catalogue_unreadable(&root.label);
-        let common_output = sync_cmd("git")
+        let common_output = crate::core::cmd::git_cmd()
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(&root.path)
             .output()
@@ -11457,7 +11464,7 @@ fn claude_sandbox_catalogue_receipt(
         if !common_dirs.insert(common_dir) {
             continue;
         }
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&root.path)
             .output()
@@ -11536,9 +11543,8 @@ async fn run_claude_task_worker_auth_probe(
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::Unsupported, message))?;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    let mut probe = async_cmd(command);
-    crate::core::child_env::isolate(
-        probe.as_std_mut(),
+    let mut probe = async_cmd(
+        command,
         crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Claude),
     );
     probe
@@ -11707,9 +11713,8 @@ async fn run_copilot_task_worker_preflight_with_timeout(
     let (command, args, via_wsl) = resolved;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    let mut command = async_cmd(command);
-    crate::core::child_env::isolate(
-        command.as_std_mut(),
+    let mut command = async_cmd(
+        command,
         crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Copilot),
     );
     command
@@ -12829,11 +12834,11 @@ pub(crate) fn try_spawn(
 
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
-    let mut cmd = async_cmd(&final_cmd);
-    // Built, never inherited: the backend's own environment holds secrets.
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
+    let mut cmd = async_cmd(&final_cmd, route);
+    // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);
     let inherited = crate::core::child_env::names_of(cmd.as_std());
     // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).

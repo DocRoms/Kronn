@@ -59,7 +59,7 @@ pub fn main_tree_wait_from(raw: Option<&str>) -> std::time::Duration {
 /// A workspace lifecycle hook: user shell in the workspace, with the same
 /// built environment as an Exec step (KT-1006).
 fn hook_command(cmd: &str, dir: &std::path::Path) -> tokio::process::Command {
-    let mut command = async_cmd("sh");
+    let mut command = async_cmd("sh", crate::core::child_env::ChildRoute::WorkflowExec);
     // A workspace carries no project id, so a hook gets no GitHub token.
     crate::core::child_env::isolate_with_github(
         command.as_std_mut(),
@@ -339,7 +339,7 @@ async fn check_branch_for_preservation(worktree: &Path, branch: &str) -> Option<
 
 /// Run `git <args>` in `cwd`, return trimmed stdout if exit was 0.
 async fn git_text_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = async_cmd("git")
+    let out = crate::core::cmd::async_git_cmd()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -450,7 +450,7 @@ async fn fetch_remote_branch_once(
     timeout: std::time::Duration,
 ) -> std::result::Result<(), String> {
     let refspec = format!("+refs/heads/{branch}:refs/remotes/{remote}/{branch}");
-    let mut command = async_cmd("git");
+    let mut command = crate::core::cmd::async_git_cmd();
     command
         .args(["fetch", "--no-tags", "--quiet", remote, &refspec])
         .current_dir(repo)
@@ -531,7 +531,7 @@ pub enum InterruptedCheckout {
 pub async fn inspect_interrupted_checkout(
     worktree: &Path,
 ) -> std::result::Result<InterruptedCheckout, String> {
-    let status = async_cmd("git")
+    let status = crate::core::cmd::async_git_cmd()
         .args(["status", "--porcelain", "--ignore-submodules=none"])
         .current_dir(worktree)
         .output()
@@ -569,7 +569,7 @@ pub async fn inspect_interrupted_checkout(
 /// Remove a checkout already found clean. No `--force`: git refuses if it
 /// became dirty or was locked since the inspection.
 pub async fn remove_clean_checkout(repo_path: &Path, worktree: &Path) -> Result<()> {
-    let output = async_cmd("git")
+    let output = crate::core::cmd::async_git_cmd()
         .args(["worktree", "remove"])
         .arg(worktree)
         .current_dir(repo_path)
@@ -587,7 +587,7 @@ pub async fn remove_clean_checkout(repo_path: &Path, worktree: &Path) -> Result<
 
 /// Delete `branch` only while it still points at `expected_sha`.
 pub async fn delete_branch_at(repo_path: &Path, branch: &str, expected_sha: &str) -> Result<()> {
-    let output = async_cmd("git")
+    let output = crate::core::cmd::async_git_cmd()
         .args([
             "update-ref",
             "-d",
@@ -672,7 +672,7 @@ impl Workspace {
 
         // Mark the repo as a safe directory (needed in Docker where the mounted
         // volume owner differs from the container user) before fetching in it.
-        let _ = async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args([
                 "config",
                 "--global",
@@ -700,7 +700,7 @@ impl Workspace {
         }
         let worktree_path = worktree_base.join(build_worktree_dir_name(workflow_name, run_id));
 
-        let _ = async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args([
                 "config",
                 "--global",
@@ -713,7 +713,7 @@ impl Workspace {
 
         // Create the worktree with a new branch. A SHA start point sets up no
         // tracking, so `@{u}` keeps meaning "the agent pushed".
-        let mut add = async_cmd("git");
+        let mut add = crate::core::cmd::async_git_cmd();
         add.args(["worktree", "add", "-b", &branch])
             .arg(&worktree_path)
             .current_dir(repo_path);
@@ -817,7 +817,7 @@ impl Workspace {
         remove_nested_worktrees(&self.repo_path, &self.path).await;
 
         // Remove the worktree
-        let output = async_cmd("git")
+        let output = crate::core::cmd::async_git_cmd()
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .current_dir(&self.repo_path)
@@ -851,7 +851,7 @@ impl Workspace {
                 }
             } else {
                 // Fully synced — safe to drop the branch ref.
-                let _ = async_cmd("git")
+                let _ = crate::core::cmd::async_git_cmd()
                     .args(["branch", "-D", &self.branch])
                     .current_dir(&self.repo_path)
                     .output()
@@ -869,7 +869,7 @@ impl Workspace {
     /// and boot recovery must remove discoverable checkout data only.
     pub async fn purge_terminal_checkout(repo_path: &Path, worktree_path: &Path) -> Result<()> {
         remove_nested_worktrees(repo_path, worktree_path).await;
-        let output = async_cmd("git")
+        let output = crate::core::cmd::async_git_cmd()
             .args(["worktree", "remove", "--force"])
             .arg(worktree_path)
             .current_dir(repo_path)
@@ -1235,32 +1235,32 @@ mod tests {
         let repo = dir.path().to_path_buf();
 
         // Init + minimal user config (commit -m needs an identity).
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["init", "-q", "-b", "main"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.email", "test@kronn.local"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.name", "test"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
         std::fs::write(repo.join("README.md"), "test\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "init"])
             .current_dir(&repo)
             .output()
@@ -1283,20 +1283,20 @@ mod tests {
         // Mirror the production scenario: a worktree branched off main
         // gets its own commit, leaving main behind by 1.
         let (_dir, repo) = make_test_repo().await;
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["checkout", "-q", "-b", "kronn/test"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
         std::fs::write(repo.join("CHANGELOG.md"), "v1\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "feat: changelog"])
             .current_dir(&repo)
             .output()
@@ -1318,32 +1318,32 @@ mod tests {
         // None (preferring "preserve too much" over "lose work").
         let dir = tempfile::TempDir::new().unwrap();
         let repo = dir.path().to_path_buf();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["init", "-q", "-b", "weird-default"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.email", "test@kronn.local"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.name", "test"])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
         std::fs::write(repo.join("README.md"), "x\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&repo)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "init"])
             .current_dir(&repo)
             .output()
@@ -1385,13 +1385,13 @@ mod tests {
 
         // Make a real commit inside the worktree so HEAD diverges from main.
         std::fs::write(ws.path.join("NEWFILE.md"), "extra\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&ws.path)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "feat: extra"])
             .current_dir(&ws.path)
             .output()
@@ -1430,7 +1430,7 @@ mod tests {
             !path.exists(),
             "the stale checkout must no longer be visible"
         );
-        let branch_check = crate::core::cmd::async_cmd("git")
+        let branch_check = crate::core::cmd::async_git_cmd()
             .args(["show-ref", "--verify", &format!("refs/heads/{branch}")])
             .current_dir(&repo)
             .output()
@@ -1480,13 +1480,13 @@ mod tests {
             None,
         );
         std::fs::write(child_ws.path.join("IMPL.md"), "child implementation\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&child_ws.path)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "feat: child work"])
             .current_dir(&child_ws.path)
             .output()
@@ -1589,7 +1589,7 @@ mod tests {
     }
 
     async fn porcelain(repo: &std::path::Path) -> String {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["worktree", "list", "--porcelain"])
             .current_dir(repo)
             .output()
@@ -1599,7 +1599,7 @@ mod tests {
     }
 
     async fn add_nested_pr_worktree(run_worktree: &std::path::Path) -> std::path::PathBuf {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["worktree", "add", "-q", "-b", "pr-1995", ".kronn/pr-1995"])
             .current_dir(run_worktree)
             .output()
@@ -1659,7 +1659,7 @@ mod tests {
         add_nested_pr_worktree(&ws.path).await;
         // A user's own worktree outside `.kronn/`, on a drive not mounted now.
         let outside = dir.path().join("été-outside");
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["worktree", "add", "-q", "-b", "user-branch"])
             .arg(&outside)
             .current_dir(&repo)
@@ -1716,7 +1716,7 @@ mod tests {
     // ─── base_ref: where a fresh isolated run starts ─────────────────────
 
     async fn git_ok(cwd: &Path, args: &[&str]) -> String {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(cwd)

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ApiAuthKind, ApiEndpoint } from '../../types/generated';
+import type { ApiAuthKind, ApiDefaultHeader, ApiEndpoint } from '../../types/generated';
 
 /** Custom API / JSON plugin form fields: name/base URL/description/docs,
  *  key-value fields, endpoints and auth. Shared by the create form (Add
@@ -29,6 +29,8 @@ export function useCustomApiFormState() {
   // after a WebFetch of `docs_url`; the user can also add rows
   // manually. Cf. [[project_endpoints_autodiscovery_0_8_6]].
   const [customEndpoints, setCustomEndpoints] = useState<ApiEndpoint[]>([]);
+  // Headers sent on every call (e.g. Notion's mandatory `Notion-Version`).
+  const [customHeaders, setCustomHeaders] = useState<ApiDefaultHeader[]>([]);
   // 0.8.6 — Edit-existing-Custom-plugin flow. When non-null, the form
   // is in edit mode: pre-filled from the existing plugin's spec, submit
   // goes to PUT instead of POST. Cleared on reset / form-close.
@@ -124,6 +126,7 @@ export function useCustomApiFormState() {
     customName, setCustomName, customBaseUrl, setCustomBaseUrl,
     customDescription, setCustomDescription, customDocsUrl, setCustomDocsUrl,
     customFields, setCustomFields, customEndpoints, setCustomEndpoints,
+    customHeaders, setCustomHeaders,
     editingCustomServerId, setEditingCustomServerId, editingCustomConfigId, setEditingCustomConfigId,
     editingCustomOriginalScope, setEditingCustomOriginalScope,
     replacingFields, setReplacingFields, customAuth, setCustomAuth,

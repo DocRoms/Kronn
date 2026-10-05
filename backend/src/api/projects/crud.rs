@@ -9,7 +9,6 @@ use axum::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -99,7 +98,6 @@ pub fn discover_wsl_homes() -> Vec<String> {
     let mut homes = Vec::new();
     #[cfg(target_os = "windows")]
     {
-        use crate::core::cmd::sync_cmd;
         use std::time::{Duration, Instant};
 
         /// Max wait per `wsl.exe` invocation. wsl.exe -l -q normally answers
@@ -109,7 +107,7 @@ pub fn discover_wsl_homes() -> Vec<String> {
 
         /// Spawn a wsl.exe child, kill it if it overruns `timeout`, return its output.
         fn run_with_timeout(args: &[&str], timeout: Duration) -> Option<std::process::Output> {
-            let mut child = sync_cmd("wsl.exe")
+            let mut child = crate::core::cmd::sync_tool_cmd("wsl.exe")
                 .args(args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -378,7 +376,7 @@ pub async fn add_folder(
     let (repo_url, _branch) = if resolved.join(".git").exists() {
         let path_for_git = req.path.clone();
         let detected = tokio::task::spawn_blocking(move || {
-            let remote = sync_cmd("git")
+            let remote = crate::core::cmd::git_cmd()
                 .args(["remote", "get-url", "origin"])
                 .current_dir(&path_for_git)
                 .output()
@@ -390,7 +388,7 @@ pub async fn add_folder(
                         None
                     }
                 });
-            let branch = sync_cmd("git")
+            let branch = crate::core::cmd::git_cmd()
                 .args(["branch", "--show-current"])
                 .current_dir(&path_for_git)
                 .output()

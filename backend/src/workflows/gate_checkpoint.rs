@@ -55,7 +55,7 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
 /// this module — production and test alike — must go through this, never
 /// `sync_cmd("git")` directly.
 fn git_cmd(project_path: &Path) -> std::process::Command {
-    let mut cmd = crate::core::cmd::sync_cmd("git");
+    let mut cmd = crate::core::cmd::git_cmd();
     cmd.current_dir(project_path);
     for var in GIT_ENV_OVERRIDES {
         cmd.env_remove(var);
@@ -466,7 +466,7 @@ mod tests {
             let readme_before = fs::read(calling_repo.join("README.md")).unwrap();
             let wip_before = fs::read(calling_repo.join("wip.txt")).ok();
 
-            let child = crate::core::cmd::sync_cmd(std::env::current_exe().unwrap())
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("commit_checkpoint_ignores_inherited_git_dir_and_work_tree")
                 .arg("--nocapture")
                 .env(INHERITED_CONTEXT_TARGET_ENV, &target)

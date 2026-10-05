@@ -553,7 +553,7 @@ mod tests {
     }
 
     fn git(dir: &std::path::Path, args: &[&str]) {
-        let ok = crate::core::cmd::sync_cmd("git")
+        let ok = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(dir)
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])

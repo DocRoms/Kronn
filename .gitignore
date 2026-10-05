@@ -24,6 +24,9 @@ backend/sidecars/docs/*.egg-info/
 
 # Node
 frontend/node_modules/
+# A worktree links node_modules: the trailing-slash rule matches directories only.
+frontend/node_modules
+desktop/node_modules
 frontend/node_modules_old/
 frontend/dist/
 .pnpm-store/

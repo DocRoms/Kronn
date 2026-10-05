@@ -8298,3 +8298,16 @@
 .wf-unsafe-diff-new { color: var(--kr-success); }
 .wf-unsafe-manual { margin: 0; color: var(--kr-warning); }
 .wf-unsafe-manual-reason { margin: var(--kr-sp-1) 0 0; color: var(--kr-text-secondary); }
+
+/* KT-1017 — human approval of an unmodelled program receiving run values. */
+.wf-unmodelled-approval {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  margin: var(--kr-sp-2) 0;
+  padding: var(--kr-sp-2);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+}

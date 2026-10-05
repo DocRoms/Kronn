@@ -3,7 +3,6 @@
 //! Each isolated discussion gets its own git worktree so agents can make
 //! changes without interfering with the main working tree or other discussions.
 
-use super::cmd::sync_cmd;
 use std::path::{Path, PathBuf};
 
 // ── KT-373 — disk as a provisioning precondition ─────────────────────────────
@@ -640,7 +639,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -670,7 +669,7 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// tracked `.gitignore`. Provisioning must not make the target dirty itself — a
 /// dirty target is (correctly) refused later by the integration preflight.
 fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--git-path", "info/exclude"])
         .current_dir(repo_path)
         .output()
@@ -842,7 +841,7 @@ pub fn create_discussion_worktree(
 
     // Mark repo as safe directory (needed in Docker where mount owner differs)
     if crate::core::env::is_docker() {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -851,7 +850,7 @@ pub fn create_discussion_worktree(
                 &repo_path.to_string_lossy(),
             ])
             .output();
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -863,7 +862,7 @@ pub fn create_discussion_worktree(
     }
 
     // Create the worktree with a new branch based on base_branch
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .arg(base_branch)
@@ -901,7 +900,7 @@ struct WorktreeEntry {
 }
 
 fn worktree_entries(repo_path: &Path) -> Vec<WorktreeEntry> {
-    let Ok(output) = sync_cmd("git")
+    let Ok(output) = crate::core::cmd::git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -937,7 +936,7 @@ fn is_strictly_inside(path: &Path, root: &Path) -> bool {
 }
 
 fn force_remove_worktree(repo_path: &Path, path: &Path) -> bool {
-    let removed = sync_cmd("git")
+    let removed = crate::core::cmd::git_cmd()
         .args(["worktree", "remove", "--force"])
         .arg(path)
         .current_dir(repo_path)
@@ -1042,7 +1041,7 @@ pub fn reattach_worktree(
     ensure_local_git_exclude(repo_path, ".kronn/")?;
 
     if crate::core::env::is_docker() {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -1051,7 +1050,7 @@ pub fn reattach_worktree(
                 &repo_path.to_string_lossy(),
             ])
             .output();
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -1063,13 +1062,13 @@ pub fn reattach_worktree(
     }
 
     // Prune stale worktree entries first (old /data/workspaces/ refs)
-    let _ = sync_cmd("git")
+    let _ = crate::core::cmd::git_cmd()
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
 
     // Attach existing branch to new worktree path (no -b, branch already exists)
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "add"])
         .arg(&worktree_path)
         .arg(existing_branch)
@@ -1099,7 +1098,7 @@ pub fn reattach_worktree(
 
 /// Find the branch associated with a worktree path (before removal).
 fn find_branch_for_worktree(repo_path: &Path, worktree_path: &str) -> Option<String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -1157,7 +1156,7 @@ pub fn remove_discussion_worktree(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "remove", "--force", worktree_path])
         .current_dir(repo_path)
         .output()
@@ -1165,7 +1164,7 @@ pub fn remove_discussion_worktree(
 
     if !output.status.success() && !wt_relative.is_empty() {
         // Git may know the worktree by relative path (due to relative gitdir refs)
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["worktree", "remove", "--force", &wt_relative])
             .current_dir(repo_path)
             .output();
@@ -1183,7 +1182,7 @@ pub fn remove_discussion_worktree(
 
     // Prune the admin entry (`.git/worktrees/<name>`) so a removed checkout stops
     // counting, whichever path above removed the directory.
-    let _ = sync_cmd("git")
+    let _ = crate::core::cmd::git_cmd()
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
@@ -1202,7 +1201,7 @@ pub fn remove_discussion_worktree(
     }
 
     if let Some(branch) = branch_to_delete {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["branch", "-D", &branch])
             .current_dir(repo_path)
             .output();
@@ -1222,7 +1221,7 @@ pub fn remove_discussion_worktree(
 
 /// Read the current HEAD commit SHA of a git dir (repo or worktree).
 fn git_head(dir: &Path) -> Result<String, String> {
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["rev-parse", "HEAD"])
         .current_dir(dir)
         .output()
@@ -1239,7 +1238,7 @@ fn git_head(dir: &Path) -> Result<String, String> {
 
 /// Resolve a local branch to its commit SHA, or `None` when it does not exist.
 fn branch_commit(repo_path: &Path, branch: &str) -> Option<String> {
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args([
             "rev-parse",
             "--verify",
@@ -1284,7 +1283,7 @@ pub fn reject_option_like_rev(rev: &str) -> Result<(), String> {
 /// builds on. Returns an error the saga surfaces as a refusal (never a guess).
 pub fn resolve_commit(repo_path: &Path, rev: &str) -> Result<String, String> {
     reject_option_like_rev(rev)?;
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
         .current_dir(repo_path)
         .output()
@@ -1309,7 +1308,7 @@ pub fn resolve_local_branch(repo_path: &Path, rev: &str) -> Result<String, Strin
     let trimmed = rev.trim();
     let branch = trimmed.strip_prefix("refs/heads/").unwrap_or(trimmed);
     let full_ref = format!("refs/heads/{branch}");
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["show-ref", "--verify", "--quiet", &full_ref])
         .current_dir(repo_path)
         .output()
@@ -1330,7 +1329,7 @@ pub fn target_branch_checkouts(
 ) -> Result<(String, Vec<PathBuf>), String> {
     let branch = resolve_local_branch(repo_path, target)?;
     let branch_field = format!("branch refs/heads/{branch}");
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "list", "--porcelain", "-z"])
         .current_dir(repo_path)
         .output()
@@ -1368,7 +1367,7 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
     let path = path
         .canonicalize()
         .map_err(|error| format!("integration target worktree is unavailable: {error}"))?;
-    let head = sync_cmd("git")
+    let head = crate::core::cmd::git_cmd()
         .args(["symbolic-ref", "--quiet", "HEAD"])
         .current_dir(&path)
         .output()
@@ -1379,7 +1378,7 @@ pub fn integration_target_worktree(repo_path: &Path, target: &str) -> Result<Pat
         return Err("integration target checkout changed branch; refusing to mutate it".into());
     }
     let common_dir = |directory: &Path| -> Result<PathBuf, String> {
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(directory)
             .output()
@@ -1422,7 +1421,7 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
         return Err(format!("refusing backup slug '{slug}'"));
     }
     let full = format!("refs/kronn-backup/{slug}");
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["update-ref", &full, sha])
         .current_dir(repo_path)
         .output()
@@ -1453,13 +1452,13 @@ pub fn write_backup_ref(repo_path: &Path, slug: &str, sha: &str) -> Result<Strin
 pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<CandidateOutcome, String> {
     reject_option_like_rev(base_sha)?;
     // Repositories that enforce DCO reject an unsigned merge commit.
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["merge", "--no-edit", "--signoff", base_sha])
         .current_dir(worktree_path)
         .output()
         .map_err(|e| format!("git merge failed: {e}"))?;
     if !out.status.success() {
-        let files = sync_cmd("git")
+        let files = crate::core::cmd::git_cmd()
             .args(["diff", "--name-only", "--diff-filter=U"])
             .current_dir(worktree_path)
             .output()
@@ -1473,7 +1472,7 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
             .unwrap_or_default();
         // Leave no half-merged tree behind: the worker must find its worktree as
         // it left it, not mid-conflict from a merge it never asked for.
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["merge", "--abort"])
             .current_dir(worktree_path)
             .output();
@@ -1491,7 +1490,7 @@ pub fn build_candidate(worktree_path: &Path, base_sha: &str) -> Result<Candidate
 /// candidate can therefore never be forced over work that landed meanwhile.
 pub fn fast_forward_to(repo_path: &Path, candidate_sha: &str) -> Result<String, String> {
     reject_option_like_rev(candidate_sha)?;
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["merge", "--ff-only", candidate_sha])
         .current_dir(repo_path)
         .output()
@@ -1523,7 +1522,7 @@ pub fn fast_forward_target_to(
 pub fn is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
     reject_option_like_rev(ancestor)?;
     reject_option_like_rev(descendant)?;
-    let out = sync_cmd("git")
+    let out = crate::core::cmd::git_cmd()
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(repo_path)
         .output()
@@ -1557,7 +1556,7 @@ fn task_submodule_head(path: &Path) -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
     }
-    let top_level = sync_cmd("git")
+    let top_level = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(path)
         .output()
@@ -1598,7 +1597,7 @@ fn task_submodule_head(path: &Path) -> Result<Option<String>, String> {
 /// exact SHA. `--no-local` prevents Git from sharing hard-linked object files
 /// or a mutable checkout between concurrent task worktrees.
 pub fn materialize_task_submodules(source_root: &Path, worktree_root: &Path) -> Result<(), String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["ls-files", "--stage", "-z"])
         .current_dir(source_root)
         .output()
@@ -1691,7 +1690,7 @@ pub fn materialize_task_submodules(source_root: &Path, worktree_root: &Path) -> 
             ));
         }
 
-        let source_git_dir = sync_cmd("git")
+        let source_git_dir = crate::core::cmd::git_cmd()
             .args(["rev-parse", "--absolute-git-dir"])
             .current_dir(&source_submodule)
             .output()
@@ -1730,7 +1729,7 @@ pub fn materialize_task_submodules(source_root: &Path, worktree_root: &Path) -> 
             )
         })?;
 
-        let clone = sync_cmd("git")
+        let clone = crate::core::cmd::git_cmd()
             .args(["clone", "--no-local", "--no-checkout", &source_git_dir])
             .arg(&target_submodule)
             .current_dir(worktree_root)
@@ -1748,7 +1747,7 @@ pub fn materialize_task_submodules(source_root: &Path, worktree_root: &Path) -> 
                 String::from_utf8_lossy(&clone.stderr).trim()
             ));
         }
-        let checkout = sync_cmd("git")
+        let checkout = crate::core::cmd::git_cmd()
             .args(["checkout", "--detach", expected_sha])
             .current_dir(&target_submodule)
             .output()
@@ -1919,7 +1918,7 @@ pub fn create_task_worktree(
     assert_managed_task_worktree_path(repo_path, &worktree_path)?;
     ensure_local_git_exclude(repo_path, ".kronn/")?;
     if crate::core::env::is_docker() {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -1928,7 +1927,7 @@ pub fn create_task_worktree(
                 &repo_path.to_string_lossy(),
             ])
             .output();
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args([
                 "config",
                 "--global",
@@ -1940,7 +1939,7 @@ pub fn create_task_worktree(
     }
 
     // Create from the EXACT pinned commit (a SHA, not a branch name).
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["worktree", "add", "-b", &branch])
         .arg(&worktree_path)
         .arg(base_sha)
@@ -2010,18 +2009,18 @@ pub fn remove_task_worktree(
         // if it is still exactly at the pinned base — never delete landed work.
         return match branch_commit(repo_path, expected_branch) {
             None => {
-                let _ = sync_cmd("git")
+                let _ = crate::core::cmd::git_cmd()
                     .args(["worktree", "prune"])
                     .current_dir(repo_path)
                     .output();
                 Ok(())
             }
             Some(sha) if sha == expected_base_sha => {
-                let _ = sync_cmd("git")
+                let _ = crate::core::cmd::git_cmd()
                     .args(["worktree", "prune"])
                     .current_dir(repo_path)
                     .output();
-                let _ = sync_cmd("git")
+                let _ = crate::core::cmd::git_cmd()
                     .args(["branch", "-D", expected_branch])
                     .current_dir(repo_path)
                     .output();
@@ -2071,7 +2070,7 @@ pub fn remove_cancelled_task_worktree(
     let wt = Path::new(worktree_path);
     assert_managed_task_worktree_path(repo_path, wt)?;
     if !wt.exists() {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["worktree", "prune"])
             .current_dir(repo_path)
             .output();
@@ -2111,18 +2110,18 @@ pub fn remove_integrated_task_worktree(
     if !wt.exists() {
         return match branch_commit(repo_path, expected_branch) {
             None => {
-                let _ = sync_cmd("git")
+                let _ = crate::core::cmd::git_cmd()
                     .args(["worktree", "prune"])
                     .current_dir(repo_path)
                     .output();
                 Ok(())
             }
             Some(sha) if sha == integrated_sha => {
-                let _ = sync_cmd("git")
+                let _ = crate::core::cmd::git_cmd()
                     .args(["worktree", "prune"])
                     .current_dir(repo_path)
                     .output();
-                let output = sync_cmd("git")
+                let output = crate::core::cmd::git_cmd()
                     .args(["branch", "-D", expected_branch])
                     .current_dir(repo_path)
                     .output()
@@ -2165,7 +2164,7 @@ pub fn remove_integrated_task_worktree(
 
 /// List all kronn worktrees for a project.
 pub fn list_project_worktrees(repo_path: &Path) -> Vec<WorktreeInfo> {
-    let output = match sync_cmd("git")
+    let output = match crate::core::cmd::git_cmd()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_path)
         .output()
@@ -2289,7 +2288,7 @@ fn parse_porcelain(stdout: &str) -> Vec<DirtyFile> {
 /// dirty, unlocking it would lose the changes. We surface the list so the UI
 /// can block with a "commit first" CTA rather than a blind refusal.
 pub fn worktree_dirty_files(worktree_path: &Path) -> Result<Vec<DirtyFile>, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["status", "--porcelain=v1"])
         .current_dir(worktree_path)
         .output()
@@ -2313,7 +2312,7 @@ pub fn committed_file_changes(
     base_rev: &str,
     head_rev: &str,
 ) -> Result<Vec<CommittedFileChange>, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args([
             "diff",
             "--name-status",
@@ -2372,7 +2371,7 @@ pub fn commit_messages(
 ) -> Result<Vec<(String, String)>, String> {
     reject_option_like_rev(base_rev)?;
     reject_option_like_rev(head_rev)?;
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args([
             "log",
             "-z",
@@ -2404,7 +2403,7 @@ pub fn commit_messages(
 /// Raw bytes of `path` as committed at `rev`.
 pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<Vec<u8>, String> {
     reject_option_like_rev(rev)?;
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["cat-file", "blob", &format!("{rev}:{path}")])
         .current_dir(worktree_path)
         .output()
@@ -2420,7 +2419,7 @@ pub fn file_at_revision(worktree_path: &Path, rev: &str, path: &str) -> Result<V
 
 /// The `Name <email>` that `git commit -s` signs with in this worktree.
 pub fn committer_identity(worktree_path: &Path) -> Result<String, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["var", "GIT_COMMITTER_IDENT"])
         .current_dir(worktree_path)
         .output()
@@ -2447,7 +2446,7 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
     // Branch / detached HEAD detection. `symbolic-ref -q HEAD` returns
     // "refs/heads/<name>" on a branch and fails (exit 1) on detached HEAD —
     // that's how we distinguish the two states without parsing `git status`.
-    let sym = sync_cmd("git")
+    let sym = crate::core::cmd::git_cmd()
         .args(["symbolic-ref", "-q", "--short", "HEAD"])
         .current_dir(repo_path)
         .output()
@@ -2461,7 +2460,7 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
         (String::new(), true)
     };
 
-    let status = sync_cmd("git")
+    let status = crate::core::cmd::git_cmd()
         .args(["status", "--porcelain=v1"])
         .current_dir(repo_path)
         .output()
@@ -2489,7 +2488,7 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
 /// the caller can surface a precise error to the user instead of a
 /// generic 500.
 pub fn checkout_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["checkout", branch])
         .current_dir(repo_path)
         .output()
@@ -2514,7 +2513,7 @@ pub fn checkout_branch(repo_path: &Path, branch: &str) -> Result<(), String> {
 /// `stash_pop_by_message` can find the exact stash even if the user stashed
 /// manually in between.
 pub fn stash_push(repo_path: &Path, message: &str) -> Result<bool, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["stash", "push", "-u", "-m", message])
         .current_dir(repo_path)
         .output()
@@ -2541,7 +2540,7 @@ pub fn stash_push(repo_path: &Path, message: &str) -> Result<bool, String> {
 pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), String> {
     // Find the stash ref matching the message. `git stash list` output
     // looks like: `stash@{0}: On main: <message>`.
-    let list = sync_cmd("git")
+    let list = crate::core::cmd::git_cmd()
         .args(["stash", "list"])
         .current_dir(repo_path)
         .output()
@@ -2562,7 +2561,7 @@ pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), Strin
             )
         })?;
 
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["stash", "pop", stash_ref])
         .current_dir(repo_path)
         .output()
@@ -3807,7 +3806,7 @@ mod tests {
         for invalid in ["missing", "HEAD", "--all"] {
             assert!(integration_target_worktree(repo.path(), invalid).is_err());
         }
-        assert!(sync_cmd("git")
+        assert!(crate::core::cmd::git_cmd()
             .args(["branch", "not-checked-out"])
             .current_dir(repo.path())
             .status()
@@ -3816,7 +3815,7 @@ mod tests {
         assert!(integration_target_worktree(repo.path(), "not-checked-out").is_err());
         let duplicate = tempfile::tempdir().unwrap();
         let duplicate_path = duplicate.path().join("same branch");
-        assert!(sync_cmd("git")
+        assert!(crate::core::cmd::git_cmd()
             .args(["worktree", "add", "--force"])
             .arg(&duplicate_path)
             .arg("main")
@@ -3865,7 +3864,7 @@ mod tests {
         let repo = make_test_repo("pinned-target-path");
         let directory = tempfile::tempdir().unwrap();
         let checkout = directory.path().join("review\n target é");
-        assert!(sync_cmd("git")
+        assert!(crate::core::cmd::git_cmd()
             .args(["worktree", "add", "-b", "review-target"])
             .arg(&checkout)
             .arg("main")
@@ -4487,7 +4486,7 @@ mod tests {
         };
 
         // The candidate contains the parent tip, so the parent can fast-forward to it.
-        let merge_base = sync_cmd("git")
+        let merge_base = crate::core::cmd::git_cmd()
             .args(["merge-base", "--is-ancestor", &parent_tip, &sha])
             .current_dir(repo.path())
             .output()
@@ -4497,7 +4496,7 @@ mod tests {
             "candidate must descend from the parent tip"
         );
 
-        let message = sync_cmd("git")
+        let message = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%B", &sha])
             .current_dir(repo.path())
             .output()
@@ -4551,7 +4550,7 @@ mod tests {
             panic!("a DCO-enforcing repository must accept the integration merge, got {outcome:?}");
         };
 
-        let message = sync_cmd("git")
+        let message = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%B", &sha])
             .current_dir(repo.path())
             .output()
@@ -4561,7 +4560,7 @@ mod tests {
                 .contains("Signed-off-by: Test <test@test.com>"),
             "the sign-off is the configured git identity"
         );
-        let parents = sync_cmd("git")
+        let parents = crate::core::cmd::git_cmd()
             .args(["log", "-1", "--format=%P", &sha])
             .current_dir(repo.path())
             .output()

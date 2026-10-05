@@ -1918,9 +1918,18 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         }
     }
 
-    // Import workflows
+    // Import workflows. A restore keeps the user's own definitions, but one
+    // that fails the editor's Exec rules is imported disabled and named in
+    // the report, never silently (KT-1017); it stays refused at run time.
     for wf in &data.workflows {
-        let w = wf.clone();
+        let mut w = wf.clone();
+        if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
+            w.enabled = false;
+            warnings.push(format!(
+                "Workflow « {} » importé désactivé, à revoir avant de le réactiver : {reason}",
+                w.name
+            ));
+        }
         if let Err(e) = state
             .db
             .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w))
@@ -2020,6 +2029,17 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // directories keep their foreign-key bindings.
     for qe in &data.quick_execs {
         let e = qe.clone();
+        // A Quick Exec has no disabled state to mark it for review: an
+        // unsafe one is left out, and the report says which and why.
+        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
+            &e.name,
+            &e.command,
+            &e.args,
+            e.unmodelled_args_approved == Some(true),
+        ) {
+            warnings.push(format!("Quick Exec « {} » non importé : {reason}", e.name));
+            continue;
+        }
         if let Err(error) = state
             .db
             .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &e))
@@ -2514,7 +2534,7 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
         tracing::info!("open-url suppressed in a test binary: {}", req.url);
         return Json(ApiResponse::ok(()));
     }
-    match open::that(&req.url) {
+    match crate::core::cmd::open_in_system(&req.url) {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => {
             tracing::warn!("Failed to open URL '{}': {}", req.url, e);
@@ -3644,6 +3664,106 @@ mod tests {
         }
     }
 
+    /// KT-1017 — a restore never brings an unsafe Exec line in silently: the
+    /// workflow is imported disabled, the Quick Exec is left out, both are
+    /// named in the report, and safe items import unchanged.
+    #[tokio::test]
+    async fn config_import_flags_unsafe_exec_lines_in_its_report() {
+        let state = test_state();
+        let mut export = build_export(&state).await.expect("build_export");
+        let now = Utc::now();
+        let workflow = |id: &str, name: &str, args: Vec<&str>| -> crate::models::Workflow {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "project_id": null,
+                "trigger": {"type": "Manual"},
+                "steps": [{"name": "greet", "step_type": {"type": "Exec"},
+                           "exec_command": "bash", "exec_args": args}],
+                "actions": [], "safety": {}, "workspace_config": null, "concurrency_limit": null,
+                "exec_allowlist": ["bash"], "enabled": true,
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        export.workflows = vec![
+            workflow(
+                "wf-unsafe",
+                "Unsafe",
+                vec!["-c", "echo \"{{issue.title}}\""],
+            ),
+            workflow(
+                "wf-safe",
+                "Safe",
+                vec!["-c", "echo \"$1\"", "_", "{{issue.title}}"],
+            ),
+        ];
+        let quick_exec = |id: &str, name: &str, args: Vec<&str>| crate::models::QuickExec {
+            id: id.into(),
+            pinned: false,
+            name: name.into(),
+            icon: "⌘".into(),
+            description: String::new(),
+            project_id: None,
+            command: "python3".into(),
+            args: args.into_iter().map(String::from).collect(),
+            timeout_secs: 60,
+            output_format: crate::models::CollectQuickExecOutputFormat::Text,
+            variables: vec![],
+            created_at: now,
+            updated_at: now,
+            unmodelled_args_approved: None,
+        };
+        export.quick_execs = vec![
+            quick_exec("qe-unsafe", "Ticket", vec!["-c", "print('{{ticket}}')"]),
+            quick_exec(
+                "qe-safe",
+                "Echo",
+                vec!["-c", "import sys; print(sys.argv[1])", "{{ticket}}"],
+            ),
+        ];
+
+        let report = do_import_db(&state, &export).await.expect("do_import_db");
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("« Unsafe »") && w.contains("{{issue.title}}")),
+            "{:?}",
+            report.warnings
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("« Ticket »") && w.contains("{{ticket}}")),
+            "{:?}",
+            report.warnings
+        );
+        let workflows = state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap();
+        let unsafe_workflow = workflows.iter().find(|w| w.id == "wf-unsafe").unwrap();
+        assert!(!unsafe_workflow.enabled, "imported disabled");
+        assert!(
+            workflows
+                .iter()
+                .find(|w| w.id == "wf-safe")
+                .unwrap()
+                .enabled
+        );
+        let execs = state
+            .db
+            .with_conn(crate::db::quick_execs::list_quick_execs)
+            .await
+            .unwrap();
+        assert_eq!(
+            execs.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["qe-safe"]
+        );
+    }
+
     /// Saved automation resources and learning rows survive a full export →
     /// import cycle. This also pins v6's Quick Exec table in global backups.
     #[tokio::test]
@@ -3671,6 +3791,7 @@ mod tests {
             variables: vec![],
             created_at: now,
             updated_at: now,
+            unmodelled_args_approved: None,
         };
         state
             .db

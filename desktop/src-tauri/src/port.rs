@@ -9,7 +9,7 @@ use std::io;
 use std::net::TcpListener;
 
 pub use kronn::core::desktop_port::{
-    port_file_path, read_persisted, write_persisted, Persisted, MIN_PORT, PORT_FILE,
+    port_file_path, read_persisted, write_persisted, Persisted, PORT_FILE,
 };
 
 pub struct ChosenPort {
@@ -61,6 +61,7 @@ pub fn bind_loopback(port: u16) -> io::Result<TcpListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kronn::core::desktop_port::MIN_PORT;
 
     #[test]
     fn a_free_saved_port_is_reused() {

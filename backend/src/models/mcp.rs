@@ -79,6 +79,21 @@ pub struct ApiSpec {
     /// `${ENV.KEY}` broker references — never as literal prompt values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_keys: Vec<ApiConfigKey>,
+    /// Headers the broker sends on every call, whatever the auth kind
+    /// (e.g. Notion's mandatory `Notion-Version`). A header given on the
+    /// call itself overrides the default of the same name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_headers: Vec<ApiDefaultHeader>,
+}
+
+/// Fixed request header declared on an API plugin. `value` is a literal
+/// or contains `${ENV.KEY}` references to the config's fields, resolved
+/// server-side so the value never reaches agent prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiDefaultHeader {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -660,6 +675,9 @@ pub struct CustomApiPayload {
     /// shape).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub endpoints: Vec<ApiEndpoint>,
+    /// Headers sent on every call (see `ApiSpec::default_headers`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_headers: Vec<ApiDefaultHeader>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

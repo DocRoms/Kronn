@@ -866,7 +866,7 @@ async fn execute_foreach(
         // everything. Deterministic, 0 token. An Interrupted parent run also
         // reconciles its persisted children below before continuing.
         if !item_id.is_empty() {
-            let git_done = crate::core::cmd::async_cmd("git")
+            let git_done = crate::core::cmd::async_git_cmd()
                 .args([
                     "log",
                     "--oneline",
@@ -931,7 +931,7 @@ async fn execute_foreach(
                             });
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
-                        let _ = crate::core::cmd::async_cmd("git")
+                        let _ = crate::core::cmd::async_git_cmd()
                             .args(add.iter().map(|s| s.as_str()))
                             .current_dir(&ws)
                             .output()
@@ -943,7 +943,7 @@ async fn execute_foreach(
                             .map(|(p, _)| p.as_str())
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let commit = crate::core::cmd::async_cmd("git")
+                        let commit = crate::core::cmd::async_git_cmd()
                             .args([
                                 "-c",
                                 "user.email=autopilot@kronn.local",

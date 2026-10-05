@@ -9447,7 +9447,7 @@ Suite de la réponse.";
         let main = root.path().join("main");
         std::fs::create_dir(&main).unwrap();
         let git = |cwd: &std::path::Path, args: &[&str]| {
-            let output = crate::core::cmd::sync_cmd("git")
+            let output = crate::core::cmd::git_cmd()
                 .args(args)
                 .current_dir(cwd)
                 .output()
@@ -9711,7 +9711,7 @@ Suite de la réponse.";
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn copilot_task_worker_preflight_times_out_and_terminates_the_child() {
-        let mut child = crate::core::cmd::async_cmd("sh")
+        let mut child = tokio::process::Command::new("sh")
             .args(["-c", "read -r ignored"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -9809,7 +9809,7 @@ Suite de la réponse.";
     fn claude_task_worker_command_receipt_contains_sizes_not_values() {
         let secret_marker = "must-not-leak";
         let settings = r#"{"sandbox":{"enabled":true}}"#;
-        let mut command = crate::core::cmd::async_cmd("claude");
+        let mut command = tokio::process::Command::new("claude");
         command
             .args([
                 "--print",
@@ -9840,7 +9840,7 @@ Suite de la réponse.";
 
         // In an environment variable — the likeliest source: a key decrypted
         // with a stale material, or a config read as UTF-16.
-        let mut command = crate::core::cmd::async_cmd("claude");
+        let mut command = tokio::process::Command::new("claude");
         command
             .args(["--print", "hello"])
             .env("ANTHROPIC_API_KEY", secret_with_nul);
@@ -9857,7 +9857,7 @@ Suite de la réponse.";
 
         // In an argument — identified by the flag it follows, since positions
         // shift between agents.
-        let mut command = crate::core::cmd::async_cmd("claude");
+        let mut command = tokio::process::Command::new("claude");
         command.args([
             "--print",
             "--append-system-prompt",
@@ -9874,7 +9874,7 @@ Suite de la réponse.";
 
         // The working directory: Kronn derives it from a project path it did
         // not necessarily create, and it fails the spawn just the same.
-        let mut command = crate::core::cmd::async_cmd("claude");
+        let mut command = tokio::process::Command::new("claude");
         command.arg("--print").current_dir("/tmp/pro\0ject");
         let offender =
             super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
@@ -9884,14 +9884,14 @@ Suite de la réponse.";
         );
 
         // The program name.
-        let mut command = crate::core::cmd::async_cmd("cla\0ude");
+        let mut command = tokio::process::Command::new("cla\0ude");
         command.arg("--print");
         let offender =
             super::super::nul_byte_offender(&command).expect("a NUL byte must be detected");
         assert!(offender.contains("program name"), "got: {offender}");
 
         // A clean command must not be refused.
-        let mut command = crate::core::cmd::async_cmd("claude");
+        let mut command = tokio::process::Command::new("claude");
         command
             .args(["--print", "--append-system-prompt", "clean", "hello"])
             .env("ANTHROPIC_API_KEY", "sk-ant-clean")
@@ -10438,7 +10438,7 @@ Suite de la réponse.";
             let dir = tempfile::tempdir().expect("temporary installation");
             let bridge = dir.path().join("Kronn MCP é.exe");
             std::fs::write(&bridge, b"bundle fixture").expect("bridge file");
-            let output = crate::core::cmd::sync_cmd(
+            let output = std::process::Command::new(
                 std::env::current_exe().expect("test executable"),
             )
             .args(["--exact",
@@ -12729,7 +12729,7 @@ Suite de la réponse.";
     /// Spawn `sh -c <script>` as its own process group, like production.
     #[cfg(unix)]
     fn spawn_group_leader(script: &str) -> (tokio::process::Child, i32) {
-        let mut cmd = crate::core::cmd::async_cmd("sh");
+        let mut cmd = tokio::process::Command::new("sh");
         cmd.args(["-c", script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -12846,7 +12846,7 @@ sleep 3600
         std::fs::write(&script_path, test_script).expect("Failed to write test script");
 
         // Spawn the test agent using the production spawn path
-        let mut cmd = crate::core::cmd::async_cmd("sh");
+        let mut cmd = tokio::process::Command::new("sh");
         cmd.arg(script_path.to_string_lossy().as_ref())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -12878,7 +12878,7 @@ sleep 3600
         // This process inherits the test runner's group, which is distinct from
         // the dedicated agent group. The guard always kills and reaps it.
         let mut witness = Witness(
-            crate::core::cmd::sync_cmd("sleep")
+            std::process::Command::new("sleep")
                 .arg("120")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -12964,7 +12964,7 @@ sleep 3600
 
     #[tokio::test]
     async fn agent_process_exposes_structured_transport_usage() {
-        let child = crate::core::cmd::async_cmd("sh")
+        let child = tokio::process::Command::new("sh")
             .args(["-c", "exit 0"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

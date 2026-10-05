@@ -1894,6 +1894,34 @@ body"#;
     /// `api_*` configs in every workflow and never tells the user
     /// they could declare a Custom API plugin for their private
     /// vendor (the 0.8.1 feature stays invisible).
+    /// Fixed vendor headers (Notion `Notion-Version`) live on the plugin:
+    /// the architect must propose them there instead of patching each step.
+    #[test]
+    fn workflow_architect_skill_teaches_plugin_default_headers() {
+        let skills = list_all_skills();
+        let arch = skills
+            .iter()
+            .find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+        assert!(
+            c.contains("Headers sent on every call"),
+            "skill must name the plugin form section"
+        );
+        assert!(
+            c.contains("propose it as a default header"),
+            "skill must tell the architect to propose the header"
+        );
+        assert!(
+            c.contains("missing_version"),
+            "skill must map the 400 symptom to the plugin-level fix"
+        );
+        assert!(
+            c.contains("Do not repeat them in `api_headers`"),
+            "skill must forbid per-step duplication"
+        );
+    }
+
     #[test]
     fn workflow_architect_skill_teaches_reuse_and_helpers() {
         let skills = list_all_skills();

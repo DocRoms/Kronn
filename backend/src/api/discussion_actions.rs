@@ -209,6 +209,7 @@ async fn execute_claimed_action(
             let response = crate::api::quick_apis::run_qa(
                 State(state.clone()),
                 Path(action.target_id.clone()),
+                None,
                 Json(RunQuickApiRequest {
                     variables,
                     workflow_run_id: None,
@@ -267,6 +268,7 @@ async fn execute_claimed_action(
             let response = crate::api::quick_execs::run(
                 State(state.clone()),
                 Path(action.target_id.clone()),
+                None,
                 Json(RunQuickExecRequest {
                     variables,
                     launch: Some(launch.clone()),

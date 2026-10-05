@@ -2,30 +2,11 @@
 
 use crate::core::cmd::sync_cmd;
 use crate::models::*;
-use rusqlite::Connection;
 use std::path::Path;
 
 const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
 pub(crate) const GIT_COMMIT_PAGE_DEFAULT: u32 = 40;
 pub(crate) const GIT_COMMIT_PAGE_MAX: u32 = 100;
-
-/// Resolve a GitHub token from MCP configs in the database.
-/// Looks for configs with server_id "mcp-github" and extracts GITHUB_PERSONAL_ACCESS_TOKEN.
-pub fn resolve_github_token(conn: &Connection, secret: &str) -> Option<String> {
-    let configs = crate::db::mcps::list_configs(conn).ok()?;
-    for config in &configs {
-        if config.server_id == "mcp-github" {
-            if let Ok(env) = crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
-                if let Some(token) = env.get("GITHUB_PERSONAL_ACCESS_TOKEN") {
-                    if !token.is_empty() {
-                        return Some(token.clone());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Parse `git diff --name-status <base>...HEAD` output into structured file
 /// statuses. Each non-rename line is `<code>\t<path>`; rename/copy lines are
@@ -94,7 +75,7 @@ fn run_git_commit_page(
     limit: u32,
 ) -> Result<(Vec<GitCommitSummary>, u32, bool), String> {
     let (offset, limit) = normalized_commit_page(offset, limit);
-    let count = sync_cmd("git")
+    let count = crate::core::cmd::git_cmd()
         .args(["rev-list", "--count", range, "--"])
         .current_dir(repo_path)
         .output()
@@ -112,7 +93,7 @@ fn run_git_commit_page(
 
     let skip = format!("--skip={offset}");
     let max_count = format!("--max-count={limit}");
-    let log = sync_cmd("git")
+    let log = crate::core::cmd::git_cmd()
         .args([
             "log",
             "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s",
@@ -142,7 +123,7 @@ pub fn run_git_range_page(
     commit_limit: u32,
 ) -> Result<(Vec<GitFileStatus>, Vec<GitCommitSummary>, u32, bool), String> {
     let range = format!("{base_sha}..{head_sha}");
-    let diff = sync_cmd("git")
+    let diff = crate::core::cmd::git_cmd()
         .args(["diff", "--name-status", &range, "--"])
         .current_dir(repo_path)
         .output()
@@ -167,7 +148,7 @@ pub fn run_git_diff_range(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let range = format!("{base_sha}..{head_sha}");
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["diff", &range, "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -182,18 +163,27 @@ pub fn run_git_diff_range(
 }
 
 /// Run `git status` in the given repo directory and return structured status.
+/// A PR lookup there uses `gh`'s own login only.
 pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
-    run_git_status_page(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT)
+    run_git_status_page(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, &[])
 }
 
 /// Run `git status` with an explicitly bounded commit-history page. File
 /// status remains complete and independent from commit pagination.
+/// `github_env` is the project's GitHub variables for the PR lookup.
 pub fn run_git_status_page(
     repo_path: &Path,
     commit_offset: u32,
     commit_limit: u32,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, commit_offset, commit_limit, true, true)
+    run_git_status_impl(
+        repo_path,
+        commit_offset,
+        commit_limit,
+        true,
+        Some(github_env),
+    )
 }
 
 /// Same status without the network PR lookup: a PR link already known from an
@@ -203,7 +193,7 @@ pub fn run_git_status_page_without_pr_lookup(
     commit_offset: u32,
     commit_limit: u32,
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, commit_offset, commit_limit, true, false)
+    run_git_status_impl(repo_path, commit_offset, commit_limit, true, None)
 }
 
 /// Selected discussion workspaces replace branch-relative evidence with their
@@ -211,8 +201,15 @@ pub fn run_git_status_page_without_pr_lookup(
 /// still collecting the independent working-tree and repository metadata.
 pub(crate) fn run_git_status_without_commit_evidence(
     repo_path: &Path,
+    github_env: &[(String, String)],
 ) -> Result<GitStatusResponse, String> {
-    run_git_status_impl(repo_path, 0, GIT_COMMIT_PAGE_DEFAULT, false, true)
+    run_git_status_impl(
+        repo_path,
+        0,
+        GIT_COMMIT_PAGE_DEFAULT,
+        false,
+        Some(github_env),
+    )
 }
 
 fn run_git_status_impl(
@@ -220,10 +217,11 @@ fn run_git_status_impl(
     commit_offset: u32,
     commit_limit: u32,
     include_commit_evidence: bool,
-    lookup_pr: bool,
+    // `None`: no network PR lookup; `Some`: the GitHub variables for it.
+    lookup_pr: Option<&[(String, String)]>,
 ) -> Result<GitStatusResponse, String> {
     let run = |args: &[&str]| -> Result<String, String> {
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -232,7 +230,11 @@ fn run_git_status_impl(
     };
 
     let run_with_status = |args: &[&str]| -> (String, bool) {
-        match sync_cmd("git").args(args).current_dir(repo_path).output() {
+        match crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+        {
             Ok(o) => (
                 String::from_utf8_lossy(&o.stdout).trim().to_string(),
                 o.status.success(),
@@ -381,10 +383,9 @@ fn run_git_status_impl(
 
     // Check if there's an open PR/MR for this branch
     let pr_url = if !branch.is_empty() && !is_default_branch {
-        if lookup_pr {
-            cached_pr_url(repo_path, &branch)
-        } else {
-            known_pr_url(repo_path, &branch)
+        match lookup_pr {
+            Some(github_env) => cached_pr_url(repo_path, &branch, github_env),
+            None => known_pr_url(repo_path, &branch),
         }
     } else {
         None
@@ -434,7 +435,7 @@ fn run_git_status_impl(
 }
 
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    sync_cmd("git")
+    crate::core::cmd::git_cmd()
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -674,7 +675,7 @@ pub(crate) fn normalize_git_remote_web_url(raw: &str) -> Option<String> {
 }
 
 fn git_remote_web_url(repo_path: &Path) -> Option<String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output()
@@ -691,7 +692,7 @@ fn git_remote_web_url(repo_path: &Path) -> Option<String> {
 /// Returns an empty string when none resolves (detached / fresh repo).
 pub fn resolve_default_branch(repo_path: &Path) -> String {
     let ok = |args: &[&str]| -> bool {
-        sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -720,7 +721,7 @@ pub fn run_git_diff_committed(
     file_path: &str,
 ) -> Result<GitDiffResponse, String> {
     let git_stdout = |args: &[&str]| -> String {
-        sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -747,7 +748,7 @@ pub fn run_git_diff_committed(
 
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
     let run_diff = |args: &[&str]| -> String {
-        sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .args(args)
             .current_dir(repo_path)
             .output()
@@ -856,7 +857,7 @@ fn parse_git_blame_porcelain(output: &str) -> Vec<GitBlameLine> {
 
 /// Return one Git author/date annotation per current working-tree line.
 pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameResponse, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["blame", "--line-porcelain", "--", file_path])
         .current_dir(repo_path)
         .output()
@@ -903,7 +904,7 @@ pub fn run_git_commit_detail(
     // Unit separator between fields, so a subject containing tabs or pipes
     // can't shift the parse.
     let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%s%x1f%b";
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["show", "--no-patch", &format!("--format={format}"), sha])
         .current_dir(repo_path)
         .output()
@@ -923,7 +924,7 @@ pub fn run_git_commit_detail(
     // `diff-tree` rather than `git show --name-only`: `--no-patch` would have
     // suppressed the file list too, and a merge commit prints nothing without
     // `-m` — so an empty result here means "nothing attributable", not an error.
-    let files = sync_cmd("git")
+    let files = crate::core::cmd::git_cmd()
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -942,7 +943,7 @@ pub fn run_git_commit_detail(
         })
         .unwrap_or(0);
 
-    let mut branches: Vec<String> = sync_cmd("git")
+    let mut branches: Vec<String> = crate::core::cmd::git_cmd()
         .args([
             "branch",
             "-a",
@@ -994,7 +995,7 @@ pub fn run_git_commit_patch(
         return Err("invalid commit hash".to_string());
     }
 
-    let header = sync_cmd("git")
+    let header = crate::core::cmd::git_cmd()
         .args(["show", "--no-patch", "--format=%H%x1f%h%x1f%s", sha])
         .current_dir(repo_path)
         .output()
@@ -1013,7 +1014,7 @@ pub fn run_git_commit_patch(
 
     // No parent listed → root commit. Asked separately because `--root` changes
     // what the patch means, and the UI says so.
-    let is_root = sync_cmd("git")
+    let is_root = crate::core::cmd::git_cmd()
         .args(["rev-list", "--parents", "-n", "1", sha])
         .current_dir(repo_path)
         .output()
@@ -1026,7 +1027,7 @@ pub fn run_git_commit_patch(
         .unwrap_or(false);
 
     // `-m` splits a merge into one patch per parent instead of printing nothing.
-    let patch_out = sync_cmd("git")
+    let patch_out = crate::core::cmd::git_cmd()
         .args([
             "show",
             "--format=",
@@ -1064,7 +1065,7 @@ pub fn run_git_commit_patch(
         full.to_string()
     };
 
-    let files_changed = sync_cmd("git")
+    let files_changed = crate::core::cmd::git_cmd()
         .args([
             "diff-tree",
             "--no-commit-id",
@@ -1113,7 +1114,7 @@ fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize,
         let file_abs = repo_path.join(clean_file);
 
         if file_abs.exists() {
-            let add_output = sync_cmd("git")
+            let add_output = crate::core::cmd::git_cmd()
                 .args(["add", "--", clean_file])
                 .current_dir(repo_path)
                 .output()
@@ -1128,7 +1129,7 @@ fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize,
                 );
             }
         } else {
-            let rm_output = sync_cmd("git")
+            let rm_output = crate::core::cmd::git_cmd()
                 .args(["rm", "--cached", "--ignore-unmatch", "--", clean_file])
                 .current_dir(repo_path)
                 .output();
@@ -1142,18 +1143,18 @@ fn stage_explicit_paths(repo_path: &Path, clean_files: &[&str]) -> Result<usize,
 
 /// Give the repository a fallback git identity when none is configured.
 fn ensure_git_identity(repo_path: &Path) {
-    let has_user = sync_cmd("git")
+    let has_user = crate::core::cmd::git_cmd()
         .args(["config", "user.name"])
         .current_dir(repo_path)
         .output()
         .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false);
     if !has_user {
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["config", "user.name", "Kronn"])
             .current_dir(repo_path)
             .status();
-        let _ = sync_cmd("git")
+        let _ = crate::core::cmd::git_cmd()
             .args(["config", "user.email", "kronn@localhost"])
             .current_dir(repo_path)
             .status();
@@ -1176,7 +1177,7 @@ fn run_commit_command(
         .map_err(|error| {
             format!("Failed to inherit data-directory lock for git commit: {error}")
         })?;
-    let mut commit_command = sync_cmd("git");
+    let mut commit_command = crate::core::cmd::git_cmd();
     commit_command.args(commit_args).current_dir(repo_path);
     #[cfg(unix)]
     if let Some(child_lock) = child_lock.as_ref() {
@@ -1199,7 +1200,7 @@ fn run_commit_command(
         return Err(format!("git commit failed: {}", stderr.trim()));
     }
 
-    let hash_output = sync_cmd("git")
+    let hash_output = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--short", "HEAD"])
         .current_dir(repo_path)
         .output()
@@ -1262,7 +1263,7 @@ pub fn run_git_commit_with_child_lock(
 /// Whether `repo_path` is in the middle of a merge: git keeps `MERGE_HEAD` in
 /// the worktree's own git dir, so this holds per linked worktree.
 pub fn merge_in_progress(repo_path: &Path) -> bool {
-    sync_cmd("git")
+    crate::core::cmd::git_cmd()
         .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
         .current_dir(repo_path)
         .output()
@@ -1272,7 +1273,7 @@ pub fn merge_in_progress(repo_path: &Path) -> bool {
 
 /// Run a `git diff`-style command and split its NUL-separated path list.
 fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -1295,7 +1296,7 @@ fn git_path_list(repo_path: &Path, args: &[&str]) -> Result<Vec<String>, String>
 /// base. Several bases (a criss-cross history) widen the set, never narrow it;
 /// with none (unrelated histories) every path where the two sides differ counts.
 fn paths_changed_by_merged_side(repo_path: &Path) -> Result<Vec<String>, String> {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["merge-base", "--all", "HEAD", "MERGE_HEAD"])
         .current_dir(repo_path)
         .output()
@@ -1405,7 +1406,7 @@ pub fn run_git_merge_commit_with_child_lock(
     commit_args.extend(["-m", message]);
     let hash = run_commit_command(repo_path, &commit_args, data_dir_lock)?;
 
-    let has_second_parent = sync_cmd("git")
+    let has_second_parent = crate::core::cmd::git_cmd()
         .args(["rev-parse", "-q", "--verify", "HEAD^2"])
         .current_dir(repo_path)
         .output()
@@ -1423,25 +1424,64 @@ pub fn run_git_merge_commit_with_child_lock(
     })
 }
 
-/// Convert a git SSH URL to HTTPS with embedded token for push.
-/// `git@github.com:org/repo.git` → `https://x-access-token:TOKEN@github.com/org/repo.git`
-fn ssh_to_https_with_token(remote_url: &str, token: &str) -> Option<String> {
-    remote_url
+/// The HTTPS URL of a GitHub remote (SSH or HTTPS form), without any
+/// credential in it.
+fn github_https_url(remote_url: &str) -> Option<String> {
+    let path = remote_url
         .strip_prefix("git@github.com:")
-        .map(|rest| format!("https://x-access-token:{}@github.com/{}", token, rest))
+        .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))
         .or_else(|| {
-            remote_url
-                .strip_prefix("git@gitlab.com:")
-                .map(|rest| format!("https://oauth2:{}@gitlab.com/{}", token, rest))
-        })
+            let rest = remote_url.strip_prefix("https://")?;
+            let host_and_path = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+            host_and_path.strip_prefix("github.com/")
+        })?;
+    (!path.is_empty()).then(|| format!("https://github.com/{path}"))
 }
 
-/// Push the current branch to origin.
+/// The authenticated `git push`: the token never appears in an argument or
+/// in a variable a hook reads by name. It travels as an `http.extraHeader`
+/// scoped to github.com through `GIT_CONFIG_*`, with hooks off, no
+/// credential helper (a repository's could receive it) and TLS verified.
+fn authenticated_push_command(
+    repo_path: &Path,
+    https_url: &str,
+    branch: &str,
+    token: &str,
+) -> std::process::Command {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let header = format!(
+        "Authorization: Basic {}",
+        STANDARD.encode(format!("x-access-token:{token}"))
+    );
+    let mut cmd = crate::core::cmd::git_cmd();
+    cmd.args([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "http.sslVerify=true",
+        "push",
+        "--no-verify",
+        "-u",
+        https_url,
+        branch,
+    ])
+    .current_dir(repo_path)
+    .env("GIT_CONFIG_COUNT", "1")
+    .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraHeader")
+    .env("GIT_CONFIG_VALUE_0", header);
+    cmd
+}
+
+/// Push the current branch to origin. `github_env` is the project's GitHub
+/// variables (`github_connection::env_for_launch`): its token, when the
+/// project is connected and the remote is on GitHub, authenticates the push.
 pub fn run_git_push(
     repo_path: &Path,
-    github_token: Option<&str>,
+    github_env: &[(String, String)],
 ) -> Result<GitPushResponse, String> {
-    let branch_output = sync_cmd("git")
+    let branch_output = crate::core::cmd::git_cmd()
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
@@ -1455,29 +1495,31 @@ pub fn run_git_push(
         return Err("Cannot determine current branch (detached HEAD?)".to_string());
     }
 
-    // Determine push target: if we have a token and the remote is SSH, use HTTPS with embedded token
-    let push_target = if let Some(token) = github_token {
-        let remote_url = sync_cmd("git")
+    let token = github_env
+        .iter()
+        .find(|(name, value)| name == "GH_TOKEN" && !value.is_empty())
+        .map(|(_, value)| value.as_str());
+    let authenticated = token.and_then(|token| {
+        let remote_url = crate::core::cmd::git_cmd()
             .env("GIT_TERMINAL_PROMPT", "0")
             .args(["remote", "get-url", "origin"])
             .current_dir(repo_path)
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
-        ssh_to_https_with_token(&remote_url, token)
-    } else {
-        None
-    };
+        github_https_url(&remote_url).map(|url| (url, token))
+    });
 
-    let mut cmd = sync_cmd("git");
-    if let Some(ref https_url) = push_target {
-        // Push to HTTPS URL with embedded token (avoids SSH auth issues)
-        cmd.args(["push", "-u", https_url, &branch]);
-    } else {
-        // Fallback: push to origin via SSH
-        cmd.args(["push", "-u", "origin", &branch]);
-    }
-    cmd.current_dir(repo_path);
+    let mut cmd = match authenticated {
+        Some((url, token)) => authenticated_push_command(repo_path, &url, &branch, token),
+        None => {
+            // The user's own credentials (SSH agent, credential helper).
+            let mut cmd = crate::core::cmd::git_cmd();
+            cmd.args(["push", "-u", "origin", &branch])
+                .current_dir(repo_path);
+            cmd
+        }
+    };
     // Never let git block the thread on an interactive prompt (SSH passphrase,
     // username/password): this runs on a blocking thread with no timeout, so a
     // prompt would hang it forever. Fail fast instead. The low-speed envs abort
@@ -1485,9 +1527,6 @@ pub fn run_git_push(
     cmd.env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
         .env("GIT_HTTP_LOW_SPEED_TIME", "60");
-    if let Some(token) = github_token {
-        cmd.env("GH_TOKEN", token);
-    }
     let push_output = cmd
         .output()
         .map_err(|e| format!("Failed to run git push: {}", e))?;
@@ -1712,7 +1751,7 @@ pub fn exec_command(
     github_env: &[(String, String)],
 ) -> Result<std::process::Command, String> {
     let argv = exec_argv(repo_path, cmd)?;
-    let mut command = sync_cmd(&argv[0]);
+    let mut command = sync_cmd(&argv[0], crate::core::child_env::ChildRoute::ProjectExec);
     command.args(&argv[1..]).current_dir(repo_path);
     crate::core::child_env::isolate_with_github(
         &mut command,
@@ -1756,7 +1795,7 @@ pub fn run_exec(
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
 pub fn detect_provider(repo_path: &Path) -> &'static str {
-    let output = sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output();
@@ -1778,17 +1817,36 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
     }
 }
 
+/// `gh` or `glab` in a repository. They start git there themselves, so they
+/// get the git-host environment, never the backend's (KT-1006); `gh` also
+/// gets the project's GitHub variables (its §4.5 connection), nothing else.
+fn host_cli_command(
+    program: &str,
+    repo_path: &Path,
+    github_env: &[(String, String)],
+) -> std::process::Command {
+    use crate::core::child_env::{self, ChildRoute};
+    let mut command = sync_cmd(program, ChildRoute::GitHost);
+    command.current_dir(repo_path);
+    if program == "gh" {
+        crate::core::github_connection::apply_launch_env(&mut command, github_env);
+    }
+    child_env::seal(&mut command, ChildRoute::GitHost, child_env::GITHUB_ENV);
+    command
+}
+
 /// Create a pull/merge request via gh (GitHub) or glab (GitLab) CLI.
 /// Automatically pushes the current branch first if it has no upstream.
+/// `github_env` is the project's GitHub variables (`env_for_launch`).
 pub fn run_create_pr(
     repo_path: &Path,
     title: &str,
     body: &str,
     base: &str,
-    github_token: Option<&str>,
+    github_env: &[(String, String)],
 ) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
-    let has_upstream = sync_cmd("git")
+    let has_upstream = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
         .current_dir(repo_path)
         .output()
@@ -1796,7 +1854,7 @@ pub fn run_create_pr(
         .unwrap_or(false);
 
     if !has_upstream {
-        let push_result = run_git_push(repo_path, github_token)?;
+        let push_result = run_git_push(repo_path, github_env)?;
         if !push_result.success {
             return Err(format!(
                 "Auto-push failed before PR creation: {}",
@@ -1822,9 +1880,8 @@ pub fn run_create_pr(
                 args.push("--description");
                 args.push(body);
             }
-            sync_cmd("glab")
+            host_cli_command("glab", repo_path, github_env)
                 .args(&args)
-                .current_dir(repo_path)
                 .output()
                 .map_err(|e| format!("Failed to run glab: {} (is glab installed?)", e))?
         }
@@ -1837,12 +1894,9 @@ pub fn run_create_pr(
                 args.push("--body");
                 args.push(body);
             }
-            let mut cmd = sync_cmd("gh");
-            cmd.args(&args).current_dir(repo_path);
-            if let Some(token) = github_token {
-                cmd.env("GH_TOKEN", token);
-            }
-            cmd.output()
+            host_cli_command("gh", repo_path, github_env)
+                .args(&args)
+                .output()
                 .map_err(|e| format!("Failed to run gh: {} (is gh installed?)", e))?
         }
     };
@@ -1877,7 +1931,11 @@ static PR_URLS: std::sync::LazyLock<std::sync::Mutex<PrUrlCache>> =
 
 /// [`check_pr_url`], reused for [`PR_URL_TTL`] per repository and branch,
 /// "no PR" included.
-pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
+pub fn cached_pr_url(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> Option<String> {
     let key = (repo_path.to_path_buf(), branch.to_string());
     if let Ok(cache) = PR_URLS.lock() {
         if let Some((url, at)) = cache.get(&key) {
@@ -1886,7 +1944,7 @@ pub fn cached_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
             }
         }
     }
-    let url = check_pr_url(repo_path, branch);
+    let url = check_pr_url(repo_path, branch, github_env);
     if let Ok(mut cache) = PR_URLS.lock() {
         cache.retain(|_, (_, at)| at.elapsed() < PR_URL_TTL);
         cache.insert(key, (url.clone(), std::time::Instant::now()));
@@ -1936,23 +1994,12 @@ fn output_within(
 }
 
 /// Check if an open PR/MR exists for a branch.
-pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
-    let provider = detect_provider(repo_path);
-    let mut command = match provider {
-        "gitlab" => {
-            let mut command = sync_cmd("glab");
-            command.args([
-                "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
-            ]);
-            command
-        }
-        _ => {
-            let mut command = sync_cmd("gh");
-            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
-            command
-        }
-    };
-    command.current_dir(repo_path);
+pub fn check_pr_url(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> Option<String> {
+    let command = pr_lookup_command(repo_path, branch, github_env);
     let output = output_within(command, PR_URL_LOOKUP_LIMIT)?;
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1963,6 +2010,28 @@ pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
         }
     } else {
         None
+    }
+}
+
+/// The `gh pr view` / `glab mr view` process [`check_pr_url`] starts.
+fn pr_lookup_command(
+    repo_path: &Path,
+    branch: &str,
+    github_env: &[(String, String)],
+) -> std::process::Command {
+    match detect_provider(repo_path) {
+        "gitlab" => {
+            let mut command = host_cli_command("glab", repo_path, github_env);
+            command.args([
+                "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
+            ]);
+            command
+        }
+        _ => {
+            let mut command = host_cli_command("gh", repo_path, github_env);
+            command.args(["pr", "view", branch, "--json", "url", "--jq", ".url"]);
+            command
+        }
     }
 }
 
@@ -2012,11 +2081,164 @@ pub fn default_pr_template(branch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// `gh` and `glab` start git in the repository: they get the git-host
+    /// environment and the project's GitHub token, never the backend's.
+    #[cfg(unix)]
+    #[test]
+    fn gh_and_glab_run_without_the_backend_environment() {
+        use crate::core::child_env::probe;
+        probe::plant_real_sentinel();
+        let bin = tempfile::tempdir().unwrap();
+        let gh_out = probe::env_dumping_program(bin.path(), "gh");
+        let glab_out = probe::env_dumping_program(bin.path(), "glab");
+        let path = format!(
+            "{}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+            bin.path().display()
+        );
+        let repo = |remote: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+                assert!(crate::core::cmd::git_cmd()
+                    .args(&args)
+                    .current_dir(dir.path())
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            dir
+        };
+        let github = repo("https://github.com/acme/app.git");
+        let gitlab = repo("https://gitlab.com/acme/app.git");
+        let project_env = vec![("GH_TOKEN".to_string(), "project-token".to_string())];
+        let home = bin.path().to_str().unwrap();
+        let create = probe::with_secret_parent(&path, home, || {
+            check_pr_url(github.path(), "feature", &project_env);
+            check_pr_url(gitlab.path(), "feature", &project_env);
+            host_cli_command("gh", github.path(), &project_env)
+        });
+
+        let gh = probe::read_dump(&gh_out);
+        probe::assert_dump_without_secrets(&gh, &["GH_TOKEN"]);
+        assert_eq!(
+            gh.get("GH_TOKEN").map(String::as_str),
+            Some("project-token"),
+            "gh gets the connected project's token, not the backend's"
+        );
+        let glab = probe::read_dump(&glab_out);
+        probe::assert_dump_without_secrets(&glab, &[]);
+
+        probe::assert_built_without_secrets(&create, &path, &["GH_TOKEN"]);
+        assert_eq!(
+            probe::env_of(&create).get("GH_TOKEN").map(String::as_str),
+            Some("project-token")
+        );
+    }
+
+    #[test]
+    fn github_remotes_map_to_a_credential_free_https_url() {
+        for remote in [
+            "git@github.com:acme/app.git",
+            "ssh://git@github.com/acme/app.git",
+            "https://github.com/acme/app.git",
+            "https://x-access-token:old@github.com/acme/app.git",
+        ] {
+            assert_eq!(
+                github_https_url(remote).as_deref(),
+                Some("https://github.com/acme/app.git"),
+                "{remote}"
+            );
+        }
+        assert_eq!(github_https_url("git@gitlab.com:acme/app.git"), None);
+        assert_eq!(github_https_url("/srv/git/app.git"), None);
+    }
+
+    /// The push token reaches no repository hook: neither in an argument, nor
+    /// in the environment, and the authenticated push runs no hook (B3-10).
+    #[cfg(unix)]
+    #[test]
+    fn a_push_never_shows_its_token_to_a_pre_push_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let token = "ghp_sentinel_push_token";
+        let base = tempfile::tempdir().unwrap();
+        let remote = base.path().join("remote.git");
+        let repo = base.path().join("repo");
+        let git = |dir: &Path, args: &[&str]| {
+            let output = crate::core::cmd::git_cmd()
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Fixture")
+                .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Fixture")
+                .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(
+            base.path(),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        git(base.path(), &["init", "-q", repo.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-q", "-m", "fixture"]);
+        let dump = base.path().join("hook.dump");
+        let hook = repo.join(".git/hooks/pre-push");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\n{{ echo \"$@\"; /usr/bin/env; git config --list; }} >> '{}'\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let encoded = {
+            use base64::{engine::general_purpose::STANDARD, Engine};
+            STANDARD.encode(format!("x-access-token:{token}"))
+        };
+
+        // A non-GitHub remote: the user's own push, hook included, no token.
+        let env = vec![("GH_TOKEN".to_string(), token.to_string())];
+        let pushed = run_git_push(&repo, &env).unwrap();
+        assert!(pushed.success, "{}", pushed.message);
+        let seen = std::fs::read_to_string(&dump).unwrap();
+        assert!(!seen.contains(token) && !seen.contains(&encoded), "{seen}");
+
+        // The authenticated form: token only in a scoped header, hooks off.
+        std::fs::remove_file(&dump).unwrap();
+        let branch = String::from_utf8(
+            crate::core::cmd::git_cmd()
+                .args(["branch", "--show-current"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let mut command =
+            authenticated_push_command(&repo, remote.to_str().unwrap(), branch.trim(), token);
+        assert!(command
+            .get_args()
+            .all(|arg| !arg.to_string_lossy().contains(token)));
+        assert!(!crate::core::child_env::probe::env_of(&command)
+            .values()
+            .any(|value| value.contains(token)));
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!dump.exists(), "the authenticated push ran a hook");
+    }
     #[test]
     fn status_without_pr_lookup_reports_only_a_link_already_known() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            let status = sync_cmd("git")
+            let status = crate::core::cmd::git_cmd()
                 .args(args)
                 .current_dir(dir.path())
                 .output()
@@ -2698,7 +2920,7 @@ filename src/main.rs
             );
         }
 
-        let first = run_git_status_page(repo.path(), 0, 40).unwrap();
+        let first = run_git_status_page(repo.path(), 0, 40, &[]).unwrap();
         assert_eq!(first.commits_total, 305);
         assert_eq!(first.commits_offset, 0);
         assert_eq!(first.commits.len(), 40);
@@ -2706,14 +2928,14 @@ filename src/main.rs
         assert_eq!(first.commits[0].subject, "history 304");
         assert_eq!(first.commits[39].subject, "history 265");
 
-        let second = run_git_status_page(repo.path(), 40, 40).unwrap();
+        let second = run_git_status_page(repo.path(), 40, 40, &[]).unwrap();
         assert_eq!(second.commits_total, 305);
         assert_eq!(second.commits_offset, 40);
         assert_eq!(second.commits.len(), 40);
         assert!(second.commits_truncated);
         assert_eq!(second.commits[0].subject, "history 264");
 
-        let last = run_git_status_page(repo.path(), 300, 1_000).unwrap();
+        let last = run_git_status_page(repo.path(), 300, 1_000, &[]).unwrap();
         assert_eq!(last.commits_total, 305);
         assert_eq!(last.commits_offset, 300);
         assert_eq!(last.commits.len(), 5);

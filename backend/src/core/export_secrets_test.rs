@@ -58,6 +58,7 @@ fn exec(args: &[&str]) -> QuickExec {
         pinned: false,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        unmodelled_args_approved: None,
     }
 }
 

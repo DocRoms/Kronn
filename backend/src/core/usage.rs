@@ -516,17 +516,15 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
     })
 }
 
-/// Run `ccusage <period> --json` and parse the result.
-///
-/// Returns a clean `Err(String)` if the binary is missing or errors — the
-/// caller surfaces it as a friendly "usage reporting unavailable" message
-/// (e.g. in local dev where ccusage isn't installed; it ships in the Docker
-/// image).
-pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
-    let period_kind = normalize_period(period);
-    let program = resolve_ccusage_program()?;
-    let mut command = crate::core::cmd::async_cmd(program);
+/// The `ccusage` process: the base environment only (KT-1006), plus where
+/// Claude's logs live when the user moved them.
+fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::process::Command {
+    use crate::core::child_env::{self, ChildRoute};
+    let mut command = crate::core::cmd::async_cmd(program, ChildRoute::Tool);
     command.arg(period_kind).arg("--json");
+    if let Some(dir) = child_env::parent_var("CLAUDE_CONFIG_DIR") {
+        command.env("CLAUDE_CONFIG_DIR", dir);
+    }
     if let Some(home) = usage_home_for_command(
         std::env::var_os("KRONN_USAGE_HOME"),
         crate::core::env::is_docker(),
@@ -536,6 +534,20 @@ pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
     if crate::core::env::is_docker() {
         command.env("npm_config_cache", "/tmp/.npm-cache");
     }
+    child_env::seal(command.as_std_mut(), ChildRoute::Tool, &[]);
+    command
+}
+
+/// Run `ccusage <period> --json` and parse the result.
+///
+/// Returns a clean `Err(String)` if the binary is missing or errors — the
+/// caller surfaces it as a friendly "usage reporting unavailable" message
+/// (e.g. in local dev where ccusage isn't installed; it ships in the Docker
+/// image).
+pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
+    let period_kind = normalize_period(period);
+    let program = resolve_ccusage_program()?;
+    let mut command = ccusage_command(&program, period_kind);
 
     let output = command
         .output()
@@ -554,6 +566,27 @@ pub async fn fetch_usage(period: &str) -> Result<UsageReport, String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn ccusage_gets_claude_logs_location_and_no_backend_secret() {
+        use crate::core::child_env::probe;
+        let mut parent = probe::parent_with_secrets("/usr/bin", "/home/u");
+        parent.push(("CLAUDE_CONFIG_DIR".into(), "/home/u/.claude-alt".into()));
+        let borrowed: Vec<(&str, &str)> = parent
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let command = crate::core::child_env::with_parent_env(&borrowed, || {
+            ccusage_command(std::path::Path::new("/usr/bin/ccusage"), "daily")
+        });
+        probe::assert_built_without_secrets(command.as_std(), "/usr/bin", &[]);
+        assert_eq!(
+            probe::env_of(command.as_std())
+                .get("CLAUDE_CONFIG_DIR")
+                .map(String::as_str),
+            Some("/home/u/.claude-alt")
+        );
+    }
 
     #[test]
     fn normalize_period_whitelists() {

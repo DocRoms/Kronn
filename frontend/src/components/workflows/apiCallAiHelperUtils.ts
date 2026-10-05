@@ -96,6 +96,10 @@ export function buildContextBlock(
     `- body     : ${step.api_body || translate('wf.apicall.helper.sys.none')}`,
     `- extract  : ${step.api_extract?.path ?? translate('wf.apicall.helper.sys.none')}`,
   ];
+  const pluginHeaders = server?.api_spec?.default_headers ?? [];
+  if (pluginHeaders.length > 0) {
+    lines.push(`- ${translate('wf.apicall.helper.sys.pluginHeaders')} : ${pluginHeaders.map(h => h.name).join(', ')}`);
+  }
 
   if (lastTestError) {
     lines.push('', translate('wf.apicall.helper.sys.ctxLastFail'), lastTestError);

@@ -211,7 +211,14 @@ pub async fn agent_api_call(
     // one derived from the body or from the chosen config (KT-1006); the
     // executor then refuses a config that project cannot see.
     if let Some(axum::Extension(caller)) = bridge {
-        if let Err(refusal) = bridge_config_visible(&state, &req, caller.project.as_deref()).await {
+        if let Err(refusal) = config_visible_to(
+            &state,
+            req.api_config_id.clone(),
+            req.quick_api_id.clone(),
+            caller.project.as_deref(),
+        )
+        .await
+        {
             return Json(ApiResponse::err(refusal));
         }
         return agent_api_call_scoped(&state, req, caller.project).await;
@@ -275,13 +282,12 @@ pub async fn agent_api_call(
 /// to that project, or opted into General for a project-less token. Checked
 /// here because the executor would otherwise fall back to the config's own
 /// first project for a project-less call.
-async fn bridge_config_visible(
+pub(crate) async fn config_visible_to(
     state: &AppState,
-    req: &AgentApiCallRequest,
+    config_id: Option<String>,
+    quick_api_id: Option<String>,
     bound: Option<&str>,
 ) -> Result<(), String> {
-    let config_id = req.api_config_id.clone();
-    let quick_api_id = req.quick_api_id.clone();
     let config = state
         .db
         .with_read_conn(move |conn| {
