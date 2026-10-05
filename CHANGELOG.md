@@ -203,7 +203,8 @@ Release notes for 0.9.3 and earlier are available in the
   another project's ids; the bearer scheme is read case-insensitively and a
   token never reaches the peer-only routes; a token's media discussion and
   learning proposal land in its project. A page or room a workflow step names
-  through a template must belong to the run's project, whoever triggered it;
+  through a template must, once rendered, belong to the run's project (a
+  literal id still works whatever its project), whoever triggered the run;
   the keys of a caller's own maps (variables, an external API's path, query
   and headers) are no longer read as Kronn ids; the plugin overview and a
   page's feeding workflows show a token only its project's; any discussion the

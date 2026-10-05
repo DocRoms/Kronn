@@ -523,9 +523,11 @@ the keys of a caller's own maps (`USER_KEYED_KEYS`: template variables, an
 external API's path, query and headers, per-step choices) are names, and only
 their values are walked; the query follows the same rule. A value that reaches
 Kronn through a template is checked where it is rendered: a PublishPageData
-page and an Agent step's room must belong to the run's project, on every run
-whoever triggered it; a project-less page or room is allowed to a project-less
-run, or when the workflow names it literally. In an import, only the resources the bundle
+page or an Agent step's room named through a template must, once rendered,
+belong to the run's project (or be project-less for a project-less run), on
+every run whoever triggered it. A literal page or room id is the workflow
+author's choice and is used whatever its project; a bridge token cannot save
+one outside its project, since the gate walks a workflow's step ids. In an import, only the resources the bundle
 lists are internal, per kind (`workflow.id` and `referenced_workflows` for
 workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
 `_pages`); a room, config or connection is never internal. A non-JSON body is

@@ -566,5 +566,19 @@ mod tests {
             literal.is_some(),
             "a literal shared room is the author's choice"
         );
+        let literal_foreign = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &agent_step(Some("room-q")),
+            &TemplateContext::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            literal_foreign.is_some(),
+            "a literal room of another project is the author's choice"
+        );
     }
 }

@@ -1,17 +1,15 @@
-//! Where a run may publish: pages and rooms named by a step, once rendered,
-//! must belong to the run's project. A template can carry a caller's variable
-//! or a prior step's output, so the stored value proves nothing.
+//! Where a run may publish: a page or room a step names through a template,
+//! once rendered, must belong to the run's project. A template can carry a
+//! caller's variable or a prior step's output, so the stored value proves
+//! nothing; a literal one is the workflow author's choice.
 
 /// Whether a step of a run for `run_project` may act on a resource of
-/// `target`. A project-less resource is allowed to a project-less run, or
-/// when the workflow names it literally (its author chose it).
+/// `target`. A literal value was chosen by the workflow's author (and a
+/// bridge token cannot save one outside its project): always allowed. A
+/// rendered value must sit in the run's project, or be project-less for a
+/// project-less run.
 pub fn target_allowed(target: Option<&str>, run_project: Option<&str>, literal: bool) -> bool {
-    match (target, run_project) {
-        (Some(target), Some(run)) => target == run,
-        (None, None) => true,
-        (None, Some(_)) => literal,
-        (Some(_), None) => false,
-    }
+    literal || target == run_project
 }
 
 /// Whether a stored step field is used as written, with no template.
@@ -38,13 +36,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_run_s_project_or_a_literal_shared_target_is_allowed() {
+    fn a_rendered_target_must_sit_in_the_run_s_project() {
         assert!(target_allowed(Some("p1"), Some("p1"), false));
-        assert!(!target_allowed(Some("p2"), Some("p1"), true));
-        assert!(!target_allowed(Some("p1"), None, true));
-        assert!(target_allowed(None, None, false));
-        assert!(target_allowed(None, Some("p1"), true));
+        assert!(!target_allowed(Some("p2"), Some("p1"), false));
         assert!(!target_allowed(None, Some("p1"), false));
+        assert!(!target_allowed(Some("p1"), None, false));
+        assert!(target_allowed(None, None, false));
+        // A literal is the author's choice, whatever its project.
+        assert!(target_allowed(Some("p2"), Some("p1"), true));
+        assert!(target_allowed(Some("p1"), None, true));
         assert!(is_literal("page-a") && !is_literal("{{page}}"));
     }
 }

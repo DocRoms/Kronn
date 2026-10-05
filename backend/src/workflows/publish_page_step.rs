@@ -412,6 +412,16 @@ mod tests {
                     rusqlite::params![format!("page-{id}"), project, format!("slug-{id}"), now],
                 )?;
             }
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at) \
+                 VALUES ('wf', 'wf', '{}', '[]', ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, status, started_at) \
+                 VALUES ('run', 'wf', 'Running', ?1)",
+                [now],
+            )?;
             Ok(())
         })
         .await
@@ -458,6 +468,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(revision, 0, "q's page is untouched");
+        // A literal page id is the workflow author's choice, whatever its
+        // project: it still publishes.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::live_pages::add_live_page_dataset(
+                    conn,
+                    "page-q",
+                    &crate::models::CreateLivePageDataset {
+                        name: "latency".into(),
+                        kind: crate::models::LivePageDatasetKind::TimeSeries,
+                        initial: None,
+                        schema: None,
+                        max_points: None,
+                        max_age_days: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut literal = publish.clone();
+        literal.page_publish.as_mut().unwrap().page_id = "page-q".into();
+        let published =
+            execute_publish_page_data_step(&literal, "wf", "run", Some("p"), &state, &context)
+                .await;
+        assert_eq!(
+            published.result.status,
+            RunStatus::Success,
+            "{}",
+            published.result.output
+        );
         context.set("page", "page-p");
         let own =
             execute_publish_page_data_step(&publish, "wf", "run", Some("p"), &state, &context)
