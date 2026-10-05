@@ -287,6 +287,17 @@ impl KeyStore {
                 .any(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
     }
 
+    /// How many distinct durable copies read `secret` back: the env override and
+    /// each vault count once (config.toml is not counted here).
+    pub fn copies_of(&self, secret: &str) -> usize {
+        usize::from(Self::env_override().as_deref() == Some(secret))
+            + self
+                .vaults
+                .iter()
+                .filter(|v| matches!(v.retrieve(), Ok(Some(cur)) if cur == secret))
+                .count()
+    }
+
     /// Whether the vault called `name` reads `secret` back.
     pub fn holds_in(&self, name: &str, secret: &str) -> bool {
         self.vaults
@@ -507,9 +518,11 @@ mod tests {
         assert!(ks.holds("KEY"));
         assert!(!ks.holds("OTHER"));
         assert!(ks.holds_in("sidecar", "KEY"));
+        assert_eq!(ks.copies_of("KEY"), 1);
         assert!(!ks.holds_in("keychain", "KEY"));
         std::env::set_var(ENV_KEK, "OTHER");
         assert!(ks.holds("OTHER"));
+        assert_eq!(ks.copies_of("OTHER"), 1, "env only");
         std::env::remove_var(ENV_KEK);
     }
 

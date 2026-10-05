@@ -43,7 +43,18 @@ impl DataDir {
         std::fs::read_to_string(self.path().join("config.toml")).unwrap()
     }
 
+    /// Two durable copies, as on macOS (keychain + sidecar): a second
+    /// sidecar file stands in for the keychain.
     fn sidecar(&self) -> KeyStore {
+        let keychain = self.path().join("keychain-standin");
+        KeyStore::from_vaults(vec![
+            Box::new(SidecarFile::in_dir(&keychain)),
+            Box::new(SidecarFile::in_dir(self.path())),
+        ])
+    }
+
+    /// Sidecar only (Linux, WSL, Docker, dev builds).
+    fn sidecar_only(&self) -> KeyStore {
         KeyStore::from_vaults(vec![Box::new(SidecarFile::in_dir(self.path()))])
     }
 }
@@ -709,4 +720,30 @@ async fn a_locked_auth_token_refuses_ordinary_routes_and_keeps_recovery_open() {
         status_of(router, "POST", "/api/config/recovery/restore", loopback).await,
         StatusCode::LOCKED
     );
+}
+
+/// Sidecar-only ladder without a recovery passphrase: the credentials leave
+/// config.toml, the key stays there and in config.toml.backup (two copies).
+#[tokio::test]
+#[serial]
+async fn a_sidecar_only_install_keeps_a_second_copy_of_the_key() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    let outcome = keystore::reconcile_with(&mut cfg, &db, &dir.sidecar_only(), dir.path())
+        .await
+        .unwrap();
+    boot(&mut cfg, db.clone(), dir.path(), &outcome, None)
+        .await
+        .unwrap()
+        .expect("armed");
+    let text = dir.config_text();
+    assert!(text.contains(&key), "config.toml keeps the second copy");
+    assert!(!text.contains(ANTHROPIC) && !text.contains(AUTH_TOKEN));
+    let backup = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
+    assert!(backup.contains(&key), "the backup keeps it too");
+    assert!(!backup.contains(ANTHROPIC));
 }

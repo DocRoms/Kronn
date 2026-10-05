@@ -243,29 +243,31 @@ fn settle_disk_copy(
         );
         return;
     }
-    // Without a recovery passphrase the data-directory sidecar must hold the key
-    // too, so dropping the config.toml copy never leaves a single copy.
-    let recovery_set = recovery::is_configured(dir);
-    if !recovery_set {
+    // The file copy goes only when at least two independent copies remain:
+    // a verified recovery passphrase and one vault, or two distinct tiers.
+    let recovery = recovery::matches_key(dir, key);
+    let copies = store.copies_of(key);
+    if recovery != recovery::RecoveryMatch::Matches {
         tracing::warn!(
-            "keystore: no recovery passphrase is set — every local copy of the key (vault and \
-             sidecar) is kept; set one in Settings → Recovery so the key survives this machine"
+            "keystore: no recovery passphrase for this key ({recovery:?}) — every local copy is \
+             kept; set one in Settings → Recovery so the key survives this machine"
         );
     }
-    let enough_copies = recovery_set || store.holds_in("sidecar", key);
-    if store.holds(key) && decrypts_every_column(key, columns) && enough_copies {
+    let enough_copies =
+        copies >= 2 || (copies >= 1 && recovery == recovery::RecoveryMatch::Matches);
+    if enough_copies && decrypts_every_column(key, columns) {
         if config::release_disk_key(dir) {
             tracing::info!(
-                "keystore: the key is held by a vault and decrypts every encrypted column — \
-                 config.toml no longer keeps a copy"
+                "keystore: {copies} vault copies (recovery passphrase: {recovery:?}) and the key \
+                 decrypts every encrypted column — config.toml no longer keeps a copy"
             );
         }
     } else {
         config::retain_disk_key(dir, key);
         tracing::warn!(
-            "keystore: no vault could read the key back, a column holds rows it cannot decrypt, \
-             or only one copy would remain without a recovery passphrase — config.toml keeps a \
-             copy so the key is not lost"
+            "keystore: fewer than two independent copies of the key (vaults, verified recovery \
+             passphrase), or a column holds rows it cannot decrypt — config.toml keeps a copy so \
+             the key is not lost"
         );
     }
 }
@@ -490,8 +492,10 @@ pub async fn recover_with_passphrase(
 
     config.encryption_secret = Some(key.clone());
     persist(store, &key);
-    if !store.holds(&key) {
-        // No vault took it: config.toml is then the only copy that survives a restart.
+    if store.copies_of(&key) < 2
+        && recovery::matches_key(dir, &key) != recovery::RecoveryMatch::Matches
+    {
+        // Fewer than two copies would survive a restart: keep one in config.toml.
         config::retain_disk_key(dir, &key);
     }
     tracing::info!("keystore: encryption key restored from recovery passphrase");
@@ -1135,15 +1139,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_config_key_moves_to_the_vault_and_leaves_config_toml() {
+    async fn legacy_config_key_moves_to_the_vaults_and_leaves_config_toml_with_two_copies() {
         let db = Database::open_in_memory().unwrap();
         let k = crypto::generate_secret();
         seed_row(&db, &k).await;
         seed_snapshot(&db, &k).await;
         let tmp = tempfile::tempdir().unwrap();
         config::retain_disk_key(tmp.path(), &k); // as load() does for a 0.14.2 file
+        let (keychain, _kc) = mem_vault("keychain", None);
         let (vault, cell) = mem_vault("sidecar", None);
-        let store = KeyStore::from_vaults(vec![vault]);
+        let store = KeyStore::from_vaults(vec![keychain, vault]);
         let mut cfg = config::default_config();
         cfg.encryption_secret = Some(k.clone());
 
@@ -1166,6 +1171,65 @@ mod tests {
             None,
             "then dropped from config.toml"
         );
+    }
+
+    /// Sidecar-only ladder (Linux, WSL, Docker, dev builds) and no recovery
+    /// passphrase: the sidecar would be the single copy, so config.toml keeps it.
+    #[tokio::test]
+    async fn a_sidecar_only_ladder_without_a_passphrase_keeps_the_key_in_config_toml() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        config::retain_disk_key(tmp.path(), &k);
+        let (vault, cell) = mem_vault("sidecar", None);
+        let store = KeyStore::from_vaults(vec![vault]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(k.clone());
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(cell.lock().unwrap().as_deref(), Some(k.as_str()));
+        assert_eq!(config::retained_disk_key(tmp.path()), Some(k.clone()));
+
+        // A recovery.key for ANOTHER key is no recovery copy of this one.
+        let other = recovery::wrap_key(&crypto::generate_secret(), "a passphrase").unwrap();
+        recovery::save_blob(tmp.path(), &other).unwrap();
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(config::retained_disk_key(tmp.path()), Some(k.clone()));
+
+        // A verified passphrase for this key is: the file copy may go.
+        recovery::save_blob(tmp.path(), &recovery::wrap_key(&k, "a passphrase").unwrap()).unwrap();
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(config::retained_disk_key(tmp.path()), None);
+    }
+
+    /// A stale key in the keychain is not a copy: sidecar K alone → keep the file.
+    #[tokio::test]
+    async fn a_stale_keychain_key_does_not_count_as_a_copy() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        config::retain_disk_key(tmp.path(), &k);
+        let (keychain, kc) = mem_vault("keychain", Some(&crypto::generate_secret()));
+        let (sidecar, _sc) = mem_vault("sidecar", None);
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(k.clone());
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_ne!(
+            kc.lock().unwrap().as_deref(),
+            Some(k.as_str()),
+            "never overwritten"
+        );
+        assert_eq!(config::retained_disk_key(tmp.path()), Some(k));
     }
 
     /// Without a recovery passphrase, a keychain-only copy is not enough to
