@@ -1094,23 +1094,54 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
 /// content here would either be a false safety blanket (we'd reject
 /// legitimate values) or trivially bypassed.
 fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(), String> {
-    validate_exec_steps_keeping(steps, allowlist, &[])
+    validate_exec_steps_keeping(steps, allowlist, &[], false)
 }
 
-/// An unchanged command line already stored as unsafe: an unrelated edit of
-/// the workflow must not be blocked by it. It stays refused at run time and
-/// flagged until the user applies a fix.
-fn is_grandfathered(grandfathered: &[UnsafeExecStep], step: &WorkflowStep, phase: &str) -> bool {
+/// An unsafe command line already stored in a workflow, with its exact
+/// place: chain (`on_failure`), step position, then the line itself.
+pub(crate) type KeptLine = (bool, usize, UnsafeExecStep);
+
+/// The unsafe lines a stored workflow already holds. An update that leaves
+/// one of them exactly as it is (same chain, position, step name, phase,
+/// source, command and args) is not blocked by it; it stays flagged and
+/// refused at run time until the user applies a fix.
+pub(crate) fn kept_lines(steps: &[WorkflowStep], on_failure: &[WorkflowStep]) -> Vec<KeptLine> {
+    let chain = |steps: &[WorkflowStep], rollback: bool| {
+        steps
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, step)| {
+                crate::core::inline_code::classify_step(step, rollback)
+                    .into_iter()
+                    .map(move |line| (rollback, index, line))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut lines = chain(steps, false);
+    lines.extend(chain(on_failure, true));
+    lines
+}
+
+fn is_grandfathered(
+    kept: &[KeptLine],
+    rollback: bool,
+    index: usize,
+    step: &WorkflowStep,
+    phase: &str,
+) -> bool {
     let (cmd, args) = if phase == "setup" {
         (step.exec_setup_command.as_deref(), &step.exec_setup_args)
     } else {
         (step.exec_command.as_deref(), &step.exec_args)
     };
-    is_grandfathered_line(grandfathered, &step.name, phase, None, cmd, args)
+    is_grandfathered_line(kept, rollback, index, &step.name, phase, None, cmd, args)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn is_grandfathered_line(
-    grandfathered: &[UnsafeExecStep],
+    kept: &[KeptLine],
+    rollback: bool,
+    index: usize,
     step_name: &str,
     phase: &str,
     alias: Option<&str>,
@@ -1118,8 +1149,10 @@ fn is_grandfathered_line(
     args: &[String],
 ) -> bool {
     let cmd = cmd.map(str::trim).unwrap_or_default();
-    grandfathered.iter().any(|known| {
-        known.step_name == step_name
+    kept.iter().any(|(kept_rollback, kept_index, known)| {
+        *kept_rollback == rollback
+            && *kept_index == index
+            && known.step_name == step_name
             && known.phase == phase
             && known.source_alias.as_deref() == alias
             && known.command == cmd
@@ -1130,11 +1163,12 @@ fn is_grandfathered_line(
 fn validate_exec_steps_keeping(
     steps: &[WorkflowStep],
     allowlist: &[String],
-    grandfathered: &[UnsafeExecStep],
+    kept: &[KeptLine],
+    rollback: bool,
 ) -> Result<(), String> {
     const MAX_ARGS: usize = 64;
     const MAX_TIMEOUT_SECS: u32 = 1800;
-    for s in steps {
+    for (index, s) in steps.iter().enumerate() {
         if matches!(s.step_type, StepType::CollectApiData) {
             if let Some(config) = &s.collect_api_data {
                 for source in &config.sources {
@@ -1177,7 +1211,9 @@ fn validate_exec_steps_keeping(
                         ));
                     }
                     let kept = is_grandfathered_line(
-                        grandfathered,
+                        kept,
+                        rollback,
+                        index,
                         &s.name,
                         "source",
                         Some(&source.alias),
@@ -1236,7 +1272,7 @@ fn validate_exec_steps_keeping(
                 MAX_ARGS
             ));
         }
-        if !is_grandfathered(grandfathered, s, "main") {
+        if !is_grandfathered(kept, rollback, index, s, "main") {
             if let Some(error) =
                 crate::core::inline_code::validation_error(&s.name, cmd, &s.exec_args)
             {
@@ -1297,7 +1333,7 @@ fn validate_exec_steps_keeping(
                     MAX_ARGS
                 ));
             }
-            if !is_grandfathered(grandfathered, s, "setup") {
+            if !is_grandfathered(kept, rollback, index, s, "setup") {
                 if let Some(error) = crate::core::inline_code::validation_error(
                     &s.name,
                     setup_cmd,
@@ -1962,10 +1998,10 @@ pub async fn update(
         .exec_allowlist
         .as_ref()
         .unwrap_or(&existing.exec_allowlist);
-    let stored_unsafe =
-        crate::core::inline_code::classify_workflow(&existing.steps, &existing.on_failure);
+    let stored_unsafe = kept_lines(&existing.steps, &existing.on_failure);
     if let Some(ref new_steps) = req.steps {
-        if let Err(e) = validate_exec_steps_keeping(new_steps, effective_allowlist, &stored_unsafe)
+        if let Err(e) =
+            validate_exec_steps_keeping(new_steps, effective_allowlist, &stored_unsafe, false)
         {
             return Json(ApiResponse::err(e));
         }
@@ -1982,7 +2018,7 @@ pub async fn update(
     }
     if let Some(ref new_on_failure) = req.on_failure {
         if let Err(e) =
-            validate_exec_steps_keeping(new_on_failure, effective_allowlist, &stored_unsafe)
+            validate_exec_steps_keeping(new_on_failure, effective_allowlist, &stored_unsafe, true)
         {
             return Json(ApiResponse::err(e));
         }
@@ -2460,6 +2496,23 @@ pub async fn export_workflow(
 /// (POST /api/workflows). Applied to the root AND every bundled child so a
 /// malformed child can't slip in. Returns a user-facing error string.
 pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+    validate_workflow_for_import_keeping(wf, &[])
+}
+
+/// The Exec rules of a workflow definition (allowlist, commands, inline-code
+/// interpolation), for write paths that do not run the full import checks.
+pub(crate) fn validate_exec_definition(wf: &Workflow) -> Result<(), String> {
+    validate_exec_allowlist(&wf.exec_allowlist)?;
+    validate_exec_steps(&wf.steps, &wf.exec_allowlist)?;
+    validate_exec_steps_keeping(&wf.on_failure, &wf.exec_allowlist, &[], true)
+}
+
+/// [`validate_workflow_for_import`] for a re-import over a stored workflow:
+/// its unchanged unsafe lines (see [`kept_lines`]) do not block the import.
+pub(crate) fn validate_workflow_for_import_keeping(
+    wf: &Workflow,
+    kept: &[KeptLine],
+) -> Result<(), String> {
     if wf.steps.is_empty() {
         return Err("Workflow must have at least one step".into());
     }
@@ -2474,8 +2527,8 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
     validate_artifact_specs(&wf.artifacts)?;
     validate_on_failure_steps(&wf.on_failure)?;
     validate_exec_allowlist(&wf.exec_allowlist)?;
-    validate_exec_steps(&wf.steps, &wf.exec_allowlist)?;
-    validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
+    validate_exec_steps_keeping(&wf.steps, &wf.exec_allowlist, kept, false)?;
+    validate_exec_steps_keeping(&wf.on_failure, &wf.exec_allowlist, kept, true)?;
     validate_required_fields_per_type(&wf.steps)?;
     validate_required_fields_per_type(&wf.on_failure)?;
     crate::workflows::concurrency::validate_key(
@@ -2700,6 +2753,11 @@ pub async fn import_workflow(
     let mut qes_to_insert: Vec<QuickExec> =
         Vec::with_capacity(envelope.referenced_quick_execs.len());
     for mut qe in envelope.referenced_quick_execs {
+        if let Some(error) =
+            crate::core::inline_code::quick_exec_validation_error(&qe.name, &qe.command, &qe.args)
+        {
+            return Json(ApiResponse::err(error));
+        }
         let old_id = qe.id.clone();
         let new_id = Uuid::new_v4().to_string();
         qe_id_remap.insert(old_id, new_id.clone());

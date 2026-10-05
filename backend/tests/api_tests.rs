@@ -25264,7 +25264,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
                     name: "greet".into(),
                     step_type: kronn::models::StepType::Exec,
                     exec_command: Some("bash".into()),
-                    exec_args: vec!["-c".into(), "echo {{issue.title}}".into()],
+                    exec_args: vec!["-c".into(), "echo \"{{issue.title}}\"".into()],
                     ..Default::default()
                 }],
                 actions: vec![],
@@ -25318,7 +25318,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         "name": "greet",
         "step_type": {"type": "Exec"},
         "exec_command": "bash",
-        "exec_args": ["-c", "echo {{issue.title}}"],
+        "exec_args": ["-c", "echo \"{{issue.title}}\""],
     }]);
     let (_, renamed) = put_json_root(
         app.clone(),
@@ -25410,6 +25410,14 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
         .await
         .unwrap();
 
+    let mut described = body("Legacy", serde_json::json!(["-c", "print('{{ticket}}')"]));
+    described["description"] = serde_json::json!("now documented");
+    let (_, kept) = put_json_root(app.clone(), "/api/quick-execs/qe-legacy", described).await;
+    assert_eq!(
+        kept["success"], true,
+        "an unchanged line stays editable: {kept}"
+    );
+
     let (_, renamed) = put_json_root(
         app.clone(),
         "/api/quick-execs/qe-legacy",
@@ -25417,8 +25425,8 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
     )
     .await;
     assert_eq!(
-        renamed["success"], true,
-        "an unchanged line stays editable: {renamed}"
+        renamed["success"], false,
+        "a renamed Quick Exec is a new line: {renamed}"
     );
 
     let (_, changed) = put_json_root(
@@ -25842,4 +25850,248 @@ mod github_connection_api {
         std::env::remove_var("KRONN_GITHUB_API_BASE");
         kronn::core::github_connection::override_machine_token_for_tests(None);
     }
+}
+
+/// A refusal from the inline-code rule names the offending placeholder.
+fn assert_inline_refusal(body: &Value, label: &str) {
+    assert_eq!(body["success"], false, "{label}: {body}");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("{{issue.title}}") || error.contains("{{ticket}}"),
+        "{label}: {error}"
+    );
+}
+
+fn unsafe_exec_step(name: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo \"{{issue.title}}\""]
+    })
+}
+
+fn safe_exec_step(name: &str) -> Value {
+    serde_json::json!({
+        "name": name,
+        "step_type": {"type": "Exec"},
+        "exec_command": "bash",
+        "exec_args": ["-c", "echo \"$1\"", "_", "{{issue.title}}"]
+    })
+}
+
+fn workflow_request(steps: Value) -> Value {
+    serde_json::json!({
+        "name": "Write path",
+        "project_id": null,
+        "trigger": {"type": "Manual"},
+        "steps": steps,
+        "exec_allowlist": ["bash", "python3"]
+    })
+}
+
+/// KT-1017 — every write path that creates an Exec line, a Quick Exec or an
+/// inline CollectApiData source refuses an unsafe inline interpolation:
+/// create, bundle (parent and child), workflow import (step and bundled
+/// Quick Exec), Artifact import, Quick Exec import. MCP draft, update and
+/// clone go through these same HTTP endpoints.
+#[tokio::test]
+async fn every_write_path_refuses_an_unsafe_inline_line() {
+    let app = test_app();
+
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([unsafe_exec_step("greet")])),
+    )
+    .await;
+    assert_inline_refusal(&created, "create");
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([safe_exec_step("greet")])),
+    )
+    .await;
+    assert_eq!(created["success"], true, "create safe: {created}");
+
+    let (_, source) = post_json(
+        app.clone(),
+        "/api/workflows",
+        workflow_request(serde_json::json!([{
+            "name": "collect",
+            "step_type": {"type": "CollectApiData"},
+            "collect_api_data": {"sources": [{
+                "alias": "ticket",
+                "quick_exec": {"command": "python3", "args": ["-c", "print('{{issue.title}}')"], "output_format": "text"},
+                "required": true
+            }]}
+        }])),
+    )
+    .await;
+    assert_inline_refusal(&source, "inline source");
+
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({"workflow": workflow_request(serde_json::json!([unsafe_exec_step("greet")]))}),
+    )
+    .await;
+    assert_inline_refusal(&bundle, "bundle parent");
+    let mut child = workflow_request(serde_json::json!([unsafe_exec_step("inner")]));
+    child["bundle_id"] = serde_json::json!("child");
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([{
+                "name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"
+            }]))
+        }),
+    )
+    .await;
+    assert_inline_refusal(&bundle, "bundle child");
+
+    let quick_exec = serde_json::json!({
+        "kind": "kronn.quick_exec",
+        "version": 1,
+        "exported_at": "2026-01-01T00:00:00Z",
+        "quick_exec": {
+            "id": "qe-x", "name": "Ticket", "icon": "⌘", "description": "", "project_id": null,
+            "command": "python3", "args": ["-c", "print('{{ticket}}')"], "timeout_secs": 10,
+            "output_format": "text", "variables": [], "pinned": false,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }
+    });
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/quick-execs/import",
+        serde_json::json!({"content": quick_exec.to_string(), "project_id": null}),
+    )
+    .await;
+    assert_inline_refusal(&imported, "quick exec import");
+}
+
+#[tokio::test]
+async fn workflow_and_artifact_imports_refuse_unsafe_inline_lines() {
+    let (_, exported) = workflow_portability_fixture().await;
+
+    let mut unsafe_step = exported.clone();
+    unsafe_step["workflow"]["exec_allowlist"] = serde_json::json!(["bash", "echo"]);
+    unsafe_step["workflow"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(unsafe_exec_step("greet"));
+    let mut unsafe_exec = exported.clone();
+    unsafe_exec["referenced_quick_execs"][0]["command"] = serde_json::json!("python3");
+    unsafe_exec["referenced_quick_execs"][0]["args"] =
+        serde_json::json!(["-c", "print('{{ticket}}')"]);
+    let app = build_router_with_auth(test_state(), false);
+    for (label, bundle) in [("step", unsafe_step), ("bundled quick exec", unsafe_exec)] {
+        let (_, body) = post_json(
+            app.clone(),
+            "/api/workflows/import",
+            serde_json::json!({"content": serde_json::to_string(&bundle).unwrap(), "project_id": null}),
+        )
+        .await;
+        assert_inline_refusal(&body, label);
+    }
+
+    let (source, _) = workflow_portability_fixture().await;
+    let (_, page) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut artifact = page["data"].clone();
+    artifact["referenced_quick_execs"][0]["command"] = serde_json::json!("python3");
+    artifact["referenced_quick_execs"][0]["args"] =
+        serde_json::json!(["-c", "print('{{ticket}}')"]);
+    let app = build_router_with_auth(test_state(), false);
+    let request = serde_json::json!({"content": artifact.to_string()});
+    let (_, preview) = post_json(app.clone(), "/api/pages/import/preview", request.clone()).await;
+    assert_ne!(
+        preview["data"]["can_import"], true,
+        "artifact preview: {preview}"
+    );
+    let (_, imported) = post_json(app, "/api/pages/import", request).await;
+    assert_inline_refusal(&imported, "artifact import");
+}
+
+/// The unchanged-line exception keys on the exact stored line: same chain,
+/// same position, same step name, same command and args. A rename, a
+/// reorder or a changed placeholder makes the line new, and it is refused.
+#[tokio::test]
+async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
+    let state = test_state();
+    let now = chrono::Utc::now();
+    let steps: Vec<kronn::models::WorkflowStep> = serde_json::from_value(serde_json::json!([
+        unsafe_exec_step("greet"),
+        safe_exec_step("other")
+    ]))
+    .unwrap();
+    state
+        .db
+        .with_conn(move |connection| {
+            let workflow = kronn::models::Workflow {
+                project_scope: None,
+                id: "workflow-identity".into(),
+                name: "Identity".into(),
+                project_id: None,
+                trigger: kronn::models::WorkflowTrigger::Manual,
+                steps,
+                actions: vec![],
+                safety: kronn::models::WorkflowSafety {
+                    sandbox: false,
+                    max_files: None,
+                    max_lines: None,
+                    require_approval: false,
+                },
+                workspace_config: None,
+                concurrency_limit: None,
+                concurrency_key: None,
+                guards: None,
+                artifacts: Default::default(),
+                on_failure: vec![],
+                exec_allowlist: vec!["bash".into()],
+                variables: vec![],
+                enabled: true,
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            kronn::db::workflows::insert_workflow(connection, &workflow)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+    let uri = "/api/workflows/workflow-identity";
+    let put = |steps: Value| put_json_root(app.clone(), uri, serde_json::json!({"steps": steps}));
+
+    let (_, same) = put(serde_json::json!([
+        unsafe_exec_step("greet"),
+        safe_exec_step("other")
+    ]))
+    .await;
+    assert_eq!(same["success"], true, "unchanged: {same}");
+
+    let (_, renamed) = put(serde_json::json!([
+        unsafe_exec_step("hello"),
+        safe_exec_step("other")
+    ]))
+    .await;
+    assert_eq!(renamed["success"], false, "renamed step: {renamed}");
+
+    let (_, reordered) = put(serde_json::json!([
+        safe_exec_step("other"),
+        unsafe_exec_step("greet")
+    ]))
+    .await;
+    assert_eq!(reordered["success"], false, "reordered: {reordered}");
+
+    let mut changed = unsafe_exec_step("greet");
+    changed["exec_args"] = serde_json::json!(["-c", "echo \"{{issue.body}}\""]);
+    let (_, changed) = put(serde_json::json!([changed, safe_exec_step("other")])).await;
+    assert_eq!(changed["success"], false, "changed placeholder: {changed}");
 }

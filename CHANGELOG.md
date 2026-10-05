@@ -425,7 +425,17 @@ Release notes for 0.9.3 and earlier are available in the
   options (`["{{mode}}", "{{issue.title}}"]` with `{{mode}}` rendering to
   `-c`): it is accepted only after the inline code of a shell or Python,
   after `--`, or after a script file, and the run-time check verifies the
-  rendered command with the origin of each argument.
+  rendered command with the origin of each argument. The same rule now
+  sees through programs that launch others (`env`, `sudo`, `timeout`,
+  `nice`, `xargs`, `busybox`…) and covers other evaluators (`awk`, `sed`,
+  `osascript`, `lua`, `tclsh`, `Rscript`, `find -exec`, `git -c`, `ssh`,
+  `docker run`, `npx -c`), whatever path or version suffix names them
+  (`/usr/bin/python3.12`, `node18`, `.exe`); a value can never be the program
+  itself; and the workflow bundle, the workflow and Artifact imports, the
+  Quick Exec import and the `kronn/` import apply it too. An unsafe line is
+  kept on save only when it is exactly the stored one (same step, position,
+  name and arguments), and an unquoted shell value no longer gets an
+  automatic fix, since `"$1"` would not print the same thing.
 
 ### Changed
 
