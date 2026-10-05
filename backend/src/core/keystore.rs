@@ -1678,6 +1678,51 @@ mod tests {
 
     // ── review round 3 ──────────────────────────────────────────────────────
 
+    /// A failure in the middle of `reencrypt_rows` rolls every row back.
+    #[tokio::test]
+    async fn reencrypt_rows_rolls_back_on_a_mid_transaction_failure() {
+        let db = Database::open_in_memory().unwrap();
+        let from = crypto::generate_secret();
+        let to = crypto::generate_secret();
+        seed_row(&db, &from).await; // mcp_configs: rewritten first
+        seed_snapshot(&db, &from).await; // its update is made to fail
+        let before: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT env_encrypted FROM mcp_configs WHERE id = 'c1'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER fail_snapshot BEFORE UPDATE ON execution_variable_snapshots \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(reencrypt_rows(&db, &from, &to).await.is_err());
+        let after: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT env_encrypted FROM mcp_configs WHERE id = 'c1'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(after, before, "the first rewrite was rolled back");
+        assert!(decrypts_every_column(
+            &from,
+            &collect_encrypted_rows(&db).await.unwrap()
+        ));
+    }
+
     /// C2-02 — a restore while both vaults hold a stale key keeps the restored
     /// key in config.toml (0 vault copies), so the next start resolves.
     #[tokio::test]
