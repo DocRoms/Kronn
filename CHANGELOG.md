@@ -243,9 +243,10 @@ Release notes for 0.9.3 and earlier are available in the
   directory, never in a repository. The desktop app follows the same rule:
   its sleep inhibitor and its login-shell PATH probe no longer pass the
   desktop's whole environment on, and its restart relaunches it without the
-  admin token or the raw key in its environment. The declared exceptions
-  (document sidecar, model and version discovery) no longer receive any
-  secret, and testing an MCP server, which may come from a repository's
+  admin token or the raw key in its environment. Model and version
+  discovery and the document sidecar now get a built environment too (their
+  CLI's own login and settings, no credential under any name), and testing
+  an MCP server, which may come from a repository's
   `.mcp.json`, starts it with only its own configured values. An
   operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
   start, like the admin token. npm registry credentials

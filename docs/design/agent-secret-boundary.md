@@ -462,24 +462,28 @@ argument or a variable named after it, and that push runs with hooks off
 repository's could receive it) and TLS verification forced. Other remotes,
 or a project not connected, push with the user's own credentials.
 
-Declared exceptions inherit the environment instead of a route's, through
-`cmd::full_env_cmd` / `full_env_sync_cmd(program, FullEnvReason)`; the test
-`full_env_cmd_sites_are_exactly_the_declared_exceptions` lists every call site
-in both crates. None receives a secret: the forbidden names, provider keys,
-GitHub variables and every secret-looking name are removed
-(`child_env::strip_inherited_secrets`), and they start in the temporary
-directory, never in a repository. They are the document sidecar
-(`core/docs_sidecar.rs::start`), model discovery
-(`model_catalog/claude_discovery.rs::discover`,
-`model_catalog/codex_discovery.rs::discover`) and version discovery
-(`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
-and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`):
-each starts a binary Kronn found. A CLI authenticated only by a provider key
-exported to Kronn therefore reports no models; its configured key reaches it
-on a real launch. The one exception that keeps its provider keys is the
-desktop relaunching itself (`desktop/src-tauri/src/main.rs::self_restart_command`,
-`SelfRestart`): it is Kronn, keeps its own working directory, loses only the
-forbidden names, and gets the operator's key override handed back.
+Probes are built from an allow-list too. Version and model discovery and the
+`npx --yes <pkg> --version` runtime probe use `cmd::discovery_cmd(program,
+family)`: the agent family's route (so a CLI still reads its own login: home,
+XDG and its config directories such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`)
+minus every credential it would inherit (provider keys, GitHub variables,
+secret-looking names), started in the temporary directory. A CLI
+authenticated only by a provider key exported to Kronn therefore reports no
+models; its configured key reaches it on a real launch. The document sidecar
+uses the Tool route plus the operator's own `KRONN_DOCS_*` and `PYTHON*`
+settings. A credential under a name no list knows (`MYSQL_PWD`,
+`DATABASE_URL` with userinfo, `*_PASSPHRASE`, `SENTRY_DSN`) reaches none of
+them.
+
+One declared exception remains, and only on the desktop: the app relaunching
+itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through
+`cmd::full_env_sync_cmd(program, FullEnvReason::SelfRestart)`). It is Kronn
+itself: it keeps its environment and working directory, loses the forbidden
+names, and gets the operator's key override handed back. The test
+`full_env_cmd_sites_are_exactly_the_declared_exceptions` checks it is the only
+call site in either crate, and `both_clippy_files_ban_the_same_spawn_entry_points`
+that every Tauri restart entry point (`AppHandle::restart`,
+`AppHandle::request_restart`, `tauri::process::restart`) is banned.
 
 The MCP probe is no longer an exception: a server's command may come from a
 repository's `.mcp.json`, so the probe starts it with a built environment (base
@@ -594,9 +598,8 @@ Authorization form is refused, and the routes answered before the gate for
 remote peers (claim-by-token, fetch-file) refuse a bridge token. Any bearer
 that matches neither the operator token nor a live bridge token is refused
 outright, never downgraded to loopback trust. Not covered by an agent's
-environment any more but still inheriting the backend's: the declared exceptions
-of the spawn inventory above (CLI version and model discovery, the document
-sidecar), with every secret removed.
+environment any more but still inheriting the desktop's own: the self-restart,
+the one declared exception of the spawn inventory above.
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its
