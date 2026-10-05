@@ -2113,6 +2113,7 @@ const zh: TranslationDict = {
   "planning.proposalRejectReason": "可选原因…",
   "planning.proposalRejectedReason": "原因：{0}",
   "planning.proposalUnavailable": "此历史提案在收件箱中不可用。",
+  "planning.proposalProject": "项目：{0}",
   "planning.proposalItemFallback": "项目 {0}",
   "planning.proposalItem.pending": "待处理",
   "planning.proposalItem.accepted": "已接受",
