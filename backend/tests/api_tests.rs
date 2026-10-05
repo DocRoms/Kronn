@@ -2342,7 +2342,10 @@ async fn artifact_import_drops_the_unmodelled_program_approval_it_carries() {
     .await;
     assert_eq!(refused["success"], false, "{refused}");
     assert!(
-        refused["error"].as_str().unwrap_or_default().contains("terraform"),
+        refused["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("terraform"),
         "{refused}"
     );
 }

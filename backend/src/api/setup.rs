@@ -1882,14 +1882,12 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     }
     let mut quick_execs = Vec::new();
     for qe in &data.quick_execs {
-        if let Some(reason) =
-            crate::core::inline_code::quick_exec_validation_error(
-                &qe.name,
-                &qe.command,
-                &qe.args,
-                qe.unmodelled_args_approved == Some(true),
-            )
-        {
+        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
+            &qe.name,
+            &qe.command,
+            &qe.args,
+            qe.unmodelled_args_approved == Some(true),
+        ) {
             warnings.push(format!("Quick Exec « {} » non importé : {reason}", qe.name));
             continue;
         }

@@ -2502,8 +2502,14 @@ mod tests {
                 rendered_refusal("s", program, &templates, &line(rendered), false)
             };
             assert!(refusal(&["-rf", "target"]).is_some(), "{program} -rf");
-            assert!(refusal(&["--no-preserve-root", "target"]).is_some(), "{program} --");
-            assert!(refusal(&["Équipe 🦀", "target"]).is_none(), "{program} plain value");
+            assert!(
+                refusal(&["--no-preserve-root", "target"]).is_some(),
+                "{program} --"
+            );
+            assert!(
+                refusal(&["Équipe 🦀", "target"]).is_none(),
+                "{program} plain value"
+            );
 
             let templates = tainted(&["-v", "{{x}}", "{{y}}"]);
             let rendered = line(&["-v", "a", "-rf"]);
