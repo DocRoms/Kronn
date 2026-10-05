@@ -62,10 +62,10 @@ pub struct RawRows(Vec<[Option<String>; 6]>);
 
 /// Read every connection row verbatim, ciphertext included.
 pub fn snapshot_rows(conn: &Connection) -> Result<RawRows> {
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
         "SELECT project_id, mode, token_encrypted, scope_json, CAST(connected_on_upgrade AS TEXT), updated_at \
-         FROM project_github_connections"
-    ))?;
+         FROM project_github_connections",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok([
