@@ -717,6 +717,17 @@ fn kill_process_group(group: Option<u32>) {
 #[cfg(not(unix))]
 fn kill_process_group(_group: Option<u32>) {}
 
+/// Native ACP runtimes are spawned as Windows programs and their protocol
+/// payloads carry Windows paths, so one found only inside WSL is refused.
+fn native_acp_wsl_only_refusal(program: &str) -> Option<String> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    crate::agents::find_binary(program)
+        .filter(|location| location.via_wsl)
+        .map(|_| crate::agents::wsl::native_acp_wsl_refusal(program))
+}
+
 /// The subprocess of a native ACP session: its command, working directory and
 /// the environment Kronn gives it.
 fn native_command(
@@ -776,6 +787,9 @@ impl AcpJsonRpcTransport {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
         })?;
+        if let Some(refusal) = native_acp_wsl_only_refusal(program) {
+            return Err(AcpError::Transport(refusal));
+        }
         let command = native_command(agent, program, &args, cwd, discussion_id);
         Self::spawn_scoped(agent, command, full_access, Some(scope)).await
     }
@@ -2307,6 +2321,18 @@ mod tests {
             AcpProductionRoute::AdaptedAcp,
             "unset must use the product adapter default"
         );
+    }
+
+    #[test]
+    fn native_acp_wsl_refusal_only_applies_to_windows_hosts() {
+        // Linux and macOS hosts never route through WSL, so nothing is refused.
+        if !cfg!(target_os = "windows") {
+            assert_eq!(native_acp_wsl_only_refusal("gemini"), None);
+            assert_eq!(
+                native_acp_wsl_only_refusal("definitely-not-installed-acp"),
+                None
+            );
+        }
     }
 
     #[test]

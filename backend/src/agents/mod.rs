@@ -36,6 +36,7 @@ pub mod runner;
 pub mod tool_trace;
 pub mod tools;
 pub mod vision;
+pub(crate) mod wsl;
 
 /// Cache for runtime probe results (npx availability).
 /// Key: binary name, Value: (available, probed_at)

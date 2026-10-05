@@ -78,6 +78,16 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Kronn on Windows starting Claude or Codex installed in WSL now passes them
+  what they need across the boundary: every variable it sets for the launch is
+  listed in `WSLENV` (appended to the user's own list), and the Windows paths
+  it puts in the arguments, including the bridge command inside the inline MCP
+  configuration, the sandbox settings and Codex overrides, become WSL paths.
+  `KRONN_WSL_BACKEND_URL` gives a WSL agent a backend URL it can reach in
+  WSL2's NAT mode, and a warning says so when networking is not mirrored. A
+  Gemini, Copilot, Kiro, OpenCode or Vibe found only inside WSL is refused
+  with a clear message instead of failing to start (KT-981).
+
 - An audit step that only calls tools, without a word of text, now shows its
   last tool, its call count and its tokens while it works, for HTTP agents and
   ACP agents alike, through one probe; the counters no longer wait for a text
