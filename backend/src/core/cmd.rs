@@ -351,10 +351,45 @@ mod tests {
     /// The places allowed to bypass clippy's spawn ban are exactly these.
     #[test]
     fn clippy_spawn_ban_bypasses_are_exactly_these() {
-        let needle = concat!("allow(clippy::", "disallowed_methods)");
+        // Any `allow`/`expect` list (plain, inner, combined or under
+        // `cfg_attr`) naming the lint or a group that holds it.
+        let lints = [
+            concat!("clippy::", "disallowed_methods"),
+            concat!("clippy::", "style"),
+            concat!("clippy::", "all"),
+        ];
+        let bypasses = |text: &str| -> usize {
+            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            let mut count = 0;
+            for opener in [concat!("allow", "("), concat!("expect", "(")] {
+                for (start, _) in compact.match_indices(opener) {
+                    let rest = &compact[start + opener.len()..];
+                    let mut depth = 1usize;
+                    let end = rest
+                        .char_indices()
+                        .find(|(_, c)| {
+                            match c {
+                                '(' => depth += 1,
+                                ')' => depth -= 1,
+                                _ => {}
+                            }
+                            depth == 0
+                        })
+                        .map_or(rest.len(), |(index, _)| index);
+                    let list = &rest[..end];
+                    if list.split(',').any(|item| lints.contains(&item)) {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
         let found: std::collections::BTreeMap<String, usize> = rust_sources()
             .into_iter()
-            .map(|(rel, text)| (rel, text.matches(needle).count()))
+            .map(|(rel, text)| {
+                let count = bypasses(&text);
+                (rel, count)
+            })
             .filter(|(_, n)| *n > 0)
             .collect();
         let expected: std::collections::BTreeMap<String, usize> = [
