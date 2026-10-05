@@ -392,7 +392,10 @@ on the direct route and the Claude/Codex adapters (`try_spawn`), native ACP
 agents (`native_command`), the task-worker auth probes, the project and
 discussion exec routes, workflow Exec steps (setup included), workspace
 lifecycle hooks, Quick Exec (task validations included) and the API-call
-credential CLIs. Each path has a test that inspects the final environment;
+credential CLIs, and every `git` process (`core::cmd` gives git its own policy:
+the base allow-list plus git's identity, config and prompt variables, never a
+repository selector), since a repository's hooks, filters and drivers run
+inside git. Each path has a test that inspects the final environment;
 the seal runs after every other `.env()` of the launch. Agents
 under Docker run in the backend container through the same `try_spawn`; there
 is no separate container spawn path. Each child starts from `env_clear()`, gets
@@ -431,6 +434,18 @@ only for resources in its scope: ids in the path, the query and the top-level
 JSON body. Writes to a discussion need one of the launch's own discussions (or
 one it created through `disc/create`); reads need the token's project;
 effectful routes need the token's project and are logged with the token id.
+Ids are resolved the way the handler resolves them before the check (`KT-12`
+task references, an execution named by its task), and an id that resolves to
+nothing is refused, never let through. Reads are scoped after the handler
+runs: list, search and lookup responses drop entries outside the token's
+project (by their project fields, or the project of the discussion they name),
+and a lone object outside it is refused; `/api/resolve/{id}` is checked against
+the resource it names. `agent-api/call` runs for the token's project, never one
+taken from the body or the chosen config, and refuses a config that project
+cannot see. The token's discussion or run is re-read on every call, so deleting
+it kills the token at once. The WebSocket bus refuses a bridge token (403) and
+any credential other than the operator token (401); without a credential it
+keeps loopback trust.
 A workflow trigger that names no project gets the token's project added to its
 body, so a shared or multi-project workflow runs for that project (KT-851
 resolution) and one that does not serve it is refused. A

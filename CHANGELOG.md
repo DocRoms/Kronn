@@ -131,7 +131,11 @@ Release notes for 0.9.3 and earlier are available in the
   and the body are checked), never a route that returns or moves a secret,
   and effects are logged with its id. A workflow it triggers without naming a
   project runs for the room's project when the workflow serves it (KT-851),
-  and is refused otherwise. The bridge reads `KRONN_BRIDGE_TOKEN`
+  and is refused otherwise. Ids are resolved like the handler resolves them
+  (`KT-12` included) and an unknown id is refused; lists, searches and lookups
+  only show the token's project; an API call runs for the token's project with
+  a config that project can see; deleting the room kills its token; the
+  WebSocket bus refuses it. The bridge reads `KRONN_BRIDGE_TOKEN`
   first. Loopback requests without a token keep today's trust until the
   per-action human proof ships in 0.15 (KT-1006).
 
@@ -140,8 +144,8 @@ Release notes for 0.9.3 and earlier are available in the
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task
-  validations included) and the API-call credential CLIs get a built
-  environment (a reviewed allow-list, then the launch's own
+  validations included), the API-call credential CLIs and every `git` process
+  (whose repository hooks run inside it) get a built environment (a reviewed allow-list, then the launch's own
   values). No child receives `KRONN_AUTH_TOKEN`, `KRONN_ENCRYPTION_KEK`, or
   another agent's provider key, nor a GitHub token from the backend's
   environment (only a connected project's, native ACP agents included), and
