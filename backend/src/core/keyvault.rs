@@ -496,14 +496,17 @@ mod tests {
             (root.join("src/main.rs"), "tokio::runtime::Builder"),
             (
                 root.join("../desktop/src-tauri/src/main.rs"),
-                "tracing_subscriber::fmt()",
+                "tracing_subscriber::",
             ),
         ] {
             let text = std::fs::read_to_string(&file).unwrap();
             let take = text
                 .find("keyvault::take_env_kek()")
                 .unwrap_or_else(|| panic!("{} never takes the key override", file.display()));
-            assert!(take < text.find(before).unwrap(), "{}", file.display());
+            let marker = text
+                .find(before)
+                .unwrap_or_else(|| panic!("{} has no `{before}`", file.display()));
+            assert!(take < marker, "{}", file.display());
         }
     }
 
