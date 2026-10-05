@@ -121,7 +121,38 @@ Release notes for 0.9.3 and earlier are available in the
   launches exactly as before. The step editor and `workflow_step_schema`
   expose the setting, validated at save (KT-908).
 
+- Each agent launch gets its own bridge token instead of Kronn's admin token:
+  a random value held only in memory, bound to the launch's discussion, task
+  execution or workflow run and their project, revoked when the launch ends
+  and forgotten on restart. It opens only the routes the `kronn-internal`
+  bridge calls, only for resources in its scope (ids in the path, the query
+  and the body are checked), never a route that returns or moves a secret,
+  and effects are logged with its id. A workflow it triggers without naming a
+  project runs for the room's project when the workflow serves it (KT-851),
+  and is refused otherwise. The bridge reads `KRONN_BRIDGE_TOKEN`
+  first. Loopback requests without a token keep today's trust until the
+  per-action human proof ships in 0.15 (KT-1006).
+
 ### Fixed
+
+- Processes Kronn starts for a caller no longer inherit the backend's
+  environment: agent CLIs on all three routes, the project and discussion
+  terminal, workflow Exec steps and workspace hooks, Quick Exec (task
+  validations included) and the API-call credential CLIs get a built
+  environment (a reviewed allow-list, then the launch's own
+  values). No child receives `KRONN_AUTH_TOKEN`, `KRONN_ENCRYPTION_KEK`, or
+  another agent's provider key, nor a GitHub token from the backend's
+  environment (only a connected project's, native ACP agents included), and
+  the backend no longer exports its admin token into its own environment
+  (KT-1006).
+- Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
+  provider key configured in Kronn, a temporary directory beside the project,
+  and their room and workflow-step contexts, like the other routes (KT-1013).
+- The project and discussion terminal no longer runs `env` and no longer
+  reads outside the project: `cat`, `head`, `tail`, `find`, `stat`, `grep`,
+  `rg`, `wc`, `du`, `file`, `tree` and `ls` refuse a path that resolves
+  outside it, symlinks followed, and `find -exec`/`-delete` and
+  `git diff --no-index` are refused (KT-1006).
 
 - Kronn on Windows starting Claude or Codex installed in WSL now passes them
   what they need across the boundary: every variable it sets for the launch is
@@ -380,6 +411,12 @@ Release notes for 0.9.3 and earlier are available in the
   Exec steps follow the same project setting, and a failed `gh` step says the
   project is not connected. `gh auth token` now runs asynchronously, with a
   5-second limit and a one-minute cache, instead of blocking every launch.
+- A request whose bearer token matches neither the operator token nor a live
+  bridge token is refused, even from loopback, where a request without any
+  token keeps passing (KT-1006).
+- The project and discussion terminal runs its command without a shell:
+  quotes still group words, but `$VAR`, `~` and globs are passed literally
+  (`find . -name "*.rs"` still works) (KT-1006).
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from
