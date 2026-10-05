@@ -1972,6 +1972,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/workflows/{id}/unsafe-steps",
             get(api::workflows::unsafe_steps),
         )
+        .route(
+            "/api/exec/line-check",
+            post(api::workflows::exec_line_check),
+        )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(
             "/api/workflows/exec-scripts/status",

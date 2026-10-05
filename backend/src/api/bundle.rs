@@ -240,6 +240,10 @@ pub async fn create_bundle(
     // Workflow needs the same fields the regular `create` endpoint
     // composes; reuse `Workflow` directly so we don't drift from the
     // canonical shape.
+    // A bundle comes from an agent's chat signal: it never carries a human's
+    // approval of unmodelled programs (KT-1017).
+    crate::api::workflows::clear_human_approvals(&mut req.workflow.steps);
+    crate::api::workflows::clear_human_approvals(&mut req.workflow.on_failure);
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
         project_scope: req.workflow.project_scope.clone(),
@@ -333,6 +337,10 @@ pub async fn create_bundle(
         });
     }
 
+    for child in &mut prepared_children {
+        crate::api::workflows::clear_human_approvals(&mut child.steps);
+        crate::api::workflows::clear_human_approvals(&mut child.on_failure);
+    }
     // Exec lines get the same save-time rules as the editor (allowlist,
     // inline-code interpolation), for the parent and every child.
     for workflow in std::iter::once(&wf_to_insert).chain(prepared_children.iter()) {

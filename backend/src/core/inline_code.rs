@@ -151,6 +151,10 @@ pub enum InlineFinding {
     OptionPosition(String),
     /// A value names the program to run (`{{cmd}}`, `env {{cmd}}`).
     TemplatedExecutable(String),
+    /// A value reaches a program the classifier does not model, which may
+    /// read its arguments as anything: `(program, path)`. Accepted only when
+    /// a human approved the step.
+    UnmodelledProgram(String, String),
 }
 
 /// The first unsafe placeholder of `cmd args`, if any: in the program name,
@@ -158,6 +162,16 @@ pub enum InlineFinding {
 /// there, whatever filter a value went through), where the program still
 /// reads options, or where it names a program to run.
 pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFinding> {
+    first_unsafe_placeholder_with(cmd, args, false)
+}
+
+/// [`first_unsafe_placeholder`], where `approved` says a human confirmed that
+/// the unmodelled programs of the line treat their arguments as data.
+pub fn first_unsafe_placeholder_with(
+    cmd: &str,
+    args: &[String],
+    approved: bool,
+) -> Option<InlineFinding> {
     if let Some(finding) = untrusted_in(cmd) {
         return Some(match finding {
             Some(path) => InlineFinding::TemplatedExecutable(path),
@@ -182,6 +196,15 @@ pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFind
             Role::Executable => return finding_at(index, InlineFinding::TemplatedExecutable),
             Role::Option => return finding_at(index, InlineFinding::OptionPosition),
             _ => {}
+        }
+    }
+    if !approved {
+        if let Some(index) = (0..args.len()).find(|&i| tainted[i] && roles[i] == Role::Unmodelled) {
+            let program = crate::core::argv_roles::owning_program(cmd, args, &roles, index);
+            return Some(match untrusted_in(&args[index]).flatten() {
+                Some(path) => InlineFinding::UnmodelledProgram(program, path),
+                None => InlineFinding::Malformed,
+            });
         }
     }
     None
@@ -212,15 +235,20 @@ pub fn safe_recipe(path: &str) -> String {
 }
 
 /// Save-time refusal for one command line (main or setup).
-pub fn validation_error(step: &str, cmd: &str, args: &[String]) -> Option<String> {
-    refusal(&format!("Step Exec « {step} »"), cmd, args)
+pub fn validation_error(step: &str, cmd: &str, args: &[String], approved: bool) -> Option<String> {
+    refusal(&format!("Step Exec « {step} »"), cmd, args, approved)
 }
 
 /// Save-time refusal for a Quick Exec, with the same rule, message and
 /// recipe as a workflow step. When the rewrite is provably equivalent it is
 /// spelled out, so the fix is one copy away.
-pub fn quick_exec_validation_error(name: &str, cmd: &str, args: &[String]) -> Option<String> {
-    let message = refusal(&format!("Quick Exec « {name} »"), cmd, args)?;
+pub fn quick_exec_validation_error(
+    name: &str,
+    cmd: &str,
+    args: &[String],
+    approved: bool,
+) -> Option<String> {
+    let message = refusal(&format!("Quick Exec « {name} »"), cmd, args, approved)?;
     Some(match suggest_args(cmd, args) {
         Ok(fixed) => format!(
             "{message} Arguments proposés : {}",
@@ -230,8 +258,8 @@ pub fn quick_exec_validation_error(name: &str, cmd: &str, args: &[String]) -> Op
     })
 }
 
-fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
-    match first_unsafe_placeholder(cmd, args)? {
+fn refusal(subject: &str, cmd: &str, args: &[String], approved: bool) -> Option<String> {
+    match first_unsafe_placeholder_with(cmd, args, approved)? {
         InlineFinding::Malformed => Some(format!(
             "{subject} : le code inline de `{cmd}` contient un placeholder mal formé."
         )),
@@ -252,30 +280,56 @@ fn refusal(subject: &str, cmd: &str, args: &[String]) -> Option<String> {
              étape Exec (et celui qu'un `env`, `sudo`, `xargs`, `find -exec` ou `docker run` \
              lance) doit être écrit en clair ; seules ses données peuvent venir d'une valeur."
         )),
+        InlineFinding::UnmodelledProgram(program, path) => {
+            Some(unmodelled_message(subject, &program, &path))
+        }
     }
+}
+
+/// The refusal for a value reaching an unmodelled program, with what to do.
+pub fn unmodelled_message(subject: &str, program: &str, path: &str) -> String {
+    format!(
+        "{subject} : `{{{{{path}}}}}` est passé à `{program}`, un programme que Kronn ne sait pas \
+         analyser : rien ne garantit qu'il lit cet argument comme une simple donnée. Fais passer \
+         la valeur par un interpréteur modélisé ou un script qui la reçoit en argument (par \
+         exemple `bash -c '{program} \"$1\"' _ {{{{{path}}}}}` n'est sûr que si `{program}` traite \
+         son argument comme une donnée), ou fais approuver l'étape par un humain (« {program} \
+         reçoit des valeurs du run ; je confirme qu'il traite ses arguments comme de simples \
+         données »)."
+    )
 }
 
 /// Every unsafe command line of a saved step (main, then setup, or each
 /// inline Quick Exec source of a CollectApiData step), with a suggested
 /// rewrite when one is provably equivalent.
 pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecStep> {
+    let approved = step.exec_unmodelled_args_approved == Some(true);
     let mut found = Vec::new();
     let mut check = |phase: &str, alias: Option<&str>, cmd: Option<&str>, args: &[String]| {
         let Some(cmd) = cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) else {
             return;
         };
-        let Some(finding) = first_unsafe_placeholder(cmd, args) else {
+        let Some(finding) = first_unsafe_placeholder_with(cmd, args, approved) else {
             return;
         };
         let placeholder = match &finding {
             InlineFinding::Untrusted(path)
             | InlineFinding::OptionPosition(path)
-            | InlineFinding::TemplatedExecutable(path) => format!("{{{{{path}}}}}"),
+            | InlineFinding::TemplatedExecutable(path)
+            | InlineFinding::UnmodelledProgram(_, path) => format!("{{{{{path}}}}}"),
             InlineFinding::Malformed => String::new(),
         };
-        let (suggested_args, manual_fix) = match suggest_args(cmd, args) {
-            Ok(rewritten) => (Some(rewritten), None),
-            Err(reason) => (None, Some(reason)),
+        let (suggested_args, manual_fix) = match (&finding, suggest_args(cmd, args)) {
+            (InlineFinding::UnmodelledProgram(program, path), _) => (
+                None,
+                Some(unmodelled_message(
+                    &format!("Step Exec « {} »", step.name),
+                    program,
+                    path,
+                )),
+            ),
+            (_, Ok(rewritten)) => (Some(rewritten), None),
+            (_, Err(reason)) => (None, Some(reason)),
         };
         found.push(UnsafeExecStep {
             step_name: step.name.clone(),
@@ -289,6 +343,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 InlineFinding::Untrusted(_) => "inline_code_interpolation".into(),
                 InlineFinding::OptionPosition(_) => "option_position_interpolation".into(),
                 InlineFinding::TemplatedExecutable(_) => "templated_executable".into(),
+                InlineFinding::UnmodelledProgram(..) => "unmodelled_program".into(),
                 InlineFinding::Malformed => "malformed_placeholder".into(),
             },
             suggested_args,
@@ -403,6 +458,13 @@ pub fn classify_workflow(
 /// Run-time refusal: the explicit error a dangerous step fails with.
 pub fn runtime_refusal(step: &WorkflowStep) -> Option<String> {
     let finding = classify_step(step, false).into_iter().next()?;
+    if finding.reason == "unmodelled_program" {
+        return Some(format!(
+            "Exec step `{}` refusé avant exécution — {}",
+            step.name,
+            finding.manual_fix.unwrap_or_default()
+        ));
+    }
     let what = if finding.placeholder.is_empty() {
         "un placeholder mal formé".to_string()
     } else {
@@ -725,11 +787,23 @@ pub fn first_tainted_option_position(
     args: &[String],
     tainted: &[bool],
 ) -> Option<usize> {
+    first_tainted_position_with(cmd, args, tainted, false)
+}
+
+/// [`first_tainted_option_position`]; with `approved`, a value given to an
+/// unmodelled program is accepted.
+fn first_tainted_position_with(
+    cmd: &str,
+    args: &[String],
+    tainted: &[bool],
+    approved: bool,
+) -> Option<usize> {
     use crate::core::argv_roles::Role;
     let roles = crate::core::argv_roles::roles(cmd, args, tainted);
     (0..args.len()).find(|&i| {
         tainted.get(i).copied().unwrap_or(false)
             && !matches!(roles[i], Role::Data | Role::RuntimeOption)
+            && !(approved && roles[i] == Role::Unmodelled)
     })
 }
 
@@ -755,6 +829,7 @@ pub fn rendered_refusal(
     cmd: &str,
     templates: &[String],
     rendered: &[String],
+    approved: bool,
 ) -> Option<String> {
     use crate::core::argv_roles::Role;
     let tainted = tainted_templates(templates);
@@ -786,8 +861,8 @@ pub fn rendered_refusal(
             }
         })
         .collect();
-    let index = first_tainted_option_position(cmd, &parsed, &tainted)
-        .or_else(|| first_tainted_option_position(cmd, templates, &tainted))
+    let index = first_tainted_position_with(cmd, &parsed, &tainted, approved)
+        .or_else(|| first_tainted_position_with(cmd, templates, &tainted, approved))
         .or(option_like)?;
     Some(format!(
         "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
@@ -1687,15 +1762,15 @@ mod tests {
         // become an option even though its rendered text looks like one.
         let templates = args(&["{{mode}}", "{{issue.title}}"]);
         let rendered = args(&["-c", "print(1)"]);
-        assert!(rendered_refusal("s", "python3", &templates, &rendered).is_some());
+        assert!(rendered_refusal("s", "python3", &templates, &rendered, false).is_some());
         // The positional recipe stays data whatever the value renders to.
         let templates = args(&["-e", "console.log(process.argv[1])", "--", "{{x}}"]);
         let rendered = args(&["-e", "console.log(process.argv[1])", "--", "--eval=1"]);
-        assert!(rendered_refusal("s", "node", &templates, &rendered).is_none());
+        assert!(rendered_refusal("s", "node", &templates, &rendered, false).is_none());
         // A tainted field rendered to `--` does not end option parsing.
         let templates = args(&["-e", "console.log(1)", "{{a}}", "{{b}}"]);
         let rendered = args(&["-e", "console.log(1)", "--", "--eval=1"]);
-        assert!(rendered_refusal("s", "node", &templates, &rendered).is_some());
+        assert!(rendered_refusal("s", "node", &templates, &rendered, false).is_some());
     }
 
     #[test]

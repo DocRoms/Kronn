@@ -1843,7 +1843,7 @@ impl ToolExecutor for KronnToolExecutor {
                     Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
                 };
                 let Json(res) =
-                    crate::api::quick_execs::create(State(self.state.clone()), Json(request)).await;
+                    crate::api::quick_execs::create_as(self.state.clone(), request, true).await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "qe_update" => {
@@ -1875,10 +1875,11 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(merged) => merged,
                     Err(error) => return fail(call, format!("invalid Quick Exec: {error}")),
                 };
-                let Json(res) = crate::api::quick_execs::update(
-                    State(self.state.clone()),
-                    Path(existing.id.clone()),
-                    Json(merged),
+                let Json(res) = crate::api::quick_execs::update_as(
+                    self.state.clone(),
+                    existing.id.clone(),
+                    merged,
+                    true,
                 )
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)
@@ -5268,6 +5269,7 @@ mod tests {
             pinned: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            unmodelled_args_approved: None,
         }
     }
 
@@ -5365,6 +5367,7 @@ mod tests {
             pinned: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            unmodelled_args_approved: None,
         };
 
         let merged: crate::models::CreateQuickExecRequest = merged_definition(

@@ -193,6 +193,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         }
     }
 }

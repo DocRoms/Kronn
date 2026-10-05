@@ -1690,6 +1690,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 variables: vec![],
                 created_at: now,
                 updated_at: now,
+                unmodelled_args_approved: None,
             };
             kronn::db::quick_execs::insert_quick_exec(connection, &quick_exec)?;
 
@@ -3264,7 +3265,7 @@ async fn project_repository_resources_expose_uses_and_used_by_with_missing_refer
                         variables: Vec::new(),
                         pinned: false,
                         created_at: now,
-                        updated_at: now,
+                        updated_at: now, unmodelled_args_approved: None,
                     },
                 )?;
                 let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
@@ -3349,6 +3350,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
                         pinned: false,
                         created_at: now,
                         updated_at: now,
+                        unmodelled_args_approved: None,
                     },
                 )?;
                 Ok(())
@@ -25699,6 +25701,7 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
                     pinned: false,
                     created_at: now,
                     updated_at: now,
+                    unmodelled_args_approved: None,
                 },
             )
         })

@@ -1918,6 +1918,7 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }],
         actions: vec![],
@@ -5428,6 +5429,7 @@ fn workflow_multi_step_roundtrip() {
                 room_id: None,
                 read_only_repos: vec![],
                 exec_script_files: vec![],
+                exec_unmodelled_args_approved: None,
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
@@ -5498,6 +5500,7 @@ fn workflow_multi_step_roundtrip() {
                 room_id: None,
                 read_only_repos: vec![],
                 exec_script_files: vec![],
+                exec_unmodelled_args_approved: None,
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
@@ -5565,6 +5568,7 @@ fn workflow_multi_step_roundtrip() {
                 room_id: None,
                 read_only_repos: vec![],
                 exec_script_files: vec![],
+                exec_unmodelled_args_approved: None,
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
         ],
@@ -5687,6 +5691,7 @@ fn workflow_update_steps_count() {
         room_id: None,
         read_only_repos: vec![],
         exec_script_files: vec![],
+        exec_unmodelled_args_approved: None,
         sub_workflow_variables: std::collections::HashMap::new(),
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();

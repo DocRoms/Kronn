@@ -1100,7 +1100,9 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
 /// An unsafe command line already stored in a workflow, with its exact
 /// place: chain (`on_failure`), step position, the line itself, then the
 /// step's declared script files (KT-918), so a changed hash is not "unchanged".
-pub(crate) type KeptLine = (bool, usize, UnsafeExecStep, Vec<ExecScriptFile>);
+/// The last element is the step's human approval of unmodelled programs: a
+/// change to it makes the line new.
+pub(crate) type KeptLine = (bool, usize, UnsafeExecStep, Vec<ExecScriptFile>, bool);
 
 /// The unsafe lines a stored workflow already holds. An update that leaves
 /// one of them exactly as it is (same chain, position, step name, phase,
@@ -1114,7 +1116,15 @@ pub(crate) fn kept_lines(steps: &[WorkflowStep], on_failure: &[WorkflowStep]) ->
             .flat_map(move |(index, step)| {
                 crate::core::inline_code::classify_step(step, rollback)
                     .into_iter()
-                    .map(move |line| (rollback, index, line, step.exec_script_files.clone()))
+                    .map(move |line| {
+                        (
+                            rollback,
+                            index,
+                            line,
+                            step.exec_script_files.clone(),
+                            step.exec_unmodelled_args_approved == Some(true),
+                        )
+                    })
             })
             .collect::<Vec<_>>()
     };
@@ -1145,6 +1155,7 @@ fn is_grandfathered(
         cmd,
         args,
         &step.exec_script_files,
+        step.exec_unmodelled_args_approved == Some(true),
     )
 }
 
@@ -1159,10 +1170,11 @@ fn is_grandfathered_line(
     cmd: Option<&str>,
     args: &[String],
     scripts: &[ExecScriptFile],
+    approved: bool,
 ) -> bool {
     let cmd = cmd.map(str::trim).unwrap_or_default();
-    kept.iter()
-        .any(|(kept_rollback, kept_index, known, kept_scripts)| {
+    kept.iter().any(
+        |(kept_rollback, kept_index, known, kept_scripts, kept_approved)| {
             *kept_rollback == rollback
                 && *kept_index == index
                 && known.step_name == step_name
@@ -1171,7 +1183,9 @@ fn is_grandfathered_line(
                 && known.command == cmd
                 && known.args == args
                 && kept_scripts.as_slice() == scripts
-        })
+                && *kept_approved == approved
+        },
+    )
 }
 
 fn validate_exec_steps_keeping(
@@ -1244,12 +1258,14 @@ fn validate_exec_steps_keeping(
                         Some(cmd),
                         &exec.args,
                         &s.exec_script_files,
+                        s.exec_unmodelled_args_approved == Some(true),
                     );
                     if !kept {
                         if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
                             &format!("{} » / source « {}", s.name, source.alias),
                             cmd,
                             &exec.args,
+                            s.exec_unmodelled_args_approved == Some(true),
                         ) {
                             return Err(error);
                         }
@@ -1309,6 +1325,7 @@ fn validate_exec_steps_keeping(
                 Some(cmd),
                 &line,
                 &s.exec_script_files,
+                s.exec_unmodelled_args_approved == Some(true),
             );
             if !kept_stdin {
                 if let Some(error) = crate::core::inline_code::stdin_validation_error(
@@ -1322,9 +1339,12 @@ fn validate_exec_steps_keeping(
             }
         }
         if !is_grandfathered(kept, rollback, index, s, "main") {
-            if let Some(error) =
-                crate::core::inline_code::validation_error(&s.name, cmd, &s.exec_args)
-            {
+            if let Some(error) = crate::core::inline_code::validation_error(
+                &s.name,
+                cmd,
+                &s.exec_args,
+                s.exec_unmodelled_args_approved == Some(true),
+            ) {
                 return Err(error);
             }
         }
@@ -1387,6 +1407,7 @@ fn validate_exec_steps_keeping(
                     &s.name,
                     setup_cmd,
                     &s.exec_setup_args,
+                    s.exec_unmodelled_args_approved == Some(true),
                 ) {
                     return Err(format!("{error} (setup)"));
                 }
@@ -1468,6 +1489,21 @@ async fn pin_exec_script_files(
         checked.map_err(|error| format!("Step Exec « {} » : {error}", step.name))?;
     }
     Ok(())
+}
+
+/// POST /api/exec/line-check — whether a line sends run values to a program
+/// Kronn does not model, so the editor offers the human approval.
+pub async fn exec_line_check(
+    Json(req): Json<ExecLineCheckRequest>,
+) -> Json<ApiResponse<ExecLineCheck>> {
+    let unmodelled_program =
+        match crate::core::inline_code::first_unsafe_placeholder(req.command.trim(), &req.args) {
+            Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(program, _)) => {
+                Some(program)
+            }
+            _ => None,
+        };
+    Json(ApiResponse::ok(ExecLineCheck { unmodelled_program }))
 }
 
 /// POST /api/workflows/exec-scripts/status — where each declared file of one
@@ -1735,6 +1771,36 @@ pub(crate) enum WorkflowWriter {
     Agent,
 }
 
+/// Drop every human approval of unmodelled programs: an agent never gives
+/// one, and an import that may come from one never carries one (KT-1017).
+pub(crate) fn clear_human_approvals(steps: &mut [WorkflowStep]) {
+    for step in steps {
+        step.exec_unmodelled_args_approved = None;
+    }
+}
+
+/// An agent's save keeps a stored approval only on a step whose command
+/// lines are exactly the ones a human approved; any other step loses it.
+fn keep_human_approvals(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
+    let lines = |step: &WorkflowStep| {
+        (
+            step.exec_command.clone(),
+            step.exec_args.clone(),
+            step.exec_setup_command.clone(),
+            step.exec_setup_args.clone(),
+            step.exec_stdin.clone(),
+            serde_json::to_value(&step.collect_api_data).unwrap_or_default(),
+        )
+    };
+    for step in steps {
+        step.exec_unmodelled_args_approved = stored
+            .iter()
+            .find(|known| known.name == step.name && lines(known) == lines(step))
+            .and_then(|known| known.exec_unmodelled_args_approved)
+            .filter(|approved| *approved);
+    }
+}
+
 impl WorkflowWriter {
     fn from_bridge(
         bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
@@ -1760,6 +1826,10 @@ pub(crate) async fn create_as(
     mut req: CreateWorkflowRequest,
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
+    if writer == WorkflowWriter::Agent {
+        clear_human_approvals(&mut req.steps);
+        clear_human_approvals(&mut req.on_failure);
+    }
     if let Err(e) = validate_project_scope_db(&state, req.project_scope.clone()).await {
         return Json(ApiResponse::err(e));
     }
@@ -2081,6 +2151,14 @@ pub(crate) async fn update_as(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if writer == WorkflowWriter::Agent {
+        if let Some(steps) = req.steps.as_mut() {
+            keep_human_approvals(steps, &existing.steps);
+        }
+        if let Some(on_failure) = req.on_failure.as_mut() {
+            keep_human_approvals(on_failure, &existing.on_failure);
+        }
+    }
 
     if req.steps.is_some() || req.on_failure.is_some() {
         let project_id = req
@@ -2877,6 +2955,7 @@ pub(crate) fn remap_workflow_step_dependencies(
 /// best-effort behaviour.
 pub async fn import_workflow(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<ImportWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let envelope: WorkflowExportEnvelope = match serde_json::from_str(&req.content) {
@@ -2905,6 +2984,15 @@ pub async fn import_workflow(
     let mut all_wfs: Vec<Workflow> = Vec::with_capacity(1 + envelope.referenced_workflows.len());
     all_wfs.push(envelope.workflow);
     all_wfs.extend(envelope.referenced_workflows);
+    // An import through an agent's bridge token (the MCP clone path) never
+    // carries a human's approval of unmodelled programs (KT-1017).
+    let by_agent = bridge.is_some();
+    if by_agent {
+        for w in &mut all_wfs {
+            clear_human_approvals(&mut w.steps);
+            clear_human_approvals(&mut w.on_failure);
+        }
+    }
 
     // Validate every workflow in the bundle like a fresh create.
     for w in &all_wfs {
@@ -2948,9 +3036,15 @@ pub async fn import_workflow(
     let mut qes_to_insert: Vec<QuickExec> =
         Vec::with_capacity(envelope.referenced_quick_execs.len());
     for mut qe in envelope.referenced_quick_execs {
-        if let Some(error) =
-            crate::core::inline_code::quick_exec_validation_error(&qe.name, &qe.command, &qe.args)
-        {
+        if by_agent {
+            qe.unmodelled_args_approved = None;
+        }
+        if let Some(error) = crate::core::inline_code::quick_exec_validation_error(
+            &qe.name,
+            &qe.command,
+            &qe.args,
+            qe.unmodelled_args_approved == Some(true),
+        ) {
             return Json(ApiResponse::err(error));
         }
         let old_id = qe.id.clone();
@@ -5303,6 +5397,7 @@ pub async fn suggestions(
                     room_id: None,
                     read_only_repos: vec![],
                     exec_script_files: vec![],
+                    exec_unmodelled_args_approved: None,
                     sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
@@ -6244,6 +6339,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -6453,6 +6549,126 @@ mod tests {
                 "{cmd} {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_unmodelled_program_is_refused_at_save_unless_a_human_approves() {
+        let mut step = mk_exec_step(
+            "plan",
+            Some("terraform"),
+            vec!["plan", "-var", "x={{x}}"],
+            None,
+        );
+        let err =
+            validate_exec_steps(std::slice::from_ref(&step), &["terraform".into()]).unwrap_err();
+        assert!(err.contains("terraform") && err.contains("humain"), "{err}");
+        step.exec_unmodelled_args_approved = Some(true);
+        assert!(validate_exec_steps(&[step], &["terraform".into()]).is_ok());
+    }
+
+    /// The unchanged-line exception keys on the approval too: flipping it
+    /// makes the line new, so a stored unsafe line is checked again.
+    #[test]
+    fn the_unchanged_line_key_includes_the_unmodelled_approval() {
+        let stored = mk_exec_step(
+            "greet",
+            Some("bash"),
+            vec!["-c", "echo {{issue.title}}"],
+            None,
+        );
+        let kept = kept_lines(std::slice::from_ref(&stored), &[]);
+        assert!(validate_exec_steps_keeping(
+            std::slice::from_ref(&stored),
+            &["bash".into()],
+            &kept,
+            false
+        )
+        .is_ok());
+        let mut flipped = stored.clone();
+        flipped.exec_unmodelled_args_approved = Some(true);
+        assert!(validate_exec_steps_keeping(&[flipped], &["bash".into()], &kept, false).is_err());
+    }
+
+    fn agent_state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    /// Only a human approves an unmodelled program: neither the bridge token
+    /// nor the Kronn agent tools can set it, on create or on a changed line,
+    /// while an agent's edit elsewhere keeps the stored approval.
+    #[tokio::test]
+    async fn an_agent_save_cannot_approve_an_unmodelled_program() {
+        let state = agent_state();
+        let request = |args: Vec<&str>| -> CreateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "plan", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": ["terraform"],
+                "steps": [{"name": "plan", "step_type": {"type": "Exec"},
+                           "exec_command": "terraform", "exec_args": args,
+                           "exec_unmodelled_args_approved": true}]
+            }))
+            .unwrap()
+        };
+        let bridge = Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+        }));
+        let Json(by_bridge) = create(
+            State(state.clone()),
+            bridge.clone(),
+            Json(request(vec!["plan", "{{x}}"])),
+        )
+        .await;
+        assert!(!by_bridge.success, "a bridge save cannot approve");
+        let Json(by_tools) = create_as(
+            state.clone(),
+            request(vec!["plan", "{{x}}"]),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(!by_tools.success, "the agent tools cannot approve");
+        let Json(by_human) = create(
+            State(state.clone()),
+            None,
+            Json(request(vec!["plan", "{{x}}"])),
+        )
+        .await;
+        assert!(by_human.success, "{:?}", by_human.error);
+        let id = by_human.data.unwrap().id;
+
+        let update = |args: Vec<&str>, name: &str| -> UpdateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "steps": [{"name": "plan", "step_type": {"type": "Exec"},
+                           "exec_command": "terraform", "exec_args": args}]
+            }))
+            .unwrap()
+        };
+        let Json(kept) = update_as(
+            state.clone(),
+            id.clone(),
+            update(vec!["plan", "{{x}}"], "renamed"),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(kept.success, "{:?}", kept.error);
+        assert_eq!(
+            kept.data.unwrap().steps[0].exec_unmodelled_args_approved,
+            Some(true)
+        );
+        let Json(changed) = crate::api::workflows::update(
+            State(state.clone()),
+            Path(id),
+            bridge,
+            Json(update(vec!["apply", "{{x}}"], "renamed")),
+        )
+        .await;
+        assert!(!changed.success, "a changed line loses the approval");
     }
 
     #[test]

@@ -30,8 +30,22 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickEx
 
 pub async fn create(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<CreateQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
+    create_as(state, request, bridge.is_some()).await
+}
+
+/// Create a Quick Exec. `by_agent` (bridge token or Kronn agent tools) drops
+/// any approval of unmodelled programs: only a human gives one (KT-1017).
+pub(crate) async fn create_as(
+    state: AppState,
+    mut request: CreateQuickExecRequest,
+    by_agent: bool,
+) -> Json<ApiResponse<QuickExec>> {
+    if by_agent {
+        request.unmodelled_args_approved = None;
+    }
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
     }
@@ -51,6 +65,9 @@ pub async fn create(
         output_format: request.output_format,
         variables: request.variables,
         pinned: false,
+        unmodelled_args_approved: request
+            .unmodelled_args_approved
+            .filter(|approved| *approved),
         created_at: now,
         updated_at: now,
     };
@@ -68,7 +85,18 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<CreateQuickExecRequest>,
+) -> Json<ApiResponse<QuickExec>> {
+    update_as(state, id, request, bridge.is_some()).await
+}
+
+/// Update a Quick Exec; see [`create_as`] for `by_agent`.
+pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    mut request: CreateQuickExecRequest,
+    by_agent: bool,
 ) -> Json<ApiResponse<QuickExec>> {
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
@@ -83,11 +111,21 @@ pub async fn update(
         Ok(None) => return Json(ApiResponse::err("Quick Exec not found")),
         Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
+    // An agent's save keeps the stored approval only for the very line a
+    // human approved; any other line loses it (KT-1017).
+    if by_agent {
+        let same_line = existing.command == request.command.trim() && existing.args == request.args;
+        request.unmodelled_args_approved = existing.unmodelled_args_approved.filter(|_| same_line);
+    }
     // An unchanged stored line stays saveable (it is still refused at run
     // time); a new or changed one must be safe.
     let unchanged = existing.name == request.name.trim()
         && existing.command == request.command.trim()
-        && existing.args == request.args;
+        && existing.args == request.args
+        && existing.unmodelled_args_approved
+            == request
+                .unmodelled_args_approved
+                .filter(|approved| *approved);
     if !unchanged {
         if let Some(error) = inline_code_error(&request) {
             return Json(ApiResponse::err(error));
@@ -105,6 +143,9 @@ pub async fn update(
         output_format: request.output_format,
         variables: request.variables,
         pinned: existing.pinned,
+        unmodelled_args_approved: request
+            .unmodelled_args_approved
+            .filter(|approved| *approved),
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -601,6 +642,7 @@ pub async fn export(
 
 pub async fn import(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(request): Json<ImportQuickExecRequest>,
 ) -> Json<ApiResponse<QuickExec>> {
     let envelope: QuickExecExportEnvelope = match serde_json::from_str(&request.content) {
@@ -611,6 +653,11 @@ pub async fn import(
         return Json(ApiResponse::err("Unsupported Quick Exec export"));
     }
     let mut item = envelope.quick_exec;
+    // An import through an agent's bridge token never carries a human's
+    // approval of unmodelled programs (KT-1017).
+    if bridge.is_some() {
+        item.unmodelled_args_approved = None;
+    }
     let validation = CreateQuickExecRequest {
         name: item.name.clone(),
         icon: Some(item.icon.clone()),
@@ -621,6 +668,7 @@ pub async fn import(
         timeout_secs: Some(item.timeout_secs),
         output_format: item.output_format,
         variables: item.variables.clone(),
+        unmodelled_args_approved: item.unmodelled_args_approved,
     };
     if let Err(error) = validate_request(&validation) {
         return Json(ApiResponse::err(error));
@@ -651,6 +699,7 @@ fn inline_code_error(request: &CreateQuickExecRequest) -> Option<String> {
         request.name.trim(),
         request.command.trim(),
         &request.args,
+        request.unmodelled_args_approved == Some(true),
     )
 }
 
@@ -725,6 +774,7 @@ mod tests {
             timeout_secs: Some(60),
             output_format: CollectQuickExecOutputFormat::Json,
             variables: vec![],
+            unmodelled_args_approved: None,
         }
     }
 
@@ -756,7 +806,62 @@ mod tests {
         assert!(inline_code_error(&safe).is_none());
         let mut plain = request("aws");
         plain.args = vec!["s3".into(), "ls".into(), "{{bucket}}".into()];
+        // `aws` is not modelled: a value reaches it only with a human's approval.
+        assert!(inline_code_error(&plain).unwrap().contains("aws"));
+        plain.unmodelled_args_approved = Some(true);
         assert!(inline_code_error(&plain).is_none());
+    }
+
+    fn state() -> crate::AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn bridge() -> Option<axum::Extension<crate::core::bridge_token::BridgeCaller>> {
+        Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+        }))
+    }
+
+    /// Only a human approves an unmodelled program: the bridge and the Kronn
+    /// agent tools lose the flag, on create and on a changed line.
+    #[tokio::test]
+    async fn only_a_human_approves_an_unmodelled_program() {
+        let state = state();
+        let mut approved = request("aws");
+        approved.args = vec!["s3".into(), "ls".into(), "{{bucket}}".into()];
+        approved.unmodelled_args_approved = Some(true);
+        let clone = |r: &CreateQuickExecRequest| -> CreateQuickExecRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": r.name, "description": "", "project_id": null, "command": r.command,
+                "args": r.args, "timeout_secs": 60, "output_format": "json", "variables": [],
+                "unmodelled_args_approved": r.unmodelled_args_approved,
+            }))
+            .unwrap()
+        };
+        let Json(by_bridge) = create(State(state.clone()), bridge(), Json(clone(&approved))).await;
+        assert!(!by_bridge.success, "a bridge save cannot approve");
+        let Json(by_tools) = create_as(state.clone(), clone(&approved), true).await;
+        assert!(!by_tools.success, "the agent tools cannot approve");
+        let Json(by_human) = create(State(state.clone()), None, Json(clone(&approved))).await;
+        assert!(by_human.success, "{:?}", by_human.error);
+        let id = by_human.data.unwrap().id;
+
+        // The agent keeps the approval only on the very line a human approved.
+        let mut same = clone(&approved);
+        same.unmodelled_args_approved = None;
+        same.description = "agent edit".into();
+        let Json(kept) = update_as(state.clone(), id.clone(), same, true).await;
+        assert_eq!(kept.data.unwrap().unmodelled_args_approved, Some(true));
+        let mut changed = clone(&approved);
+        changed.args = vec!["s3".into(), "rm".into(), "{{bucket}}".into()];
+        let Json(dropped) = update(State(state.clone()), Path(id), bridge(), Json(changed)).await;
+        assert!(!dropped.success, "a changed line loses the approval");
     }
 
     #[test]

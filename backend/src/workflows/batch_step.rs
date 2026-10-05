@@ -2036,6 +2036,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }

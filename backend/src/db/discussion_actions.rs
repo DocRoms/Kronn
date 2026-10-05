@@ -832,6 +832,7 @@ mod tests {
                 pinned: false,
                 created_at: now,
                 updated_at: now,
+                unmodelled_args_approved: None,
             },
         )
         .unwrap();
@@ -1301,6 +1302,7 @@ mod tests {
                 pinned: false,
                 created_at: now,
                 updated_at: now,
+                unmodelled_args_approved: None,
             },
         )
         .unwrap();
@@ -1374,6 +1376,7 @@ mod tests {
                 pinned: false,
                 created_at: now,
                 updated_at: now,
+                unmodelled_args_approved: None,
             },
         )
         .unwrap();

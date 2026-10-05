@@ -655,6 +655,12 @@ pub struct WorkflowStep {
     /// verified copy and fails before running when a file no longer matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exec_script_files: Vec<ExecScriptFile>,
+    /// KT-1017 — a human confirmed that the programs of this step that the
+    /// classifier does not model treat their arguments as plain data, so
+    /// templated values may reach them. Never set by an agent's save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exec_unmodelled_args_approved: Option<bool>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
@@ -2254,4 +2260,22 @@ mod step_deserialization_tests {
         assert_eq!(req.project_id, "proj-1");
         assert_eq!(req.step.name, "fetch_issue");
     }
+}
+
+/// A command line to check for the step editor and the Quick Exec form.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ExecLineCheckRequest {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// What the editors need to know about one command line.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ExecLineCheck {
+    /// The unmodelled program that receives a value from the run, when the
+    /// line needs a human's approval to be saved (KT-1017).
+    pub unmodelled_program: Option<String>,
 }

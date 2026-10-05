@@ -2060,6 +2060,7 @@ fn import_document(
                         stored.name == resource.name
                             && stored.command == resource.command
                             && stored.args == resource.args
+                            && stored.unmodelled_args_approved == resource.unmodelled_args_approved
                     })
                 }
                 None => false,
@@ -2069,6 +2070,7 @@ fn import_document(
                     &resource.name,
                     &resource.command,
                     &resource.args,
+                    resource.unmodelled_args_approved == Some(true),
                 ) {
                     anyhow::bail!(error);
                 }
@@ -2630,6 +2632,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&base, "lint").unwrap();
 
@@ -2756,6 +2759,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&exec, "lint").unwrap();
         let entry = crate::core::repository_resources::publish(
@@ -2872,6 +2876,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&exec, "lint").unwrap();
         let entry = crate::core::repository_resources::publish(
@@ -2978,6 +2983,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         };
         let mut rendered =
             crate::core::repository_resources::render_quick_exec(&exec, "health").unwrap();
@@ -3325,6 +3331,7 @@ mod tests {
             pinned: false,
             created_at: timestamp,
             updated_at: timestamp,
+            unmodelled_args_approved: None,
         }
     }
 

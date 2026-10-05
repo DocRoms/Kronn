@@ -208,6 +208,7 @@ fn parse_resources(request: &ArtifactImportRequest) -> Result<Vec<Resource>> {
             &exec.name,
             &exec.command,
             &exec.args,
+            exec.unmodelled_args_approved == Some(true),
         ) {
             bail!(error);
         }

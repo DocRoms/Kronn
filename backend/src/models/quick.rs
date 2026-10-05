@@ -616,6 +616,11 @@ pub struct QuickExec {
     /// User-pinned / favorite Quick Exec in the Automation library.
     #[serde(default)]
     pub pinned: bool,
+    /// KT-1017 — a human confirmed that an unmodelled program here treats
+    /// its arguments as plain data. Never set by an agent's save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unmodelled_args_approved: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -636,6 +641,10 @@ pub struct CreateQuickExecRequest {
     pub output_format: super::CollectQuickExecOutputFormat,
     #[serde(default)]
     pub variables: Vec<PromptVariable>,
+    /// See [`QuickExec::unmodelled_args_approved`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub unmodelled_args_approved: Option<bool>,
 }
 
 /// Partial favorite toggle shared by Quick Prompts, Quick APIs and Quick

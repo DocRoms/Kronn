@@ -2045,6 +2045,38 @@ mod tests {
     use crate::models::{AgentType, ModelTier};
     use chrono::TimeZone;
 
+    /// KT-1017 — the human approval of unmodelled programs is part of what a
+    /// `kronn/` import approves, and leaves older definitions' hashes as is.
+    #[test]
+    fn the_approval_hash_covers_the_unmodelled_programs_approval() {
+        let document = |step: Value| RepositoryDocument {
+            schema_version: 1,
+            kind: ProjectRepositoryResourceKind::Workflow,
+            slug: "wf".into(),
+            updated_at: Utc::now(),
+            requires: vec![],
+            resource: serde_json::json!({"name": "wf", "steps": [step]}),
+            redacted_fields: vec![],
+        };
+        let step: crate::models::WorkflowStep = serde_json::from_value(serde_json::json!({
+            "name": "t", "step_type": {"type": "Exec"}, "exec_command": "terraform",
+            "exec_args": ["plan", "{{x}}"]
+        }))
+        .unwrap();
+        let plain = serde_json::to_value(&step).unwrap();
+        assert!(
+            plain.get("exec_unmodelled_args_approved").is_none(),
+            "absent when not approved"
+        );
+        let mut approved_step = step.clone();
+        approved_step.exec_unmodelled_args_approved = Some(true);
+        let approved = serde_json::to_value(&approved_step).unwrap();
+        assert_ne!(
+            approval_hash(&document(plain)),
+            approval_hash(&document(approved))
+        );
+    }
+
     fn sample_exec(secret: &str) -> QuickExec {
         QuickExec {
             id: "qe-1".into(),
@@ -2060,6 +2092,7 @@ mod tests {
             pinned: false,
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             updated_at: Utc.timestamp_opt(1_700_000_010, 0).unwrap(),
+            unmodelled_args_approved: None,
         }
     }
 

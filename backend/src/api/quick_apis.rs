@@ -644,6 +644,7 @@ pub async fn run_qa(
         room_id: None,
         read_only_repos: vec![],
         exec_script_files: vec![],
+        exec_unmodelled_args_approved: None,
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 
@@ -1114,6 +1115,7 @@ pub async fn batch_run_qa(
         room_id: None,
         read_only_repos: vec![],
         exec_script_files: vec![],
+        exec_unmodelled_args_approved: None,
         sub_workflow_variables: std::collections::HashMap::new(),
     };
 

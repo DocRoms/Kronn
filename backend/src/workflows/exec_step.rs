@@ -335,6 +335,7 @@ async fn execute_exec_step_inner(
         raw_command,
         &step.exec_args,
         &rendered_args,
+        step.exec_unmodelled_args_approved == Some(true),
     ) {
         return fail(step, start, refusal);
     }
@@ -415,6 +416,7 @@ async fn execute_exec_step_inner(
             setup_cmd,
             &step.exec_setup_args,
             &setup_args,
+            step.exec_unmodelled_args_approved == Some(true),
         ) {
             return fail(step, start, format!("{refusal} (setup)"));
         }
@@ -970,6 +972,7 @@ mod tests {
             room_id: None,
             read_only_repos: vec![],
             exec_script_files: vec![],
+            exec_unmodelled_args_approved: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -1647,6 +1650,43 @@ mod tests {
                 "nothing ran"
             );
         }
+    }
+
+    /// A value reaching a program Kronn does not model is refused before it
+    /// runs, unless a human approved the step.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unmodelled_program_runs_only_with_a_human_approval() {
+        let mut ctx = TemplateContext::new();
+        ctx.set_issue(
+            "--compress-program=touch",
+            "",
+            "1",
+            "https://tracker.test/1",
+            &[],
+        );
+        let mut step = exec_step("sorted", Some("sort"), vec!["{{issue.title}}"], None);
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let refused = execute_exec_step(&step, &["sort".to_string()], &workdir, &ctx).await;
+        assert_eq!(refused.result.status, RunStatus::Failed);
+        assert!(
+            refused.result.output.contains("refusé avant exécution"),
+            "{}",
+            refused.result.output
+        );
+        assert!(
+            refused.result.output.contains("sort"),
+            "{}",
+            refused.result.output
+        );
+        step.exec_unmodelled_args_approved = Some(true);
+        let approved = execute_exec_step(&step, &["sort".to_string()], &workdir, &ctx).await;
+        assert!(
+            !approved.result.output.contains("refusé avant exécution"),
+            "{}",
+            approved.result.output
+        );
     }
 
     /// The envelope escapes stdout; markers must still come back as printed.

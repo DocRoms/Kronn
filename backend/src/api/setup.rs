@@ -2031,9 +2031,12 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         let e = qe.clone();
         // A Quick Exec has no disabled state to mark it for review: an
         // unsafe one is left out, and the report says which and why.
-        if let Some(reason) =
-            crate::core::inline_code::quick_exec_validation_error(&e.name, &e.command, &e.args)
-        {
+        if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
+            &e.name,
+            &e.command,
+            &e.args,
+            e.unmodelled_args_approved == Some(true),
+        ) {
             warnings.push(format!("Quick Exec « {} » non importé : {reason}", e.name));
             continue;
         }
@@ -3707,6 +3710,7 @@ mod tests {
             variables: vec![],
             created_at: now,
             updated_at: now,
+            unmodelled_args_approved: None,
         };
         export.quick_execs = vec![
             quick_exec("qe-unsafe", "Ticket", vec!["-c", "print('{{ticket}}')"]),
@@ -3787,6 +3791,7 @@ mod tests {
             variables: vec![],
             created_at: now,
             updated_at: now,
+            unmodelled_args_approved: None,
         };
         state
             .db

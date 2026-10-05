@@ -9,6 +9,16 @@
 //! An unknown program gets every argument as data: argv is not parsed by a
 //! shell, so a value cannot become code there.
 
+/// The program that receives argument `index`: the nearest program position
+/// before it (a wrapper's program, `find -exec`, `docker run`…), else `cmd`.
+pub fn owning_program(cmd: &str, args: &[String], roles: &[Role], index: usize) -> String {
+    (0..index)
+        .rev()
+        .find(|&j| roles.get(j) == Some(&Role::Executable))
+        .map(|j| args[j].clone())
+        .unwrap_or_else(|| cmd.to_string())
+}
+
 /// The program a wrapper launches and its arguments (`env A=1 bash -s` →
 /// `bash`, `["-s"]`), following nested wrappers; `None` when `cmd` is not a
 /// wrapper or names no program.
@@ -45,6 +55,9 @@ pub enum Role {
     /// would read it as an option (git and find operands): checked at run
     /// time on the rendered value.
     RuntimeOption,
+    /// An argument of a program the classifier does not model: refused
+    /// unless a human approved the step.
+    Unmodelled,
 }
 
 /// The program name as the classifier compares it: base name of a path,
@@ -115,7 +128,8 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
         _ if UNMODELLED_EVALUATORS.contains(&name.as_str()) => vec![Role::Option; args.len()],
         _ => match flag_spec(&name) {
             Some(spec) => flag_roles(args, tainted, &spec),
-            None => vec![Role::Data; args.len()],
+            None if is_data_only(cmd) => vec![Role::Data; args.len()],
+            None => vec![Role::Unmodelled; args.len()],
         },
     }
 }
@@ -1414,10 +1428,14 @@ const UNMODELLED_EVALUATORS: &[&str] = &[
     "batch",
 ];
 
-/// Programs whose arguments are plain data by construction (no option of
-/// theirs runs code). Used to measure how much of real usage the explicit
-/// model covers.
-const DATA_ONLY_PROGRAMS: &[&str] = &[
+/// Programs whose arguments are plain data by construction: none of their
+/// options names a command, a script or a program to run, and none reads its
+/// argument text as code. Every entry was checked against that rule; programs
+/// that fail it stay out (or get their own model): `sort --compress-program`,
+/// `zip -TT`, `rg --pre`, `less` (`!cmd`, `LESSOPEN`), `tar --to-command`,
+/// `find -exec`, `sed` (`e`), `awk`, `xargs`, `env`, `git`, `diff3
+/// --diff-program`, `sdiff --diff-program`, `hostname` (sets the host name).
+pub const DATA_ONLY_PROGRAMS: &[&str] = &[
     "echo",
     "printf",
     "cat",
@@ -1425,12 +1443,10 @@ const DATA_ONLY_PROGRAMS: &[&str] = &[
     "grep",
     "egrep",
     "fgrep",
-    "rg",
     "jq",
     "wc",
     "head",
     "tail",
-    "sort",
     "uniq",
     "cut",
     "tr",
@@ -1467,14 +1483,12 @@ const DATA_ONLY_PROGRAMS: &[&str] = &[
     "gunzip",
     "bzip2",
     "xz",
-    "zip",
     "unzip",
     "file",
     "which",
     "pwd",
     "id",
     "whoami",
-    "hostname",
     "uname",
     "printenv",
     "seq",
@@ -1492,13 +1506,27 @@ const DATA_ONLY_PROGRAMS: &[&str] = &[
     "mkfifo",
 ];
 
+/// Whether `cmd` is a data-only program. The exact base name is compared,
+/// without the version-suffix stripping of [`normalize_command`]: `diff3`
+/// (which takes `--diff-program`) is not `diff`.
+fn is_data_only(cmd: &str) -> bool {
+    let base = cmd
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    DATA_ONLY_PROGRAMS.contains(&base)
+}
+
 /// Whether the classifier models `cmd` explicitly: a known data-only
 /// program, a wrapper, an interpreter or evaluator it parses, or one it
-/// refuses values for. Measurement only for now: an unmodelled program
-/// still gets its arguments as data.
+/// refuses values for. A value reaching any other program is refused unless
+/// a human approved the step.
 pub fn is_modelled_program(cmd: &str) -> bool {
     let name = normalize_command(cmd);
-    DATA_ONLY_PROGRAMS.contains(&name.as_str())
+    is_data_only(cmd)
         || wrapper(&name).is_some()
         || crate::core::inline_code::is_interpreter(cmd)
         || UNMODELLED_EVALUATORS.contains(&name.as_str())
@@ -2017,8 +2045,7 @@ mod tests {
             ("git", vec!["fetch", "{{remote}}"]),
             ("git", vec!["log", "--", "{{path}}"]),
             ("docker", vec!["run", "--rm", "img", "echo", "{{x}}"]),
-            ("npx", vec!["prettier", "--check", "{{file}}"]),
-            ("mytool", vec!["{{x}}", "--flag", "{{y}}"]),
+            ("npx", vec!["prettier", "--check", "out.txt"]),
         ] {
             assert!(!refused(cmd, &items), "{cmd} {items:?}");
         }
@@ -2034,10 +2061,13 @@ mod tests {
             first_unsafe_placeholder("env", &line(&["{{cmd}}"])),
             Some(InlineFinding::TemplatedExecutable(_))
         ));
-        // An unknown program keeps its arguments as data.
+        // An unknown program needs a human's approval of its arguments.
         assert_eq!(
             first_unsafe_placeholder("mytool", &line(&["{{x}}", "-o", "{{y}}"])),
-            None
+            Some(InlineFinding::UnmodelledProgram(
+                "mytool".into(),
+                "x".into()
+            ))
         );
     }
 
@@ -2048,12 +2078,17 @@ mod tests {
             "s",
             "git",
             &templates,
-            &line(&["fetch", "--upload-pack=touch x"])
+            &line(&["fetch", "--upload-pack=touch x"]),
+            false
         )
         .is_some());
-        assert!(rendered_refusal("s", "git", &templates, &line(&["fetch", "origin"])).is_none());
+        assert!(
+            rendered_refusal("s", "git", &templates, &line(&["fetch", "origin"]), false).is_none()
+        );
         let templates = line(&["log", "--", "{{path}}"]);
-        assert!(rendered_refusal("s", "git", &templates, &line(&["log", "--", "-x"])).is_none());
+        assert!(
+            rendered_refusal("s", "git", &templates, &line(&["log", "--", "-x"]), false).is_none()
+        );
     }
 
     #[test]
@@ -2127,10 +2162,12 @@ mod tests {
     #[test]
     fn an_operand_rendered_as_an_option_is_refused_but_an_option_value_is_not() {
         let templates = line(&["{{target}}"]);
-        assert!(rendered_refusal("s", "make", &templates, &line(&["--eval=x"])).is_some());
-        assert!(rendered_refusal("s", "make", &templates, &line(&["build"])).is_none());
+        assert!(rendered_refusal("s", "make", &templates, &line(&["--eval=x"]), false).is_some());
+        assert!(rendered_refusal("s", "make", &templates, &line(&["build"]), false).is_none());
         let templates = line(&["-u{{user}}", "db"]);
-        assert!(rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"])).is_none());
+        assert!(
+            rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"]), false).is_none()
+        );
     }
 
     #[test]
@@ -2325,10 +2362,17 @@ mod tests {
     #[test]
     fn a_make_operand_rendered_as_an_assignment_is_refused_at_run_time() {
         let templates = line(&["--", "{{target}}"]);
+        assert!(rendered_refusal(
+            "s",
+            "make",
+            &templates,
+            &line(&["--", "SHELL=/tmp/x"]),
+            false
+        )
+        .is_some());
         assert!(
-            rendered_refusal("s", "make", &templates, &line(&["--", "SHELL=/tmp/x"])).is_some()
+            rendered_refusal("s", "make", &templates, &line(&["--", "build"]), false).is_none()
         );
-        assert!(rendered_refusal("s", "make", &templates, &line(&["--", "build"])).is_none());
     }
 
     #[test]
@@ -2348,6 +2392,77 @@ mod tests {
         }
         for name in ["mytool", "terraform", "aws"] {
             assert!(!is_modelled_program(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unmodelled_program_needs_a_human_approval() {
+        use crate::core::inline_code::first_unsafe_placeholder_with;
+        for (cmd, items, program) in [
+            ("terraform", vec!["plan", "-var", "x={{x}}"], "terraform"),
+            ("npx", vec!["prettier", "--check", "{{file}}"], "prettier"),
+            ("env", vec!["A=1", "aws", "s3", "ls", "{{bucket}}"], "aws"),
+            ("find", vec![".", "-exec", "mytool", "{{x}}", ";"], "mytool"),
+            ("/opt/bin/mytool", vec!["{{x}}"], "/opt/bin/mytool"),
+        ] {
+            let items = line(&items);
+            assert!(
+                matches!(
+                    first_unsafe_placeholder(cmd, &items),
+                    Some(InlineFinding::UnmodelledProgram(ref p, _)) if p == program
+                ),
+                "{cmd} {items:?}"
+            );
+            assert_eq!(
+                first_unsafe_placeholder_with(cmd, &items, true),
+                None,
+                "{cmd} {items:?}"
+            );
+        }
+        // No value, nothing to approve; a data-only program needs no approval.
+        assert_eq!(
+            first_unsafe_placeholder("terraform", &line(&["plan"])),
+            None
+        );
+        assert_eq!(first_unsafe_placeholder("echo", &line(&["{{x}}"])), None);
+        // The approval never covers code or option positions.
+        assert!(
+            first_unsafe_placeholder_with("bash", &line(&["-c", "echo {{x}}"]), true).is_some()
+        );
+        // At run time too.
+        let templates = line(&["plan", "{{x}}"]);
+        let rendered = line(&["plan", "value"]);
+        assert!(rendered_refusal("s", "terraform", &templates, &rendered, false).is_some());
+        assert!(rendered_refusal("s", "terraform", &templates, &rendered, true).is_none());
+    }
+
+    /// Each program left out of `DATA_ONLY_PROGRAMS` for an option that runs
+    /// a command, a script or a program: it is not data-only, and a value
+    /// given to that option is refused.
+    #[test]
+    fn the_data_only_list_has_no_command_option() {
+        for (program, option) in [
+            ("sort", "--compress-program"),
+            ("zip", "-TT"),
+            ("rg", "--pre"),
+            ("less", "+!"),
+            ("hostname", "-F"),
+            ("diff3", "--diff-program"),
+            ("sdiff", "--diff-program"),
+            ("tar", "--to-command"),
+            ("find", "-exec"),
+            ("sed", "-e"),
+            ("awk", "-e"),
+            ("xargs", "-I"),
+            ("git", "-c"),
+            ("env", "-S"),
+        ] {
+            assert!(!DATA_ONLY_PROGRAMS.contains(&program), "{program}");
+            assert!(refused(program, &[option, "{{x}}"]), "{program} {option}");
+        }
+        for program in DATA_ONLY_PROGRAMS {
+            assert!(is_modelled_program(program), "{program}");
+            assert!(!refused(program, &["{{x}}"]), "{program}");
         }
     }
 }
