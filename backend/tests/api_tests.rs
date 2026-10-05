@@ -15338,8 +15338,9 @@ async fn disc_sync_request_resends_missing_messages() {
         .unwrap();
 
     // The host must re-broadcast the missing message as a ChatMessage, with its
-    // role/identity preserved.
-    let found = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // role/identity preserved. The loop returns on arrival; the bound only
+    // catches a message that never comes, so it is generous for loaded runs.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while let Some(Ok(frame)) = StreamExt::next(&mut receiver).await {
             if let tokio_tungstenite::tungstenite::Message::Text(txt) = frame {
                 if let Ok(WsMessage::ChatMessage {
