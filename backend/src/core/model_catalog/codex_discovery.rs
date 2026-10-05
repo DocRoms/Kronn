@@ -69,13 +69,21 @@ struct ModelListResult {
     data: Vec<ModelListEntry>,
 }
 
-pub async fn discover() -> DiscoveryOutcome {
-    let mut command = crate::core::cmd::async_cmd("codex");
+/// `codex app-server`, run outside any repository (design note §9).
+fn discovery_command() -> tokio::process::Command {
+    let mut command =
+        crate::core::cmd::full_env_cmd("codex", crate::core::cmd::FullEnvReason::ModelDiscovery);
     command
         .arg("app-server")
+        .current_dir(std::env::temp_dir())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    command
+}
+
+pub async fn discover() -> DiscoveryOutcome {
+    let mut command = discovery_command();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -238,6 +246,15 @@ async fn read_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_runs_outside_any_repository() {
+        let command = discovery_command();
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(std::env::temp_dir().as_path())
+        );
+    }
 
     #[test]
     fn model_list_result_parses_documented_shape() {

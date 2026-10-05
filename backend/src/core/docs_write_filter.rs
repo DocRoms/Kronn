@@ -432,7 +432,7 @@ fn document_paths(worktree: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let docs_rel = docs_dir
         .strip_prefix(worktree)
         .map_err(|_| "Document directory is outside its workspace".to_string())?;
-    let output = crate::core::cmd::sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .args([
             "ls-files",
             "-z",

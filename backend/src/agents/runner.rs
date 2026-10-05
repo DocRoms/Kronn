@@ -11,7 +11,7 @@ use super::ollama_memory::{
     KvShape, MachineFacts, ModelCeiling,
 };
 use super::provenance::{self, AgentProvenanceCapture};
-use crate::core::cmd::{async_cmd, sync_cmd};
+use crate::core::cmd::async_cmd;
 use crate::models::{AgentType, ModelTier, ModelTiersConfig, Skill, TokensConfig};
 
 const MAX_CALLS_PER_TOOL: usize = 12;
@@ -11450,7 +11450,7 @@ fn claude_sandbox_catalogue_receipt(
     let mut worktrees = std::collections::BTreeSet::new();
     for root in repo_roots {
         let unreadable = || claude_sandbox_catalogue_unreadable(&root.label);
-        let common_output = sync_cmd("git")
+        let common_output = crate::core::cmd::git_cmd()
             .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .current_dir(&root.path)
             .output()
@@ -11464,7 +11464,7 @@ fn claude_sandbox_catalogue_receipt(
         if !common_dirs.insert(common_dir) {
             continue;
         }
-        let output = sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(["worktree", "list", "--porcelain"])
             .current_dir(&root.path)
             .output()
@@ -11543,9 +11543,8 @@ async fn run_claude_task_worker_auth_probe(
         .map_err(|message| std::io::Error::new(std::io::ErrorKind::Unsupported, message))?;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    let mut probe = async_cmd(command);
-    crate::core::child_env::isolate(
-        probe.as_std_mut(),
+    let mut probe = async_cmd(
+        command,
         crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Claude),
     );
     probe
@@ -11714,9 +11713,8 @@ async fn run_copilot_task_worker_preflight_with_timeout(
     let (command, args, via_wsl) = resolved;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
-    let mut command = async_cmd(command);
-    crate::core::child_env::isolate(
-        command.as_std_mut(),
+    let mut command = async_cmd(
+        command,
         crate::core::child_env::ChildRoute::Agent(crate::core::child_env::AgentFamily::Copilot),
     );
     command
@@ -12836,11 +12834,11 @@ pub(crate) fn try_spawn(
 
     tracing::debug!("Agent argv: {} {}", final_cmd, loggable_argv(&final_args));
 
-    let mut cmd = async_cmd(&final_cmd);
-    // Built, never inherited: the backend's own environment holds secrets.
     let route = crate::core::child_env::ChildRoute::Agent(
         crate::core::child_env::AgentFamily::from_launch(binary, npx_package, env_key),
     );
+    let mut cmd = async_cmd(&final_cmd, route);
+    // Built, never inherited: the backend's own environment holds secrets.
     crate::core::child_env::reset(cmd.as_std_mut(), route);
     let inherited = crate::core::child_env::names_of(cmd.as_std());
     // Under Docker, the MCP values the project's `.mcp.json` refers to (KT-964).

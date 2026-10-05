@@ -4816,7 +4816,7 @@ pub async fn test_worktree(
     // and a duplicate branch would conflict). The operator can then
     // experiment freely; deleting the worktree leaves the original
     // preserved branch untouched.
-    let output = match crate::core::cmd::async_cmd("git")
+    let output = match crate::core::cmd::async_git_cmd()
         .args(["worktree", "add", "--detach"])
         .arg(&test_dir)
         .arg(&branch.head_sha)
@@ -4924,7 +4924,7 @@ pub async fn delete_test_worktree(
         return Json(ApiResponse::ok(()));
     }
 
-    let output = match crate::core::cmd::async_cmd("git")
+    let output = match crate::core::cmd::async_git_cmd()
         .args(["worktree", "remove", "--force"])
         .arg(&test_dir)
         .current_dir(&repo_path)

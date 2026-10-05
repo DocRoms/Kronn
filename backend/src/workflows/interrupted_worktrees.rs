@@ -179,7 +179,7 @@ mod tests {
     const WORKFLOW: &str = "reclaim";
 
     async fn git(cwd: &Path, args: &[&str]) -> String {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(cwd)
@@ -195,7 +195,7 @@ mod tests {
     }
 
     async fn branch_exists(repo: &Path, branch: &str) -> bool {
-        crate::core::cmd::async_cmd("git")
+        crate::core::cmd::async_git_cmd()
             .args([
                 "show-ref",
                 "--verify",

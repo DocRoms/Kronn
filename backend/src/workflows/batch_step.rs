@@ -227,7 +227,7 @@ fn validate_item_repo_paths(items: &[serde_json::Value]) -> Result<(), String> {
                 "PACK PRECONDITION FAIL: item {index} repo_path `{path}` is absent or not a directory; no child discussion was created"
             ));
         }
-        let is_git_worktree = crate::core::cmd::sync_cmd("git")
+        let is_git_worktree = crate::core::cmd::git_cmd()
             .args(["rev-parse", "--is-inside-work-tree"])
             .current_dir(&resolved)
             .output()
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn pack_repo_path_precondition_accepts_a_real_git_worktree_and_ignores_unrelated_items() {
         let fixture = tempfile::tempdir().unwrap();
-        let output = crate::core::cmd::sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .args(["init"])
             .current_dir(fixture.path())
             .output()

@@ -3693,11 +3693,10 @@ fn validation_metadata_command(
     words: &[&str],
     cwd: &std::path::Path,
 ) -> Result<tokio::process::Command, String> {
-    let mut metadata = crate::core::cmd::async_cmd("cargo");
     // Cargo reads the repository's `.cargo/config.toml`: the Quick Exec
     // environment, as for the validation itself (KT-1006).
     let route = crate::core::child_env::ChildRoute::QuickExec;
-    crate::core::child_env::reset(metadata.as_std_mut(), route);
+    let mut metadata = crate::core::cmd::async_cmd("cargo", route);
     metadata
         .current_dir(cwd)
         // Resolution must neither fetch dependencies nor wait forever before a
@@ -15232,7 +15231,7 @@ mod tests {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(repo.path().join("README.md"), "# changed\n").unwrap();
         assert!(git(repo.path(), &["add", "README.md"]).status.success());
-        let mut git_command = crate::core::cmd::sync_cmd("git");
+        let mut git_command = crate::core::cmd::git_cmd();
         git_command
             .args(["commit", "--no-gpg-sign", "-m", "blocked hook"])
             .current_dir(repo.path());
@@ -15242,7 +15241,7 @@ mod tests {
         // Spawn an unrelated long-lived child while the targeted Git child is
         // alive. The duplicate stays CLOEXEC in the parent, so this child must
         // not accidentally retain the backend lock.
-        let mut unrelated_child = crate::core::cmd::sync_cmd("sh")
+        let mut unrelated_child = std::process::Command::new("sh")
             .args(["-c", "sleep 30"])
             .spawn()
             .unwrap();
@@ -16755,7 +16754,7 @@ mod tests {
     async fn metadata_timeout_kills_and_reaps_the_owned_child() {
         use std::process::Stdio;
 
-        let mut child = crate::core::cmd::async_cmd("sh")
+        let mut child = tokio::process::Command::new("sh")
             .args(["-c", "read _"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -595,11 +595,8 @@ fn gitlab_cli_hostname(value: &str) -> Result<String, String> {
 /// The `glab api` process listing a user's projects: the git-host
 /// environment (KT-1006) without any token or host override.
 fn gitlab_cli_command(hostname: &str) -> tokio::process::Command {
-    let mut command = crate::core::cmd::async_cmd("glab");
-    crate::core::child_env::isolate(
-        command.as_std_mut(),
-        crate::core::child_env::ChildRoute::GitHost,
-    );
+    let mut command =
+        crate::core::cmd::async_cmd("glab", crate::core::child_env::ChildRoute::GitHost);
     command
         .args([
             "api",

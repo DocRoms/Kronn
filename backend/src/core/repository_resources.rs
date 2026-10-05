@@ -1119,7 +1119,7 @@ pub fn relocate_skill_entries(
 }
 
 fn is_tracked(root: &Path, relative: &str) -> bool {
-    crate::core::cmd::sync_cmd("git")
+    crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(root)
         .args(["ls-files", "--error-unmatch", "--", relative])
@@ -1405,7 +1405,7 @@ pub fn uncommitted_managed_paths(root: &Path, lock: &RepositoryLock) -> Vec<Stri
     let mut pathspecs: Vec<&str> = lock.files.keys().map(String::as_str).collect();
     pathspecs.push(SKILLS_ROOT);
     pathspecs.extend(crate::core::skill_migration::SOURCE_ROOTS.iter().copied());
-    let output = crate::core::cmd::sync_cmd("git")
+    let output = crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(root)
         .args(["status", "--porcelain", "-uall", "--"])
@@ -1473,7 +1473,7 @@ impl RepositoryFileDates {
         if existing.is_empty() {
             return dates;
         }
-        let listed = crate::core::cmd::sync_cmd("git")
+        let listed = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["-c", "core.quotepath=off", "ls-files", "-z", "--"])
@@ -1494,7 +1494,7 @@ impl RepositoryFileDates {
         if pending.is_empty() {
             return dates;
         }
-        let spawned = crate::core::cmd::sync_cmd("git")
+        let spawned = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args([
@@ -2720,7 +2720,7 @@ mod tests {
     #[test]
     fn uncommitted_managed_paths_lists_only_dirty_lock_files() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -2734,13 +2734,13 @@ mod tests {
         let dirty = uncommitted_managed_paths(root.path(), &lock);
         assert!(dirty.contains(&"kronn/quick-execs/deploy.yaml".to_string()));
 
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["add", "-A"])
             .status()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args([
@@ -3089,7 +3089,7 @@ mod tests {
 
     fn commit_as(root: &Path, author: &str, date: &str, message: &str) {
         let git = |args: &[&str]| {
-            crate::core::cmd::sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .arg("-C")
                 .arg(root)
                 .args(args)
@@ -3109,7 +3109,7 @@ mod tests {
     #[test]
     fn file_dates_come_from_each_files_last_commit_in_one_pass() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -3147,7 +3147,7 @@ mod tests {
     #[test]
     fn file_dates_stop_waiting_for_git_when_the_budget_is_spent() {
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])

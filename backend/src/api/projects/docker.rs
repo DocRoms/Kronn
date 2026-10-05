@@ -89,12 +89,7 @@ fn find_compose_file(root: &FsPath) -> Option<String> {
 /// `docker` with the Docker environment only (KT-1006): Compose interpolates
 /// the environment into a repository's compose file.
 fn docker_cli() -> tokio::process::Command {
-    let mut command = async_cmd("docker");
-    crate::core::child_env::isolate(
-        command.as_std_mut(),
-        crate::core::child_env::ChildRoute::Docker,
-    );
-    command
+    async_cmd("docker", crate::core::child_env::ChildRoute::Docker)
 }
 
 fn docker_command(root: &FsPath, compose_file: &str, args: &[&str]) -> tokio::process::Command {

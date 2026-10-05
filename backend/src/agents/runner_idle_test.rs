@@ -742,7 +742,7 @@ struct AcpRun<'a> {
 
 #[cfg(unix)]
 async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentProcess {
-    let mut command = async_cmd("python3");
+    let mut command = tokio::process::Command::new("python3");
     command
         .args(["-c", ACP_AGENT])
         .env("FIXTURE_MODE", run.mode);

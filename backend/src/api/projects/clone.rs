@@ -11,7 +11,6 @@ use axum::{
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
@@ -166,7 +165,7 @@ async fn clone_with_fallbacks(
         let cand_owned = cand.clone();
         let dest_buf = dest.to_path_buf();
         let res = tokio::task::spawn_blocking(move || {
-            sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .env("GIT_TERMINAL_PROMPT", "0")
                 // Abort a clone stalled under 1 KB/s for 60s instead of
                 // pinning the blocking thread on a dead network forever.
@@ -276,7 +275,7 @@ pub async fn clone_project(
         let original_url = url.clone();
         let clone_path2 = host_path.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .args(["remote", "set-url", "origin", &original_url])
                 .current_dir(&clone_path2)
                 .output()
@@ -503,7 +502,7 @@ pub async fn clone_and_remap(
         let original_url = url.clone();
         let clone_path2 = host_path.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            sync_cmd("git")
+            crate::core::cmd::git_cmd()
                 .args(["remote", "set-url", "origin", &original_url])
                 .current_dir(&clone_path2)
                 .output()

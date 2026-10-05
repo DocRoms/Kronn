@@ -520,7 +520,8 @@ async fn probe_mcp_stdio_with_timeout(
     deadline: Duration,
 ) -> Result<(), String> {
     let operation = async {
-        let mut process = crate::core::cmd::async_cmd(command);
+        let mut process =
+            crate::core::cmd::full_env_cmd(command, crate::core::cmd::FullEnvReason::McpProbe);
         process
             .args(args)
             .envs(env)

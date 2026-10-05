@@ -1574,7 +1574,7 @@ mod tests {
             .iter()
             .map(|arg| ctx.render_strict(arg).unwrap())
             .collect();
-        let output = crate::core::cmd::sync_cmd(cmd)
+        let output = std::process::Command::new(cmd)
             .args(&rendered)
             .current_dir(dir)
             .output()
@@ -1727,7 +1727,7 @@ mod tests {
             .iter()
             .map(|arg| ctx.render_strict(arg).unwrap())
             .collect();
-        let output = crate::core::cmd::sync_cmd(cmd)
+        let output = std::process::Command::new(cmd)
             .args(&rendered)
             .current_dir(dir)
             .output()

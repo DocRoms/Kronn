@@ -520,8 +520,7 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
 /// Claude's logs live when the user moved them.
 fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::process::Command {
     use crate::core::child_env::{self, ChildRoute};
-    let mut command = crate::core::cmd::async_cmd(program);
-    child_env::reset(command.as_std_mut(), ChildRoute::Tool);
+    let mut command = crate::core::cmd::async_cmd(program, ChildRoute::Tool);
     command.arg(period_kind).arg("--json");
     if let Some(dir) = child_env::parent_var("CLAUDE_CONFIG_DIR") {
         command.env("CLAUDE_CONFIG_DIR", dir);

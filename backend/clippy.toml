@@ -1,0 +1,21 @@
+# Every child process is built in `core::cmd`, which gives it the environment
+# of its route (KT-1006, design note agent-secret-boundary §9). Constructing
+# or spawning a process any other way would inherit the backend's environment.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use core::cmd::{sync_cmd, git_cmd, sync_tool_cmd} with a ChildRoute" },
+    { path = "tokio::process::Command::new", reason = "use core::cmd::{async_cmd, async_git_cmd, tool_cmd} with a ChildRoute" },
+    { path = "open::that", reason = "use core::cmd::open_in_system" },
+    { path = "open::that_detached", reason = "use core::cmd::open_in_system" },
+    { path = "open::that_in_background", reason = "use core::cmd::open_in_system" },
+    { path = "open::with", reason = "use core::cmd::open_in_system" },
+    { path = "open::with_detached", reason = "use core::cmd::open_in_system" },
+    { path = "open::with_in_background", reason = "use core::cmd::open_in_system" },
+    { path = "libc::fork", reason = "spawn through core::cmd" },
+    { path = "libc::vfork", reason = "spawn through core::cmd" },
+    { path = "libc::execv", reason = "spawn through core::cmd" },
+    { path = "libc::execve", reason = "spawn through core::cmd" },
+    { path = "libc::execvp", reason = "spawn through core::cmd" },
+    { path = "libc::posix_spawn", reason = "spawn through core::cmd" },
+    { path = "libc::posix_spawnp", reason = "spawn through core::cmd" },
+    { path = "libc::system", reason = "spawn through core::cmd" },
+]

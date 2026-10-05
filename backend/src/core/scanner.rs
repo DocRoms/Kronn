@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use super::cmd::async_cmd;
 use crate::models::{AiConfigType, DetectedRepo, ProjectWriteAccess, ProjectWriteAccessStatus};
 
 /// AI config file patterns to look for in repositories
@@ -241,12 +240,9 @@ async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Out
             // Run git inside WSL for WSL filesystem paths
             if let Some(linux_path) = unc_to_wsl_linux_path(path) {
                 let git_cmd = format!("git -C '{}' {}", linux_path, args.join(" "));
-                let mut command = async_cmd("wsl.exe");
                 // git runs the repository's hooks: git's own environment.
-                crate::core::child_env::isolate(
-                    command.as_std_mut(),
-                    crate::core::child_env::ChildRoute::Git,
-                );
+                let mut command =
+                    super::cmd::async_cmd("wsl.exe", crate::core::child_env::ChildRoute::Git);
                 return command
                     .args(["-e", "bash", "-lc", &git_cmd])
                     .output()
@@ -254,7 +250,7 @@ async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Out
                     .context("Failed to run git via wsl.exe");
             }
         }
-        async_cmd("git")
+        crate::core::cmd::async_git_cmd()
             .args(args)
             .current_dir(path)
             .output()
@@ -263,7 +259,7 @@ async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Out
     }
     #[cfg(not(target_os = "windows"))]
     {
-        async_cmd("git")
+        crate::core::cmd::async_git_cmd()
             .args(args)
             .current_dir(path)
             .output()

@@ -5627,7 +5627,7 @@ mod tests {
     }
 
     async fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
-        let out = crate::core::cmd::async_cmd("git")
+        let out = crate::core::cmd::async_git_cmd()
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .current_dir(cwd)

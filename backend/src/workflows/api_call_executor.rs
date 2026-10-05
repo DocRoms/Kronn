@@ -756,11 +756,8 @@ async fn resolve_dynamic_auth(
 /// A credential CLI process: its cloud configuration and the base allow-list,
 /// nothing else of the backend's environment (KT-1006).
 fn credential_cli_command(command: &str, args: &[String]) -> tokio::process::Command {
-    let mut cmd = crate::core::cmd::async_cmd(command);
-    crate::core::child_env::isolate(
-        cmd.as_std_mut(),
-        crate::core::child_env::ChildRoute::CredentialCli,
-    );
+    let mut cmd =
+        crate::core::cmd::async_cmd(command, crate::core::child_env::ChildRoute::CredentialCli);
     cmd.args(args);
     cmd.kill_on_drop(true);
     cmd

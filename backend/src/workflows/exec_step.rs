@@ -66,7 +66,7 @@ const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]
 /// environment (KT-1006) and the project's GitHub variables only when the
 /// project is connected (D2); callers only add argv, cwd and stdio.
 fn exec_child(program: &str, github_env: &[(String, String)]) -> tokio::process::Command {
-    let mut command = async_cmd(program);
+    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
     crate::core::child_env::isolate_with_github(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,
@@ -84,7 +84,7 @@ fn approved_script_child(
     copy_dir: &Path,
 ) -> tokio::process::Command {
     use crate::core::approved_scripts::{SCRIPTS_DIR_ENV, WORKTREE_ENV};
-    let mut command = async_cmd(program);
+    let mut command = async_cmd(program, crate::core::child_env::ChildRoute::WorkflowExec);
     crate::core::child_env::isolate_with_github_and_values(
         command.as_std_mut(),
         crate::core::child_env::ChildRoute::WorkflowExec,

@@ -334,7 +334,7 @@ fn strip_kronn_regions_removes_managed_blocks_keeps_user_content() {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let ok = super::sync_cmd("git")
+    let ok = crate::core::cmd::git_cmd()
         .arg("-C")
         .arg(dir)
         .args(args)

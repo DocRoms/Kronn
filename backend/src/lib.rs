@@ -1,3 +1,6 @@
+// Test fixtures may start processes directly; production code cannot (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod acp;
 pub mod agents;
 pub mod api;

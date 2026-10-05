@@ -2531,7 +2531,7 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
         tracing::info!("open-url suppressed in a test binary: {}", req.url);
         return Json(ApiResponse::ok(()));
     }
-    match open::that(&req.url) {
+    match crate::core::cmd::open_in_system(&req.url) {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => {
             tracing::warn!("Failed to open URL '{}': {}", req.url, e);

@@ -3698,7 +3698,7 @@ mod tests {
     async fn listing_previews_every_touched_path_then_reports_dates_and_uncommitted_files() {
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -3950,7 +3950,7 @@ mod tests {
     async fn both_sides_carry_an_eight_character_fingerprint_that_differs_between_two_versions() {
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q"])
@@ -4079,7 +4079,7 @@ mod tests {
                 body
             ));
         }
-        let mut child = crate::core::cmd::sync_cmd("git")
+        let mut child = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["fast-import", "--quiet"])
@@ -4093,7 +4093,7 @@ mod tests {
             .write_all(stream.as_bytes())
             .unwrap();
         assert!(child.wait().unwrap().success());
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["reset", "--hard", "-q"])
@@ -4132,7 +4132,7 @@ mod tests {
         isolate_config_dir();
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q", "-b", "main"])
@@ -4188,13 +4188,13 @@ mod tests {
             .await;
             assert!(published.0.data.is_some(), "{:?}", published.0.error);
         }
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["add", "-A"])
             .status()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
@@ -5554,7 +5554,7 @@ mod tests {
         isolate_config_dir();
         let state = test_state();
         let root = tempfile::tempdir().unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["init", "-q", "-b", "main"])
@@ -5682,13 +5682,13 @@ mod tests {
                 assert!(published.0.data.is_some(), "{:?}", published.0.error);
             }
         }
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["add", "-A"])
             .status()
             .unwrap();
-        crate::core::cmd::sync_cmd("git")
+        crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root.path())
             .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
@@ -5706,7 +5706,7 @@ mod tests {
     // ── KT-903: skills are real Agent Skills in `.agents/skills` ────────────
 
     fn git(root: &Path, args: &[&str]) {
-        let status = crate::core::cmd::sync_cmd("git")
+        let status = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["-c", "user.name=T", "-c", "user.email=t@example.com"])
@@ -5717,7 +5717,7 @@ mod tests {
     }
 
     fn commit_count(root: &Path) -> usize {
-        let output = crate::core::cmd::sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(root)
             .args(["rev-list", "--count", "HEAD"])

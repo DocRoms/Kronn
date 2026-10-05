@@ -31,7 +31,7 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::core::cmd::async_cmd;
+use crate::core::cmd::{full_env_cmd, FullEnvReason};
 
 const BUNDLED_SIDECAR_ENV: &str = "KRONN_DOCS_SIDECAR";
 
@@ -115,9 +115,9 @@ impl DocsSidecar {
         // stderr is inherited so real errors land in the main backend
         // log without us having to re-forward them.
         let mut cmd = match &program {
-            SidecarProgram::Bundled(path) => async_cmd(path),
+            SidecarProgram::Bundled(path) => full_env_cmd(path, FullEnvReason::DocsSidecar),
             SidecarProgram::PythonModule(path) => {
-                let mut cmd = async_cmd(path);
+                let mut cmd = full_env_cmd(path, FullEnvReason::DocsSidecar);
                 cmd.arg("-m").arg("kronn_docs.server");
                 cmd
             }

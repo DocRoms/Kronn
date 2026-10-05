@@ -1,4 +1,3 @@
-use crate::core::cmd::async_cmd;
 use crate::models::{AgentDetection, AgentType, AppConfig, ShadowedInstall};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -1008,7 +1007,8 @@ async fn probe_runtime(def: &AgentDef) -> bool {
 
     // Probe: npx --yes <pkg> --version with 15s timeout
     tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
-    let mut cmd = async_cmd("npx");
+    let mut cmd =
+        crate::core::cmd::full_env_cmd("npx", crate::core::cmd::FullEnvReason::VersionDiscovery);
     cmd.args(["--yes", pkg, "--version"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1250,17 +1250,32 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
         {
             if binary_path.starts_with('/') {
                 // WSL path — run via wsl.exe with login shell for correct PATH
-                async_cmd("wsl.exe")
-                    .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
-                    .output()
-                    .await?
+                crate::core::cmd::full_env_cmd(
+                    "wsl.exe",
+                    crate::core::cmd::FullEnvReason::VersionDiscovery,
+                )
+                .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
+                .output()
+                .await?
             } else {
-                async_cmd(binary_path).arg("--version").output().await?
+                crate::core::cmd::full_env_cmd(
+                    binary_path,
+                    crate::core::cmd::FullEnvReason::VersionDiscovery,
+                )
+                .arg("--version")
+                .output()
+                .await?
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            async_cmd(binary_path).arg("--version").output().await?
+            crate::core::cmd::full_env_cmd(
+                binary_path,
+                crate::core::cmd::FullEnvReason::VersionDiscovery,
+            )
+            .arg("--version")
+            .output()
+            .await?
         }
     };
 

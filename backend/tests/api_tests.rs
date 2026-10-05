@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // fixtures start processes directly
 //! Integration tests for the Kronn backend API.
 //!
 //! These tests exercise the full HTTP layer (router + handlers + DB)
@@ -16263,7 +16264,7 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                 .map(|path| std::fs::read(path).unwrap())
                 .collect();
 
-            let mut child = kronn::core::cmd::async_cmd(std::env::current_exe().unwrap())
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "mcp_host_sync_router_confines_an_inherited_host_home",

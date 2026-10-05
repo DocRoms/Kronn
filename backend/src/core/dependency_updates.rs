@@ -425,8 +425,7 @@ fn background_command(
     route: ChildRoute,
     extra: &[(&str, &str)],
 ) -> tokio::process::Command {
-    let mut command = async_cmd(program);
-    child_env::reset(command.as_std_mut(), route);
+    let mut command = async_cmd(program, route);
     command
         .current_dir(directory)
         .env("CI", "1")

@@ -72,7 +72,7 @@ impl ReadOnlyRepos {
             }
             push_unique(&mut roots, root.clone());
             // A linked Git worktree stores its history outside its checkout.
-            let output = crate::core::cmd::sync_cmd("git")
+            let output = crate::core::cmd::git_cmd()
                 .arg("-C")
                 .arg(&root)
                 .args([
@@ -244,7 +244,7 @@ mod tests {
         let repo = temp.path().join("API équipe");
         std::fs::create_dir(&work).unwrap();
         std::fs::create_dir(&repo).unwrap();
-        let output = crate::core::cmd::sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .arg("init")
             .arg(&repo)
             .output()
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn read_only_repos_includes_external_git_history_for_a_linked_worktree() {
         let (temp, work, repo) = fixture();
-        let output = crate::core::cmd::sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(&repo)
             .args([
@@ -414,7 +414,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let linked = temp.path().join("linked");
-        let output = crate::core::cmd::sync_cmd("git")
+        let output = crate::core::cmd::git_cmd()
             .arg("-C")
             .arg(&repo)
             .args(["worktree", "add", "--detach"])

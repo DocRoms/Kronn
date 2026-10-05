@@ -505,9 +505,8 @@ enum Outcome {
 /// The process a validated spec starts, before stdio: the resolved binary,
 /// its argv and cwd, and a built environment (KT-1006). Nothing is inherited.
 fn build_command(spec: &ValidatedSpec) -> tokio::process::Command {
-    let mut command = async_cmd(resolve_binary(spec));
-    crate::core::child_env::isolate(
-        command.as_std_mut(),
+    let mut command = async_cmd(
+        resolve_binary(spec),
         crate::core::child_env::ChildRoute::QuickExec,
     );
     command.args(&spec.argv).current_dir(&spec.cwd);

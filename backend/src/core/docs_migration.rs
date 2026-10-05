@@ -171,7 +171,7 @@ async fn git_mv_ai_to_docs(project_path: &Path) -> Result<(), String> {
     // Try `git mv` first (preserves history). Falls back to plain
     // `mv` if the project isn't a git repo OR `git mv` fails for some
     // reason (untracked content, etc.).
-    let r = crate::core::cmd::async_cmd("git")
+    let r = crate::core::cmd::async_git_cmd()
         .args(["mv", "ai", "docs"])
         .current_dir(project_path)
         .output()
@@ -241,7 +241,7 @@ async fn merge_ai_into_docs(project_path: &Path) -> Result<(), String> {
         let src_str = src_rel.to_string_lossy();
         let dst_str = dst_rel.to_string_lossy();
 
-        let r = crate::core::cmd::async_cmd("git")
+        let r = crate::core::cmd::async_git_cmd()
             .args(["mv", "-f", &src_str, &dst_str])
             .current_dir(project_path)
             .output()
@@ -310,7 +310,7 @@ async fn rename_index_to_agents(docs_dir: &Path) -> Result<(), String> {
         );
         return Ok(());
     }
-    let r = crate::core::cmd::async_cmd("git")
+    let r = crate::core::cmd::async_git_cmd()
         .args(["mv", "docs/index.md", "docs/AGENTS.md"])
         .current_dir(docs_dir.parent().unwrap_or(docs_dir))
         .output()
@@ -1052,19 +1052,19 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
         // Init git so `git mv` works.
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["init", "-q", "-b", "main"])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.email", "test@kronn.local"])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["config", "user.name", "test"])
             .current_dir(&root)
             .output()
@@ -1097,13 +1097,13 @@ mod tests {
         )
         .unwrap();
         // Commit so git mv works on tracked files.
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "init"])
             .current_dir(&root)
             .output()
@@ -1241,13 +1241,13 @@ mod tests {
         let (_tmp, root) = make_legacy_project().await;
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/handbook.md"), "# Handbook (human)").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "human docs"])
             .current_dir(&root)
             .output()
@@ -1281,13 +1281,13 @@ mod tests {
         // ai/glossary.md is "# Glossary\n..."; create a docs/glossary.md
         // with different content to trigger the conflict.
         std::fs::write(root.join("docs/glossary.md"), "# Different glossary\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "conflict"])
             .current_dir(&root)
             .output()
@@ -1519,13 +1519,13 @@ mod tests {
         std::fs::create_dir_all(root.join("docs")).unwrap();
         let dup = "# Glossary\nSee ai/index.md.\n";
         std::fs::write(root.join("docs/glossary.md"), dup).unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "dup"])
             .current_dir(&root)
             .output()
@@ -1897,13 +1897,13 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["add", "."])
             .current_dir(&root)
             .output()
             .await
             .unwrap();
-        let _ = crate::core::cmd::async_cmd("git")
+        let _ = crate::core::cmd::async_git_cmd()
             .args(["commit", "-q", "-m", "+placeholders"])
             .current_dir(&root)
             .output()

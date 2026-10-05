@@ -2,7 +2,6 @@
 #![cfg(unix)]
 
 use kronn::agents::runner::{start_agent_with_config, AgentStartConfig};
-use kronn::core::cmd::sync_cmd;
 use kronn::models::AgentType;
 
 #[tokio::test]
@@ -39,7 +38,7 @@ async fn workflow_read_only_repos_live_probe() {
                 &markers[3],
             ],
         ] {
-            let output = sync_cmd("git")
+            let output = kronn::core::cmd::git_cmd()
                 .arg("-C")
                 .arg(&repo)
                 .args(args)
