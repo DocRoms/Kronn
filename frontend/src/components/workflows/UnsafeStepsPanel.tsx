@@ -65,6 +65,7 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
                   {issue.phase === 'source' ? ` (${t('wf.unsafeSource', issue.source_alias ?? '')})` : ''}
                   {' — '}
                   <code>{issue.placeholder || issue.reason}</code>
+                  {issue.reason === 'unmodelled_program' ? ` — ${t('wf.unsafeUnmodelled', issue.command)}` : ''}
                 </span>
                 <button
                   type="button"

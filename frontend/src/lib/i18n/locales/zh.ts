@@ -4046,6 +4046,8 @@ const zh: TranslationDict = {
   "wf.unsafeTitle": "不安全插值：这些步骤不会运行",
   "wf.unsafeIntro": "工单标题或步骤输出之类的值被放进了内联代码，可能被当作代码执行。Kronn 在运行时拒绝这些步骤。修复方法是把值作为独立参数传递，解释器不会把它当作代码读取。",
   "wf.unsafeSetup": "setup",
+  "exec.unmodelledApprove": "{0} 会接收运行中的值；我确认它只把参数当作普通数据处理",
+  "wf.unsafeUnmodelled": "Kronn 无法检查 {0}：需要人工确认它只把参数当作数据处理",
   "wf.unsafeSource": "数据源「{0}」",
   "wf.unsafeSuggest": "建议修复",
   "wf.unsafeDiff": "建议的修改",

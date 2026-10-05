@@ -4097,6 +4097,8 @@ const es: TranslationDict = {
   'wf.unsafeTitle': 'Interpolación peligrosa: estos pasos no se ejecutarán',
   'wf.unsafeIntro': 'Un valor como el título de un ticket o la salida de un paso está dentro de código inline, donde podría ejecutarse. Kronn rechaza estos pasos al ejecutarse. La corrección pasa el valor como argumento separado, que el intérprete nunca lee como código.',
   'wf.unsafeSetup': 'setup',
+  'exec.unmodelledApprove': '{0} recibe valores de la ejecución; confirmo que trata sus argumentos como simples datos',
+  'wf.unsafeUnmodelled': '{0} no es un programa que Kronn sepa verificar: una persona debe confirmar que trata sus argumentos como datos',
   'wf.unsafeSource': 'fuente « {0} »',
   'wf.unsafeSuggest': 'Proponer una corrección',
   'wf.unsafeDiff': 'Cambio propuesto',

@@ -4097,6 +4097,8 @@ const en: TranslationDict = {
   'wf.unsafeTitle': 'Unsafe interpolation: these steps will not run',
   'wf.unsafeIntro': 'A value such as a ticket title or a step output is placed inside inline code, where it could run as code. Kronn refuses these steps at run time. The fix passes the value as a separate argument the interpreter never reads as code.',
   'wf.unsafeSetup': 'setup',
+  'exec.unmodelledApprove': '{0} receives values from the run; I confirm it treats its arguments as plain data',
+  'wf.unsafeUnmodelled': '{0} is not a program Kronn can check: a human must confirm it treats its arguments as data',
   'wf.unsafeSource': 'source « {0} »',
   'wf.unsafeSuggest': 'Suggest a fix',
   'wf.unsafeDiff': 'Suggested change',

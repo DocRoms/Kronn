@@ -527,6 +527,15 @@ Release notes for 0.9.3 and earlier are available in the
   `chroot`, `strace`, `parallel`…) and package fetchers (`pip install`,
   `pipx run`, `uvx`, `go run`, `cargo install`, `gem install`,
   `deno run`/`eval`) follow the same rule.
+- A run value can no longer reach a program Kronn does not model unless a
+  human approved it (KT-1017). Every program is now either known to read
+  its arguments as plain data (`echo`, `cat`, `grep`, `jq`…), parsed by the
+  classifier, or refused: an Exec step or Quick Exec that passes a template
+  value to any other program is refused at save and at run time, with the
+  program named. The step editor and the Quick Exec form show a checkbox for
+  such a line ("terraform receives values from the run; I confirm it treats
+  its arguments as plain data"); only a human can tick it, an agent's save
+  never sets it, and a bundle or an import through an agent drops it.
 
 ### Changed
 

@@ -111,6 +111,8 @@ import type {
   WorkflowStep,
   WorkflowSummary,
   UnsafeExecStep,
+  ExecLineCheck,
+  ExecLineCheckRequest,
   ExecScriptFileStatus,
   ExecScriptStatusRequest,
   WorkflowRun,
@@ -2405,6 +2407,8 @@ export const workflows = {
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
   /** KT-1017 — Exec command lines refused at run time, with suggested rewrites. */
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
+  /** KT-1017 — whether a command line sends run values to an unmodelled program. */
+  execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */
   execScriptStatus: (req: ExecScriptStatusRequest) =>
     api<ExecScriptFileStatus[]>('POST', '/workflows/exec-scripts/status', req),
