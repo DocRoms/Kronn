@@ -33,8 +33,8 @@ The running process still reads `config.tokens.keys` and
 `config::save` writes them back to the table (encrypted, read back) before it
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
-[src: file: backend/src/core/credential_store.rs:295-349]
-[src: file: backend/src/core/config.rs:177-201]
+[src: file: backend/src/core/credential_store.rs:332-387]
+[src: file: backend/src/core/config.rs:200-224]
 
 ## Boot order
 
@@ -42,7 +42,10 @@ the previous file untouched.
    `config.toml`. It never mints a key or an auth token. A missing
    `config.toml` starts from defaults **without** a key, so no random key is
    ever offered to the reconciler. Values that are not a 32-byte hex key are
-   ignored as candidates.
+   ignored as candidates. A `config.toml` that cannot be parsed is moved to
+   `config.toml.corrupt.<timestamp>` (`0600`, kept: it may hold the key), a
+   top-level `encryption_secret` line is salvaged, and the start continues
+   as a first run.
 2. The database opens, then the reconciler picks the key by decrypt
    self-test across every registered column:
    - a vault that cannot be read (denied keychain prompt, locked keychain,
@@ -52,7 +55,12 @@ the previous file untouched.
      same message on its "Kronn could not start" screen (startup error →
      `wait_for_backend` → bootstrap failure panel, with Retry); for the
      keychain it says to choose Allow, or to start with
-     `KRONN_USE_KEYCHAIN=0` (`open --env KRONN_USE_KEYCHAIN=0 -a Kronn`);
+     `KRONN_USE_KEYCHAIN=0` (`open --env KRONN_USE_KEYCHAIN=0 -a Kronn`); a
+     damaged keychain item (bad encoding, duplicates) is reported as such,
+     naming `com.kronn.kronn` / `encryption_secret_v1` and when it may be
+     deleted in Keychain Access;
+   - before locking, the `encryption_secret` of `config.toml.backup` and its
+     rotated copies are tried as read-only candidates;
    - a key is minted only when no registered column holds ciphertext;
    - two distinct keys that each decrypt some rows (say the keychain holds
      K1 and the sidecar K2) **stop the boot** with nothing written; the
@@ -60,7 +68,8 @@ the previous file untouched.
      decrypts. Kronn never picks one, and never overwrites a vault that holds
      a different key than the one in use. Every row is scanned, so a second
      key whose rows are all old is still found. To keep both halves, start
-     Kronn with `KRONN_REENCRYPT_FROM=<fingerprint of the key to retire>`: its
+     Kronn with `KRONN_REENCRYPT_FROM=<fingerprint of the key to retire>` (macOS
+     app: `open --env KRONN_REENCRYPT_FROM=<fingerprint> -a Kronn`): its
      rows (and the encrypted `config.toml` backup) are re-encrypted under the
      first other key listed, in one transaction checked by read-back and
      rolled back on any failure, then the boot continues; no key copy is
@@ -69,7 +78,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:328-452]
+   [src: file: backend/src/core/keystore.rs:394-551]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -82,20 +91,26 @@ the previous file untouched.
    therefore keeps the key in `config.toml`. A `recovery.key` written before
    0.14.3 has no fingerprint and does not count until the passphrase is used
    once (a restore, or replacing it in Settings → Recovery), which records
-   it. A different legacy key in `config.toml` is kept.
+   it. Another value in `config.toml` (a retired key, or not a key at all)
+   decrypts nothing at that point, so it is moved to
+   `config.toml.retired-key.<timestamp>` (`0600`) and the key in use gets the
+   file copy it needs. Before anything is encrypted, the key in use must
+   have a durable copy: a vault reads it back, or `config.toml` is written
+   with it and read back; otherwise the boot stops ("No durable copy of the
+   encryption key could be written") with nothing encrypted.
    `GET /api/config/recovery/status` reports `matches_key`, `key_locked`,
    `key_copies_kept` (the retention rule keeps the file copy),
    `config_holds_key`, `copies`, `stale_sources` (key stores holding another
    key, never overwritten), `invalid_sources`, `locked_credentials` and
    `kept_recovery_blobs`; Settings → Recovery shows the warnings.
-   [src: file: backend/src/core/keystore.rs:253-293]
+   [src: file: backend/src/core/keystore.rs:271-319]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
    as it is. If this step fails before loading the token while a token is
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
-   auth off. [src: file: backend/src/core/credential_store.rs:414-547]
+   auth off. [src: file: backend/src/core/credential_store.rs:452-585]
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4
@@ -155,10 +170,13 @@ Safe to interrupt at any point; a rerun converges:
    owner-only with the auth token and provider keys already removed, so a
    failed credential boot cannot leave them in plaintext there. An existing
    `config.toml.backup` with other content (an older key, say) is moved to
-   `config.toml.backup.<timestamp>` (`0600`) instead of being overwritten.
+   `config.toml.backup.<timestamp>` (`0600`) instead of being overwritten,
+   with its credentials removed and its key kept. Every credential boot also
+   scrubs `config.toml.backup` and every rotated copy (copies rotated by an
+   earlier 0.14.3 start included), under the same copies rule for the key.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:625-628]
+[src: file: backend/src/core/credential_store.rs:696-699]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -194,7 +212,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 names the ones whose project is gone.
-[src: file: backend/src/core/keystore.rs:761-811]
+[src: file: backend/src/core/keystore.rs:913-969]
 
 ## Reset
 
@@ -207,7 +225,18 @@ holding only that key (the next start is a first run with the same key);
 otherwise it is removed. A file counts as key-only only when it holds nothing
 but `encryption_secret`. The encrypted credential backup is deleted and
 `config.toml.backup` is set aside under a timestamped name (it may hold an
-older key).
+older key). A reset while the key is locked also deletes the token row, which
+no key can read, so the next start mints a key and a token.
+
+When the key is in use but the stored credentials fail to load at start
+(disk full, unreadable `config.toml`), auth is locked and enabled (fail
+closed), `recovery/status` reports `credentials_unavailable`, the locked
+screen says to fix the cause and restart, and credential changes are
+refused with that reason. Settings → Recovery shows every computed warning
+(another or an invalid value in a key store, a single copy without a
+passphrase, stored credentials no key reads). An export bundles
+`recovery.key` only when it is verified for the key in use, and otherwise
+warns.
 
 ## Downgrading to 0.14.2
 
@@ -232,4 +261,4 @@ rebuild, so macOS would prompt on every restart). To exercise the keychain
 path, including a denied prompt, start the dev backend with
 `KRONN_USE_KEYCHAIN=1`; `KRONN_USE_KEYCHAIN=0` forces the sidecar in a release
 build. Outside macOS and Windows the default is off (no keychain backend).
-[src: file: backend/src/core/keyvault.rs:231-237]
+[src: file: backend/src/core/keyvault.rs:234-240]

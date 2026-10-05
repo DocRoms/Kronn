@@ -288,6 +288,14 @@ Release notes for 0.9.3 and earlier are available in the
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
   name instead of being overwritten (KT-1007).
+- A first start that cannot keep a durable copy of the new key (disk full,
+  read-only data directory) stops with what to do instead of encrypting
+  under a key that would be gone at the next start; an invalid or retired
+  `encryption_secret` in `config.toml` is set aside in a side file and never
+  keeps the key in use from being saved; a reset while the key is locked
+  lets the next start begin fresh; `config.toml.backup` copies rotated from
+  0.14.2 lose their plaintext credentials; an unreadable `config.toml` is
+  kept aside and its key salvaged (KT-1007).
 - The locked screen tells a remote visitor to open Kronn on its machine,
   restores a lost key, or sets a new API token when only the stored token is
   unreadable (even with strict localhost); Settings → Recovery restores a
