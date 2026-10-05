@@ -271,6 +271,36 @@ pub enum Kind {
     Connection,
     /// A task-execution worker offer.
     Offer,
+    // Resources that live inside a discussion or a project: checked as that
+    // discussion or project (see [`canonical`]).
+    Message,
+    ContextFile,
+    Dispatch,
+    /// A joined CLI session (`cli_session_id`).
+    Session,
+    Workspace,
+    OrchestrationRun,
+    Proposal,
+    MediaJob,
+    AuditRun,
+}
+
+impl Kind {
+    /// A resource checked as the discussion or project it lives in.
+    fn derived(self) -> bool {
+        matches!(
+            self,
+            Kind::Message
+                | Kind::ContextFile
+                | Kind::Dispatch
+                | Kind::Session
+                | Kind::Workspace
+                | Kind::OrchestrationRun
+                | Kind::Proposal
+                | Kind::MediaJob
+                | Kind::AuditRun
+        )
+    }
 }
 
 /// Whether an id is what the request acts on, or something it references.
@@ -380,7 +410,7 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         "DELETE",
         "/api/discussions/{id}/context-files/{file_id}",
         Own,
-        &[("id", D)],
+        &[("id", D), ("file_id", Kind::ContextFile)],
     ),
     r("POST", "/api/discussions/peer-join", Write, &[]),
     r("POST", "/api/discussions/peer-leave", Write, &[]),
@@ -441,7 +471,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
         &[("id", T), ("blocker_id", T)],
     ),
     r("GET", "/api/planning/proposals", Read, &[]),
-    r("GET", "/api/planning/proposals/{id}", Read, &[]),
+    r(
+        "GET",
+        "/api/planning/proposals/{id}",
+        Read,
+        &[("id", Kind::Proposal)],
+    ),
     r("POST", "/api/learnings/propose", Write, &[]),
     r("POST", "/api/orchestration/tool/workers", Read, &[]),
     r("POST", "/api/orchestration/tool/prepare", Read, &[]),
@@ -536,7 +571,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
     r("GET", "/api/pages/{id}/discussions", Read, &[("id", G)]),
     r("POST", "/api/media/generate", Effect, &[]),
-    r("GET", "/api/media/jobs/{id}", Read, &[]),
+    r(
+        "GET",
+        "/api/media/jobs/{id}",
+        Read,
+        &[("id", Kind::MediaJob)],
+    ),
     r("GET", "/api/projects/{id}", Read, &[("id", P)]),
     r("GET", "/api/projects/{id}/audit-info", Read, &[("id", P)]),
     r("GET", "/api/projects/{id}/audit-status", Read, &[("id", P)]),
@@ -637,6 +677,7 @@ const CREATE_ROUTES: &[(&str, &str)] = &[
     ("/api/pages", "project_id"),
     ("/api/planning/tasks", "project_ids"),
     ("/api/disc/create", "project_id"),
+    ("/api/learnings/propose", "project_id"),
 ];
 
 /// Update routes whose handler resets or may drop the project when the body
@@ -665,6 +706,24 @@ pub fn prepare_body(
     };
     let mut body = body.clone();
     let mut changed = false;
+    if let Some(fields) = body
+        .as_object()
+        .filter(|_| route.pattern == "/api/learnings/propose")
+    {
+        // A preference applies to every project: a human records it.
+        if fields.get("kind").and_then(|kind| kind.as_str()) == Some("preference") {
+            return Err(Refusal(
+                "a bridge token cannot propose a preference for every project".into(),
+            ));
+        }
+    }
+    if route.pattern == "/api/disc/link"
+        && body.get("force_reassign") == Some(&serde_json::json!(true))
+    {
+        return Err(Refusal(
+            "a bridge token cannot take a session over from another discussion".into(),
+        ));
+    }
     if let Some(fields) = body.as_object_mut() {
         let create = CREATE_ROUTES
             .iter()
@@ -716,9 +775,9 @@ pub fn prepare_body(
                 ))
             }
             Some(serde_json::Value::String(project)) if Some(project.as_str()) != bound => {
-                return Err(Refusal(format!(
-                    "project {project} is outside this bridge token's project"
-                )))
+                return Err(Refusal(
+                    "the project named is outside this bridge token's project".into(),
+                ))
             }
             _ => {}
         }
@@ -788,14 +847,21 @@ const ID_KEYS: &[(&str, Kind)] = &[
     ("discussion_id", Kind::Discussion),
     ("disc_id", Kind::Discussion),
     ("discussion_ids", Kind::Discussion),
+    ("disc_ids", Kind::Discussion),
     ("parent_discussion_id", Kind::Discussion),
     ("source_discussion_id", Kind::Discussion),
     ("sub_discussion_id", Kind::Discussion),
     ("child_discussion_id", Kind::Discussion),
+    ("origin_discussion_id", Kind::Discussion),
+    ("judge_discussion_id", Kind::Discussion),
+    ("review_discussion_id", Kind::Discussion),
+    ("validation_discussion_id", Kind::Discussion),
     ("from_disc_id", Kind::Discussion),
     ("to_disc_id", Kind::Discussion),
     ("runtime_disc_id", Kind::Discussion),
     ("resume_disc_id", Kind::Discussion),
+    ("return_disc_id", Kind::Discussion),
+    ("previous_disc_id", Kind::Discussion),
     ("expected_disc_id", Kind::Discussion),
     ("expected_child_disc_id", Kind::Discussion),
     ("bound_disc_id", Kind::Discussion),
@@ -807,6 +873,8 @@ const ID_KEYS: &[(&str, Kind)] = &[
     ("task_id", Kind::Task),
     ("blocker_task_id", Kind::Task),
     ("task_reference", Kind::Task),
+    ("task_ref", Kind::Task),
+    ("parent_reference", Kind::Task),
     ("workflow_id", Kind::Workflow),
     ("parent_workflow_id", Kind::Workflow),
     ("sub_workflow_id", Kind::Workflow),
@@ -814,28 +882,163 @@ const ID_KEYS: &[(&str, Kind)] = &[
     ("workflow_run_id", Kind::Run),
     ("parent_run_id", Kind::Run),
     ("resume_run_id", Kind::Run),
+    ("child_run_id", Kind::Run),
+    ("judge_run_id", Kind::Run),
+    ("carried_from_run_id", Kind::Run),
+    ("triggered_by_run_id", Kind::Run),
     ("execution_id", Kind::Execution),
     ("task_execution_id", Kind::Execution),
     ("qp_id", Kind::QuickPrompt),
     ("quick_prompt_id", Kind::QuickPrompt),
     ("batch_quick_prompt_id", Kind::QuickPrompt),
     ("batch_chain_prompt_ids", Kind::QuickPrompt),
+    ("originating_qp_id", Kind::QuickPrompt),
     ("qa_id", Kind::QuickApi),
     ("quick_api_id", Kind::QuickApi),
     ("qe_id", Kind::QuickExec),
+    ("quick_exec_id", Kind::QuickExec),
+    ("approved_quick_exec_ids", Kind::QuickExec),
     ("page_id", Kind::Page),
     ("api_config_id", Kind::McpConfig),
     ("mcp_config_ids", Kind::McpConfig),
+    ("config_id", Kind::McpConfig),
+    ("config_ids", Kind::McpConfig),
+    ("source_config_id", Kind::McpConfig),
+    ("imported_config_ids", Kind::McpConfig),
     ("connection_id", Kind::Connection),
+    ("worker_connection_id", Kind::Connection),
     ("offer_id", Kind::Offer),
+    ("message_id", Kind::Message),
+    ("message_ref", Kind::Message),
+    ("last_message_id", Kind::Message),
+    ("reply_to_message_id", Kind::Message),
+    ("source_message_id", Kind::Message),
+    ("target_message_id", Kind::Message),
+    ("trigger_message_id", Kind::Message),
+    ("offer_message_id", Kind::Message),
+    ("delivered_message_ids", Kind::Message),
+    ("file_id", Kind::ContextFile),
+    ("file_ids", Kind::ContextFile),
+    ("context_file_id", Kind::ContextFile),
+    ("asset_id", Kind::ContextFile),
+    ("reference_asset_id", Kind::ContextFile),
+    ("reference_asset_ids", Kind::ContextFile),
+    ("extracted_from_asset_id", Kind::ContextFile),
+    ("dispatch_id", Kind::Dispatch),
+    ("dispatch_job_id", Kind::Dispatch),
+    ("source_dispatch_job_id", Kind::Dispatch),
+    ("completion_dispatch_id", Kind::Dispatch),
+    ("cli_session_id", Kind::Session),
+    ("target_cli_session_id", Kind::Session),
+    ("worker_cli_session_id", Kind::Session),
+    ("workspace_id", Kind::Workspace),
+    ("target_workspace_id", Kind::Workspace),
+    ("orchestration_run_id", Kind::OrchestrationRun),
+    ("proposal_id", Kind::Proposal),
+    ("job_id", Kind::MediaJob),
+    ("audit_run_id", Kind::AuditRun),
+];
+
+/// Id-shaped keys known to carry no scoped resource id. Reviewed one by one:
+/// anything id-shaped that is neither here nor in [`ID_KEYS`] is refused.
+const PLAIN_ID_KEYS: &[&str] = &[
+    // The caller's own CLI session identity; the routes keyed by it resolve
+    // its room before the check (see `credential_targets`).
+    "session_id",
+    "actor_session_id",
+    "source_session_id",
+    "source_binding_session_id",
+    "conversation_id",
+    // Idempotency keys the caller chooses for a message it is writing.
+    "source_msg_id",
+    "client_message_id",
+    // Definition-of-done items: scoped by the task in the path or by the
+    // execution the handler revalidates.
+    "dod_id",
+    "worker_dod_ids",
+    // A dataset of the page named in the path.
+    "dataset_id",
+    // Model catalogue entries (no project, no secret).
+    "model_id",
+    "voice_id",
+    "generation_id",
+    "runtime_target_id",
+    // MCP server catalogue entries (global).
+    "server_id",
+    "replacement_server_id",
+    // The shared agent library: read-only for a bridge token.
+    "skill_id",
+    "skill_ids",
+    "default_skill_ids",
+    "profile_id",
+    "profile_ids",
+    "default_profile_id",
+    "worker_profile_id",
+    "directive_id",
+    "directive_ids",
+    // Git refs and tracker keys, not Kronn ids.
+    "backup_ref",
+    "base_ref",
+    "source_ref",
+    "test_mode_stash_ref",
+    "ticket_ref",
+    // Option ids of a question card.
+    "recommended_option_ids",
+];
+
+/// Containers whose objects carry their own `id` (a step, a DoD item, an
+/// option, the planning actor) rather than a reference to a resource, or a
+/// `ref` Kronn never resolves (a learning's evidence: a path, URL or note).
+const OWN_CONTAINERS: &[&str] = &[
+    "evidence",
+    "steps",
+    "on_failure",
+    "definition_of_done",
+    "dod",
+    "items",
+    "variables",
+    "options",
+    "sources",
+    "actor",
+    "links",
+    "exec_script_files",
+    "messages",
+];
+
+/// Fields holding a caller's own data (an HTTP body for an external API, a
+/// page dataset, a JSON schema, a sample): Kronn never reads a reference out
+/// of them, so their contents are not checked.
+const OPAQUE_KEYS: &[&str] = &[
+    "api_body",
+    "body",
+    "json_data_payload",
+    "data",
+    "envelope",
+    "sample",
+    "payload",
+    "current",
+    "initial",
+    "value",
+    "schema",
+    "json_schema",
+    "fallback",
+    "details",
 ];
 
 /// Keys naming what a write acts on rather than what it references.
 const TARGET_KEYS: &[&str] = &["task_execution_id", "execution_id", "offer_id", "parent_id"];
 
+/// Whether a key looks like it holds an id.
+pub fn looks_like_id(key: &str) -> bool {
+    matches!(key, "id" | "ref")
+        || ["_id", "_ids", "_ref", "_refs", "_reference", "_references"]
+            .iter()
+            .any(|suffix| key.ends_with(suffix))
+}
+
 fn kind_of_key(route: &BridgeRoute, key: &str) -> Option<Kind> {
-    // `parent_id` is a task only on the planning routes; elsewhere it names
-    // something unscoped (a message, a step).
+    // `parent_id` is a task only on the planning routes; elsewhere it is an
+    // unknown id field.
     if key == "parent_id" {
         return route
             .pattern
@@ -867,66 +1070,140 @@ fn param_role(route: &BridgeRoute, name: &str) -> Role {
     }
 }
 
-/// Collect every id under a known key in `value`, at any depth. `skip_keys`
-/// are not collected; `internal` ids are defined inside the value itself.
-fn walk_ids(
-    route: &BridgeRoute,
-    value: &serde_json::Value,
-    skip_keys: &[&str],
-    internal: &HashSet<String>,
-    out: &mut Vec<NamedId>,
-) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, child) in fields {
-                if let Some(kind) =
-                    kind_of_key(route, key).filter(|_| !skip_keys.contains(&key.as_str()))
-                {
-                    let role = key_role(key);
-                    let mut push = |id: &str| {
-                        if !id.is_empty() && !internal.contains(id) {
-                            out.push(NamedId::new(kind, id, role));
-                        }
-                    };
-                    match child {
-                        serde_json::Value::String(id) => push(id),
-                        serde_json::Value::Array(items) => items
-                            .iter()
-                            .filter_map(|item| item.as_str())
-                            .for_each(&mut push),
-                        _ => {}
-                    }
+fn unknown_id_field(key: &str) -> Refusal {
+    Refusal(format!(
+        "`{key}` is an id field a bridge token cannot use on this route"
+    ))
+}
+
+/// The resources an import bundles, per kind: refs to them are remapped by
+/// the import and not looked up. Discussions, configs and connections are
+/// never bundled.
+#[derive(Default)]
+struct Bundled(HashSet<(Kind, String)>);
+
+impl Bundled {
+    fn of_import(content: &serde_json::Value) -> Self {
+        let mut bundled = HashSet::new();
+        let mut add = |kind: Kind, value: Option<&serde_json::Value>| {
+            if let Some(id) = value.and_then(|value| value.as_str()) {
+                bundled.insert((kind, id.to_owned()));
+            }
+        };
+        add(Kind::Workflow, content.pointer("/workflow/id"));
+        for (list, kind) in [
+            ("referenced_workflows", Kind::Workflow),
+            ("referenced_quick_prompts", Kind::QuickPrompt),
+            ("referenced_quick_apis", Kind::QuickApi),
+            ("referenced_quick_execs", Kind::QuickExec),
+            ("referenced_pages", Kind::Page),
+        ] {
+            for item in content
+                .get(list)
+                .and_then(|items| items.as_array())
+                .into_iter()
+                .flatten()
+            {
+                add(kind, item.get("id"));
+                if kind == Kind::Page {
+                    add(kind, item.get("slug"));
                 }
-                walk_ids(route, child, skip_keys, internal, out);
             }
         }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                walk_ids(route, item, skip_keys, internal, out);
-            }
-        }
-        _ => {}
+        Self(bundled)
+    }
+
+    fn holds(&self, kind: Kind, id: &str) -> bool {
+        self.0.contains(&(kind, id.to_owned()))
     }
 }
 
-/// Every `id` value defined inside a value (the resources an import bundles).
-fn defined_ids(value: &serde_json::Value, out: &mut HashSet<String>) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            if let Some(id) = fields.get("id").and_then(|id| id.as_str()) {
-                out.insert(id.to_owned());
+struct Walk<'a> {
+    route: &'a BridgeRoute,
+    /// Inside an import's `content`: its own project fields are replaced at
+    /// import, its `id`s are definitions, bundled refs are remapped.
+    bundled: Option<&'a Bundled>,
+}
+
+impl Walk<'_> {
+    /// Collect every id under a known key, at any depth; refuse an id-shaped
+    /// key that is neither known nor reviewed as plain.
+    fn walk(
+        &self,
+        value: &serde_json::Value,
+        parent: Option<&str>,
+        depth: usize,
+        out: &mut Vec<NamedId>,
+    ) -> Result<(), Refusal> {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, child) in fields {
+                    if OPAQUE_KEYS.contains(&key.as_str()) && !looks_like_id(key) {
+                        continue;
+                    }
+                    self.key(key, child, parent, depth, out)?;
+                    self.walk(child, Some(key), depth + 1, out)?;
+                }
+                Ok(())
             }
-            fields.values().for_each(|child| defined_ids(child, out));
+            serde_json::Value::Array(items) => items
+                .iter()
+                .try_for_each(|item| self.walk(item, parent, depth + 1, out)),
+            _ => Ok(()),
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|child| defined_ids(child, out)),
-        _ => {}
+    }
+
+    fn key(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        parent: Option<&str>,
+        depth: usize,
+        out: &mut Vec<NamedId>,
+    ) -> Result<(), Refusal> {
+        if !looks_like_id(key) {
+            return Ok(());
+        }
+        if let Some(kind) = kind_of_key(self.route, key) {
+            if self.bundled.is_some() && kind == Kind::Project {
+                return Ok(());
+            }
+            let role = key_role(key);
+            let mut push = |raw: &serde_json::Value| {
+                let id = match raw {
+                    serde_json::Value::String(id) => id.clone(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    _ => return,
+                };
+                let bundled = self.bundled.is_some_and(|b| b.holds(kind, &id));
+                if !id.is_empty() && !bundled {
+                    out.push(NamedId::new(kind, id, role));
+                }
+            };
+            match value {
+                serde_json::Value::Array(items) => items.iter().for_each(&mut push),
+                other => push(other),
+            }
+            return Ok(());
+        }
+        if PLAIN_ID_KEYS.contains(&key) {
+            return Ok(());
+        }
+        // The resource's own id, or a sub-object's own id.
+        let own_id = matches!(key, "id" | "ref")
+            && (depth == 0
+                || self.bundled.is_some()
+                || parent.is_some_and(|parent| OWN_CONTAINERS.contains(&parent)));
+        if own_id {
+            return Ok(());
+        }
+        Err(unknown_id_field(key))
     }
 }
 
 /// The ids a request names: declared path parameters, query parameters, and
-/// known keys at any depth of the JSON body, plus the workflow an import
-/// carries (its own project fields are replaced at import, and the resources
-/// it bundles are not looked up).
+/// id-shaped keys at any depth of the JSON body, plus the workflow an import
+/// carries. An id-shaped key the gate cannot resolve is refused.
 pub fn collect_ids(
     route: &BridgeRoute,
     path_params: &[(String, String)],
@@ -940,30 +1217,38 @@ pub fn collect_ids(
         }
     }
     if let Some(query) = query {
-        for pair in query.split('&') {
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             let key = percent_decode(key);
-            if let Some(kind) = kind_of_key(route, &key) {
-                let value = percent_decode(value);
-                if !value.is_empty() {
-                    ids.push(NamedId::new(kind, value, key_role(&key)));
+            if !looks_like_id(&key) {
+                continue;
+            }
+            match kind_of_key(route, &key) {
+                Some(kind) => {
+                    let value = percent_decode(value);
+                    if !value.is_empty() {
+                        ids.push(NamedId::new(kind, value, key_role(&key)));
+                    }
                 }
+                None if PLAIN_ID_KEYS.contains(&key.as_str()) => {}
+                None => return Err(unknown_id_field(&key)),
             }
         }
     }
     if let Some(body) = body {
-        walk_ids(route, body, &[], &HashSet::new(), &mut ids);
+        let walk = Walk {
+            route,
+            bundled: None,
+        };
+        walk.walk(body, None, 0, &mut ids)?;
         if route.pattern == "/api/workflows/import" {
             let content = import_content(body)?;
-            let mut internal = HashSet::new();
-            defined_ids(&content, &mut internal);
-            walk_ids(
+            let bundled = Bundled::of_import(&content);
+            let walk = Walk {
                 route,
-                &content,
-                &["project_id", "project_ids"],
-                &internal,
-                &mut ids,
-            );
+                bundled: Some(&bundled),
+            };
+            walk.walk(&content, None, 0, &mut ids)?;
         }
     }
     ids.sort_by(|a, b| (a.id.as_str(), a.role as u8).cmp(&(b.id.as_str(), b.role as u8)));
@@ -1125,21 +1410,25 @@ pub fn authorize(
             if bound == Some(id) {
                 continue;
             }
-            return Err(Refusal(format!(
-                "project {id} is outside this bridge token's project"
-            )));
+            return Err(Refusal(
+                "a project the request names is outside this bridge token's project".into(),
+            ));
         }
         if kind == Kind::Discussion && route.rule == Rule::Own && !grant.owns_discussion(id) {
-            return Err(Refusal(format!(
-                "a bridge token may only write to its own discussion, not {id}"
-            )));
+            return Err(Refusal(
+                "a bridge token may only write to its own discussion".into(),
+            ));
         }
         // An id the operation would not resolve either is refused, never let
         // through: authorizing must see what the handler will act on.
         let place = match residence(kind, id)? {
             Some(place) => place,
             None if owns(grant, kind, id) => continue,
-            None => return Err(Refusal(format!("{kind:?} {id} does not exist"))),
+            None => {
+                return Err(Refusal(format!(
+                    "a {kind:?} the request names does not exist"
+                )))
+            }
         };
         let allowed = match (route.rule, named.role) {
             (Rule::Effect, _) => effect_allowed(grant, route, kind, id, &place, bound),
@@ -1152,7 +1441,8 @@ pub fn authorize(
             } else {
                 "is outside this bridge token's scope"
             };
-            return Err(Refusal(format!("{kind:?} {id} {why}")));
+            // Never the id: it may belong to another project.
+            return Err(Refusal(format!("a {kind:?} the request names {why}")));
         }
     }
     Ok(())
@@ -1232,6 +1522,16 @@ pub fn residence(
         Kind::QuickExec => project_of("SELECT project_id FROM quick_execs WHERE id = ?1"),
         Kind::Page => project_of("SELECT project_id FROM live_pages WHERE id = ?1"),
         Kind::Execution => execution_residence(id),
+        // Checked as the discussion or project they live in: see `canonical`.
+        Kind::Message
+        | Kind::ContextFile
+        | Kind::Dispatch
+        | Kind::Session
+        | Kind::Workspace
+        | Kind::OrchestrationRun
+        | Kind::Proposal
+        | Kind::MediaJob
+        | Kind::AuditRun => Ok(None),
         Kind::Offer => {
             let execution: Option<String> = conn
                 .query_row(
@@ -1332,6 +1632,88 @@ pub fn residence(
     }
 }
 
+/// The resource a request's id is really checked as: a message, file,
+/// dispatch, session, workspace, orchestration run or proposal stands for its
+/// discussion; a media job for its discussion, else its project; an audit run
+/// for its project. `None` when it resolves to nothing.
+pub fn canonical(
+    conn: &rusqlite::Connection,
+    kind: Kind,
+    id: &str,
+) -> anyhow::Result<Option<(Kind, String)>> {
+    use rusqlite::OptionalExtension;
+    let discussion_of = |sql: &str| -> anyhow::Result<Option<(Kind, String)>> {
+        Ok(conn
+            .query_row(sql, [id], |row| row.get::<_, String>(0))
+            .optional()?
+            .map(|disc| (Kind::Discussion, disc)))
+    };
+    match kind {
+        Kind::Message => discussion_of("SELECT discussion_id FROM messages WHERE id = ?1"),
+        Kind::ContextFile => discussion_of("SELECT discussion_id FROM context_files WHERE id = ?1"),
+        Kind::Dispatch => {
+            discussion_of("SELECT discussion_id FROM agent_dispatch_jobs WHERE id = ?1")
+        }
+        Kind::Session => match id.parse::<i64>() {
+            Ok(pk) => Ok(conn
+                .query_row(
+                    "SELECT disc_id FROM discussion_sessions WHERE id = ?1",
+                    [pk],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|disc| (Kind::Discussion, disc))),
+            Err(_) => Ok(None),
+        },
+        Kind::Workspace => discussion_of("SELECT disc_id FROM discussion_workspaces WHERE id = ?1"),
+        Kind::OrchestrationRun => {
+            discussion_of("SELECT discussion_id FROM orchestration_runs WHERE id = ?1")
+        }
+        Kind::Proposal => {
+            discussion_of("SELECT discussion_id FROM planning_proposals WHERE id = ?1")
+        }
+        Kind::MediaJob => {
+            let found: Option<(Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT discussion_id, project_id FROM media_jobs WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            Ok(match found {
+                Some((Some(disc), _)) => Some((Kind::Discussion, disc)),
+                Some((None, Some(project))) => Some((Kind::Project, project)),
+                _ => None,
+            })
+        }
+        Kind::AuditRun => Ok(conn
+            .query_row(
+                "SELECT project_id FROM audit_runs WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|project| (Kind::Project, project))),
+        _ => Ok(Some((kind, id.to_owned()))),
+    }
+}
+
+/// The ids of a request as the gate checks them ([`canonical`]); an id that
+/// resolves to nothing stays as named and is refused by `authorize`.
+pub fn canonical_ids(
+    conn: &rusqlite::Connection,
+    ids: Vec<NamedId>,
+) -> anyhow::Result<Vec<NamedId>> {
+    ids.into_iter()
+        .map(|named| {
+            Ok(match canonical(conn, named.kind, &named.id)? {
+                Some((kind, id)) => NamedId::new(kind, id, named.role),
+                None => named,
+            })
+        })
+        .collect()
+}
+
 /// What a scope is bound to now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeBinding {
@@ -1402,13 +1784,47 @@ pub fn resolve_scope_project(
 pub fn credential_targets(
     conn: &rusqlite::Connection,
     route: &BridgeRoute,
+    query: Option<&str>,
     body: Option<&serde_json::Value>,
 ) -> anyhow::Result<Vec<NamedId>> {
     use rusqlite::OptionalExtension;
     let field = |name: &str| {
-        body.and_then(|body| body.get(name))
+        let from_body = body
+            .and_then(|body| body.get(name))
             .and_then(|value| value.as_str())
-            .map(str::to_owned)
+            .map(str::to_owned);
+        from_body.or_else(|| {
+            query.and_then(|query| {
+                query.split('&').find_map(|pair| {
+                    let (key, value) = pair.split_once('=')?;
+                    (percent_decode(key) == name).then(|| percent_decode(value))
+                })
+            })
+        })
+    };
+    let role = if route.method == "GET" {
+        Role::Ref
+    } else {
+        Role::Target
+    };
+    // The room a caller-supplied (agent, session) is joined to.
+    let joined_room = || -> anyhow::Result<Option<String>> {
+        match (field("source_agent"), field("source_session_id")) {
+            (Some(agent), Some(session)) => Ok(
+                crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
+                    .map(|session| session.disc_id),
+            ),
+            _ => Ok(None),
+        }
+    };
+    // The room a caller-supplied (agent, session) is currently bound to.
+    let bound_room = || -> anyhow::Result<Option<String>> {
+        match (field("source_agent"), field("source_session_id")) {
+            (Some(agent), Some(session)) => {
+                crate::db::disc_source::find_disc_by_source_session(conn, &agent, &session)
+            }
+            _ => Ok(None),
+        }
     };
     let hash = |raw: &str| hex(&Sha256::digest(raw.as_bytes()));
     let unresolved = || NamedId::new(Kind::Discussion, "<unresolved credential>", Role::Target);
@@ -1460,10 +1876,70 @@ pub fn credential_targets(
                 );
             }
         }
+        // Acting on the room of a joined session: that room must be in
+        // scope, and a session that resolves to no room is refused.
+        "/api/disc/workspace/history-lease" => {
+            out.push(joined_room()?.map_or_else(unresolved, |disc| {
+                NamedId::new(Kind::Discussion, disc, role)
+            }));
+        }
+        "/api/disc/workspace" => match joined_room()? {
+            Some(disc) => out.push(NamedId::new(Kind::Discussion, disc, role)),
+            None if route.method != "GET" => out.push(unresolved()),
+            None => {}
+        },
+        // Moving a session's binding: the room it leaves must be writable too.
+        "/api/disc/link" | "/api/disc/unlink" | "/api/disc/transfer-session" => {
+            if let Some(disc) = bound_room()? {
+                out.push(NamedId::new(Kind::Discussion, disc, Role::Target));
+            }
+        }
+        // Reads keyed by a session: the room they would reveal must be visible.
+        "/api/disc/find_by_session" | "/api/disc/session-status" => {
+            if let Some(disc) = bound_room()? {
+                out.push(NamedId::new(Kind::Discussion, disc, Role::Ref));
+            }
+        }
         _ => {}
+    }
+    // Any other route naming a joined session acts as that session: its room
+    // must be visible to the token. An `Own` route already requires its own
+    // room, which is the only one the session acts in there.
+    let explicit = SESSION_KEYED_ROUTES.iter().any(|(_, pattern)| {
+        *pattern == route.pattern && *pattern != "/api/orchestration/accept-offer"
+    });
+    if !explicit && route.rule != Rule::Own {
+        if let Some(disc) = joined_room()? {
+            out.push(NamedId::new(Kind::Discussion, disc, Role::Ref));
+        }
+        if let (Some(agent), Some(session)) = (field("agent_type"), field("session_id")) {
+            if let Some(found) =
+                crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
+            {
+                out.push(NamedId::new(Kind::Discussion, found.disc_id, Role::Ref));
+            }
+        }
     }
     Ok(out)
 }
+
+/// Routes that act on a discussion reached through a caller-supplied
+/// session, invite or resume credential rather than an id.
+pub const SESSION_KEYED_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/discussions/peer-join"),
+    ("POST", "/api/discussions/peer-leave"),
+    ("POST", "/api/discussions/peer-resume"),
+    ("POST", "/api/discussions/orchestrator-return-resume"),
+    ("POST", "/api/disc/workspace"),
+    ("GET", "/api/disc/workspace"),
+    ("POST", "/api/disc/workspace/history-lease"),
+    ("POST", "/api/disc/link"),
+    ("POST", "/api/disc/unlink"),
+    ("POST", "/api/disc/transfer-session"),
+    ("POST", "/api/orchestration/accept-offer"),
+    ("GET", "/api/disc/find_by_session"),
+    ("GET", "/api/disc/session-status"),
+];
 
 // ─── Response scoping ───────────────────────────────────────────────────────
 
@@ -1597,7 +2073,26 @@ fn typed_entries(data: &serde_json::Value) -> Vec<&serde_json::Map<String, serde
 
 /// Resolved residences for [`scope_response`]: `None` = the id resolves to
 /// nothing (hidden by default).
-pub type Residences = HashMap<(Kind, String), Option<Residence>>;
+pub type Residences = HashMap<(Kind, String), Option<(Kind, String, Residence)>>;
+
+/// Resolve a response's ids for [`scope_response`]: each to the resource it is
+/// checked as, with that resource's residence.
+pub fn resolve_residences(
+    conn: &rusqlite::Connection,
+    wanted: Vec<(Kind, String)>,
+) -> anyhow::Result<Residences> {
+    let mut residences = Residences::new();
+    for (kind, id) in wanted {
+        let resolved = match canonical(conn, kind, &id)? {
+            Some((as_kind, as_id)) => {
+                residence(conn, as_kind, &as_id)?.map(|place| (as_kind, as_id, place))
+            }
+            None => None,
+        };
+        residences.insert((kind, id), resolved);
+    }
+    Ok(residences)
+}
 
 struct Scoper<'a> {
     route: &'a BridgeRoute,
@@ -1609,7 +2104,12 @@ struct Scoper<'a> {
 impl Scoper<'_> {
     fn id_visible(&self, kind: Kind, id: &str) -> bool {
         match self.residences.get(&(kind, id.to_owned())) {
-            Some(Some(place)) => visible_for_read(self.grant, kind, id, place, self.bound),
+            Some(Some((as_kind, as_id, place))) => {
+                visible_for_read(self.grant, *as_kind, as_id, place, self.bound)
+            }
+            // A response may name a message or job since deleted, or a key
+            // shared with another table: it hides nothing it cannot place.
+            Some(None) if kind.derived() => true,
             _ => owns(self.grant, kind, id),
         }
     }
@@ -1686,11 +2186,11 @@ impl Scoper<'_> {
                 if !self.own_fields_visible(fields, typed) {
                     return false;
                 }
-                let mut filtered: Vec<usize> = Vec::new();
-                for child in fields.values_mut() {
+                let mut filtered: Vec<(String, usize)> = Vec::new();
+                for (key, child) in fields.iter_mut() {
                     if child.is_array() {
                         if let Some(left) = self.filter_list(child, None) {
-                            filtered.push(left);
+                            filtered.push((key.clone(), left));
                         }
                     } else if child.is_object() && !self.keep(child, None) {
                         return false;
@@ -1720,23 +2220,42 @@ impl Scoper<'_> {
     }
 }
 
-/// After entries were dropped from the lists of an object, its count fields
-/// can no longer be trusted: set to the remaining length when one list was
-/// filtered, removed when several were.
-fn fix_counts(fields: &mut serde_json::Map<String, serde_json::Value>, filtered: &[usize]) {
-    let counts: Vec<String> = fields
-        .iter()
-        .filter(|(key, value)| {
-            let key = key.to_ascii_lowercase();
-            value.is_number() && (key.contains("count") || key.contains("total"))
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in counts {
-        if let [left] = filtered {
-            fields.insert(key, serde_json::json!(left));
-        } else {
-            fields.remove(&key);
+/// Responses a token gets whole or not at all.
+pub fn scoped_whole_or_refused(route: &BridgeRoute) -> bool {
+    route.pattern == "/api/workflows/{id}/export"
+}
+
+/// Counts known to pair with a list, besides the `<list>_count`,
+/// `<list>_total` and `total_<list>` conventions.
+const PAIRED_COUNTS: &[(&str, &str)] = &[
+    ("discussions", "disc_count"),
+    ("disc_ids", "disc_count"),
+    ("items", "total"),
+    ("discs", "disc_count"),
+];
+
+/// After entries were dropped from a list, the count paired with that list
+/// follows its new length; every other field stays as the handler wrote it.
+fn fix_counts(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    filtered: &[(String, usize)],
+) {
+    for (list, left) in filtered {
+        let mut paired: Vec<String> = vec![
+            format!("{list}_count"),
+            format!("{list}_total"),
+            format!("total_{list}"),
+        ];
+        paired.extend(
+            PAIRED_COUNTS
+                .iter()
+                .filter(|(name, _)| name == list)
+                .map(|(_, count)| count.to_string()),
+        );
+        for count in paired {
+            if fields.get(&count).is_some_and(|value| value.is_number()) {
+                fields.insert(count, serde_json::json!(left));
+            }
         }
     }
 }
@@ -1790,10 +2309,10 @@ pub fn scope_response(
                 return hidden();
             }
             let mut filtered = Vec::new();
-            for child in fields.values_mut() {
+            for (key, child) in fields.iter_mut() {
                 if child.is_array() {
                     if let Some(left) = scoper.filter_list(child, typed) {
-                        filtered.push(left);
+                        filtered.push((key.clone(), left));
                     }
                 } else if child.is_object() && !scoper.keep(child, None) {
                     return hidden();

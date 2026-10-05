@@ -260,10 +260,11 @@ fn ids_are_read_from_path_query_and_body_at_any_depth() {
         (Kind::Project, "p-b"),
         (Kind::Project, "p-nested"),
         (Kind::QuickPrompt, "qp-deep"),
+        (Kind::Project, "7"),
     ] {
         assert!(has(&ids, kind, id), "{kind:?} {id} missing from {ids:?}");
     }
-    assert_eq!(ids.len(), 9, "{ids:?}");
+    assert_eq!(ids.len(), 10, "{ids:?}");
 }
 
 /// B-01 / B-02 / F-01 — nested step refs and a workflow scope are collected.
@@ -340,10 +341,9 @@ fn task_parents_references_and_offers_are_collected() {
     .unwrap();
     assert!(ids.contains(&target(Kind::Task, "b-task")), "{ids:?}");
     let disc = route("POST", "/api/disc/create");
-    let ids = collect_ids(disc, &[], None, Some(&json!({"parent_id": "msg-1"}))).unwrap();
     assert!(
-        ids.is_empty(),
-        "parent_id is a task only on planning routes: {ids:?}"
+        collect_ids(disc, &[], None, Some(&json!({"parent_id": "msg-1"}))).is_err(),
+        "parent_id is a task only on planning routes, unknown elsewhere"
     );
     let prepare = route("POST", "/api/orchestration/tool/prepare");
     let ids = collect_ids(
@@ -700,7 +700,13 @@ fn a_failed_lookup_refuses() {
 fn residences(entries: &[(Kind, &str)]) -> Residences {
     entries
         .iter()
-        .map(|(kind, id)| ((*kind, id.to_string()), world(*kind, id).unwrap()))
+        .map(|(kind, id)| {
+            let place = world(*kind, id).unwrap();
+            (
+                (*kind, id.to_string()),
+                place.map(|place| (*kind, id.to_string(), place)),
+            )
+        })
         .collect()
 }
 

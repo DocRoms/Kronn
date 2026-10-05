@@ -3147,6 +3147,32 @@ pub async fn import_workflow(
         prepared.push(w);
     }
 
+    // A Quick Exec the bundle does not carry is an existing one: the same
+    // project and allowlist rule as on create applies to it.
+    let bundled_qes: std::collections::HashSet<&String> = qe_id_remap.values().collect();
+    for w in &prepared {
+        for steps in [&w.steps, &w.on_failure] {
+            let mut existing_refs = steps.clone();
+            for step in existing_refs.iter_mut() {
+                if let Some(config) = step.collect_api_data.as_mut() {
+                    config
+                        .sources
+                        .retain(|source| !bundled_qes.contains(&source.quick_exec_id));
+                }
+            }
+            if let Err(e) = validate_saved_quick_exec_refs(
+                &state,
+                &existing_refs,
+                &w.exec_allowlist,
+                req.project_id.as_deref(),
+            )
+            .await
+            {
+                return Json(ApiResponse::err(e));
+            }
+        }
+    }
+
     // Every SubWorkflow ref must resolve within the bundle (fresh ids) OR to a
     // workflow already on this instance — else the graph would dangle.
     let new_ids: std::collections::HashSet<String> = wf_id_remap.values().cloned().collect();

@@ -681,10 +681,10 @@ async fn api_call_runs_for_the_token_s_project_never_the_config_s() {
     )
     .await;
     assert_eq!(status, 403, "{response}");
+    // Named by kind, never by the other project's id (B3-05).
+    let error = response["error"].as_str().unwrap_or_default();
     assert!(
-        response["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("cfg-b")),
+        error.contains("McpConfig") && !error.contains("cfg-b"),
         "{response}"
     );
 }

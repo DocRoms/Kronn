@@ -233,10 +233,7 @@ pub async fn ws_handler(
     let strict_localhost = config.server.auth_strict_localhost;
     let has_valid_token = {
         let expected = config.server.auth_token.as_deref();
-        let bearer = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "));
+        let bearer = crate::bearer_credential(&headers);
         bearer.is_some_and(|bearer| {
             crate::core::bridge_token::operator_token_matches(expected, bearer)
         }) || query

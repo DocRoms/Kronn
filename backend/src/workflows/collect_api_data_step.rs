@@ -121,6 +121,22 @@ pub async fn execute_collect_api_data_step(
                     })
                     .await
                 {
+                    // A Quick Exec of another project never runs in this one,
+                    // whatever the saved workflow says.
+                    Ok(Some(exec))
+                        if exec
+                            .project_id
+                            .as_deref()
+                            .is_some_and(|owner| Some(owner) != project_id.as_deref()) =>
+                    {
+                        return SourceResult::failed(
+                            index,
+                            source.alias,
+                            source.required,
+                            "Saved Quick Exec belongs to another project".to_string(),
+                        )
+                        .with_kind(source_kind)
+                    }
                     Ok(Some(exec)) => Some(exec),
                     Ok(None) => {
                         return SourceResult::failed(
