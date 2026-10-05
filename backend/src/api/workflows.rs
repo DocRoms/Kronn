@@ -1308,6 +1308,7 @@ fn validate_exec_steps_keeping(
                 None,
                 Some(cmd),
                 &line,
+                &s.exec_script_files,
             );
             if !kept_stdin {
                 if let Some(error) = crate::core::inline_code::stdin_validation_error(
