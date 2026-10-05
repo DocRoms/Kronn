@@ -9,6 +9,14 @@ import re
 import sys
 
 
+# Matched at a position, never on a slice: slicing made the scan quadratic.
+_RAW_OPEN = re.compile(r'r#*"')
+_RAW_HASHES = re.compile(r'r(#*)"')
+_NOT_NEWLINE = re.compile(r"[^\n]")
+_LITERAL_START = re.compile(r"[/\"r']")
+_CHAR_LITERAL = re.compile(r"'(\\(?:u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'])'")
+
+
 def _sanitize(text):
     """Blank out string/char literals and comments (same length, newlines
     kept so line numbers survive). Without this, a `)` inside a literal
@@ -20,9 +28,7 @@ def _sanitize(text):
     i, n = 0, len(text)
 
     def blank(a, b):
-        for k in range(a, min(b, n)):
-            if out[k] != "\n":
-                out[k] = " "
+        out[a:b] = _NOT_NEWLINE.sub(" ", text[a:b])
 
     while i < n:
         c = text[i]
@@ -45,7 +51,7 @@ def _sanitize(text):
                     j += 1
             blank(i, j)
             i = j
-        elif c == '"' or (c == "r" and re.match(r'r#*"', text[i:])):
+        elif c == '"' or (c == "r" and _RAW_OPEN.match(text, i)):
             if c == '"':
                 j = i + 1
                 while j < n:
@@ -57,7 +63,7 @@ def _sanitize(text):
                     else:
                         j += 1
             else:
-                m = re.match(r'r(#*)"', text[i:])
+                m = _RAW_HASHES.match(text, i)
                 closer = '"' + m.group(1)
                 j = text.find(closer, i + len(m.group(0)))
                 j = n if j == -1 else j + len(closer)
@@ -66,14 +72,16 @@ def _sanitize(text):
         elif c == "'":
             # Char literal ('x', '\n', '\u{…}') vs lifetime ('a) — a char
             # literal always has a CLOSING quote within a few chars.
-            m = re.match(r"'(\\(?:u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'])'", text[i:])
+            m = _CHAR_LITERAL.match(text, i)
             if m:
-                blank(i, i + m.end())
-                i += m.end()
+                blank(i, m.end())
+                i = m.end()
             else:
                 i += 1  # lifetime: skip the quote, keep the identifier
         else:
-            i += 1
+            # Jump to the next character that can open a literal or comment.
+            nxt = _LITERAL_START.search(text, i + 1)
+            i = nxt.start() if nxt else n
     return "".join(out)
 
 
