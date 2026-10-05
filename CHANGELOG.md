@@ -323,7 +323,8 @@ Release notes for 0.9.3 and earlier are available in the
 - A task delegated to Gemini, Copilot, Kiro or OpenCode as a launched worker
   ran with the discussion's full access and without its delivery context, so
   it could act beyond the worker scope and never deliver (KT-1012). These
-  native ACP agents are now refused as launched workers with a clear reason,
+  native ACP agents, and Vibe, are now refused as launched workers with a
+  clear reason,
   at preparation and at launch; one worker policy now decides every route, and
   an exact joined CLI session of the same agent stays eligible.
 - Agent streams are sturdier (KT-1014). An accented letter or emoji split
