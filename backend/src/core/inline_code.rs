@@ -10,7 +10,7 @@ use crate::models::{UnsafeExecStep, WorkflowStep};
 /// Shells whose `-c` argument is a script.
 const SHELLS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "fish", "ksh", "ash", "mksh", "yash", "csh", "tcsh", "xonsh",
-    "nu", "elvish",
+    "nu", "elvish", "rbash", "oksh", "loksh", "posh", "hush", "osh", "ysh", "rc", "es",
 ];
 
 /// Inline-code options of an interpreter: the short option letters (also
@@ -42,6 +42,12 @@ fn is_shell(cmd: &str) -> bool {
 fn is_python(cmd: &str) -> bool {
     let lower = base_name(cmd);
     lower.starts_with("python") || lower.starts_with("pypy")
+}
+
+/// Whether `cmd` is an interpreter with modelled inline code (shell,
+/// Python, Node, Bun, Deno, Perl, Ruby, PHP, PowerShell).
+pub fn is_interpreter(cmd: &str) -> bool {
+    inline_code_options(cmd).is_some()
 }
 
 fn is_node(cmd: &str) -> bool {
@@ -482,6 +488,8 @@ fn value_options(cmd: &str) -> &'static [&'static str] {
         ]
     } else if lower == "ruby" {
         &["-I", "-r", "-C", "-E"]
+    } else if lower == "perl" {
+        &["-I", "-M", "-m"]
     } else {
         &[]
     }
@@ -755,9 +763,30 @@ pub fn rendered_refusal(
         tainted.get(i).copied().unwrap_or(false)
             && saved.get(i) == Some(&Role::RuntimeOption)
             && !templates[i].starts_with('-')
-            && rendered[i].starts_with('-')
+            && (rendered[i].starts_with('-')
+                // make reads `NAME=value` operands as assignments, which
+                // can expand `$(shell …)`.
+                || (matches!(
+                    crate::core::argv_roles::normalize_command(cmd).as_str(),
+                    "make" | "gmake" | "bmake"
+                ) && rendered[i].contains('=')))
     });
-    let index = first_tainted_option_position(cmd, rendered, &tainted)
+    // The structure the program parses: rendered text, except that an
+    // option the author wrote (`-u{{user}}`) keeps its template, so the
+    // value cannot be read as more option letters.
+    let parsed: Vec<String> = rendered
+        .iter()
+        .zip(templates)
+        .zip(&tainted)
+        .map(|((rendered, template), tainted)| {
+            if *tainted && template.starts_with('-') {
+                template.clone()
+            } else {
+                rendered.clone()
+            }
+        })
+        .collect();
+    let index = first_tainted_option_position(cmd, &parsed, &tainted)
         .or_else(|| first_tainted_option_position(cmd, templates, &tainted))
         .or(option_like)?;
     Some(format!(

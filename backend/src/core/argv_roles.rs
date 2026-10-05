@@ -85,6 +85,9 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
     if let Some(spec) = wrapper(&name) {
         return wrapper_roles(&spec, args, tainted, depth);
     }
+    if name == "deno" {
+        return deno_roles(args, tainted, depth);
+    }
     if let Some(roles) = crate::core::inline_code::interpreter_roles(cmd, args, tainted) {
         return roles;
     }
@@ -100,7 +103,14 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
         "git" => git_roles(args, tainted),
         "ssh" => ssh_roles(args, tainted),
         "docker" | "podman" => docker_roles(args, tainted, depth),
-        "npx" | "bunx" => npx_roles(args, tainted, depth),
+        "npx" | "bunx" | "uvx" => npx_roles(args, tainted, depth),
+        "tar" | "gtar" | "bsdtar" => tar_roles(&name, args, tainted),
+        "kubectl" | "oc" => kubectl_roles(args, tainted, depth),
+        "runuser" => runuser_roles(args, tainted, depth),
+        "parallel" => parallel_roles(args, tainted),
+        "pip" | "pipx" | "uv" | "go" | "cargo" | "gem" => {
+            fetcher_roles(&name, args, tainted, depth)
+        }
         "npm" | "pnpm" | "yarn" => package_manager_roles(&name, args, tainted, depth),
         _ if UNMODELLED_EVALUATORS.contains(&name.as_str()) => vec![Role::Option; args.len()],
         _ => match flag_spec(&name) {
@@ -135,6 +145,9 @@ struct Wrapper {
     leading_positionals: usize,
     /// `NAME=value` assignments may precede the command (`env`, `sudo`).
     assignments: bool,
+    /// The remaining arguments are joined into a shell command line
+    /// (`watch`), so they are code rather than a program and its argv.
+    tail_is_code: bool,
 }
 
 fn wrapper(name: &str) -> Option<Wrapper> {
@@ -143,6 +156,7 @@ fn wrapper(name: &str) -> Option<Wrapper> {
         command_line_options: &[],
         leading_positionals,
         assignments,
+        tail_is_code: false,
     };
     Some(match name {
         "env" => Wrapper {
@@ -150,7 +164,132 @@ fn wrapper(name: &str) -> Option<Wrapper> {
             command_line_options: &["-S", "--split-string"],
             leading_positionals: 0,
             assignments: true,
+            tail_is_code: false,
         },
+        "watch" => Wrapper {
+            value_options: &["-n", "--interval", "-q", "--equexit"],
+            command_line_options: &[],
+            leading_positionals: 0,
+            assignments: false,
+            tail_is_code: true,
+        },
+        "flock" => Wrapper {
+            value_options: &["-w", "--timeout", "-E", "--conflict-exit-code"],
+            command_line_options: &["-c", "--command"],
+            leading_positionals: 1,
+            assignments: false,
+            tail_is_code: false,
+        },
+        "setsid" => spec(&[], 0, false),
+        "chroot" => spec(&["--userspec", "--groups"], 1, false),
+        "unshare" => spec(
+            &[
+                "--propagation",
+                "--setgroups",
+                "--map-user",
+                "--map-group",
+                "-S",
+                "--setuid",
+                "-G",
+                "--setgid",
+                "-R",
+                "--root",
+                "-w",
+                "--wd",
+            ],
+            0,
+            false,
+        ),
+        "nsenter" => spec(
+            &[
+                "-t", "--target", "-S", "--setuid", "-G", "--setgid", "-r", "--root", "-w", "--wd",
+            ],
+            0,
+            false,
+        ),
+        "taskset" => spec(&[], 1, false),
+        "ionice" => spec(
+            &[
+                "-c",
+                "--class",
+                "-n",
+                "--classdata",
+                "-p",
+                "--pid",
+                "-P",
+                "--pgid",
+                "-u",
+                "--uid",
+            ],
+            0,
+            false,
+        ),
+        "chrt" => spec(
+            &[
+                "-T",
+                "--sched-runtime",
+                "-P",
+                "--sched-period",
+                "-D",
+                "--sched-deadline",
+            ],
+            1,
+            false,
+        ),
+        "strace" => spec(
+            &[
+                "-o",
+                "--output",
+                "-e",
+                "-p",
+                "--attach",
+                "-u",
+                "--user",
+                "-s",
+                "--string-limit",
+                "-a",
+                "-b",
+                "-I",
+                "-E",
+                "--env",
+                "-O",
+                "-P",
+                "-X",
+            ],
+            0,
+            false,
+        ),
+        "ltrace" => spec(
+            &[
+                "-o", "--output", "-e", "-p", "-u", "-s", "-a", "-n", "-x", "-L", "-F",
+            ],
+            0,
+            false,
+        ),
+        "valgrind" => spec(&[], 0, false),
+        "systemd-run" => spec(
+            &[
+                "-u",
+                "--unit",
+                "-p",
+                "--property",
+                "-E",
+                "--setenv",
+                "--uid",
+                "--gid",
+                "-M",
+                "--machine",
+                "--description",
+                "--slice",
+                "--on-calendar",
+                "--on-active",
+                "--working-directory",
+                "-H",
+                "--host",
+            ],
+            0,
+            false,
+        ),
         "nice" => spec(&["-n", "--adjustment"], 0, false),
         "nohup" | "command" | "busybox" => spec(&[], 0, false),
         "timeout" | "gtimeout" => spec(&["-s", "--signal", "-k", "--kill-after"], 1, false),
@@ -247,22 +386,14 @@ fn wrapper_roles(spec: &Wrapper, args: &[String], tainted: &[bool], depth: usize
             break;
         }
         if is_option(arg) {
-            let name = long_name(arg);
-            if spec.command_line_options.contains(&name) {
-                roles[i] = Role::Code;
-                if !arg.contains('=') && i + 1 < args.len() {
-                    roles[i + 1] = Role::Code;
+            match wrapper_option(spec, arg) {
+                WrapperOption::CommandLine => {
+                    // That command line and everything after it is code.
+                    roles[i..].fill(Role::Code);
+                    return roles;
                 }
-                // The rest is part of that command line too.
-                for role in roles.iter_mut().skip(i) {
-                    *role = Role::Code;
-                }
-                return roles;
-            }
-            if spec.value_options.contains(&name) && !arg.contains('=') {
-                i += 2;
-            } else {
-                i += 1;
+                WrapperOption::TakesNext => i += 2,
+                WrapperOption::Flag => i += 1,
             }
             continue;
         }
@@ -277,12 +408,67 @@ fn wrapper_roles(spec: &Wrapper, args: &[String], tainted: &[bool], depth: usize
         }
         break;
     }
+    if spec.tail_is_code {
+        roles[i.min(args.len())..].fill(Role::Code);
+        return roles;
+    }
     if i < args.len() {
         roles[i] = Role::Executable;
         let inner = roles_at(&args[i], &args[i + 1..], &tainted[i + 1..], depth + 1);
         roles[i + 1..].copy_from_slice(&inner);
     }
     roles
+}
+
+enum WrapperOption {
+    /// The option's value is a shell command line (`env -S`, `flock -c`).
+    CommandLine,
+    /// The option takes the next argument as its value.
+    TakesNext,
+    /// A flag, or an option whose value is attached.
+    Flag,
+}
+
+/// Whether `option` (exact, or an unambiguous long prefix getopt accepts,
+/// e.g. `--spl` for `--split-string`) is in `list`.
+fn option_in(option: &str, list: &[&str]) -> bool {
+    list.contains(&option)
+        || (option.starts_with("--")
+            && option.len() > 3
+            && list
+                .iter()
+                .any(|known| known.starts_with("--") && known.starts_with(option)))
+}
+
+/// How a wrapper reads one option argument, scanning a short cluster letter
+/// by letter (`sudo -Eu root`, `env -iS 'cmd'`, `xargs -0I {}`).
+fn wrapper_option(spec: &Wrapper, arg: &str) -> WrapperOption {
+    if arg.starts_with("--") {
+        let name = long_name(arg);
+        if option_in(name, spec.command_line_options) {
+            return WrapperOption::CommandLine;
+        }
+        if option_in(name, spec.value_options) && !arg.contains('=') {
+            return WrapperOption::TakesNext;
+        }
+        return WrapperOption::Flag;
+    }
+    let cluster = arg.strip_prefix('-').unwrap_or_default();
+    for (at, c) in cluster.char_indices() {
+        let short = format!("-{c}");
+        if spec.command_line_options.contains(&short.as_str()) {
+            return WrapperOption::CommandLine;
+        }
+        if spec.value_options.contains(&short.as_str()) {
+            // The rest of the cluster is the value, or the next argument is.
+            return if at + c.len_utf8() == cluster.len() {
+                WrapperOption::TakesNext
+            } else {
+                WrapperOption::Flag
+            };
+        }
+    }
+    WrapperOption::Flag
 }
 
 // ─── Evaluators ──────────────────────────────────────────────────────────────
@@ -630,6 +816,41 @@ fn git_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
         }
         break; // the subcommand
     }
+    if i >= args.len() || is_tainted(tainted, i) {
+        return roles;
+    }
+    let subcommand = args[i].as_str();
+    // Subcommands whose operands are a command to run.
+    if subcommand == "submodule" && args.get(i + 1).is_some_and(|next| next == "foreach") {
+        roles[i + 2..].fill(Role::Code);
+        return roles;
+    }
+    if subcommand == "bisect" && args.get(i + 1).is_some_and(|next| next == "run") {
+        let command = i + 2;
+        if command < args.len() {
+            roles[command] = Role::Executable;
+            let inner = roles_at(
+                &args[command],
+                &args[command + 1..],
+                &tainted[command + 1..],
+                1,
+            );
+            roles[command + 1..].copy_from_slice(&inner);
+        }
+        return roles;
+    }
+    if subcommand == "config" {
+        // A config value can be a command (`alias.x=!…`, `core.sshCommand`).
+        for (j, role) in roles.iter_mut().enumerate().skip(i + 1) {
+            *role = if is_tainted(tainted, j) {
+                Role::Code
+            } else {
+                Role::Data
+            };
+        }
+        return roles;
+    }
+    let code_options = git_command_options(subcommand);
     let mut i = i + 1;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -637,8 +858,30 @@ fn git_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
             roles[i + 1..].fill(Role::Data);
             return roles;
         }
+        if is_tainted(tainted, i) {
+            roles[i] = if is_option(arg) {
+                // `--exec={{x}}` / `-x{{x}}`: the value of an option the
+                // author wrote; code when that option runs a command.
+                if attached_option_matches(arg, code_options) {
+                    Role::Code
+                } else {
+                    Role::Data
+                }
+            } else {
+                Role::RuntimeOption
+            };
+            i += 1;
+            continue;
+        }
         roles[i] = Role::RuntimeOption;
-        if !is_tainted(tainted, i) && SUBCOMMAND_VALUES.contains(&arg) && i + 1 < args.len() {
+        if option_in(long_name(arg), code_options) && !arg.contains('=') {
+            if i + 1 < args.len() {
+                roles[i + 1] = Role::Code;
+            }
+            i += 2;
+            continue;
+        }
+        if SUBCOMMAND_VALUES.contains(&arg) && i + 1 < args.len() {
             roles[i + 1] = Role::Data;
             i += 2;
             continue;
@@ -646,6 +889,41 @@ fn git_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
         i += 1;
     }
     roles
+}
+
+/// Options of a git subcommand whose value is a command to run.
+fn git_command_options(subcommand: &str) -> &'static [&'static str] {
+    match subcommand {
+        "rebase" => &["-x", "--exec"],
+        "fetch" | "pull" | "ls-remote" => &["--upload-pack"],
+        "clone" => &["-u", "--upload-pack", "-c", "--config", "--template"],
+        "push" => &["--receive-pack", "--exec"],
+        "archive" => &["--exec", "--remote"],
+        "difftool" | "mergetool" => &["-x", "--extcmd", "-t", "--tool"],
+        "grep" => &["-O", "--open-files-in-pager"],
+        "filter-branch" => &[
+            "--env-filter",
+            "--tree-filter",
+            "--index-filter",
+            "--parent-filter",
+            "--msg-filter",
+            "--commit-filter",
+            "--tag-name-filter",
+        ],
+        "send-email" => &["--sendmail-cmd", "--smtp-server", "--to-cmd", "--cc-cmd"],
+        _ => &[],
+    }
+}
+
+/// Whether `arg` is one of `options` with its value attached (`-xVALUE`,
+/// `--exec=VALUE`, or an unambiguous long prefix with `=`).
+fn attached_option_matches(arg: &str, options: &[&str]) -> bool {
+    if arg.starts_with("--") {
+        return arg.contains('=') && option_in(long_name(arg), options);
+    }
+    options
+        .iter()
+        .any(|option| option.len() == 2 && !option.starts_with("--") && arg.starts_with(option))
 }
 
 /// ssh: options can run local commands (`-o ProxyCommand=…`), the
@@ -786,15 +1064,35 @@ fn docker_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
         }
         break;
     }
-    let subcommand = args.get(i).map(String::as_str).unwrap_or_default();
-    if !matches!(subcommand, "run" | "create" | "exec") || is_tainted(tainted, i) {
-        for (j, role) in roles.iter_mut().enumerate().skip(i + 1) {
-            *role = if is_tainted(tainted, j) {
-                Role::RuntimeOption
-            } else {
-                Role::Data
-            };
+    if i >= args.len() || is_tainted(tainted, i) {
+        return roles;
+    }
+    // `docker container run`, `docker compose [-f x] run|exec SERVICE`.
+    let mut subcommand = args[i].as_str();
+    if subcommand == "container" || subcommand == "compose" {
+        let group = subcommand;
+        i += 1;
+        while i < args.len() && !is_tainted(tainted, i) && is_option(&args[i]) {
+            let takes = group == "compose"
+                && matches!(
+                    long_name(&args[i]),
+                    "-f" | "--file"
+                        | "-p"
+                        | "--project-name"
+                        | "--profile"
+                        | "--env-file"
+                        | "--project-directory"
+                )
+                && !args[i].contains('=');
+            i += if takes { 2 } else { 1 };
         }
+        if i >= args.len() || is_tainted(tainted, i) {
+            return roles;
+        }
+        subcommand = args[i].as_str();
+    }
+    if !matches!(subcommand, "run" | "create" | "exec") {
+        // Unknown subcommands are not modelled: a value stays out.
         return roles;
     }
     let mut i = i + 1;
@@ -923,11 +1221,14 @@ fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
                 let code = spec.code.iter().any(|option| {
                     arg.starts_with(option) && !arg.starts_with("--")
                         || arg.starts_with(&format!("{option}="))
-                }) || (!arg.starts_with("--")
-                    && cluster
-                        .chars()
-                        .next()
-                        .is_some_and(|c| spec.short_code.contains(&c)));
+                }) || (arg.starts_with("--")
+                    && arg.contains('=')
+                    && option_in(long_name(arg), spec.code))
+                    || (!arg.starts_with("--")
+                        && cluster
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphabetic())
+                            .any(|c| spec.short_code.contains(&c)));
                 roles[i] = if code { Role::Code } else { Role::Data };
                 i += 1;
                 continue;
@@ -947,6 +1248,14 @@ fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
             for (j, role) in roles.iter_mut().enumerate().skip(i + 1) {
                 *role = match spec.operands {
                     Operands::FirstThenCode(_) => Role::Code,
+                    // make still reads `NAME=value` after `--`.
+                    _ if spec.assignments_are_code && is_tainted(tainted, j) => {
+                        if is_assignment(&args[j]) {
+                            Role::Code
+                        } else {
+                            Role::RuntimeOption
+                        }
+                    }
                     _ if j == i + 1
                         && matches!(spec.operands, Operands::ProgramThenData)
                         && operand == 0 =>
@@ -965,7 +1274,7 @@ fn flag_roles(args: &[String], tainted: &[bool], spec: &FlagSpec) -> Vec<Role> {
         }
         if is_option(arg) {
             let name = long_name(arg);
-            if spec.code.contains(&name) {
+            if option_in(name, spec.code) {
                 roles[i] = Role::Code;
                 if !arg.contains('=') && i + 1 < args.len() {
                     roles[i + 1] = Role::Code;
@@ -1105,6 +1414,139 @@ const UNMODELLED_EVALUATORS: &[&str] = &[
     "batch",
 ];
 
+/// Programs whose arguments are plain data by construction (no option of
+/// theirs runs code). Used to measure how much of real usage the explicit
+/// model covers.
+const DATA_ONLY_PROGRAMS: &[&str] = &[
+    "echo",
+    "printf",
+    "cat",
+    "ls",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "jq",
+    "wc",
+    "head",
+    "tail",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "date",
+    "mkdir",
+    "rmdir",
+    "cp",
+    "mv",
+    "rm",
+    "ln",
+    "touch",
+    "test",
+    "[",
+    "true",
+    "false",
+    "sleep",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "stat",
+    "du",
+    "df",
+    "tee",
+    "diff",
+    "cmp",
+    "comm",
+    "shasum",
+    "sha256sum",
+    "sha1sum",
+    "md5sum",
+    "base64",
+    "gzip",
+    "gunzip",
+    "bzip2",
+    "xz",
+    "zip",
+    "unzip",
+    "file",
+    "which",
+    "pwd",
+    "id",
+    "whoami",
+    "hostname",
+    "uname",
+    "printenv",
+    "seq",
+    "nl",
+    "paste",
+    "join",
+    "fold",
+    "column",
+    "od",
+    "hexdump",
+    "xxd",
+    "iconv",
+    "chmod",
+    "chown",
+    "mkfifo",
+];
+
+/// Whether the classifier models `cmd` explicitly: a known data-only
+/// program, a wrapper, an interpreter or evaluator it parses, or one it
+/// refuses values for. Measurement only for now: an unmodelled program
+/// still gets its arguments as data.
+pub fn is_modelled_program(cmd: &str) -> bool {
+    let name = normalize_command(cmd);
+    DATA_ONLY_PROGRAMS.contains(&name.as_str())
+        || wrapper(&name).is_some()
+        || crate::core::inline_code::is_interpreter(cmd)
+        || UNMODELLED_EVALUATORS.contains(&name.as_str())
+        || flag_spec(&name).is_some()
+        || matches!(
+            name.as_str(),
+            "awk"
+                | "gawk"
+                | "mawk"
+                | "nawk"
+                | "sed"
+                | "gsed"
+                | "osascript"
+                | "lua"
+                | "luajit"
+                | "tclsh"
+                | "wish"
+                | "rscript"
+                | "r"
+                | "find"
+                | "gfind"
+                | "git"
+                | "ssh"
+                | "docker"
+                | "podman"
+                | "npx"
+                | "bunx"
+                | "uvx"
+                | "npm"
+                | "pnpm"
+                | "yarn"
+                | "tar"
+                | "gtar"
+                | "bsdtar"
+                | "kubectl"
+                | "oc"
+                | "runuser"
+                | "parallel"
+                | "pip"
+                | "pipx"
+                | "uv"
+                | "go"
+                | "cargo"
+                | "gem"
+                | "deno"
+        )
+}
+
 /// An interpreter with no modelled argv (see [`UNMODELLED_EVALUATORS`]).
 pub fn is_unmodelled_evaluator(name: &str) -> bool {
     UNMODELLED_EVALUATORS.contains(&name)
@@ -1140,6 +1582,10 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
                 "--init-command",
                 "-p",
                 "--pid",
+                "-eval-command",
+                "-init-eval-command",
+                "-command",
+                "-init-command",
             ],
             &[],
             Operands::ProgramThenData,
@@ -1155,6 +1601,25 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
                 "--new-volume-script",
                 "-F",
             ],
+            &['I', 'F'],
+            Operands::All(Role::RuntimeOption),
+        ),
+        "script" => spec(&["-c", "--command"], &[], Operands::All(Role::Data)),
+        "su" => spec(
+            &[
+                "-c",
+                "--command",
+                "-s",
+                "--shell",
+                "-C",
+                "--session-command",
+            ],
+            &[],
+            Operands::All(Role::Option),
+        ),
+        "scp" => spec(&["-o", "-S", "-F", "-J"], &[], Operands::All(Role::Option)),
+        "sftp" => spec(
+            &["-o", "-S", "-F", "-b", "-D", "-J"],
             &[],
             Operands::All(Role::RuntimeOption),
         ),
@@ -1188,6 +1653,195 @@ fn flag_spec(name: &str) -> Option<FlagSpec> {
         ),
         _ => return None,
     })
+}
+
+// ─── More launchers ──────────────────────────────────────────────────────────
+
+/// tar: the traditional first argument is an option cluster without a dash
+/// (`tar cIf PROG a.tar dir`), each value letter taking the next argument in
+/// order; `I` and `F` take a program.
+fn tar_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
+    let spec = flag_spec(name).expect("tar has a flag spec");
+    let traditional = args.first().is_some_and(|first| {
+        !is_tainted(tainted, 0)
+            && !first.starts_with('-')
+            && !first.is_empty()
+            && first.chars().all(|c| c.is_ascii_alphabetic())
+    });
+    if !traditional {
+        return flag_roles(args, tainted, &spec);
+    }
+    let mut roles = vec![Role::Option; args.len()];
+    let mut next = 1;
+    for letter in args[0].chars() {
+        if matches!(
+            letter,
+            'f' | 'b' | 'I' | 'F' | 'T' | 'X' | 'C' | 'L' | 'N' | 'K' | 'V' | 'g'
+        ) && next < args.len()
+        {
+            roles[next] = match letter {
+                'I' | 'F' => Role::Code,
+                _ => Role::RuntimeOption,
+            };
+            next += 1;
+        }
+    }
+    let rest = flag_roles(&args[next..], &tainted[next..], &spec);
+    roles[next..].copy_from_slice(&rest);
+    roles
+}
+
+/// kubectl / oc: `exec`, `run`, `debug`, `attach` start a program after
+/// `--`; before it, a value is refused (pod, image, options). Other
+/// subcommands read operands as data unless they look like options.
+fn kubectl_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let Some(sub) = (0..args.len()).find(|&i| !is_tainted(tainted, i) && !is_option(&args[i]))
+    else {
+        return roles;
+    };
+    if !matches!(args[sub].as_str(), "exec" | "run" | "debug" | "attach") {
+        for (j, role) in roles.iter_mut().enumerate().skip(sub + 1) {
+            *role = if is_tainted(tainted, j) {
+                Role::RuntimeOption
+            } else {
+                Role::Data
+            };
+        }
+        return roles;
+    }
+    if let Some(dash) = (sub + 1..args.len()).find(|&j| !is_tainted(tainted, j) && args[j] == "--")
+    {
+        let command = dash + 1;
+        if command < args.len() {
+            roles[command] = Role::Executable;
+            let inner = roles_at(
+                &args[command],
+                &args[command + 1..],
+                &tainted[command + 1..],
+                depth + 1,
+            );
+            roles[command + 1..].copy_from_slice(&inner);
+        }
+    }
+    roles
+}
+
+/// runuser: `-u USER -- cmd args` launches a program; the `su`-like form
+/// takes a command line in `-c`.
+fn runuser_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
+    let dash = (0..args.len()).find(|&j| !is_tainted(tainted, j) && args[j] == "--");
+    let user_form = args[..dash.unwrap_or(args.len())]
+        .iter()
+        .any(|arg| arg == "-u" || arg.starts_with("--user"));
+    if let (true, Some(dash)) = (user_form, dash) {
+        let mut roles = vec![Role::Option; args.len()];
+        let command = dash + 1;
+        if command < args.len() {
+            roles[command] = Role::Executable;
+            let inner = roles_at(
+                &args[command],
+                &args[command + 1..],
+                &tainted[command + 1..],
+                depth + 1,
+            );
+            roles[command + 1..].copy_from_slice(&inner);
+        }
+        return roles;
+    }
+    flag_roles(args, tainted, &flag_spec("su").expect("su has a flag spec"))
+}
+
+/// GNU parallel: the command template runs through a shell, so it is code;
+/// inputs after `:::` / `::::` are quoted by parallel and stay data.
+fn parallel_roles(args: &[String], tainted: &[bool]) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let mut inputs = false;
+    for (j, arg) in args.iter().enumerate() {
+        if !is_tainted(tainted, j) && arg.starts_with(":::") {
+            inputs = true;
+            continue;
+        }
+        roles[j] = if inputs { Role::Data } else { Role::Code };
+    }
+    roles
+}
+
+/// Package fetchers that install or run fetched code: a value naming what
+/// to install or run is a program to run.
+fn fetcher_roles(name: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let literal =
+        |i: usize| (!is_tainted(tainted, i) && !is_option(&args[i])).then(|| args[i].as_str());
+    let Some(sub) = (0..args.len()).find(|&i| literal(i).is_some()) else {
+        return roles;
+    };
+    let second = (sub + 1 < args.len()).then(|| literal(sub + 1)).flatten();
+    let (kind, rest) = match (name, args[sub].as_str(), second) {
+        ("uv", "tool", Some("run")) => ("run", sub + 2),
+        ("uv", "tool", Some("install")) | ("uv", "pip", Some("install")) => ("install", sub + 2),
+        ("uv", "run", _) => ("run", sub + 1),
+        ("uv", "add", _) => ("install", sub + 1),
+        ("pipx", "run", _) => ("run", sub + 1),
+        ("pipx", "install" | "inject", _) => ("install", sub + 1),
+        ("pip", "install", _) => ("install", sub + 1),
+        ("go", "run" | "install" | "get", _) => ("install", sub + 1),
+        ("go", "generate", _) => ("deny", sub + 1),
+        ("cargo", "install", _) => ("install", sub + 1),
+        ("gem", "install", _) => ("install", sub + 1),
+        _ => ("data", sub + 1),
+    };
+    match kind {
+        "run" => {
+            let inner = npx_roles(&args[rest..], &tainted[rest..], depth + 1);
+            roles[rest..].copy_from_slice(&inner);
+        }
+        "install" => {
+            for (j, role) in roles.iter_mut().enumerate().skip(rest) {
+                *role = if is_tainted(tainted, j) {
+                    Role::Executable
+                } else {
+                    Role::Data
+                };
+            }
+        }
+        "deny" => {}
+        _ => {
+            for (j, role) in roles.iter_mut().enumerate().skip(rest) {
+                *role = if is_tainted(tainted, j) {
+                    Role::RuntimeOption
+                } else {
+                    Role::Data
+                };
+            }
+        }
+    }
+    roles
+}
+
+/// deno: `eval CODE` is code; `run`/`x`/`test`/`bench`/`compile`/`install`
+/// take a script or package (never a value), whose arguments are data.
+fn deno_roles(args: &[String], tainted: &[bool], depth: usize) -> Vec<Role> {
+    let mut roles = vec![Role::Option; args.len()];
+    let Some(sub) = (0..args.len()).find(|&i| !is_tainted(tainted, i) && !is_option(&args[i]))
+    else {
+        // `deno -e`-like flags or no subcommand: option positions only.
+        return crate::core::inline_code::interpreter_roles("deno", args, tainted).unwrap_or(roles);
+    };
+    match args[sub].as_str() {
+        "eval" => roles[sub + 1..].fill(Role::Code),
+        "run" | "x" | "test" | "bench" | "compile" | "install" => {
+            if let Some(script) =
+                (sub + 1..args.len()).find(|&i| is_tainted(tainted, i) || !is_option(&args[i]))
+            {
+                roles[script] = Role::Executable;
+                roles[script + 1..].fill(Role::Data);
+            }
+        }
+        _ => {}
+    }
+    let _ = depth;
+    roles
 }
 
 #[cfg(test)]
@@ -1477,5 +2131,223 @@ mod tests {
         assert!(rendered_refusal("s", "make", &templates, &line(&["build"])).is_none());
         let templates = line(&["-u{{user}}", "db"]);
         assert!(rendered_refusal("s", "mysql", &templates, &line(&["-ualice", "db"])).is_none());
+    }
+
+    #[test]
+    fn review_two_findings_are_refused() {
+        for (finding, cmd, items) in [
+            (
+                "F1",
+                "sudo",
+                vec!["-Eu", "root", "bash", "-c", "echo \"{{x}}\""],
+            ),
+            (
+                "F1",
+                "xargs",
+                vec!["-0I", "{}", "sh", "-c", "echo \"{{x}}\" {}"],
+            ),
+            (
+                "F1",
+                "env",
+                vec!["-iu", "HOME", "bash", "-c", "echo \"{{x}}\""],
+            ),
+            ("F2", "env", vec!["-iS", "bash -c", "{{x}}"]),
+            ("F2", "env", vec!["--split=bash -c {{x}}"]),
+            (
+                "F3",
+                "docker",
+                vec!["compose", "exec", "svc", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            (
+                "F3",
+                "docker",
+                vec![
+                    "compose",
+                    "-f",
+                    "c.yml",
+                    "run",
+                    "--rm",
+                    "svc",
+                    "python3",
+                    "-c",
+                    "print('{{x}}')",
+                ],
+            ),
+            (
+                "F3",
+                "docker",
+                vec!["container", "run", "img", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F3", "docker", vec!["logs", "{{container}}"]),
+            ("F4", "git", vec!["rebase", "--exec", "{{x}}", "main"]),
+            ("F4", "git", vec!["rebase", "-x", "{{x}}"]),
+            ("F4", "git", vec!["rebase", "--exe={{x}}", "main"]),
+            (
+                "F4",
+                "git",
+                vec!["fetch", "--upload-pack", "{{x}}", "origin"],
+            ),
+            ("F4", "git", vec!["clone", "-u", "{{x}}", "repo"]),
+            ("F4", "git", vec!["archive", "--exec={{x}}", "HEAD"]),
+            ("F4", "git", vec!["submodule", "foreach", "{{x}}"]),
+            (
+                "F4",
+                "git",
+                vec!["bisect", "run", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F4", "git", vec!["config", "alias.x", "{{x}}"]),
+            (
+                "F5",
+                "kubectl",
+                vec!["exec", "pod", "--", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "kubectl", vec!["exec", "{{pod}}", "--", "ls"]),
+            ("F5", "watch", vec!["-n", "5", "{{x}}"]),
+            ("F5", "flock", vec!["/tmp/lock", "-c", "{{x}}"]),
+            (
+                "F5",
+                "flock",
+                vec!["/tmp/lock", "bash", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "script", vec!["-c", "{{x}}", "out.log"]),
+            ("F5", "su", vec!["deploy", "-c", "{{x}}"]),
+            (
+                "F5",
+                "runuser",
+                vec!["-u", "deploy", "--", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "runuser", vec!["deploy", "-c", "{{x}}"]),
+            ("F5", "chroot", vec!["/srv", "sh", "-c", "echo \"{{x}}\""]),
+            ("F5", "setsid", vec!["bash", "-c", "echo \"{{x}}\""]),
+            ("F5", "unshare", vec!["-r", "sh", "-c", "echo \"{{x}}\""]),
+            (
+                "F5",
+                "nsenter",
+                vec!["-t", "1", "-m", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "taskset", vec!["0x1", "bash", "-c", "echo \"{{x}}\""]),
+            (
+                "F5",
+                "ionice",
+                vec!["-c", "3", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "chrt", vec!["10", "sh", "-c", "echo \"{{x}}\""]),
+            (
+                "F5",
+                "strace",
+                vec!["-f", "-o", "t.log", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            ("F5", "ltrace", vec!["sh", "-c", "echo \"{{x}}\""]),
+            (
+                "F5",
+                "valgrind",
+                vec!["--tool=memcheck", "python3", "-c", "print('{{x}}')"],
+            ),
+            (
+                "F5",
+                "systemd-run",
+                vec!["--user", "-p", "X=1", "sh", "-c", "echo \"{{x}}\""],
+            ),
+            (
+                "F5",
+                "parallel",
+                vec!["-j", "2", "echo {{x}} {}", ":::", "a"],
+            ),
+            ("F5", "scp", vec!["-o", "{{x}}", "a", "host:b"]),
+            ("F5", "scp", vec!["a", "host:{{path}}"]),
+            ("F5", "sftp", vec!["-o", "{{x}}", "host"]),
+            ("F5", "rbash", vec!["-c", "echo \"{{x}}\""]),
+            ("F5", "oksh", vec!["-c", "echo \"{{x}}\""]),
+            ("F5", "rc", vec!["-c", "echo \"{{x}}\""]),
+            ("F6", "make", vec!["--ev={{x}}"]),
+            ("F6", "tar", vec!["--to-com={{x}}", "-xf", "a.tar"]),
+            ("F6", "rsync", vec!["--rsync-p={{x}}", "a", "b"]),
+            ("F6", "psql", vec!["--comm={{x}}"]),
+            ("F6", "gdb", vec!["./prog", "-eval-command", "{{x}}"]),
+            ("F7", "tar", vec!["-cI", "{{x}}", "-f", "a.tar", "dir"]),
+            ("F7", "tar", vec!["cIf", "{{x}}", "a.tar", "dir"]),
+            ("F8", "make", vec!["--", "CFLAGS={{x}}"]),
+            ("F9", "pip", vec!["install", "{{pkg}}"]),
+            ("F9", "pip3", vec!["install", "-U", "{{pkg}}"]),
+            ("F9", "pipx", vec!["run", "{{pkg}}"]),
+            ("F9", "uvx", vec!["{{pkg}}"]),
+            ("F9", "uv", vec!["run", "{{x}}"]),
+            ("F9", "uv", vec!["tool", "run", "{{pkg}}"]),
+            ("F9", "uv", vec!["pip", "install", "{{pkg}}"]),
+            ("F9", "go", vec!["run", "{{pkg}}"]),
+            ("F9", "cargo", vec!["install", "{{crate}}"]),
+            ("F9", "gem", vec!["install", "{{gem}}"]),
+            ("F9", "deno", vec!["run", "{{url}}"]),
+            ("F9", "bun", vec!["x", "{{pkg}}"]),
+            ("F10", "perl", vec!["-I", "lib.pl", "{{x}}"]),
+        ] {
+            assert!(refused(cmd, &items), "{finding} {cmd} {items:?}");
+        }
+        assert!(matches!(
+            first_unsafe_placeholder("deno", &line(&["eval", "console.log('{{x}}')"])),
+            Some(InlineFinding::Untrusted(_))
+        ));
+    }
+
+    #[test]
+    fn review_two_data_positions_stay_accepted() {
+        for (cmd, items) in [
+            ("sudo", vec!["-Eu", "root", "make", "{{target}}"]),
+            (
+                "env",
+                vec![
+                    "-i",
+                    "A=1",
+                    "python3",
+                    "-c",
+                    "import sys; print(sys.argv[1])",
+                    "{{x}}",
+                ],
+            ),
+            ("docker", vec!["compose", "exec", "svc", "echo", "{{x}}"]),
+            ("git", vec!["rebase", "--exec", "make test", "{{branch}}"]),
+            ("git", vec!["commit", "-m", "{{message}}"]),
+            ("kubectl", vec!["get", "pods", "{{name}}"]),
+            ("kubectl", vec!["exec", "pod", "--", "echo", "{{x}}"]),
+            ("flock", vec!["/tmp/lock", "make", "{{target}}"]),
+            ("parallel", vec!["echo {}", ":::", "{{x}}"]),
+            ("make", vec!["{{target}}"]),
+            ("tar", vec!["xf", "{{archive}}"]),
+            ("pip", vec!["list"]),
+            ("cargo", vec!["test", "{{filter}}"]),
+            ("deno", vec!["run", "app.ts", "{{x}}"]),
+            ("perl", vec!["script.pl", "{{x}}"]),
+        ] {
+            assert!(!refused(cmd, &items), "{cmd} {items:?}");
+        }
+    }
+
+    #[test]
+    fn a_make_operand_rendered_as_an_assignment_is_refused_at_run_time() {
+        let templates = line(&["--", "{{target}}"]);
+        assert!(
+            rendered_refusal("s", "make", &templates, &line(&["--", "SHELL=/tmp/x"])).is_some()
+        );
+        assert!(rendered_refusal("s", "make", &templates, &line(&["--", "build"])).is_none());
+    }
+
+    #[test]
+    fn modelled_programs_are_known_for_measurement() {
+        for name in [
+            "echo",
+            "bash",
+            "/usr/bin/python3",
+            "env",
+            "git",
+            "make",
+            "tar",
+            "watch",
+            "kubectl",
+        ] {
+            assert!(is_modelled_program(name), "{name}");
+        }
+        for name in ["mytool", "terraform", "aws"] {
+            assert!(!is_modelled_program(name), "{name}");
+        }
     }
 }
