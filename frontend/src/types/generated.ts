@@ -6672,9 +6672,8 @@ run_retention_days: number,
 /**
  * KT-984 — blank the step outputs of workflow runs finished more than N
  * days ago, keeping every run row and its metadata. `0` keeps outputs
- * forever. A fresh install starts at 30 (`core::config::default_config`); a
- * config.toml without the field, i.e. an existing install, reads 0 until
- * the user turns it on. See `db::run_retention` for what is never touched.
+ * forever. Off on every install until the user chooses a window (Settings
+ * suggests 30). See `db::run_retention` for what is never touched.
  */
 run_payload_retention_days: number,
 /**
