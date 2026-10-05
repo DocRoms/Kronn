@@ -9993,10 +9993,78 @@ Suite de la réponse.";
             worker,
             room_agent,
             workflow_step,
+            &[],
         )
         .expect("the stand-in binary starts");
         let output = child.wait_with_output().await.expect("the child exits");
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// What a spawned agent sees of the three GitHub variables (D2).
+    #[cfg(unix)]
+    async fn github_env_seen_by_child(
+        github_env: &[(String, String)],
+        adapter_env: &[(String, String)],
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gh-env-probe");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\nprintf '%s|%s|%s' \"${GH_TOKEN-unset}\" \"${GITHUB_TOKEN-unset}\" \"${COPILOT_GITHUB_TOKEN-unset}\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let io = if adapter_env.is_empty() {
+            SpawnIo::Direct(None)
+        } else {
+            SpawnIo::Adapter(adapter_env)
+        };
+        let child = try_spawn(
+            path.to_str().unwrap(),
+            None,
+            &[],
+            dir.path(),
+            "ANTHROPIC_API_KEY",
+            None,
+            io,
+            None,
+            None,
+            None,
+            None,
+            github_env,
+        )
+        .expect("the stand-in binary starts");
+        let output = child.wait_with_output().await.expect("the child exits");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// An unconnected project's agent gets no GitHub token, even one the
+    /// backend's own environment or `gh` login holds; a connected one gets it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_connected_project_hands_its_agent_a_github_token() {
+        assert_eq!(
+            github_env_seen_by_child(&[], &[]).await,
+            "unset|unset|unset"
+        );
+
+        let granted: Vec<(String, String)> = crate::core::github_connection::GITHUB_ENV_NAMES
+            .iter()
+            .map(|name| (name.to_string(), "gho_project".to_string()))
+            .collect();
+        assert_eq!(
+            github_env_seen_by_child(&granted, &[]).await,
+            "gho_project|gho_project|gho_project"
+        );
+
+        // A value the launch set on purpose (a project MCP's) is not stripped.
+        let mcp = vec![("GITHUB_TOKEN".to_string(), "mcp-value".to_string())];
+        assert_eq!(
+            github_env_seen_by_child(&[], &mcp).await,
+            "unset|mcp-value|unset"
+        );
     }
 
     fn worker_context() -> TaskWorkerBridgeContext {

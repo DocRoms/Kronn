@@ -827,6 +827,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "214_workflow_project_scope",
         include_str!("sql/214_workflow_project_scope.sql"),
     ),
+    (
+        "216_project_github_connections",
+        include_str!("sql/216_project_github_connections.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.
@@ -845,6 +849,10 @@ fn apply_migration(tx: &rusqlite::Transaction<'_>, name: &str, sql: &str) -> Res
     }
     if name == "152_external_api_openrouter_preset" {
         ensure_openrouter_preset(tx)?;
+    }
+    if name == "216_project_github_connections" {
+        // Reads each repository's remote, which SQL cannot do.
+        crate::db::github_connections::seed_on_upgrade(tx)?;
     }
     Ok(())
 }
@@ -1379,6 +1387,43 @@ mod tests {
             .unwrap()
             .exists([])
             .unwrap());
+    }
+
+    /// D2 upgrade default: existing projects on GitHub stay connected through
+    /// the gh login with a one-time notice; the others and new ones are not.
+    #[test]
+    fn github_connections_upgrade_keeps_existing_github_projects_connected() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run_through(&conn, "214_workflow_project_scope").unwrap();
+        for (id, repo_url) in [
+            ("on-github", Some("git@github.com:octo/kronn.git")),
+            ("on-gitlab", Some("https://gitlab.com/octo/other")),
+            ("local", None),
+        ] {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, repo_url, created_at, updated_at)
+                 VALUES (?1, ?1, '/nowhere/' || ?1, ?2, datetime('now'), datetime('now'))",
+                rusqlite::params![id, repo_url],
+            )
+            .unwrap();
+        }
+
+        run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path, repo_url, created_at, updated_at)
+             VALUES ('new', 'new', '/nowhere/new', 'https://github.com/octo/new',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .unwrap();
+        run(&conn).unwrap();
+
+        let rows = crate::db::github_connections::list(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].project_id, "on-github");
+        assert_eq!(rows[0].mode, crate::models::GithubConnectionMode::GhLogin);
+        assert!(rows[0].connected_on_upgrade);
     }
 
     #[test]

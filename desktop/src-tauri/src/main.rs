@@ -598,6 +598,17 @@ async fn start_backend(
         Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
     }
 
+    // Before any launch: which projects hand their agents a GitHub token (D2).
+    match kronn::core::github_connection::load_grants(
+        &database,
+        app_config.encryption_secret.as_deref(),
+    )
+    .await
+    {
+        Ok(n) => tracing::info!("GitHub connections loaded: {n} connected project(s)"),
+        Err(e) => tracing::error!("GitHub connections not loaded (no agent gets a token): {e}"),
+    }
+
     match kronn::bootstrap_external_api_connections(&database, &mut app_config).await {
         Ok(true) => {
             if let Err(e) = config::save(&app_config).await {

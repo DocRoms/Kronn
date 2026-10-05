@@ -3296,6 +3296,7 @@ async fn make_agent_stream_inner(
             provenance: served_model
                 .as_ref()
                 .map(crate::api::delivery_publication::ServedModelRecorder::capture),
+            project_id: disc_project_id.as_deref(),
             work_dir: workspace_path.as_deref(),
             full_access,
             skill_ids: &skill_ids,

@@ -50,6 +50,7 @@ export const SYNCED_KEYS: readonly string[] = [
   'kronn:automationSkillFavorites',
   'kronn:fullAccessNoticeDismissed',
   'kronn:runRetentionBannerDismissed',
+  'kronn:githubUpgradeNoticeDismissed',
 ];
 
 export const SYNCED_PREFIXES: readonly string[] = ['kronn:collection-favorites:'];

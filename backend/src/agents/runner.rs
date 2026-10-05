@@ -2856,6 +2856,9 @@ pub struct AgentStartConfig<'a> {
     pub activity: Option<super::activity::AgentActivitySink>,
     /// Used to read .mcp.json and resolve MCP context.
     pub project_path: &'a str,
+    /// The launch's project, when it has one. Decides whether the agent gets
+    /// a GitHub token (`core::github_connection`, D2).
+    pub project_id: Option<&'a str>,
     /// Working directory for the agent. If `None`, defaults to `project_path`.
     pub work_dir: Option<&'a str>,
     pub read_only_repos: &'a [String],
@@ -3028,6 +3031,7 @@ impl<'a> AgentStartConfig<'a> {
             provenance: None,
             activity: None,
             project_path,
+            project_id: None,
             prompt,
             tokens,
             work_dir: None,
@@ -4148,6 +4152,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 worker_args,
                 api_key: get_api_key(env_key, config.tokens),
                 step_tools: config.step_tools.cloned(),
+                github_env: crate::core::github_connection::env_for_launch(config.project_id).await,
             };
             // Read-only repositories need the adapter's restricted policy.
             return start_adapted_acp(
@@ -4273,6 +4278,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     }
 
+    let github_env = crate::core::github_connection::env_for_launch(config.project_id).await;
     // Try direct binary first, then npx fallback
     let mut child = match try_spawn(
         binary,
@@ -4286,6 +4292,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         config.task_worker_context,
         config.room_agent_context,
         config.workflow_step_context,
+        &github_env,
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -4303,6 +4310,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.task_worker_context,
                     config.room_agent_context,
                     config.workflow_step_context,
+                    &github_env,
                 )?
             } else {
                 return Err(e);
@@ -4449,6 +4457,8 @@ pub(crate) struct AdapterLaunchOptions {
     pub(crate) api_key: Option<String>,
     /// KT-908 — a workflow step's declared tools; `None` = today's argv.
     pub(crate) step_tools: Option<crate::models::StepTools>,
+    /// `core::github_connection::env_for_launch` for this launch's project.
+    pub(crate) github_env: Vec<(String, String)>,
 }
 
 /// Reuse the authoritative direct worker policy, including its isolated MCP
@@ -12666,6 +12676,7 @@ pub(crate) fn try_spawn(
     task_worker_context: Option<&TaskWorkerBridgeContext>,
     room_agent_context: Option<&RoomAgentBridgeContext>,
     workflow_step_context: Option<&WorkflowStepBridgeContext>,
+    github_env: &[(String, String)],
 ) -> Result<tokio::process::Child, String> {
     let stdin_payload = match io {
         SpawnIo::Direct(payload) => payload,
@@ -12927,34 +12938,8 @@ pub(crate) fn try_spawn(
         cmd.env(env_key, key);
     }
 
-    // Forward GitHub token so agents can create branches, PRs, etc.
-    // Priority: env var GH_TOKEN/GITHUB_TOKEN > `gh auth token` (gh CLI config).
-    // Also sets COPILOT_GITHUB_TOKEN for GitHub Copilot CLI.
-    let gh_token = std::env::var("GH_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .or_else(|_| {
-            // Fallback: extract token from `gh auth token` (stored in ~/.config/gh/hosts.yml).
-            // Use sync_cmd so the gh subprocess does not flash a console window on Windows.
-            crate::core::cmd::sync_cmd("gh")
-                .args(["auth", "token"])
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| {
-                    let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if t.is_empty() {
-                        None
-                    } else {
-                        Some(t)
-                    }
-                })
-                .ok_or(std::env::VarError::NotPresent)
-        });
-    if let Ok(ref token) = gh_token {
-        cmd.env("GH_TOKEN", token);
-        cmd.env("GITHUB_TOKEN", token);
-        cmd.env("COPILOT_GITHUB_TOKEN", token);
-    }
+    // Only a project connected to GitHub hands its agents a token (D2).
+    crate::core::github_connection::apply_launch_env(cmd.as_std_mut(), github_env);
     // If an API key was explicitly set (e.g. for CopilotCli), also set COPILOT_GITHUB_TOKEN
     if let Some(key) = api_key {
         if env_key == "GH_TOKEN" {

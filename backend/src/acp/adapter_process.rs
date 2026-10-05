@@ -320,6 +320,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         )
         .unwrap()
     }
@@ -358,6 +359,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
         )
         .unwrap();
         let pgid = child.id().unwrap() as i32;

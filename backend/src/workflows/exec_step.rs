@@ -55,6 +55,9 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 /// Still bounded so one CLI cannot inflate a workflow run without limit.
 pub const MAX_COLLECT_OUTPUT_BYTES: usize = 1024 * 1024;
 
+/// Added to a failed `gh` step whose project gave it no GitHub token.
+pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
+
 /// Truncation suffix appended when stdout / stderr exceeds [`MAX_OUTPUT_BYTES`].
 const TRUNCATION_MARKER: &str = "\n\n[... output tronqué — limite 100 KB ...]";
 
@@ -74,6 +77,55 @@ pub async fn execute_exec_step_with_output_limit(
     work_dir: &str,
     ctx: &TemplateContext,
     output_limit_bytes: usize,
+) -> StepOutcome {
+    execute_exec_step_inner(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        output_limit_bytes,
+        None,
+    )
+    .await
+}
+
+/// A workflow Exec step: the workflow author chose the command, so it gets
+/// the project's GitHub token when the project is connected, and none
+/// otherwise (D2). Other callers keep the inherited environment.
+pub async fn execute_exec_step_for_project(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    project_id: Option<&str>,
+) -> StepOutcome {
+    let github_env = crate::core::github_connection::env_for_launch(project_id).await;
+    execute_exec_step_inner(
+        step,
+        workflow_allowlist,
+        work_dir,
+        ctx,
+        MAX_OUTPUT_BYTES,
+        Some(&github_env),
+    )
+    .await
+}
+
+fn needs_gh_hint(
+    raw_command: &str,
+    success: bool,
+    github_env: Option<&[(String, String)]>,
+) -> bool {
+    !success && raw_command == "gh" && github_env.is_some_and(<[_]>::is_empty)
+}
+
+async fn execute_exec_step_inner(
+    step: &WorkflowStep,
+    workflow_allowlist: &[String],
+    work_dir: &str,
+    ctx: &TemplateContext,
+    output_limit_bytes: usize,
+    github_env: Option<&[(String, String)]>,
 ) -> StepOutcome {
     let start = Instant::now();
     let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
@@ -398,6 +450,9 @@ pub async fn execute_exec_step_with_output_limit(
         // when the runner drops the step-dispatch future. Without this,
         // the child gets reparented to PID 1 and keeps running.
         .kill_on_drop(true);
+    if let Some(github_env) = github_env {
+        crate::core::github_connection::apply_launch_env(cmd.as_std_mut(), github_env);
+    }
 
     // 2026-06-11 — setup + main share ONE deadline. The setup phase above
     // consumed `start.elapsed()` of the budget; the main command gets the
@@ -472,11 +527,14 @@ pub async fn execute_exec_step_with_output_limit(
     } else {
         RunStatus::Failed
     };
-    let summary = match exit_code {
+    let mut summary = match exit_code {
         Some(_) if success => format!("exit 0 — {} ms", duration_ms),
         Some(code) => format!("exit {} — {} ms", code, duration_ms),
         None => format!("killed by signal — {} ms", duration_ms),
     };
+    if needs_gh_hint(raw_command, success, github_env) {
+        summary.push_str(GH_NOT_CONNECTED_HINT);
+    }
 
     // Structured envelope so `{{steps.<name>.data.exit_code}}` etc.
     // resolve in downstream steps. Mirrors notify_step's contract.
@@ -763,6 +821,57 @@ mod tests {
             read_only_repos: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(github_machine_token)]
+    async fn a_workflow_exec_step_gets_github_only_from_a_connected_project() {
+        use crate::core::github_connection::{override_machine_token_for_tests, set_grant};
+        use crate::models::GithubConnectionMode;
+        override_machine_token_for_tests(Some(Some("gho_machineTOKEN")));
+        let step = exec_step("token", Some("printenv"), vec!["GH_TOKEN"], None);
+        let allow = vec!["printenv".to_string()];
+        let ctx = TemplateContext::new();
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().to_str().unwrap();
+
+        let off =
+            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-off"))
+                .await;
+        assert_eq!(
+            off.result.status,
+            RunStatus::Failed,
+            "{}",
+            off.result.output
+        );
+        assert!(!off.result.output.contains("gho_machineTOKEN"));
+
+        set_grant("r16-exec-on", GithubConnectionMode::GhLogin, None);
+        let on =
+            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-on")).await;
+        assert_eq!(on.result.status, RunStatus::Success, "{}", on.result.output);
+        assert!(on.result.output.contains("gho_machineTOKEN"));
+
+        let none = execute_exec_step_for_project(&step, &allow, work_dir, &ctx, None).await;
+        assert_eq!(
+            none.result.status,
+            RunStatus::Failed,
+            "a project-less run gets no token"
+        );
+        override_machine_token_for_tests(None);
+    }
+
+    #[test]
+    fn a_failed_gh_step_without_a_token_says_why() {
+        let token = vec![("GH_TOKEN".to_string(), "t".to_string())];
+        assert!(needs_gh_hint("gh", false, Some(&[])));
+        assert!(!needs_gh_hint("gh", true, Some(&[])));
+        assert!(!needs_gh_hint("gh", false, Some(&token)));
+        assert!(
+            !needs_gh_hint("gh", false, None),
+            "callers that inherit are not judged"
+        );
+        assert!(!needs_gh_hint("git", false, Some(&[])));
     }
 
     #[tokio::test]

@@ -3273,6 +3273,44 @@ export type GitFileStatus = { path: string, status: string, staged: boolean, };
 
 export type GitGraphCommit = { hash: string, short_hash: string, parents: Array<string>, refs: Array<string>, subject: string, author: string, committed_at: number, };
 
+/**
+ * What a project persists: whether its agents receive a GitHub token, and from where.
+ */
+export type GithubConnectionMode = "not_connected" | "gh_login" | "stored_token";
+
+/**
+ * What the UI shows: the persisted mode plus whether the machine has a token.
+ */
+export type GithubConnectionState = "not_connected" | "available_but_off" | "connected_gh_login" | "connected_stored_token";
+
+export type GithubMachineTokenSource = "environment" | "gh_cli";
+
+/**
+ * The scope a token actually has, as GitHub reported it.
+ */
+export type GithubScope = {
+/**
+ * False when GitHub could not be asked or did not say; `reason` explains.
+ */
+verified: boolean, token_kind: GithubTokenKind, login: string | null,
+/**
+ * OAuth scopes (`X-OAuth-Scopes`) of a classic or OAuth token.
+ */
+scopes: Array<string>,
+/**
+ * Repositories a fine-grained token can reach (`owner/name`).
+ */
+repositories: Array<string>, repositories_truncated: boolean,
+/**
+ * The token reaches every repository of the account (e.g. classic `repo`).
+ */
+broad: boolean, reason: string | null, checked_at: string, };
+
+/**
+ * Read from the token prefix only; GitHub documents these prefixes.
+ */
+export type GithubTokenKind = "classic" | "oauth" | "fine_grained" | "app" | "unknown";
+
 export type GitPushResponse = { success: boolean, message: string, };
 
 export type GitStatusResponse = { branch: string, default_branch: string, is_default_branch: boolean, files: Array<GitFileStatus>,
@@ -5432,6 +5470,20 @@ export type ProjectDockerService = { service: string, container_name: string | n
  */
 export type ProjectDockerStatus = { compose_present: boolean, compose_file: string | null, docker_available: boolean, daemon_available: boolean, services: Array<ProjectDockerService>, checked_at: string, error: string | null, };
 
+export type ProjectGithubConnection = { project_id: string, mode: GithubConnectionMode, state: GithubConnectionState, machine_token_available: boolean, machine_token_source: GithubMachineTokenSource | null,
+/**
+ * The project's remote is on github.com.
+ */
+on_github: boolean,
+/**
+ * Scope of the token this project uses (or would use when it is off).
+ */
+scope: GithubScope | null,
+/**
+ * Kept connected by the upgrade that introduced this setting; drives a one-time notice.
+ */
+connected_on_upgrade: boolean, updated_at: string | null, };
+
 export type ProjectLanguageStat = { language: string, bytes: number, };
 
 export type ProjectMcpSyncReport = { status: ProjectMcpSyncStatus, detail?: string | null, synced_at: string, };
@@ -6907,6 +6959,11 @@ num_ctx: number | null,
 warnings: Array<string>, };
 
 export type SetProjectAgentFiles = { policy: AgentFilesPolicy, };
+
+/**
+ * `PUT /api/projects/{id}/github`. `token` is read only for `stored_token`.
+ */
+export type SetProjectGithubConnectionRequest = { mode: GithubConnectionMode, token?: string, };
 
 export type SetRecoveryResponse = {
 /**

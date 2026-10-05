@@ -185,6 +185,8 @@ pub(crate) fn build_step_prompt(
 pub async fn execute_step(
     step: &WorkflowStep,
     project_path: &str,
+    // Decides whether the step's agents get a GitHub token (D2).
+    project_id: Option<&str>,
     work_dir: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
@@ -420,6 +422,7 @@ pub async fn execute_step(
         match run_agent_with_timeout(
             step,
             project_path,
+            project_id,
             work_dir,
             &prompt,
             &artifact_dirs,
@@ -525,6 +528,7 @@ pub async fn execute_step(
                         let repair_res = run_agent_with_timeout(
                             step,
                             project_path,
+                            project_id,
                             work_dir,
                             &repair_prompt,
                             &artifact_dirs,
@@ -635,6 +639,7 @@ pub async fn execute_step(
                             let esc_res = run_agent_with_timeout(
                                 &escalated,
                                 project_path,
+                                project_id,
                                 work_dir,
                                 &prompt,
                                 &artifact_dirs,
@@ -752,7 +757,7 @@ pub async fn execute_step(
                 if let Some(mar) = step.multi_agent_review.clone() {
                     let pre_debate = final_output.clone();
                     match run_multi_agent_debate(
-                        step, &mar, &final_output, project_path, work_dir,
+                        step, &mar, &final_output, project_path, project_id, work_dir,
                         tokens_config, full_access, model_tiers, http_endpoints,
                         ollama_context_overrides,
                         native_tools.clone(),
@@ -1142,6 +1147,7 @@ async fn preflight_workflow_launch(
 async fn run_agent_with_timeout(
     step: &WorkflowStep,
     project_path: &str,
+    project_id: Option<&str>,
     work_dir: &str,
     prompt: &str,
     read_only_dirs: &[String],
@@ -1233,6 +1239,7 @@ async fn run_agent_with_timeout(
             // The bridge's discussion is the room the capability names.
             discussion_id: room.map(|room| room.discussion_id.as_str()),
             workflow_step_context: room,
+            project_id,
             ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
         })
         .await
@@ -1683,6 +1690,7 @@ async fn run_multi_agent_debate(
     cfg: &crate::models::MultiAgentReviewConfig,
     planner_output: &str,
     project_path: &str,
+    project_id: Option<&str>,
     work_dir: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
@@ -1781,6 +1789,7 @@ async fn run_multi_agent_debate(
         let rev = run_agent_with_timeout(
             &reviewer_step,
             project_path,
+            project_id,
             work_dir,
             &rprompt,
             &[],
@@ -1854,6 +1863,7 @@ async fn run_multi_agent_debate(
         let auth = run_agent_with_timeout(
             &author_step,
             project_path,
+            project_id,
             work_dir,
             &aprompt,
             &[],
@@ -3188,6 +3198,7 @@ mod http_native_tool_step_tests {
         let outcome = execute_step(
             &named_custom_step("connection-b", None),
             &project,
+            None,
             &project,
             &empty_tokens(),
             false,
@@ -3245,6 +3256,7 @@ mod http_native_tool_step_tests {
         let outcome = execute_step(
             &named_custom_step("connection-b", None),
             &project,
+            None,
             &project,
             &empty_tokens(),
             false,
@@ -3372,6 +3384,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let outcome = execute_step(
             &step,
             &project,
+            None,
             &project,
             &empty_tokens(),
             false,
@@ -3419,6 +3432,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let outcome = execute_step(
             &named_custom_step("deleted-connection", None),
             &project,
+            None,
             &project,
             &empty_tokens(),
             false,
@@ -3471,6 +3485,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let outcome = execute_step(
             &step,
             &project,
+            None,
             &project,
             &empty_tokens(),
             false,
@@ -3550,6 +3565,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let outcome = execute_step(
             &step,
             &project,
+            None,
             &project,
             &tokens,
             false,
@@ -3645,6 +3661,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         let outcome = execute_step(
             &step,
             &project,
+            None,
             &project,
             &tokens,
             false,

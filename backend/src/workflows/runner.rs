@@ -2036,6 +2036,7 @@ async fn execute_run_body(
                         let mut outcome = execute_step(
                             step,
                             &project_path,
+                            workflow.project_id.as_deref(),
                             &work_dir,
                             tokens_config,
                             full_access,
@@ -2194,11 +2195,12 @@ async fn execute_run_body(
                     // The run-time guard mirrors the save-time validator
                     // for defence in depth (a workflow loaded from a
                     // hand-edited JSON could carry a stale Exec step).
-                    super::exec_step::execute_exec_step(
+                    super::exec_step::execute_exec_step_for_project(
                         step,
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
+                        workflow.project_id.as_deref(),
                     )
                     .await
                 }
@@ -3089,6 +3091,7 @@ async fn execute_run_body(
                             let outcome = execute_step(
                                 rb_step,
                                 &project_path,
+                                workflow.project_id.as_deref(),
                                 &work_dir,
                                 tokens_config,
                                 full_access,
@@ -3123,11 +3126,12 @@ async fn execute_run_body(
                 StepType::Exec => {
                     // Exec in rollback is allowed (e.g. `make revert`
                     // as a compensation step). Same allowlist enforced.
-                    super::exec_step::execute_exec_step(
+                    super::exec_step::execute_exec_step_for_project(
                         rb_step,
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
+                        workflow.project_id.as_deref(),
                     )
                     .await
                 }

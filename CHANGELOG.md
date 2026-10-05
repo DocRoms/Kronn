@@ -13,6 +13,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Each project now decides whether its agents receive a GitHub token (KT-1006,
+  D2). A "GitHub" row on the project's Overview, and a chip in the discussion
+  header, show the state: not connected, available but off, connected through
+  your gh login, or connected through a token pasted for the project and
+  stored encrypted. "Connect GitHub" asks for confirmation, shows the scope
+  GitHub reports for the token (OAuth scopes, or the repositories of a
+  fine-grained token, or why it could not be verified) and recommends a
+  fine-grained token when the gh token reaches every repository. Turning it
+  off applies to new launches; agents already running keep what they received.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).
@@ -362,6 +371,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Agents no longer receive the machine's GitHub token by default (KT-1006, D2):
+  `GH_TOKEN`, `GITHUB_TOKEN` and `COPILOT_GITHUB_TOKEN` reach Claude and Codex
+  launches only for a connected project, and are removed from the inherited
+  environment otherwise, Docker included. On upgrade, existing projects whose
+  remote is on GitHub stay connected through the gh login and show a one-time
+  notice with a "Turn off" button; new projects start not connected. Workflow
+  Exec steps follow the same project setting, and a failed `gh` step says the
+  project is not connected. `gh auth token` now runs asynchronously, with a
+  5-second limit and a one-minute cache, instead of blocking every launch.
 - Plugins page: one export and one import flow, the plugin bundle, where each
   plugin's scope and CLI exposure are chosen on import. The per-plugin JSON
   export and the paste-a-spec import are gone, and a plugin is deleted from

@@ -244,6 +244,16 @@ DoD items, each with a test:
 
 ### 4.5 GitHub connection per project (D2)
 
+**Status: implemented** (0.14.3, approved by Romu on card `0143-secu-d2-v31`).
+User guide: [`guides/github-connection.md`](../guides/github-connection.md).
+Code: `core/github_connection.rs` (`env_for_launch`, `apply_launch_env`, scope
+check), `db/github_connections.rs` (migration 216, upgrade seeding),
+`api/github_connection.rs`, `ProjectGithubRow.tsx`. Decisions taken while
+implementing: workflow Exec steps receive the project's token when it is
+connected and none otherwise; summaries and audits receive none; Copilot's own
+configured token is unchanged; quick execs and the project exec route keep the
+backend environment until the environment builder (layer A) covers them.
+
 Goal (Romu, card `0143-secu-d2-gh-token`): turning GitHub on for a project is
 one click, and the UI says what it gives and what it risks.
 

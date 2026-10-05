@@ -355,6 +355,7 @@ impl AcpTransport for ClaudeAcpAdapter {
             self.launch.worker_context.as_ref(),
             self.launch.room_agent_context.as_ref(),
             self.launch.workflow_step_context.as_ref(),
+            &self.launch.github_env,
         )
         .map_err(AcpError::Transport)?;
         let mut stdin = child

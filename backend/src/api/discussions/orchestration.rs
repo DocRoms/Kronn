@@ -512,6 +512,7 @@ pub async fn orchestrate(
         }
     }
 
+    let orch_project_id = disc.project_id.clone();
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
         state
@@ -708,6 +709,7 @@ pub async fn orchestrate(
                 crate::http_transport::external_http_runtime(connection, &tokens)
             });
             match runner::start_agent_with_config(runner::AgentStartConfig {
+                project_id: orch_project_id.as_deref(),
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: fa,
                 mcp_context_override: global_mcp_context.as_deref(),
@@ -831,6 +833,7 @@ pub async fn orchestrate(
                     .get(&format!("{:?}", agent_type))
                     .unwrap_or(&false);
                 match runner::start_agent_with_config(runner::AgentStartConfig {
+                    project_id: orch_project_id.as_deref(),
                     work_dir: orch_workspace_path.as_deref(),
                     full_access: fa,
                     skill_ids: &orch_skill_ids,
@@ -1044,6 +1047,7 @@ pub async fn orchestrate(
                 crate::http_transport::external_http_runtime(connection, &tokens)
             });
             match runner::start_agent_with_config(runner::AgentStartConfig {
+                project_id: orch_project_id.as_deref(),
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: synth_fa,
                 skill_ids: &orch_skill_ids,

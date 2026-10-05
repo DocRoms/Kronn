@@ -1151,6 +1151,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/projects/{id}/default-profile",
             put(api::projects::set_default_profile),
         )
+        // Whether this project's agents receive a GitHub token (D2).
+        .route(
+            "/api/projects/{id}/github",
+            get(api::github_connection::get).put(api::github_connection::set),
+        )
+        .route(
+            "/api/projects/{id}/github/scope",
+            post(api::github_connection::refresh_scope),
+        )
         // 0.8.3 — companion repos. Body = full Vec<LinkedRepo>;
         // atomic replace (no partial CRUD per row).
         .route(

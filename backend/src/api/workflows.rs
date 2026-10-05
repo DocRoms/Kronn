@@ -3593,6 +3593,7 @@ pub async fn test_step(
         let outcome = crate::workflows::steps::execute_step(
             &step,
             &project_path,
+            req.project_id.as_deref(),
             &work_dir,
             &tokens,
             full_access,
