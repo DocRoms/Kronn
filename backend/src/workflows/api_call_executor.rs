@@ -33,7 +33,8 @@ use super::api_call_binary::{
     binary_summary, read_binary_body, resolve_binary_policy, BinaryPolicy,
 };
 use super::api_call_security::{
-    assert_host_matches_base, assert_public_ip, redact_url_query, ResolvedAuth,
+    assert_host_matches_base, assert_public_ip, redact_url_query, send_with_guarded_redirects,
+    GuardedSendError, RedirectGuard, ResolvedAuth,
 };
 
 /// Logging context plumbed through `execute_api_call_step_with_db` so the
@@ -304,6 +305,12 @@ pub async fn execute_api_call_step_core(
     let pagination_truncated: bool;
     let empty_response_status: Option<u16>;
 
+    let redirect_guard = RedirectGuard {
+        base_url: policy
+            .enforce_host_match
+            .then_some(resolved_base_url.as_str()),
+        enforce_public_ip: policy.enforce_public_ip,
+    };
     let response = match walk_pages(
         method.clone(),
         full_url.clone(),
@@ -317,6 +324,7 @@ pub async fn execute_api_call_step_core(
         plugin_slug,
         config_id,
         binary.as_ref(),
+        &redirect_guard,
     )
     .await
     {
@@ -1381,6 +1389,7 @@ async fn walk_pages(
     plugin_slug: &str,
     config_id: &str,
     binary: Option<&BinaryPolicy>,
+    redirect_guard: &RedirectGuard<'_>,
 ) -> Result<(Value, bool, Option<u16>), String> {
     // Returns `(merged_response, truncated, empty_response_status)`. The HTTP
     // code is kept separate from API data when the first response has no body.
@@ -1506,6 +1515,7 @@ async fn walk_pages(
             timeout,
             max_retries,
             binary,
+            redirect_guard,
         )
         .await?;
 
@@ -1744,6 +1754,7 @@ async fn send_with_retry(
     timeout: Duration,
     max_retries: u8,
     binary: Option<&BinaryPolicy>,
+    redirect_guard: &RedirectGuard<'_>,
 ) -> Result<(Value, Option<String>, Option<u16>), String> {
     // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
     // "Request forbidden by administrative rules" without it — see
@@ -1755,6 +1766,8 @@ async fn send_with_retry(
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
+        // Redirects are followed by hand so each hop is re-validated.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))?;
     let headers = build_request_headers(auth, extra_headers)?;
@@ -1774,16 +1787,23 @@ async fn send_with_retry(
     };
     let mut attempt: u8 = 0;
     loop {
-        let mut req = client
-            .request(method.clone(), url.clone())
-            .headers(headers.clone());
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-
-        let response = match req.send().await {
+        let attach_body = |req: reqwest::RequestBuilder| match body {
+            Some(b) => req.json(b),
+            None => req,
+        };
+        let response = match send_with_guarded_redirects(
+            &client,
+            method.clone(),
+            url.clone(),
+            headers.clone(),
+            &attach_body,
+            redirect_guard,
+        )
+        .await
+        {
             Ok(r) => r,
-            Err(e) => {
+            Err(GuardedSendError::Refused(msg)) => return Err(msg),
+            Err(GuardedSendError::Transport(e)) => {
                 let detail = e
                     .source()
                     .map(|source| format!("{e}: {source}"))
@@ -3361,6 +3381,97 @@ mod tests {
     }
 
     // ─── Pagination walk ────────────────────────────────────────────
+
+    // ─── Redirect hops (KT-1039) ────────────────────────────────────
+
+    fn bearer_env() -> HashMap<String, String> {
+        HashMap::from([("TOK".to_string(), "tok-secret".to_string())])
+    }
+
+    async fn run_redirecting_step(server: &MockServer, location: &str) -> StepOutcome {
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location))
+            .mount(server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::Bearer {
+                env_key: "TOK".into(),
+            },
+            vec![mk_endpoint("GET", "/start")],
+        );
+        execute_api_call_step_core(
+            &mk_step("/start"),
+            &plugin,
+            &bearer_env(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn redirect_to_cloud_metadata_is_refused() {
+        let server = MockServer::start().await;
+        let out = run_redirecting_step(&server, "http://169.254.169.254/latest/meta-data/").await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security: redirect refused"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_to_another_loopback_host_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"leak": true})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let port = server.address().port();
+        let out = run_redirecting_step(&server, &format!("http://localhost:{port}/admin")).await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security: redirect refused"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn same_host_redirect_is_followed_with_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/moved"))
+            .and(header("authorization", "Bearer tok-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = run_redirecting_step(&server, "/moved").await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_stops_at_the_hop_cap() {
+        let server = MockServer::start().await;
+        let out = run_redirecting_step(&server, "/start").await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("redirects"),
+            "got: {}",
+            out.result.output
+        );
+    }
 
     #[tokio::test]
     async fn walk_pages_offset_concatenates_three_pages() {

@@ -102,22 +102,63 @@ pub async fn execute_notify_step_with_policy(
     let redacted_url = redact_notify_url(&parsed_url);
 
     // ── Build and fire the request ──────────────────────────────────────
-    let client = match reqwest::Client::builder().timeout(NOTIFY_TIMEOUT).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(NOTIFY_TIMEOUT)
+        // Redirects are followed by hand so each hop is re-validated.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
         Ok(c) => c,
         Err(e) => return fail(step, start, format!("HTTP client build failed: {}", e)),
     };
 
-    let mut req = client.request(method.clone(), &url);
+    let mut headers = reqwest::header::HeaderMap::new();
     for (k, v) in &config.headers {
-        req = req.header(k, v);
+        let name = match reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
+            Ok(n) => n,
+            Err(_) => return fail(step, start, format!("Notify: invalid header name `{k}`")),
+        };
+        let value = match reqwest::header::HeaderValue::from_str(v) {
+            Ok(v) => v,
+            Err(_) => {
+                return fail(
+                    step,
+                    start,
+                    format!("Notify: invalid value for header `{k}`"),
+                )
+            }
+        };
+        headers.append(name, value);
     }
-    if method != reqwest::Method::GET && !body.is_empty() {
-        req = req.body(body.clone());
-    }
-
-    let response = match req.send().await {
+    let send_body = method != reqwest::Method::GET && !body.is_empty();
+    let attach_body = |req: reqwest::RequestBuilder| {
+        if send_body {
+            req.body(body.clone())
+        } else {
+            req
+        }
+    };
+    let guard = super::api_call_security::RedirectGuard {
+        base_url: None,
+        enforce_public_ip,
+    };
+    let response = match super::api_call_security::send_with_guarded_redirects(
+        &client,
+        method.clone(),
+        parsed_url.clone(),
+        headers,
+        &attach_body,
+        &guard,
+    )
+    .await
+    {
         Ok(r) => r,
-        Err(e) => return fail(step, start, format!("HTTP request failed: {}", e)),
+        Err(super::api_call_security::GuardedSendError::Refused(msg)) => {
+            return fail(step, start, msg)
+        }
+        Err(super::api_call_security::GuardedSendError::Transport(e)) => {
+            return fail(step, start, format!("HTTP request failed: {}", e))
+        }
     };
 
     let status = response.status();
@@ -514,6 +555,117 @@ mod tests {
         assert_eq!(out.result.status, RunStatus::Failed);
         assert!(
             out.result.output.contains("Security"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_redirect_to_cloud_metadata_is_refused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security: redirect refused"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_cross_host_redirect_drops_credential_headers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(307).insert_header(
+                "location",
+                format!("http://localhost:{}/sink", other.address().port()),
+            ))
+            .mount(&origin)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/sink"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&other)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook", origin.uri()),
+            method: "POST".into(),
+            headers: HashMap::from([
+                (
+                    "Authorization".to_string(),
+                    "Bearer hook-secret".to_string(),
+                ),
+                ("X-Webhook-Token".to_string(), "hook-secret".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ]),
+            body_template: r#"{"a":1}"#.into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "got: {}",
+            out.result.output
+        );
+        let received = other.received_requests().await.unwrap();
+        let sink = &received[0];
+        assert!(sink.headers.get("authorization").is_none());
+        assert!(sink.headers.get("x-webhook-token").is_none());
+        assert_eq!(
+            sink.headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(sink.body, br#"{"a":1}"#);
+    }
+
+    #[tokio::test]
+    async fn notify_same_host_redirect_keeps_headers() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(308).insert_header("location", "/hook2"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/hook2"))
+            .and(header("x-webhook-token", "hook-secret"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::from([("X-Webhook-Token".to_string(), "hook-secret".to_string())]),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
             "got: {}",
             out.result.output
         );

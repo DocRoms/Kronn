@@ -301,6 +301,12 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
+- ApiCall and Notify steps no longer follow an HTTP redirect blindly: each hop
+  (at most 5) goes through the same checks as the first URL — the plugin's
+  host for ApiCall, a public address for both — so a 302 to the cloud metadata
+  address or to Kronn on loopback is refused. A hop to another origin keeps
+  only `Content-Type`, `Accept` and `User-Agent`, never an auth header
+  (KT-1039).
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

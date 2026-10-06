@@ -83,6 +83,13 @@ pub fn assert_host_matches_base(target: &Url, plugin_base_url: &str) -> Result<(
 /// once and feeding the IP to reqwest with a `Host:` header override,
 /// which is a much bigger surgery — revisit if the threat model changes.
 pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
+    assert_ip_allowed(target, false).await
+}
+
+/// `allow_loopback` lets tests stand a wiremock on 127.0.0.1 in for a public
+/// host while link-local and private targets stay refused.
+async fn assert_ip_allowed(target: &Url, allow_loopback: bool) -> Result<(), SecurityError> {
+    let refused = |ip: &IpAddr| is_disallowed_ip(ip) && !(allow_loopback && ip.is_loopback());
     let host = target.host_str().ok_or(SecurityError::NoHost)?.to_string();
 
     // Fast path: the URL already contains an IP literal (`127.0.0.1`,
@@ -92,7 +99,7 @@ pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
     // `[…]` brackets for IPv6 literals, hence the trim.
     let host_stripped = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_stripped.parse::<IpAddr>() {
-        if is_disallowed_ip(&ip) {
+        if refused(&ip) {
             return Err(SecurityError::PrivateOrLoopback { host, ip });
         }
         return Ok(());
@@ -112,11 +119,136 @@ pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
     };
     for sock in lookup {
         let ip = sock.ip();
-        if is_disallowed_ip(&ip) {
+        if refused(&ip) {
             return Err(SecurityError::PrivateOrLoopback { host, ip });
         }
     }
     Ok(())
+}
+
+/// Hop cap for followed redirects; reqwest's default is 10.
+pub const MAX_REDIRECTS: usize = 5;
+
+/// Validation applied to every redirect hop, so a 3xx cannot steer a request
+/// past the checks the initial URL went through.
+#[derive(Debug, Clone, Copy)]
+pub struct RedirectGuard<'a> {
+    /// `Some` when the target must stay on the plugin's host (ApiCall).
+    pub base_url: Option<&'a str>,
+    pub enforce_public_ip: bool,
+}
+
+impl RedirectGuard<'_> {
+    pub async fn check(&self, target: &Url) -> Result<(), SecurityError> {
+        if !matches!(target.scheme(), "http" | "https") {
+            return Err(SecurityError::InvalidUrl {
+                reason: format!("redirect to unsupported scheme `{}`", target.scheme()),
+            });
+        }
+        if let Some(base) = self.base_url {
+            assert_host_matches_base(target, base)?;
+        }
+        // Test mode keeps loopback reachable but still refuses metadata and
+        // private ranges on a hop.
+        assert_ip_allowed(target, !self.enforce_public_ip).await
+    }
+}
+
+/// Failure of [`send_with_guarded_redirects`]: transport errors stay
+/// retryable, a refused hop does not.
+#[derive(Debug)]
+pub enum GuardedSendError {
+    Transport(reqwest::Error),
+    Refused(String),
+}
+
+/// Headers that may cross to another origin; everything else may carry a
+/// credential (custom auth headers have arbitrary names).
+const CROSS_ORIGIN_HEADERS: [reqwest::header::HeaderName; 3] = [
+    reqwest::header::CONTENT_TYPE,
+    reqwest::header::ACCEPT,
+    reqwest::header::USER_AGENT,
+];
+
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host() == b.host()
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+/// Sends `method url` on a client built with `redirect::Policy::none()` and
+/// follows redirects itself, validating each hop with `guard`. 301/302 turn a
+/// POST into a bodyless GET and 303 turns anything but HEAD into one, as
+/// reqwest does; 307/308 keep method and body.
+pub async fn send_with_guarded_redirects(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: Url,
+    headers: reqwest::header::HeaderMap,
+    attach_body: &(dyn Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder + Sync),
+    guard: &RedirectGuard<'_>,
+) -> Result<reqwest::Response, GuardedSendError> {
+    use reqwest::{Method, StatusCode};
+    let mut method = method;
+    let mut url = url;
+    let mut headers = headers;
+    let mut with_body = true;
+    for hop in 0..=MAX_REDIRECTS {
+        let mut req = client
+            .request(method.clone(), url.clone())
+            .headers(headers.clone());
+        if with_body {
+            req = attach_body(req);
+        }
+        let response = req.send().await.map_err(GuardedSendError::Transport)?;
+        let status = response.status();
+        if !status.is_redirection() {
+            return Ok(response);
+        }
+        let Some(location) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return Ok(response);
+        };
+        if hop == MAX_REDIRECTS {
+            return Err(GuardedSendError::Refused(format!(
+                "Security: more than {MAX_REDIRECTS} redirects"
+            )));
+        }
+        let next = url.join(location).map_err(|e| {
+            GuardedSendError::Refused(format!("Security: invalid redirect target: {e}"))
+        })?;
+        guard
+            .check(&next)
+            .await
+            .map_err(|e| GuardedSendError::Refused(format!("Security: redirect refused: {e}")))?;
+        match status {
+            StatusCode::SEE_OTHER if method != Method::HEAD => {
+                method = Method::GET;
+                with_body = false;
+            }
+            StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND if method == Method::POST => {
+                method = Method::GET;
+                with_body = false;
+            }
+            _ => {}
+        }
+        if !same_origin(&url, &next) {
+            let mut kept = reqwest::header::HeaderMap::new();
+            for name in &CROSS_ORIGIN_HEADERS {
+                for value in headers.get_all(name) {
+                    kept.append(name.clone(), value.clone());
+                }
+            }
+            headers = kept;
+        }
+        url = next;
+    }
+    Err(GuardedSendError::Refused(format!(
+        "Security: more than {MAX_REDIRECTS} redirects"
+    )))
 }
 
 /// Rejects the RFC 1918, loopback, link-local, multicast and
@@ -315,6 +447,52 @@ mod tests {
     fn host_match_case_insensitive() {
         let target = Url::parse("https://API.Jira.com/").unwrap();
         assert!(assert_host_matches_base(&target, "https://api.jira.com").is_ok());
+    }
+
+    // ─── RedirectGuard ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn production_guard_refuses_loopback_metadata_and_other_schemes() {
+        let guard = RedirectGuard {
+            base_url: None,
+            enforce_public_ip: true,
+        };
+        for target in [
+            "http://127.0.0.1:3140/api/config",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "file:///etc/passwd",
+        ] {
+            let url = Url::parse(target).unwrap();
+            assert!(guard.check(&url).await.is_err(), "{target} must be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_guard_allows_loopback_only() {
+        let guard = RedirectGuard {
+            base_url: None,
+            enforce_public_ip: false,
+        };
+        let loopback = Url::parse("http://127.0.0.1:9/").unwrap();
+        assert!(guard.check(&loopback).await.is_ok());
+        let metadata = Url::parse("http://169.254.169.254/").unwrap();
+        assert!(guard.check(&metadata).await.is_err());
+        let private = Url::parse("http://10.0.0.1/").unwrap();
+        assert!(guard.check(&private).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn guard_with_base_refuses_another_host() {
+        let guard = RedirectGuard {
+            base_url: Some("https://api.example.com"),
+            enforce_public_ip: false,
+        };
+        let other = Url::parse("https://127.0.0.1/").unwrap();
+        assert!(matches!(
+            guard.check(&other).await,
+            Err(SecurityError::CrossHost { .. })
+        ));
     }
 
     // ─── assert_public_ip ───────────────────────────────────────────
