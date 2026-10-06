@@ -522,12 +522,74 @@ fn same_name(left: &OsStr, right: &OsStr) -> bool {
     }
 }
 
+/// The desktop's withheld variables and whether it withholds at all.
+#[derive(Default, Clone)]
+struct Withheld {
+    /// Set once the desktop withholds its environment.
+    active: bool,
+    vars: Vec<(OsString, OsString)>,
+}
+
 /// Variables moved out of the process environment, kept for the builder
 /// and for Kronn's own reads (see [`withhold_process_environment`]).
-static WITHHELD: std::sync::OnceLock<Vec<(OsString, OsString)>> = std::sync::OnceLock::new();
+static WITHHELD: std::sync::Mutex<Withheld> = std::sync::Mutex::new(Withheld {
+    active: false,
+    vars: Vec::new(),
+});
 
-fn withheld() -> &'static [(OsString, OsString)] {
-    WITHHELD.get().map(Vec::as_slice).unwrap_or_default()
+#[cfg(test)]
+thread_local! {
+    static WITHHELD_OVERRIDE: std::cell::RefCell<Option<Withheld>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` as if the desktop had withheld `vars` (this thread only).
+#[cfg(test)]
+pub(crate) fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    let state = Withheld {
+        active: true,
+        vars: vars
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect(),
+    };
+    WITHHELD_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(state));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WITHHELD_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    body()
+}
+
+/// Run `f` on the withheld state (the test override on this thread, if any).
+fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
+    #[cfg(test)]
+    {
+        let mut f = Some(f);
+        let overridden = WITHHELD_OVERRIDE.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|state| (f.take().unwrap())(state))
+        });
+        if let Some(result) = overridden {
+            return result;
+        }
+        let f = f.take().unwrap();
+        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut state)
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut state)
+    }
+}
+
+fn withheld() -> Vec<(OsString, OsString)> {
+    with_state(|state| state.vars.clone())
 }
 
 /// The live environment plus the withheld variables it no longer holds.
@@ -544,9 +606,12 @@ fn with_withheld(
 }
 
 fn withheld_value(name: &OsStr) -> Option<OsString> {
-    withheld()
-        .iter()
-        .find_map(|(key, value)| same_name(key, name).then(|| value.clone()))
+    with_state(|state| {
+        state
+            .vars
+            .iter()
+            .find_map(|(key, value)| same_name(key, name).then(|| value.clone()))
+    })
 }
 
 /// Kronn's own read of one environment variable: the live value, else the
@@ -572,7 +637,36 @@ pub fn var_os<K: AsRef<OsStr>>(name: K) -> Option<OsString> {
 /// The whole environment as Kronn sees it: live plus withheld.
 #[allow(clippy::disallowed_methods)] // the one live read
 pub fn vars_os() -> Vec<(OsString, OsString)> {
-    with_withheld(std::env::vars_os().collect(), withheld())
+    with_withheld(std::env::vars_os().collect(), &withheld())
+}
+
+/// Kronn's only way to set a variable. Once the desktop withholds its
+/// environment, a name off the webview allow-list goes to the withheld set,
+/// never live (where the webview helpers would inherit it).
+#[allow(clippy::disallowed_methods)] // the one live write
+pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(name: K, value: V) {
+    let (name, value) = (name.as_ref(), value.as_ref());
+    let withhold = with_state(|state| {
+        state.vars.retain(|(key, _)| !same_name(key, name));
+        let withhold = state.active && !webview_keeps(name);
+        if withhold {
+            state.vars.push((name.to_os_string(), value.to_os_string()));
+        }
+        withhold
+    });
+    if withhold {
+        std::env::remove_var(name);
+    } else {
+        std::env::set_var(name, value);
+    }
+}
+
+/// Kronn's only way to remove a variable: live and withheld alike.
+#[allow(clippy::disallowed_methods)] // the one live write
+pub fn remove_var<K: AsRef<OsStr>>(name: K) {
+    let name = name.as_ref();
+    with_state(|state| state.vars.retain(|(key, _)| !same_name(key, name)));
+    std::env::remove_var(name);
 }
 
 /// Whether a process-environment name is a credential.
@@ -583,14 +677,10 @@ fn is_credential(name: &str) -> bool {
         || looks_secret(name)
 }
 
-/// Kronn settings whose name looks like a secret but holds none: never
-/// withheld, never dropped as a credential.
-const KRONN_SETTINGS: &[&str] = &["KRONN_USE_KEYCHAIN", "KRONN_MCP_SECRET_REFERENCES"];
-
 /// What the desktop process keeps in its live environment, and so what the
 /// system webview helpers (WebKitGTK, WebView2) inherit: the base allow-list,
-/// display and session plumbing, toolkit and runtime settings, and Kronn's
-/// own non-secret settings. Never a credential.
+/// display and session plumbing, toolkit and runtime settings. Never a
+/// credential, never a Kronn setting (Kronn reads those through [`var`]).
 const WEBVIEW_NAMES: &[&str] = &[
     "DISPLAY",
     "WAYLAND_DISPLAY",
@@ -607,6 +697,7 @@ const WEBVIEW_NAMES: &[&str] = &[
     "APPIMAGE",
     "ARGV0",
     "OWD",
+    "SNAP",
 ];
 const WEBVIEW_PREFIXES: &[&str] = &[
     "XDG_",
@@ -624,12 +715,11 @@ const WEBVIEW_PREFIXES: &[&str] = &[
     "QT_",
     "AT_SPI_",
     "PULSE_",
-    "SNAP",
+    "SNAP_",
     "FLATPAK_",
     "TAURI_",
     "RUST_",
     "DYLD_",
-    "KRONN_",
 ];
 
 /// Whether the desktop keeps `name` in its live environment.
@@ -637,9 +727,6 @@ fn webview_keeps(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false; // not valid Unicode: withheld like a credential
     };
-    if name_in(name, KRONN_SETTINGS) {
-        return true;
-    }
     let listed =
         is_base(name) || name_in(name, WEBVIEW_NAMES) || has_prefix(name, WEBVIEW_PREFIXES);
     listed && !is_credential(name)
@@ -665,7 +752,7 @@ fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsStrin
 
 /// The variables [`withhold_process_environment`] moved out (none elsewhere).
 pub fn withheld_variables() -> Vec<(OsString, OsString)> {
-    withheld().to_vec()
+    withheld()
 }
 
 /// Desktop: keep only the webview allow-list in the process environment, so
@@ -674,7 +761,11 @@ pub fn withheld_variables() -> Vec<(OsString, OsString)> {
 /// own reads ([`var`], [`parent_var`]) still see every withheld variable.
 /// Call before any thread exists: removing a variable is not thread-safe.
 pub fn withhold_process_environment() {
-    let _ = WITHHELD.set(take_process_environment());
+    let held = take_process_environment();
+    with_state(|state| {
+        state.active = true;
+        state.vars = held;
+    });
 }
 
 /// Remove from a built command every credential it carries: provider keys,

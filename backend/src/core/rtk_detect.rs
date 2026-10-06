@@ -175,11 +175,11 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
         let prev = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", tmp.path());
+        crate::core::child_env::set_var("HOME", tmp.path());
         f(tmp.path());
         match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
+            Some(v) => crate::core::child_env::set_var("HOME", v),
+            None => crate::core::child_env::remove_var("HOME"),
         }
     }
 
@@ -201,8 +201,8 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let prev_data = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
         let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
-        std::env::set_var("KRONN_IN_DOCKER", "1"); // → is_docker() == true
-        std::env::set_var("KRONN_HOST_BIN", tmp.path());
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1"); // → is_docker() == true
+        crate::core::child_env::set_var("KRONN_HOST_BIN", tmp.path());
 
         assert!(
             !rtk_binary_available(),
@@ -229,12 +229,12 @@ mod tests {
         }
 
         match prev_data {
-            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
-            None => std::env::remove_var("KRONN_IN_DOCKER"),
+            Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
+            None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
         }
         match prev_hb {
-            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
-            None => std::env::remove_var("KRONN_HOST_BIN"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_BIN", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_BIN"),
         }
     }
 

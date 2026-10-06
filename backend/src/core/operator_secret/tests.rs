@@ -16,8 +16,8 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 }
@@ -25,7 +25,7 @@ impl Drop for Scratch {
 fn scratch() -> Scratch {
     let dir = tempfile::tempdir().unwrap();
     let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-    std::env::set_var("KRONN_DATA_DIR", dir.path());
+    crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
     Scratch { dir, previous }
 }
 
@@ -39,7 +39,7 @@ fn scratch_restores_the_environment_even_after_a_test_changes_its_path() {
             crate::core::child_env::var_os("KRONN_DATA_DIR").unwrap(),
             dir.path()
         );
-        std::env::set_var("KRONN_DATA_DIR", dir.path().join("blocked"));
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path().join("blocked"));
     }
     assert_eq!(crate::core::child_env::var_os("KRONN_DATA_DIR"), before);
 }
@@ -93,7 +93,7 @@ fn nothing_is_committed_when_the_file_cannot_be_written() {
     // The directory exists but the file cannot: a path whose parent is a file.
     let blocked = dir.path().join("blocked");
     std::fs::write(&blocked, b"not a directory").unwrap();
-    std::env::set_var("KRONN_DATA_DIR", &blocked);
+    crate::core::child_env::set_var("KRONN_DATA_DIR", &blocked);
 
     assert!(bootstrap(&conn).is_err());
     // The forbidden state: a key in the database the operator has no copy of.

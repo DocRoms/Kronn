@@ -800,12 +800,12 @@ ATLASSIAN_TOKEN = "x"
     #[serial]
     fn resolve_home_prefers_kronn_host_home() {
         let original = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", "/host/path");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/host/path");
         let resolved = resolve_home();
         assert_eq!(resolved, Some(PathBuf::from("/host/path")));
         match original {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
     }
 }

@@ -42,8 +42,8 @@ fn read_env_kek() -> Option<String> {
 /// not thread-safe.
 fn take_env_kek_from_process() -> Option<String> {
     let value = read_env_kek();
-    std::env::remove_var(ENV_KEK);
-    std::env::remove_var("KRONN_KEK");
+    crate::core::child_env::remove_var(ENV_KEK);
+    crate::core::child_env::remove_var("KRONN_KEK");
     value
 }
 
@@ -507,17 +507,17 @@ mod tests {
     #[test]
     #[serial]
     fn primary_prefers_env_over_vaults() {
-        std::env::set_var(ENV_KEK, "  envkey \n");
+        crate::core::child_env::set_var(ENV_KEK, "  envkey \n");
         let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value("keychain", "otherkey"))]);
         assert_eq!(ks.primary(), Some(("envkey".to_string(), "env")));
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
     }
 
     #[test]
     #[serial]
     fn the_key_override_leaves_the_process_environment() {
-        std::env::set_var(ENV_KEK, " envkey \n");
-        std::env::set_var("KRONN_KEK", "legacy");
+        crate::core::child_env::set_var(ENV_KEK, " envkey \n");
+        crate::core::child_env::set_var("KRONN_KEK", "legacy");
         assert_eq!(take_env_kek_from_process(), Some("envkey".to_string()));
         assert!(crate::core::child_env::var_os(ENV_KEK).is_none());
         assert!(crate::core::child_env::var_os("KRONN_KEK").is_none());
@@ -548,15 +548,15 @@ mod tests {
     #[test]
     #[serial]
     fn env_override_ignores_whitespace_only_value() {
-        std::env::set_var(ENV_KEK, " \n\t ");
+        crate::core::child_env::set_var(ENV_KEK, " \n\t ");
         assert_eq!(KeyStore::env_override(), None);
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
     }
 
     #[test]
     #[serial]
     fn primary_falls_through_unavailable_to_next_vault() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::unavailable("keychain")),
             boxed(MockVault::with_value("sidecar", "sk")),
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     #[serial]
     fn primary_returns_none_when_all_empty_or_unavailable() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::unavailable("keychain")),
             boxed(MockVault::empty("sidecar")),
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     #[serial]
     fn snapshot_exposes_split_brain_disagreement() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::with_value("keychain", "AAAA")),
             boxed(MockVault::with_value("sidecar", "BBBB")),
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     #[serial]
     fn snapshot_fails_on_an_unreadable_vault_instead_of_reading_it_as_empty() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::with_value("sidecar", "sk")),
             boxed(MockVault::unavailable("keychain")),
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     #[serial]
     fn mirror_never_writes_into_a_vault_whose_read_failed() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let state = std::sync::Arc::new(Mutex::new(MockState::Unreadable("OLD".into())));
         let keychain = MockVault {
             name: "keychain",
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     #[serial]
     fn holds_reads_back_env_and_vaults() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::unavailable("keychain")),
             boxed(MockVault::with_value("sidecar", "KEY")),
@@ -641,10 +641,10 @@ mod tests {
         assert!(ks.holds_in("sidecar", "KEY"));
         assert_eq!(ks.copies_of("KEY"), 1);
         assert!(!ks.holds_in("keychain", "KEY"));
-        std::env::set_var(ENV_KEK, "OTHER");
+        crate::core::child_env::set_var(ENV_KEK, "OTHER");
         assert!(ks.holds("OTHER"));
         assert_eq!(ks.copies_of("OTHER"), 0, "env is not a persisted copy");
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
     }
 
     #[test]
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     #[serial]
     fn mirror_writes_missing_and_skips_present() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::with_value("keychain", "KEY")),
             boxed(MockVault::empty("sidecar")),
@@ -695,7 +695,7 @@ mod tests {
     #[test]
     #[serial]
     fn mirror_never_overwrites_a_vault_holding_another_key() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::with_value("keychain", "K1")),
             boxed(MockVault::with_value("sidecar", "K2")),
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     #[serial]
     fn mirror_reports_error_for_unavailable_but_still_writes_others() {
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
             boxed(MockVault::unavailable("keychain")),
             boxed(MockVault::empty("sidecar")),
@@ -750,18 +750,18 @@ mod tests {
     #[test]
     #[serial]
     fn use_os_keychain_defaults_off_in_debug_and_honours_override() {
-        std::env::remove_var("KRONN_USE_KEYCHAIN");
+        crate::core::child_env::remove_var("KRONN_USE_KEYCHAIN");
         // Tests compile with debug_assertions → default is OFF (no macOS
         // password prompt on every cargo rebuild).
         assert!(
             !use_os_keychain(),
             "debug builds must skip the keychain by default"
         );
-        std::env::set_var("KRONN_USE_KEYCHAIN", "1");
+        crate::core::child_env::set_var("KRONN_USE_KEYCHAIN", "1");
         assert!(use_os_keychain(), "explicit opt-in must win");
-        std::env::set_var("KRONN_USE_KEYCHAIN", "0");
+        crate::core::child_env::set_var("KRONN_USE_KEYCHAIN", "0");
         assert!(!use_os_keychain(), "explicit opt-out must win");
-        std::env::remove_var("KRONN_USE_KEYCHAIN");
+        crate::core::child_env::remove_var("KRONN_USE_KEYCHAIN");
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
         let ks = KeyStore::standard(dir.path());
         // snapshot() would hit the OS keychain; just prove it built (2 vaults +
         // the env tier) by checking the env override path with no env set.
-        std::env::remove_var(ENV_KEK);
+        crate::core::child_env::remove_var(ENV_KEK);
         assert_eq!(KeyStore::env_override(), None);
         let _ = ks; // constructed successfully
     }

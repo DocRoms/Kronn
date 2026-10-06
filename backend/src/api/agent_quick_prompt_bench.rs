@@ -327,7 +327,7 @@ async fn bench_quick_prompt_native_catalogue() {
         }
         for &tiered_mode in modes {
             let state = campaign_state(scenario, directory.path()).await;
-            std::env::set_var("KRONN_TIERED_TOOLS", if tiered_mode { "1" } else { "0" });
+            crate::core::child_env::set_var("KRONN_TIERED_TOOLS", if tiered_mode { "1" } else { "0" });
             let executor = KronnToolExecutor::arc(state.clone(),Some("general".into()),agent.clone(),None,None);
             let catalogue = executor.catalogue();
             let catalogue_bytes = serde_json::to_vec(&catalogue).unwrap().len();
@@ -368,8 +368,8 @@ async fn bench_quick_prompt_native_catalogue() {
         std::fs::write(path, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
     }
     match previous_tiering {
-        Some(value) => std::env::set_var("KRONN_TIERED_TOOLS", value),
-        None => std::env::remove_var("KRONN_TIERED_TOOLS"),
+        Some(value) => crate::core::child_env::set_var("KRONN_TIERED_TOOLS", value),
+        None => crate::core::child_env::remove_var("KRONN_TIERED_TOOLS"),
     }
     assert!(
         reports.iter().all(|report| report["ok"] == true),

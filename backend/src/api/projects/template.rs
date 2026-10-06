@@ -592,14 +592,14 @@ mod tests {
         impl Drop for RestoreTemplatesEnv {
             fn drop(&mut self) {
                 match &self.0 {
-                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
                 }
             }
         }
         let _restore = RestoreTemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         // This checkout's own templates, whatever another test left in the env.
-        std::env::set_var(
+        crate::core::child_env::set_var(
             "KRONN_TEMPLATES_DIR",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
         );

@@ -474,9 +474,9 @@ impl ScriptedOpenCodeOnPath {
             std::env::split_paths(&crate::core::child_env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
-        std::env::set_var("PATH", path);
-        std::env::set_var("OPENCODE_FIXTURE_OUT", out);
-        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        crate::core::child_env::set_var("PATH", path);
+        crate::core::child_env::set_var("OPENCODE_FIXTURE_OUT", out);
+        crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
         Self(saved)
     }
 }
@@ -486,8 +486,8 @@ impl Drop for ScriptedOpenCodeOnPath {
     fn drop(&mut self) {
         for (name, value) in &self.0 {
             match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
+                Some(value) => crate::core::child_env::set_var(name, value),
+                None => crate::core::child_env::remove_var(name),
             }
         }
     }

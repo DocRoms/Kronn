@@ -443,7 +443,7 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 /// environment, so no child can inherit the admin token (KT-1006).
 pub fn take_env_auth_token() -> Option<String> {
     let token = crate::core::child_env::var("KRONN_AUTH_TOKEN").ok();
-    std::env::remove_var("KRONN_AUTH_TOKEN");
+    crate::core::child_env::remove_var("KRONN_AUTH_TOKEN");
     token
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
@@ -846,7 +846,7 @@ mod tests {
     async fn an_unparseable_config_is_kept_aside_and_its_key_salvaged() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("corrupt");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
         let key = crate::core::crypto::generate_secret();
         std::fs::write(
             tmp.join(CONFIG_FILE),
@@ -875,7 +875,7 @@ mod tests {
             .contains("x = [broken"));
         assert!(is_first_run().await.unwrap());
         release_disk_key(&tmp);
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -886,7 +886,7 @@ mod tests {
     async fn a_schema_invalid_config_is_set_aside_with_a_notice() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("schema");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
         std::fs::write(tmp.join(CONFIG_FILE), "[server]\nport = \"not a number\"\n").unwrap();
         let loaded = load().await.unwrap().expect("first run");
         assert!(loaded.encryption_secret.is_none());
@@ -901,7 +901,7 @@ mod tests {
             !notice.contains("intact") && notice.contains("No encryption key"),
             "{notice}"
         );
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1021,7 +1021,7 @@ mod tests {
     fn data_dir_lock_resolves_the_configured_data_directory() {
         let dir = scratch_dir("configured-lock");
         let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = acquire_data_dir_lock().expect("configured data-dir lock must succeed");
         assert!(
@@ -1031,8 +1031,8 @@ mod tests {
         drop(first);
 
         match previous_data_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1045,7 +1045,7 @@ mod tests {
     async fn load_does_not_regenerate_a_missing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("noregen");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.auth_token = Some("tok".into()); // avoid the auth-gen re-save path
@@ -1058,7 +1058,7 @@ mod tests {
             "load() MUST NOT generate a key when the field is missing (I1)"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1067,7 +1067,7 @@ mod tests {
     async fn load_keeps_an_existing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("keepsecret");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         // A 0.14.2 file carries the key; the struct never writes it.
         let mut cfg = default_config();
@@ -1097,7 +1097,7 @@ mod tests {
         assert!(!text.contains("encryption_secret"), "{text}");
         assert!(!text.contains(&secret));
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1111,7 +1111,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("ollama-ctx-overrides");
         let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server
@@ -1153,8 +1153,8 @@ mod tests {
         assert!(reloaded.server.ollama_context_overrides.is_empty());
 
         match previous_data_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1166,7 +1166,7 @@ mod tests {
     async fn load_migrates_legacy_single_keys_to_multikey() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("legacymig");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         // The legacy fields are `skip_serializing`, so we can't round-trip them
         // through save(); write a raw config.toml with the legacy line injected
@@ -1192,7 +1192,7 @@ mod tests {
             "legacy field must be cleared"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1202,7 +1202,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let previous_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", tmp.path());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.path());
 
         for saved_port in [3140, 4242] {
             let mut desktop = default_config();
@@ -1224,8 +1224,8 @@ mod tests {
         }
 
         match previous_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
     async fn concurrent_saves_never_produce_a_torn_config() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("concurrent");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let base = default_config();
         let mut handles = Vec::new();
@@ -1259,7 +1259,7 @@ mod tests {
             "a complete config must be readable after concurrent saves"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1279,7 +1279,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.unlocked_profiles.push("batman".into());
@@ -1300,7 +1300,7 @@ mod tests {
             reloaded.secret_themes
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1312,7 +1312,7 @@ mod tests {
     async fn load_does_not_generate_an_auth_token_nor_touch_auth_enabled() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("noauthgen");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.auth_token = None;
@@ -1323,7 +1323,7 @@ mod tests {
         assert!(loaded.server.auth_token.is_none());
         assert!(loaded.server.auth_enabled, "the saved choice is kept");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1365,7 +1365,7 @@ mod tests {
 
         let tmp = std::env::temp_dir().join(format!("kronn-config-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let cfg = default_config();
         save(&cfg).await.expect("save must succeed");
@@ -1386,7 +1386,7 @@ mod tests {
             file_mode
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1403,7 +1403,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let loaded = load().await.expect("load must succeed even with no file");
         assert!(
@@ -1411,7 +1411,7 @@ mod tests {
             "absent config file must return None, got {loaded:?}"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1428,7 +1428,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let first = is_first_run().await.expect("first_run check");
         assert!(first, "with no config file, is_first_run must be true");
@@ -1439,7 +1439,7 @@ mod tests {
         let still_first = is_first_run().await.expect("first_run after save");
         assert!(!still_first, "after a save, is_first_run must be false");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1456,7 +1456,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let cfg = default_config();
         save(&cfg).await.expect("save");
@@ -1481,7 +1481,7 @@ mod tests {
         }
         assert_eq!(loaded.scan.scan_depth, 4, "scan_depth must default to 4");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.anti_hallucination_mode = "strict".into();
@@ -1514,7 +1514,7 @@ mod tests {
             loaded.server.default_model_tier
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

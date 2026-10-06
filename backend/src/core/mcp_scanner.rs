@@ -4505,8 +4505,8 @@ mod host_sync_tests {
         fn drop(&mut self) {
             for (name, value) in self.0.drain(..) {
                 match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
                 }
             }
         }
@@ -5044,15 +5044,15 @@ mod host_sync_tests {
         // observes it. Nested tests in the same suite are still in different
         // threads — this is a known limitation of std::env, accepted because
         // the alternative (serial_test crate) would balloon dev-only deps.
-        unsafe {
-            std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
+        {
+            crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
         }
         let mut file = McpJsonFile {
             mcp_servers: HashMap::new(),
         };
         let injected = inject_kronn_internal(&mut file);
-        unsafe {
-            std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        {
+            crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
         }
         let _ = std::fs::remove_file(&tmp);
         assert!(
@@ -5571,7 +5571,7 @@ Always send emails from contact@example.com
         let before = crate::core::child_env::var_os("KRONN_HOST_HOME");
         {
             let _restore = EnvRestore::capture(&["KRONN_HOST_HOME"]);
-            std::env::set_var("KRONN_HOST_HOME", "/synthetic/host-sync-fixture");
+            crate::core::child_env::set_var("KRONN_HOST_HOME", "/synthetic/host-sync-fixture");
             assert_eq!(
                 crate::core::child_env::var_os("KRONN_HOST_HOME"),
                 Some("/synthetic/host-sync-fixture".into())
@@ -5596,10 +5596,10 @@ Always send emails from contact@example.com
         std::fs::create_dir_all(&writable_project).unwrap();
         std::fs::create_dir_all(&host_home).unwrap();
 
-        std::env::set_var("KRONN_IN_DOCKER", "1");
-        std::env::set_var("KRONN_REPOS_DIR", &writable_root);
-        std::env::remove_var("KRONN_EXTRA_REPOS");
-        std::env::set_var("KRONN_HOST_HOME", &host_home);
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_REPOS_DIR", &writable_root);
+        crate::core::child_env::remove_var("KRONN_EXTRA_REPOS");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", &host_home);
 
         let writable_db = project_sync_test_db(&writable_project);
         sync_project_with_report(&writable_db, "sync-project", "test-secret");

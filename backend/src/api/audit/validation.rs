@@ -677,7 +677,7 @@ mod tests {
         // KRONN_TEMPLATES_DIR is consumed by resolve_templates_dir
         // when set; the function honors it as the override so tests
         // can point at our fake templates root.
-        std::env::set_var("KRONN_TEMPLATES_DIR", &templates);
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", &templates);
         (tmp, project)
     }
 
@@ -877,8 +877,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 match &self.0 {
-                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
                 }
             }
         }
@@ -1129,8 +1129,8 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 match &self.0 {
-                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
                 }
             }
         }
@@ -1268,7 +1268,7 @@ mod tests {
         std::fs::create_dir_all(project.join("docs")).unwrap();
         std::fs::write(project.join("docs/inconsistencies-security.md"), "").unwrap();
         // Force resolver away from real templates dir.
-        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
         let (success, warn) =
             validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);
@@ -1296,7 +1296,7 @@ mod tests {
         std::fs::create_dir_all(project.join("docs")).unwrap();
         let dest = project.join("docs/inconsistencies-security.md");
         std::fs::write(&dest, "partial agent output").unwrap();
-        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
         let (success, warn) =
             validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);

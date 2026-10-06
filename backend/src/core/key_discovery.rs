@@ -266,10 +266,10 @@ mod tests {
         .unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         let key = read_codex_key();
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         assert_eq!(key, Some("sk-test-codex-key-456".to_string()));
@@ -284,10 +284,10 @@ mod tests {
         std::fs::write(tmp.join(".codex/auth.json"), r#"{"OPENAI_API_KEY":""}"#).unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         let key = read_codex_key();
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         assert_eq!(key, None, "Empty key should return None");
@@ -313,10 +313,10 @@ mod tests {
         .unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         let key = read_gemini_key();
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         assert_eq!(key, Some("AIza-test-gemini-789".to_string()));
@@ -336,10 +336,10 @@ mod tests {
         .unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         let key = read_vibe_key();
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         assert_eq!(
@@ -363,10 +363,10 @@ mod tests {
 
         // Temporarily override HOME
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         let key = read_vibe_key();
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         assert_eq!(
@@ -400,10 +400,10 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
@@ -425,10 +425,10 @@ mod tests {
         .unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
@@ -456,10 +456,10 @@ mod tests {
         std::fs::write(tmp.join(".gemini/settings.json"), corrupt).unwrap();
 
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        crate::core::child_env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
@@ -477,17 +477,17 @@ mod tests {
     fn home_dir_prefers_kronn_host_home() {
         let old_host = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", "/host/real-user");
-        std::env::set_var("HOME", "/container/fake");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/host/real-user");
+        crate::core::child_env::set_var("HOME", "/container/fake");
         let dir = home_dir();
         // Restore
         if let Some(h) = old_host {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         } else {
-            std::env::remove_var("KRONN_HOST_HOME");
+            crate::core::child_env::remove_var("KRONN_HOST_HOME");
         }
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
         assert_eq!(dir, Some(PathBuf::from("/host/real-user")));
     }
@@ -497,14 +497,14 @@ mod tests {
     fn home_dir_falls_back_to_home() {
         let old_host = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         let old_home = crate::core::child_env::var("HOME").ok();
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::set_var("HOME", "/home/testuser");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::set_var("HOME", "/home/testuser");
         let dir = home_dir();
         if let Some(h) = old_host {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         }
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         }
         assert_eq!(dir, Some(PathBuf::from("/home/testuser")));
     }
@@ -515,22 +515,22 @@ mod tests {
         let old_host = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         let old_home = crate::core::child_env::var("HOME").ok();
         let old_up = crate::core::child_env::var("USERPROFILE").ok();
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("HOME");
-        std::env::set_var("USERPROFILE", r"C:\Users\TestUser");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("HOME");
+        crate::core::child_env::set_var("USERPROFILE", r"C:\Users\TestUser");
         let dir = home_dir();
         if let Some(h) = old_host {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         }
         if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
+            crate::core::child_env::set_var("HOME", h);
         } else {
-            std::env::remove_var("HOME");
+            crate::core::child_env::remove_var("HOME");
         }
         if let Some(h) = old_up {
-            std::env::set_var("USERPROFILE", h);
+            crate::core::child_env::set_var("USERPROFILE", h);
         } else {
-            std::env::remove_var("USERPROFILE");
+            crate::core::child_env::remove_var("USERPROFILE");
         }
         assert_eq!(dir, Some(PathBuf::from(r"C:\Users\TestUser")));
     }
@@ -541,12 +541,12 @@ mod tests {
     #[serial]
     fn default_key_name_from_host_home() {
         let old = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", "/home/alice");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/home/alice");
         let name = default_key_name();
         if let Some(h) = old {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         } else {
-            std::env::remove_var("KRONN_HOST_HOME");
+            crate::core::child_env::remove_var("KRONN_HOST_HOME");
         }
         assert_eq!(name, "alice");
     }
@@ -555,12 +555,12 @@ mod tests {
     #[serial]
     fn default_key_name_from_windows_host_home_forward_slash() {
         let old = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", "C:/Users/Bob");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "C:/Users/Bob");
         let name = default_key_name();
         if let Some(h) = old {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         } else {
-            std::env::remove_var("KRONN_HOST_HOME");
+            crate::core::child_env::remove_var("KRONN_HOST_HOME");
         }
         assert_eq!(name, "Bob");
     }
@@ -570,12 +570,12 @@ mod tests {
     fn default_key_name_from_windows_host_home_backslash() {
         // Backslash paths should also work (Windows native Tauri app)
         let old = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", r"C:\Users\Alice");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", r"C:\Users\Alice");
         let name = default_key_name();
         if let Some(h) = old {
-            std::env::set_var("KRONN_HOST_HOME", h);
+            crate::core::child_env::set_var("KRONN_HOST_HOME", h);
         } else {
-            std::env::remove_var("KRONN_HOST_HOME");
+            crate::core::child_env::remove_var("KRONN_HOST_HOME");
         }
         assert_eq!(name, "Alice");
     }

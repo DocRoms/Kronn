@@ -3058,7 +3058,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("kronn-resources-test-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok();
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
     }
 
     fn test_state() -> crate::AppState {

@@ -15,8 +15,8 @@ impl PublicationFixture {
             .collect();
         let host = root.path().join("host-home");
         std::fs::create_dir(&host).unwrap();
-        std::env::set_var("KRONN_DATA_DIR", root.path());
-        std::env::set_var("KRONN_HOST_HOME", host);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", root.path());
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host);
         Self {
             _root: root,
             previous,
@@ -28,8 +28,8 @@ impl Drop for PublicationFixture {
     fn drop(&mut self) {
         for (key, value) in &self.previous {
             match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+                Some(value) => kronn::core::child_env::set_var(key, value),
+                None => kronn::core::child_env::remove_var(key),
             }
         }
     }

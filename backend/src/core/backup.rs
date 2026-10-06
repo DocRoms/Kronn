@@ -627,16 +627,16 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_backup_dir_defaults_in_volume_then_env_external() {
-        std::env::remove_var("KRONN_BACKUP_DIR");
+        crate::core::child_env::remove_var("KRONN_BACKUP_DIR");
         let (dir, ext) = resolve_backup_dir(Path::new("/data"));
         assert_eq!(dir, PathBuf::from("/data/backups"));
         assert!(!ext, "default is in-volume");
 
-        std::env::set_var("KRONN_BACKUP_DIR", "/host/backups");
+        crate::core::child_env::set_var("KRONN_BACKUP_DIR", "/host/backups");
         let (dir, ext) = resolve_backup_dir(Path::new("/data"));
         assert_eq!(dir, PathBuf::from("/host/backups"));
         assert!(ext, "env-provided dir is external");
-        std::env::remove_var("KRONN_BACKUP_DIR");
+        crate::core::child_env::remove_var("KRONN_BACKUP_DIR");
     }
 
     #[test]

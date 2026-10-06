@@ -152,8 +152,8 @@ mod tests {
         fn drop(&mut self) {
             for (name, previous) in &self.0 {
                 match previous {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
                 }
             }
         }
@@ -163,8 +163,8 @@ mod tests {
     #[serial(acp_adapter_env_toggle)]
     fn task_worker_route_policy_covers_every_launch_route() {
         let _restore = RestoreAdapterToggles::capture();
-        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         // Native ACP: refused as a worker, an ordinary turn keeps its setting.
         for agent in [
             AgentType::GeminiCli,
@@ -190,7 +190,7 @@ mod tests {
             assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
         }
         // Direct CLI compatibility route.
-        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
             crate::acp::resolve_acp_route(&AgentType::Codex),
             crate::acp::AcpProductionRoute::DirectCliMigration
@@ -493,7 +493,7 @@ mod tests {
     fn acp_mcp_registry_carries_the_kronn_bridge_with_no_credential_in_the_payload() {
         let script = tempfile::NamedTempFile::new().unwrap();
         let previous = crate::core::child_env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
 
         let with_no_project = acp_project_mcp_servers("", false);
         let bridge = with_no_project
@@ -538,8 +538,8 @@ mod tests {
         assert_eq!(own[0], bridge);
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
-            None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
+            None => crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
         }
     }
 
@@ -5434,8 +5434,8 @@ mod tests {
             (Some("0"), "claude-sonnet-4-6"),
         ] {
             match switch {
-                Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
-                None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+                Some(value) => crate::core::child_env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+                None => crate::core::child_env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
             }
             let mut process = start_ollama_http(
                 &AgentType::LiteLlm,
@@ -5459,8 +5459,8 @@ mod tests {
             assert!(process.child.wait().await.expect("lifeline").success());
         }
         match previous {
-            Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
-            None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+            Some(value) => crate::core::child_env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+            None => crate::core::child_env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
         }
 
         let requests = server.received_requests().await.expect("request capture");
@@ -8055,8 +8055,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn hosted_audit_step_converges_within_its_input_budget() {
-        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
-        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
         let per_turn = 100_000;
         let (budgeted, captured) = hosted_audit_that_keeps_exploring(per_turn, 0).await;
         let opened = budgeted.expect("the write window must open");
@@ -8085,8 +8085,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn hosted_audit_history_pressure_uses_the_bounded_context_budget() {
-        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
-        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
         let (opened, captured) = hosted_audit_that_keeps_exploring(10, 40_000).await;
         let opened = opened.expect("the write window must open");
         assert!(opened <= 30, "opened at request {opened}: {captured}");
@@ -9132,8 +9132,8 @@ Suite de la réponse.";
     fn fix_file_ownership_no_env_vars_does_not_panic() {
         // When KRONN_HOST_UID / KRONN_HOST_GID are not set, fix_file_ownership
         // should return early without error.
-        std::env::remove_var("KRONN_HOST_UID");
-        std::env::remove_var("KRONN_HOST_GID");
+        crate::core::child_env::remove_var("KRONN_HOST_UID");
+        crate::core::child_env::remove_var("KRONN_HOST_GID");
         super::super::fix_file_ownership(std::path::Path::new("/tmp"));
     }
 
@@ -9141,12 +9141,12 @@ Suite de la réponse.";
     #[serial]
     fn fix_file_ownership_with_nonexistent_dir_does_not_panic() {
         // Even with UID/GID set, chown on a nonexistent path should not panic.
-        std::env::set_var("KRONN_HOST_UID", "1000");
-        std::env::set_var("KRONN_HOST_GID", "1000");
+        crate::core::child_env::set_var("KRONN_HOST_UID", "1000");
+        crate::core::child_env::set_var("KRONN_HOST_GID", "1000");
         super::super::fix_file_ownership(std::path::Path::new("/nonexistent/path/for/test"));
         // Clean up
-        std::env::remove_var("KRONN_HOST_UID");
-        std::env::remove_var("KRONN_HOST_GID");
+        crate::core::child_env::remove_var("KRONN_HOST_UID");
+        crate::core::child_env::remove_var("KRONN_HOST_GID");
     }
 
     // ─── agent_command: full_access flags ──────────────────────────────────────
@@ -10114,8 +10114,8 @@ Suite de la réponse.";
         let previous = crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
         for opt_in in [None, Some("1")] {
             match opt_in {
-                Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-                None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+                Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+                None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
             }
             let worker = worker_context();
             let principal = room_agent_context();
@@ -10141,8 +10141,8 @@ Suite de la réponse.";
             }
         }
         match previous {
-            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
         }
     }
 
@@ -10151,21 +10151,21 @@ Suite de la réponse.";
     #[serial]
     async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
         let previous = crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
-        std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
+        crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
         assert_eq!(
             auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
             "1",
             "off by default"
         );
-        std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
+        crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
         assert_eq!(
             auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
             "unset",
             "the operator keeps it for a native discussion"
         );
         match previous {
-            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
         }
     }
 
@@ -12267,8 +12267,8 @@ Suite de la réponse.";
         // structurally broken in Docker: Codex couldn't read a single file
         // and the plan review emitted a false NEEDS_RETRIAGE. The container
         // + worktree are the isolation boundary; always danger-full-access.
-        std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
-        std::env::set_var("KRONN_HOST_OS", "Linux");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/home/testuser");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "Linux");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
@@ -12276,29 +12276,29 @@ Suite de la réponse.";
             "Docker (any OS) must use danger-full-access — bwrap can't init in the container"
         );
         assert!(!args.contains(&"--sandbox=workspace-write".to_string()));
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("KRONN_HOST_OS");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_OS");
     }
 
     #[test]
     #[serial]
     fn codex_macos_docker_forces_full_access_sandbox() {
-        std::env::set_var("KRONN_HOST_HOME", "/Users/testuser");
-        std::env::set_var("KRONN_HOST_OS", "macOS");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/Users/testuser");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "macOS");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
             args.contains(&"--sandbox=danger-full-access".to_string()),
             "macOS Docker should force danger-full-access sandbox regardless of full_access flag"
         );
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("KRONN_HOST_OS");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_OS");
     }
 
     #[test]
     #[serial]
     fn codex_native_full_access_uses_danger_sandbox() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", true, "", None);
         assert!(
@@ -12310,7 +12310,7 @@ Suite de la réponse.";
     #[test]
     #[serial]
     fn codex_native_restricted_access_keeps_default_sandbox() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
@@ -13851,15 +13851,15 @@ sleep 3600
             "model", "turn", "inline tk", "turns", "ptr tk", "turns", "inline", "pointer"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             for (scenario, prompt, grounded) in [
                 ("needs doc", needs_doc, true),
                 ("ignores doc", ignores_doc, false),
             ] {
-                std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+                crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
                 let inline =
                     bench_doc_run("doc · inline", &project_path, prompt, catalogue.clone()).await;
-                std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+                crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
                 let pointer =
                     bench_doc_run("doc · pointer", &project_path, prompt, catalogue.clone()).await;
 
@@ -13918,7 +13918,7 @@ sleep 3600
             "", "full s", "", "tiered s", ""
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             let full_run = bench_run("two · full", prompt, full.clone()).await;
             let tiered_run = bench_run("two · tiered", prompt, tiered.clone()).await;
             // Both modes are scored. Scoring only the tiered one made the
@@ -14224,7 +14224,7 @@ sleep 3600
             "scoré sur"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             let external = crate::core::child_env::var("KRONN_BENCH_HTTP_ENDPOINT")
                 .ok()
                 .map(|endpoint| ExternalHttpRuntime {
@@ -14622,7 +14622,7 @@ sleep 3600
             "model", "full tk", "turns", "tiered tk", "turns", "full", "tiered"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             let full_run = bench_run("media · full", media_prompt, full.clone()).await;
             let tiered_run = bench_run("media · tiered", media_prompt, tiered.clone()).await;
             println!(
@@ -14810,11 +14810,11 @@ sleep 3600
     #[test]
     #[serial]
     fn an_operator_can_put_the_whole_project_doc_back() {
-        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+        crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
         assert!(!inline_project_doc_forced());
         assert!(http_agent_reads_its_own_files(true, true));
 
-        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+        crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
         assert!(inline_project_doc_forced());
         assert!(
             !http_agent_reads_its_own_files(true, true),
@@ -14822,9 +14822,9 @@ sleep 3600
         );
 
         // Une valeur qui n'est pas `1` ne force rien.
-        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "oui");
+        crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "oui");
         assert!(!inline_project_doc_forced());
-        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+        crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
     }
 
     /// Vider les caches ne suffisait pas : la garde anti-répétition RETIRE un

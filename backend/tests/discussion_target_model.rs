@@ -20,8 +20,8 @@ async fn fixture(
         let host_home = root.path().join("host-home");
         std::fs::create_dir_all(&data_dir).expect("create discussion-target data fixture");
         std::fs::create_dir_all(&host_home).expect("create discussion-target host fixture");
-        std::env::set_var("KRONN_DATA_DIR", data_dir);
-        std::env::set_var("KRONN_HOST_HOME", host_home);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
         root
     });
     let db = Arc::new(kronn::db::Database::open_in_memory().unwrap());

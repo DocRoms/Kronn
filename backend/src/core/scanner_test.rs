@@ -7,7 +7,7 @@ mod tests {
     #[serial]
     fn resolve_host_path_no_env() {
         // Without KRONN_HOST_HOME, paths should pass through unchanged
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/some/local/path");
         assert_eq!(result.to_string_lossy(), "/some/local/path");
     }
@@ -797,10 +797,10 @@ mod tests {
         std::fs::create_dir_all(&writable).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
 
-        std::env::set_var("KRONN_IN_DOCKER", "1");
-        std::env::set_var("KRONN_REPOS_DIR", root.path().join("repos"));
-        std::env::remove_var("KRONN_EXTRA_REPOS");
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_REPOS_DIR", root.path().join("repos"));
+        crate::core::child_env::remove_var("KRONN_EXTRA_REPOS");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
 
         let inside = diagnose_project_write_access(&writable.to_string_lossy());
         assert_eq!(
@@ -814,7 +814,7 @@ mod tests {
         );
         assert_eq!(blocked.reason.as_deref(), Some("outside_rw_perimeter"));
 
-        std::env::remove_var("KRONN_IN_DOCKER");
-        std::env::remove_var("KRONN_REPOS_DIR");
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+        crate::core::child_env::remove_var("KRONN_REPOS_DIR");
     }
 }

@@ -422,7 +422,7 @@ mod tests {
     fn update_preserves_the_original_id_and_is_atomic() {
         let dir = scratch_config_dir("directives-update");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let id = save_custom_directive(
             "Original Name",
@@ -464,8 +464,8 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -474,7 +474,7 @@ mod tests {
     fn update_of_unknown_id_is_rejected() {
         let dir = scratch_config_dir("directives-update-missing");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let result = update_custom_directive(
             "custom-does-not-exist",
@@ -488,8 +488,8 @@ mod tests {
         assert!(result.is_err());
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -498,7 +498,7 @@ mod tests {
     fn colliding_slugs_do_not_overwrite_each_other() {
         let dir = scratch_config_dir("directives-collision");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = save_custom_directive(
             "Foo Bar",
@@ -524,8 +524,8 @@ mod tests {
         assert_eq!(get_directive(&second).unwrap().content, "content B");
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -534,7 +534,7 @@ mod tests {
     fn update_and_delete_reject_a_path_traversal_id() {
         let dir = scratch_config_dir("directives-traversal");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         // Lives one level above the directives/ dir the traversal id targets.
         let sentinel = dir.join("sentinel.md");
@@ -565,8 +565,8 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -575,7 +575,7 @@ mod tests {
     fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
         let dir = scratch_config_dir("directives-snapshot");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let id = save_custom_directive(
             "Snapshot Directive",
@@ -618,8 +618,8 @@ mod tests {
         release_directives_snapshot(&run_id);
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 

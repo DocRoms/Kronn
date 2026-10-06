@@ -643,9 +643,8 @@ fn the_webview_keeps_an_allow_list_only() {
         "WEBKIT_DISABLE_COMPOSITING_MODE",
         "WEBVIEW2_USER_DATA_FOLDER",
         "RUST_LOG",
-        "KRONN_DATA_DIR",
-        "KRONN_USE_KEYCHAIN",
-        "KRONN_MCP_SECRET_REFERENCES",
+        "SNAP",
+        "SNAP_NAME",
     ] {
         assert!(webview_keeps(OsStr::new(kept)), "{kept}");
     }
@@ -662,6 +661,10 @@ fn the_webview_keeps_an_allow_list_only() {
         "KRONN_BRIDGE_TOKEN",
         "KRONN_AUTH_TOKEN",
         "OLLAMA_HOST",
+        "KRONN_FAILURE_NOTIFY_URL",
+        "KRONN_DATA_DIR",
+        "KRONN_USE_KEYCHAIN",
+        "SNAPLET_TARGET_DATABASE_URL",
     ] {
         assert!(!webview_keeps(OsStr::new(withheld)), "{withheld}");
     }
@@ -682,31 +685,23 @@ fn withheld_variables_leave_the_process_but_reach_kronn() {
         ("DEPLOY_PASSPHRASE", "sentinel-passphrase"),
         ("SENTRY_DSN", "https://key@sentry.example/1"),
         ("KRONN_WITHHOLD_SENTINEL_API_KEY", "sentinel"),
-        ("KRONN_USE_KEYCHAIN", "1"),
     ];
     for (name, value) in sentinels {
-        std::env::set_var(name, value);
+        crate::core::child_env::set_var(name, value);
     }
     let names: Vec<&str> = sentinels.iter().map(|(name, _)| *name).collect();
     let held = take_process_environment_where(|name| {
         !names.iter().any(|sentinel| name == *sentinel) || webview_keeps(name)
     });
     for (name, value) in sentinels {
-        let live = std::env::var_os(name);
-        if name == "KRONN_USE_KEYCHAIN" {
-            assert_eq!(live.as_deref(), Some(OsStr::new(value)), "{name}");
-        } else {
-            assert!(live.is_none(), "{name} stayed live");
-            let value_held = held
-                .iter()
-                .find_map(|(key, held)| (key == name).then_some(held));
-            assert_eq!(value_held.map(|v| v.to_str().unwrap()), Some(value));
-        }
+        assert!(std::env::var_os(name).is_none(), "{name} stayed live");
+        let value_held = held
+            .iter()
+            .find_map(|(key, held)| (key == name).then_some(held));
+        assert_eq!(value_held.map(|v| v.to_str().unwrap()), Some(value));
     }
-    // The keychain switch the error message recommends still works.
-    assert!(crate::core::keyvault::use_os_keychain());
     for (name, _) in sentinels {
-        std::env::remove_var(name);
+        crate::core::child_env::remove_var(name);
     }
 
     let live = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
@@ -769,4 +764,90 @@ fn the_desktop_withholds_its_environment_before_the_webview_starts() {
         .expect("the desktop never withholds its environment");
     assert!(withhold < main.find("tauri::Builder::default()").unwrap());
     assert!(withhold < main.find("tracing_subscriber::").unwrap());
+}
+
+/// Kronn's reads fall back to the withheld set: a variable the desktop
+/// withheld still resolves, without duplicates (B8-05, B8-01).
+#[test]
+fn reads_fall_back_to_withheld_variables() {
+    let names = [
+        "KRONN_R8_SENTINEL_HOST",
+        "KRONN_FAILURE_NOTIFY_URL",
+        "KRONN_USE_KEYCHAIN",
+        "Kronn_R8_Mixed_Token",
+    ];
+    for name in names {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "{name} is set in the test env"
+        );
+    }
+    with_withheld_env(
+        &[
+            ("KRONN_R8_SENTINEL_HOST", "h"),
+            ("KRONN_FAILURE_NOTIFY_URL", "https://hooks.example/secret"),
+            ("KRONN_USE_KEYCHAIN", "1"),
+            ("Kronn_R8_Mixed_Token", "x"),
+            ("PATH", "withheld-duplicate"),
+        ],
+        || {
+            assert_eq!(var("KRONN_R8_SENTINEL_HOST").as_deref(), Ok("h"));
+            assert_eq!(
+                var_os("KRONN_R8_SENTINEL_HOST").as_deref(),
+                Some(OsStr::new("h"))
+            );
+            assert_eq!(
+                var("KRONN_FAILURE_NOTIFY_URL").as_deref(),
+                Ok("https://hooks.example/secret")
+            );
+            // The keychain switch the error message recommends works through
+            // the overlay, though the desktop withholds it (B7-02).
+            assert!(crate::core::keyvault::use_os_keychain());
+            let all = vars_os();
+            assert!(all
+                .iter()
+                .any(|(key, value)| key == "KRONN_R8_SENTINEL_HOST" && value == "h"));
+            // A live variable wins and is listed once.
+            assert_eq!(all.iter().filter(|(key, _)| key == "PATH").count(), 1);
+            assert_ne!(var("PATH").as_deref(), Ok("withheld-duplicate"));
+            if cfg!(windows) {
+                assert_eq!(var("KRONN_R8_MIXED_TOKEN").as_deref(), Ok("x"));
+            }
+        },
+    );
+    assert!(var("KRONN_R8_SENTINEL_HOST").is_err());
+}
+
+/// Writes keep the overlay consistent: a removed variable is gone from the
+/// withheld set too, and once the desktop withholds, a name off the webview
+/// allow-list is never set live (B8-04).
+#[test]
+#[serial_test::serial]
+fn writes_keep_the_withheld_set_consistent() {
+    with_withheld_env(&[("KRONN_R8_X_TOKEN", "v")], || {
+        assert_eq!(var("KRONN_R8_X_TOKEN").as_deref(), Ok("v"));
+        remove_var("KRONN_R8_X_TOKEN");
+        assert_eq!(var("KRONN_R8_X_TOKEN"), Err(std::env::VarError::NotPresent));
+
+        set_var("KRONN_R8_MYSQL_PWD", "pw");
+        assert!(std::env::var_os("KRONN_R8_MYSQL_PWD").is_none());
+        assert_eq!(var("KRONN_R8_MYSQL_PWD").as_deref(), Ok("pw"));
+        remove_var("KRONN_R8_MYSQL_PWD");
+
+        // An allow-listed name is set live.
+        set_var("WEBKIT_R8_SENTINEL", "1");
+        assert_eq!(
+            std::env::var_os("WEBKIT_R8_SENTINEL").as_deref(),
+            Some(OsStr::new("1"))
+        );
+        remove_var("WEBKIT_R8_SENTINEL");
+        assert!(std::env::var_os("WEBKIT_R8_SENTINEL").is_none());
+    });
+    // Outside the desktop policy, writes are plain.
+    set_var("KRONN_R8_PLAIN_TOKEN", "t");
+    assert_eq!(
+        std::env::var_os("KRONN_R8_PLAIN_TOKEN").as_deref(),
+        Some(OsStr::new("t"))
+    );
+    remove_var("KRONN_R8_PLAIN_TOKEN");
 }

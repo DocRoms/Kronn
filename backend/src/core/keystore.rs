@@ -2006,12 +2006,12 @@ mod tests {
         let mut cfg = config::default_config();
         cfg.encryption_secret = None;
 
-        std::env::set_var(
+        crate::core::child_env::set_var(
             ENV_REENCRYPT_FROM,
             crypto::key_fingerprint_hex(&k2).unwrap(),
         );
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(ENV_REENCRYPT_FROM);
+        crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         assert_eq!(
             outcome.unwrap(),
             KeyOutcome::Resolved { source: "keychain" }
@@ -2040,7 +2040,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (sidecar, cell) = mem_vault("sidecar", Some(&format!(" {k}\n")));
         let store = KeyStore::from_vaults(vec![sidecar]);
-        std::env::set_var(crate::core::keyvault::ENV_KEK, k.to_uppercase());
+        crate::core::child_env::set_var(crate::core::keyvault::ENV_KEK, k.to_uppercase());
         let mut outcomes = Vec::new();
         for _ in 0..2 {
             let mut cfg = config::default_config();
@@ -2052,7 +2052,7 @@ mod tests {
                 "canonical"
             );
         }
-        std::env::remove_var(crate::core::keyvault::ENV_KEK);
+        crate::core::child_env::remove_var(crate::core::keyvault::ENV_KEK);
         for outcome in outcomes {
             assert!(matches!(outcome.unwrap(), KeyOutcome::Resolved { .. }));
         }
@@ -2314,7 +2314,7 @@ mod tests {
         let (sidecar, _b) = mem_vault("sidecar", Some(&k2));
         let store = KeyStore::from_vaults(vec![keychain, sidecar]);
         let boot = |retire: &str| {
-            std::env::set_var(
+            crate::core::child_env::set_var(
                 ENV_REENCRYPT_FROM,
                 crypto::key_fingerprint_hex(retire).unwrap(),
             );
@@ -2337,7 +2337,7 @@ mod tests {
         let mut cfg = config::default_config();
         cfg.encryption_secret = Some(k3.clone());
         let third = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(ENV_REENCRYPT_FROM);
+        crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         assert_eq!(third.unwrap(), KeyOutcome::Resolved { source: "keychain" });
         assert!(decrypts_every_column(
             &k1,
@@ -2400,14 +2400,14 @@ mod tests {
         let (keychain, _a) = mem_vault("keychain", Some(&k1));
         let (sidecar, _b) = mem_vault("sidecar", Some(&k2));
         let store = KeyStore::from_vaults(vec![keychain, sidecar]);
-        std::env::set_var(
+        crate::core::child_env::set_var(
             ENV_REENCRYPT_FROM,
             crypto::key_fingerprint_hex(&k2).unwrap(),
         );
         let mut cfg = config::default_config();
         cfg.encryption_secret = None;
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(ENV_REENCRYPT_FROM);
+        crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         outcome.unwrap();
         assert_eq!(
             crate::core::credential_store::read_backup(&backup, &k1).unwrap(),
@@ -2427,11 +2427,11 @@ mod tests {
         config::retain_disk_key(tmp.path(), &k);
         let (sidecar, _s) = mem_vault("sidecar", Some(&k));
         let store = KeyStore::from_vaults(vec![sidecar]);
-        std::env::set_var(crate::core::keyvault::ENV_KEK, &k);
+        crate::core::child_env::set_var(crate::core::keyvault::ENV_KEK, &k);
         let mut cfg = config::default_config();
         cfg.encryption_secret = Some(k.clone());
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(crate::core::keyvault::ENV_KEK);
+        crate::core::child_env::remove_var(crate::core::keyvault::ENV_KEK);
         outcome.unwrap();
         assert_eq!(config::retained_disk_key(tmp.path()), Some(k));
     }
@@ -2833,12 +2833,12 @@ mod tests {
         let store = KeyStore::from_vaults(vec![sidecar]);
         let mut cfg = config::default_config();
         cfg.encryption_secret = Some(k1.clone());
-        std::env::set_var(
+        crate::core::child_env::set_var(
             ENV_REENCRYPT_FROM,
             crypto::key_fingerprint_hex(&k1).unwrap(),
         );
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(ENV_REENCRYPT_FROM);
+        crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         assert_eq!(outcome.unwrap(), KeyOutcome::Resolved { source: "sidecar" });
         assert_eq!(config::retained_disk_key(tmp.path()), Some(k2));
         assert_eq!(side_file_keys(tmp.path()), vec![k1]);
@@ -3225,14 +3225,14 @@ mod tests {
         let (keychain, _a) = mem_vault("keychain", Some(&k1));
         let (sidecar, _b) = mem_vault("sidecar", Some(&k2));
         let store = KeyStore::from_vaults(vec![keychain, sidecar]);
-        std::env::set_var(
+        crate::core::child_env::set_var(
             ENV_REENCRYPT_FROM,
             crypto::key_fingerprint_hex(&k2).unwrap(),
         );
         let mut cfg = config::default_config();
         cfg.encryption_secret = None;
         let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
-        std::env::remove_var(ENV_REENCRYPT_FROM);
+        crate::core::child_env::remove_var(ENV_REENCRYPT_FROM);
         outcome.unwrap();
         assert!(decrypts_every_column(
             &k1,

@@ -160,12 +160,12 @@ async fn wal_disabled_skips_the_reader_and_falls_back() {
     // there. Observable: a write through with_read_conn SUCCEEDS (it's
     // the write connection, no query_only guard).
     let prev_wal = crate::core::child_env::var("KRONN_DB_WAL").ok();
-    std::env::set_var("KRONN_DB_WAL", "0");
+    crate::core::child_env::set_var("KRONN_DB_WAL", "0");
     let tmp = tempfile::TempDir::new().unwrap();
     let db = crate::db::Database::open_path(&tmp.path().join("nowal.db"));
     match prev_wal {
-        Some(v) => std::env::set_var("KRONN_DB_WAL", v),
-        None => std::env::remove_var("KRONN_DB_WAL"),
+        Some(v) => crate::core::child_env::set_var("KRONN_DB_WAL", v),
+        None => crate::core::child_env::remove_var("KRONN_DB_WAL"),
     }
     let db = db.unwrap();
 

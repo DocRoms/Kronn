@@ -3838,11 +3838,11 @@ mod tests {
     {
         let dir = tempfile::tempdir().unwrap();
         let previous = crate::core::child_env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", dir.path());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
         f(dir.path().to_path_buf()).await;
         match previous {
-            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(v) => crate::core::child_env::set_var("KRONN_DATA_DIR", v),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -4261,7 +4261,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let state = test_state();
         let mut imported = config::default_config();

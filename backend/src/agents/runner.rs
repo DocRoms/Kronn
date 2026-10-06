@@ -13777,9 +13777,9 @@ mod acp_resume_tests {
             fn drop(&mut self) {
                 for (name, previous) in &self.0 {
                     if let Some(value) = previous {
-                        std::env::set_var(name, value);
+                        crate::core::child_env::set_var(name, value);
                     } else {
-                        std::env::remove_var(name);
+                        crate::core::child_env::remove_var(name);
                     }
                 }
             }
@@ -13795,7 +13795,7 @@ mod acp_resume_tests {
             ),
         ]);
         for (name, _) in &restore.0 {
-            std::env::set_var(name, "1");
+            crate::core::child_env::set_var(name, "1");
         }
         let project = tempfile::tempdir().unwrap();
         let tokens = TokensConfig {

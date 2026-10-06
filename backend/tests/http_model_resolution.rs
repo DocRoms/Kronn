@@ -22,7 +22,7 @@ async fn fixture() -> (Database, MockServer, ExternalHttpRuntime, TokensConfig) 
     static DIRECTORY: OnceLock<tempfile::TempDir> = OnceLock::new();
     DIRECTORY.get_or_init(|| {
         let directory = tempfile::tempdir().unwrap();
-        std::env::set_var("KRONN_DATA_DIR", directory.path());
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", directory.path());
         directory
     });
     let db = Database::open_in_memory().unwrap();

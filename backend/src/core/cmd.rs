@@ -205,7 +205,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         // Also in the real process environment: without the policy, git would
         // inherit it from there. A name nothing else in the suite reads.
-        std::env::set_var("KRONN_HOOK_SENTINEL_API_KEY", "sentinel-real-env");
+        crate::core::child_env::set_var("KRONN_HOOK_SENTINEL_API_KEY", "sentinel-real-env");
         let git = |args: &[&str]| {
             let output = crate::core::child_env::with_parent_env(
                 &[
@@ -241,7 +241,7 @@ mod tests {
         std::fs::write(repo.path().join("f.txt"), "x").unwrap();
         git(&["add", "f.txt"]);
         git(&["commit", "-q", "-m", "fixture"]);
-        std::env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
+        crate::core::child_env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
     }
 
     /// A program Kronn runs for itself gets the base allow-list only.
@@ -364,8 +364,9 @@ mod tests {
         let expected: std::collections::BTreeMap<String, usize> = [
             // raw_async, raw_sync, open_in_system (open::commands, isolated)
             ("backend/src/core/cmd.rs", 3),
-            // var, var_os, vars_os, take_process_environment_where: the live reads
-            ("backend/src/core/child_env.rs", 4),
+            // var, var_os, vars_os, set_var, remove_var,
+            // take_process_environment_where: the live reads and writes
+            ("backend/src/core/child_env.rs", 6),
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
             ("backend/tests/api_tests.rs", 1),
@@ -394,7 +395,7 @@ mod tests {
             for name in ["config.toml", "config"] {
                 let file = dir.join(".cargo").join(name);
                 if let Ok(text) = std::fs::read_to_string(&file) {
-                    assert!(!rustflags_lower_lints(&text), "{}", file.display());
+                    assert!(!config_lowers_lints(&text), "{}", file.display());
                 }
             }
         }
@@ -486,11 +487,15 @@ mod tests {
         }
         // rustc reads `-` in a lint name as `_` (flags themselves keep theirs).
         let compact = compact
+            .replace("--force-warn", "\u{4}")
             .replace("--allow", "\u{1}")
+            .replace("--warn", "\u{5}")
             .replace("-A", "\u{2}")
             .replace("-W", "\u{3}")
             .replace('-', "_")
+            .replace('\u{4}', "--force-warn")
             .replace('\u{1}', "--allow")
+            .replace('\u{5}', "--warn")
             .replace('\u{2}', "-A")
             .replace('\u{3}', "-W");
         if compact.contains("__cap_lints") {
@@ -504,10 +509,48 @@ mod tests {
                 format!("--allow{lint}"),
                 format!("\"--allow\",\"{lint}\""),
                 format!("-W{lint}"),
+                format!("--warn={lint}"),
+                format!("--warn{lint}"),
+                format!("\"--warn\",\"{lint}\""),
+                format!("--force-warn={lint}"),
+                format!("--force-warn{lint}"),
+                format!("\"--force-warn\",\"{lint}\""),
             ]
             .iter()
             .any(|form| compact.contains(form.as_str()))
         })
+    }
+
+    /// A Cargo configuration that lowers the ban: rustflags, an alias that
+    /// shadows `cargo clippy`, or an `[env]` value clippy-driver reads.
+    fn config_lowers_lints(text: &str) -> bool {
+        if rustflags_lower_lints(text) {
+            return true;
+        }
+        let mut table = String::new();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap().trim();
+            if line.starts_with('[') {
+                table = line
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .trim()
+                    .to_string();
+                continue;
+            }
+            let Some((key, _)) = line.split_once('=') else {
+                continue;
+            };
+            let full = format!("{table}.{}", key.trim().trim_matches('"'));
+            let mut parts = full.splitn(2, '.');
+            let (section, key) = (parts.next().unwrap(), parts.next().unwrap_or(""));
+            if section == "alias" && key == "clippy" {
+                return true;
+            }
+            if section == "env" && key.to_ascii_uppercase().starts_with("CLIPPY_") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Every way to lower the spawn ban is caught (B6-05).
@@ -549,9 +592,19 @@ mod tests {
             "[build]\nrustflags = [\"-Aclippy::disallowed-methods\"]\n",
             "[build]\nrustflags = \"--allow clippy::all\"\n",
             "[build]\nrustflags = [\"--allow=clippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = [\"--force-warn\", \"clippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = \"--force-warn=clippy::all\"\n",
+            "[build]\nrustflags = [\"--warn\", \"clippy::style\"]\n",
+            "[alias]\nclippy = \"check\"\n",
+            "[alias]\nclippy = [\"check\", \"--all-targets\"]\n",
+            "[env]\nCLIPPY_CONF_DIR = \"x\"\n",
+            "[env]\nCLIPPY_ARGS = { value = \"\", force = true }\n",
         ] {
-            assert!(rustflags_lower_lints(config), "{config}");
+            assert!(config_lowers_lints(config), "{config}");
         }
+        assert!(!config_lowers_lints(
+            "[alias]\nc = \"check\"\n[env]\nRUST_LOG = \"info\"\n"
+        ));
         assert!(!rustflags_lower_lints("[build]\ntarget-dir = \"target\"\n"));
     }
 
@@ -625,6 +678,11 @@ mod tests {
             "std::env::var_os",
             "std::env::vars",
             "std::env::vars_os",
+            "std::env::set_var",
+            "std::env::remove_var",
+            "libc::getenv",
+            "libc::secure_getenv",
+            "libc::_NSGetEnviron",
         ];
         for entry in required {
             assert!(desktop_paths.contains(entry), "{entry} is not banned");

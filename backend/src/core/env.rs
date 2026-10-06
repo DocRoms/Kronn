@@ -106,12 +106,12 @@ mod tests {
     #[serial]
     fn is_docker_true_when_marker_set() {
         let old = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
-        std::env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
         assert!(is_docker());
         if let Some(v) = old {
-            std::env::set_var("KRONN_IN_DOCKER", v);
+            crate::core::child_env::set_var("KRONN_IN_DOCKER", v);
         } else {
-            std::env::remove_var("KRONN_IN_DOCKER");
+            crate::core::child_env::remove_var("KRONN_IN_DOCKER");
         }
     }
 
@@ -122,8 +122,8 @@ mod tests {
         // set; it must NOT flip docker mode (fail-open on the LAN guard).
         let old_marker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
         let old_data = crate::core::child_env::var("KRONN_DATA_DIR").ok();
-        std::env::remove_var("KRONN_IN_DOCKER");
-        std::env::set_var("KRONN_DATA_DIR", "/tmp/relocated");
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", "/tmp/relocated");
         // (skip on machines actually running tests inside a container)
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
@@ -131,11 +131,11 @@ mod tests {
             assert!(!is_docker(), "data-dir override alone must not mean docker");
         }
         if let Some(v) = old_marker {
-            std::env::set_var("KRONN_IN_DOCKER", v);
+            crate::core::child_env::set_var("KRONN_IN_DOCKER", v);
         }
         match old_data {
-            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(v) => crate::core::child_env::set_var("KRONN_DATA_DIR", v),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -143,12 +143,12 @@ mod tests {
     #[serial]
     fn auth_off_by_default_under_docker() {
         let old = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
-        std::env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
         assert!(!auth_on_by_default(), "Docker → auth must default OFF (localhost bypass can't see the real client behind NAT)");
         if let Some(v) = old {
-            std::env::set_var("KRONN_IN_DOCKER", v);
+            crate::core::child_env::set_var("KRONN_IN_DOCKER", v);
         } else {
-            std::env::remove_var("KRONN_IN_DOCKER");
+            crate::core::child_env::remove_var("KRONN_IN_DOCKER");
         }
     }
 
@@ -156,7 +156,7 @@ mod tests {
     #[serial]
     fn auth_on_by_default_when_native() {
         let old = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
-        std::env::remove_var("KRONN_IN_DOCKER");
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
         {
@@ -166,7 +166,7 @@ mod tests {
             );
         }
         if let Some(v) = old {
-            std::env::set_var("KRONN_IN_DOCKER", v);
+            crate::core::child_env::set_var("KRONN_IN_DOCKER", v);
         }
     }
 
@@ -174,12 +174,12 @@ mod tests {
     #[serial]
     fn host_os_label_from_env() {
         let old = crate::core::child_env::var("KRONN_HOST_OS").ok();
-        std::env::set_var("KRONN_HOST_OS", "macOS");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "macOS");
         assert_eq!(host_os_label(), "macOS");
         if let Some(v) = old {
-            std::env::set_var("KRONN_HOST_OS", v);
+            crate::core::child_env::set_var("KRONN_HOST_OS", v);
         } else {
-            std::env::remove_var("KRONN_HOST_OS");
+            crate::core::child_env::remove_var("KRONN_HOST_OS");
         }
     }
 
@@ -187,16 +187,16 @@ mod tests {
     #[serial]
     fn host_os_label_ignores_empty() {
         let old = crate::core::child_env::var("KRONN_HOST_OS").ok();
-        std::env::set_var("KRONN_HOST_OS", "");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "");
         let label = host_os_label();
         assert!(
             !label.is_empty(),
             "Should fall through to platform detection"
         );
         if let Some(v) = old {
-            std::env::set_var("KRONN_HOST_OS", v);
+            crate::core::child_env::set_var("KRONN_HOST_OS", v);
         } else {
-            std::env::remove_var("KRONN_HOST_OS");
+            crate::core::child_env::remove_var("KRONN_HOST_OS");
         }
     }
 
@@ -205,18 +205,18 @@ mod tests {
     fn host_os_label_wsl_via_distro_name() {
         let old_os = crate::core::child_env::var("KRONN_HOST_OS").ok();
         let old_wsl = crate::core::child_env::var("WSL_DISTRO_NAME").ok();
-        std::env::remove_var("KRONN_HOST_OS");
-        std::env::set_var("WSL_DISTRO_NAME", "Ubuntu");
+        crate::core::child_env::remove_var("KRONN_HOST_OS");
+        crate::core::child_env::set_var("WSL_DISTRO_NAME", "Ubuntu");
         let label = host_os_label();
         if let Some(v) = old_os {
-            std::env::set_var("KRONN_HOST_OS", v);
+            crate::core::child_env::set_var("KRONN_HOST_OS", v);
         } else {
-            std::env::remove_var("KRONN_HOST_OS");
+            crate::core::child_env::remove_var("KRONN_HOST_OS");
         }
         if let Some(v) = old_wsl {
-            std::env::set_var("WSL_DISTRO_NAME", v);
+            crate::core::child_env::set_var("WSL_DISTRO_NAME", v);
         } else {
-            std::env::remove_var("WSL_DISTRO_NAME");
+            crate::core::child_env::remove_var("WSL_DISTRO_NAME");
         }
         #[cfg(target_os = "linux")]
         assert_eq!(label, "WSL");

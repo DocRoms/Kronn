@@ -29,8 +29,8 @@ fn isolate_config_dir() {
         let host_home = root.path().join("host-home");
         std::fs::create_dir_all(&data_dir).expect("create learnings data fixture");
         std::fs::create_dir_all(&host_home).expect("create learnings host fixture");
-        std::env::set_var("KRONN_DATA_DIR", data_dir);
-        std::env::set_var("KRONN_HOST_HOME", host_home);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
         root
     });
 }
@@ -280,7 +280,7 @@ async fn validate_accepts_inference_with_single_human_validation() {
     // on a single human validation. Pins the intended behaviour so a future
     // change is deliberate.
     let tmp = std::env::temp_dir().join(format!("kronn_uc_inf_{}", uuid::Uuid::new_v4()));
-    std::env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
+    kronn::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
     let app = test_app();
     let (_s, j) = post(
         app.clone(),
@@ -300,7 +300,7 @@ async fn validate_accepts_inference_with_single_human_validation() {
         "inference promotes on single validation in 0.10.0: {jv}"
     );
     assert_eq!(jv["data"]["status"], "promoted");
-    std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+    kronn::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     std::fs::remove_dir_all(&tmp).ok();
 }
 
@@ -339,7 +339,7 @@ async fn reject_after_promote_is_refused() {
     // rejected (which would desync DB vs the already-written learnings.md).
     let _env = ENV_LOCK.lock().await;
     let tmp = std::env::temp_dir().join(format!("kronn_uc_rap_{}", uuid::Uuid::new_v4()));
-    std::env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
+    kronn::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
     let app = test_app();
     let (_s, j) = post(
         app.clone(),
@@ -370,7 +370,7 @@ async fn reject_after_promote_is_refused() {
         .unwrap()
         .to_lowercase()
         .contains("pending"));
-    std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+    kronn::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     std::fs::remove_dir_all(&tmp).ok();
 }
 
@@ -412,7 +412,7 @@ async fn validate_promotes_user_scope_to_file() {
     let _env = ENV_LOCK.lock().await;
     // Isolate the user-context dir so the promotion write is sandboxed.
     let tmp = std::env::temp_dir().join(format!("kronn_uc_{}", uuid::Uuid::new_v4()));
-    std::env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
+    kronn::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", &tmp);
 
     let app = test_app();
     let (_st, j) = post(
@@ -437,6 +437,6 @@ async fn validate_promotes_user_scope_to_file() {
     assert!(content.contains("validate and promote me"));
     assert!(content.contains(&format!("(lc_id:{id})")));
 
-    std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+    kronn::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     std::fs::remove_dir_all(&tmp).ok();
 }

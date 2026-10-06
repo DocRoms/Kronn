@@ -169,7 +169,7 @@ mod tests {
     #[serial]
     fn resolve_url_prefers_config_trims_and_rejects_empty() {
         // Env-free assertions first (this test is the only env manipulator).
-        std::env::remove_var("KRONN_FAILURE_NOTIFY_URL");
+        crate::core::child_env::remove_var("KRONN_FAILURE_NOTIFY_URL");
         assert_eq!(
             resolve_url(Some("  https://hook  ".into())).as_deref(),
             Some("https://hook")
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(resolve_url(None), None);
 
         // An empty/whitespace config value must NOT mask a valid env URL.
-        std::env::set_var("KRONN_FAILURE_NOTIFY_URL", "  https://env-hook  ");
+        crate::core::child_env::set_var("KRONN_FAILURE_NOTIFY_URL", "  https://env-hook  ");
         assert_eq!(
             resolve_url(Some("   ".into())).as_deref(),
             Some("https://env-hook")
@@ -190,6 +190,6 @@ mod tests {
             resolve_url(Some("https://cfg-hook".into())).as_deref(),
             Some("https://cfg-hook")
         );
-        std::env::remove_var("KRONN_FAILURE_NOTIFY_URL");
+        crate::core::child_env::remove_var("KRONN_FAILURE_NOTIFY_URL");
     }
 }

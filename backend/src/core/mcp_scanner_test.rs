@@ -796,7 +796,7 @@ command = "manual-command"
         let tmp = setup_tmp("redir-no-ai");
         // No ai/ directory — should do nothing
         // Set KRONN_TEMPLATES_DIR to a valid templates path
-        std::env::set_var("KRONN_TEMPLATES_DIR", "/tmp/kronn-test-no-templates");
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", "/tmp/kronn-test-no-templates");
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
         // No files should be created
         assert!(!tmp.join("CLAUDE.md").exists());
@@ -822,7 +822,7 @@ command = "manual-command"
         std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
         std::fs::write(tpl.join("CLAUDE.md"), "Read docs/AGENTS.md").unwrap();
 
-        std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
 
         assert!(
@@ -866,7 +866,7 @@ command = "manual-command"
         )
         .unwrap();
 
-        std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
 
         assert!(!tmp.join("CLAUDE.md").exists());
@@ -902,7 +902,7 @@ command = "manual-command"
         std::fs::write(tpl.join("GEMINI.md"), "Template content").unwrap();
         std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
 
-        std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
 
         // CLAUDE.md should NOT be overwritten
@@ -3025,7 +3025,7 @@ args = ["@example/old-mcp"]
         let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
 
         // Native: delegates to the backend-PATH check.
-        std::env::remove_var("KRONN_IN_DOCKER");
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
         {
@@ -3036,8 +3036,8 @@ args = ["@example/old-mcp"]
         }
 
         // Docker + host bin present as a DANGLING symlink (brew Cellar) → kept.
-        std::env::set_var("KRONN_IN_DOCKER", "1");
-        std::env::set_var("KRONN_HOST_BIN", tmp.path());
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_HOST_BIN", tmp.path());
         std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", tmp.path().join("uvx")).unwrap();
         assert!(
             host_mcp_command_available("uvx"),
@@ -3051,16 +3051,16 @@ args = ["@example/old-mcp"]
         // Docker + absolute path → unverifiable from the container → keep.
         assert!(host_mcp_command_available("/usr/local/bin/uvx"));
         // Docker without a host-bin mount → keep (never drop what may work).
-        std::env::remove_var("KRONN_HOST_BIN");
+        crate::core::child_env::remove_var("KRONN_HOST_BIN");
         assert!(host_mcp_command_available("uvx"));
 
         match prev_docker {
-            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
-            None => std::env::remove_var("KRONN_IN_DOCKER"),
+            Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
+            None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
         }
         match prev_hb {
-            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
-            None => std::env::remove_var("KRONN_HOST_BIN"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_BIN", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_BIN"),
         }
     }
 
@@ -3076,7 +3076,7 @@ args = ["@example/old-mcp"]
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
         let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3131,7 +3131,7 @@ args = ["@example/old-mcp"]
         }
 
         let plans = |mode: &str| -> Vec<(&'static str, String)> {
-            std::env::set_var("KRONN_MCP_SECRET_REFERENCES", mode);
+            crate::core::child_env::set_var("KRONN_MCP_SECRET_REFERENCES", mode);
             let syncs: [(&'static str, &dyn HostMcpSync); 4] = [
                 ("Codex", &CodexSync),
                 ("Copilot", &CopilotSync),
@@ -3147,15 +3147,15 @@ args = ["@example/old-mcp"]
                     (*name, plan.content)
                 })
                 .collect();
-            std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+            crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
             out
         };
 
         let docker = plans("1");
         let native = plans("0");
         match prev_home {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         cleanup(&tmp);
 
@@ -3193,9 +3193,9 @@ args = ["@example/old-mcp"]
         let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         let prev_docker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
         let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
-        std::env::set_var("KRONN_IN_DOCKER", "1");
-        std::env::set_var("KRONN_HOST_BIN", hostbin.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_HOST_BIN", hostbin.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3240,16 +3240,16 @@ args = ["@example/old-mcp"]
         );
 
         match prev_home {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         match prev_docker {
-            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
-            None => std::env::remove_var("KRONN_IN_DOCKER"),
+            Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
+            None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
         }
         match prev_hb {
-            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
-            None => std::env::remove_var("KRONN_HOST_BIN"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_BIN", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_BIN"),
         }
         cleanup(&tmp);
     }
@@ -3265,7 +3265,7 @@ args = ["@example/old-mcp"]
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
         let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3328,8 +3328,8 @@ args = ["@example/old-mcp"]
         );
 
         match prev {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         cleanup(&tmp);
     }
@@ -3350,7 +3350,7 @@ args = ["@example/old-mcp"]
         // process. See feedback_windows_crossplatform.md re env-var
         // testing.
         let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         // Empty in-memory DB — no user MCPs configured. The kronn-
         // internal injection should be the ONLY entry written.
@@ -3384,8 +3384,8 @@ args = ["@example/old-mcp"]
 
         // Restore env
         match prev {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         cleanup(&tmp);
     }
@@ -3397,7 +3397,7 @@ args = ["@example/old-mcp"]
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
         let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3459,8 +3459,8 @@ args = ["@example/old-mcp"]
         );
 
         match prev {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         cleanup(&tmp);
     }
@@ -3472,7 +3472,7 @@ args = ["@example/old-mcp"]
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
         let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3493,8 +3493,8 @@ args = ["@example/old-mcp"]
         );
 
         match prev {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
         cleanup(&tmp);
     }
@@ -3513,15 +3513,15 @@ args = ["@example/old-mcp"]
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
         let b = bridge.to_string_lossy().to_string();
-        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &b);
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &b);
+        crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &b);
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", &b);
 
         let wrote = crate::agents::with_cold_detection_cache(|| {
             write_kronn_internal_only(&tmp.to_string_lossy()).unwrap()
         });
 
-        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
-        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
 
         assert!(wrote, "bridge resolved via env → files should be written");
         for (path, label) in &[
@@ -3606,9 +3606,9 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("secret-refs");
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
-        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
-        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+        crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        crate::core::child_env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = Connection::open_in_memory().unwrap();
@@ -3651,9 +3651,9 @@ args = ["@example/old-mcp"]
         .unwrap();
 
         let result = write_general_mcp_json(&conn, secret, &tmp.to_string_lossy());
-        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
-        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
-        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
         result.unwrap();
 
         let claude = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
@@ -3697,7 +3697,7 @@ args = ["@example/old-mcp"]
         use crate::models::{McpConfig, McpServer, McpSource, McpTransport};
         use rusqlite::Connection;
         let tmp = setup_tmp("secret-native");
-        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "0");
+        crate::core::child_env::set_var("KRONN_MCP_SECRET_REFERENCES", "0");
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3735,7 +3735,7 @@ args = ["@example/old-mcp"]
         )
         .unwrap();
         let result = write_general_mcp_json(&conn, secret, &tmp.to_string_lossy());
-        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
         result.unwrap();
         let claude = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
         assert!(claude.contains("native-value"), "{claude}");
@@ -3758,9 +3758,9 @@ args = ["@example/old-mcp"]
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
         let previous_data = crate::core::child_env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", &data);
-        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &data);
+        crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
         // The user's own server, which Kronn must never take out.
         std::fs::write(
             repo.join(".mcp.json"),
@@ -3832,11 +3832,11 @@ args = ["@example/old-mcp"]
         let claude = std::fs::read_to_string(outside.join(".mcp.json")).unwrap();
         assert!(claude.contains("kronn-internal"), "{claude}");
 
-        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
-        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
         match previous_data {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         cleanup(&tmp);
     }
@@ -3856,9 +3856,9 @@ args = ["@example/old-mcp"]
         std::fs::create_dir_all(&repo).unwrap();
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
-        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
-        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+        crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        crate::core::child_env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = Connection::open_in_memory().unwrap();
@@ -3931,9 +3931,9 @@ args = ["@example/old-mcp"]
         let result = crate::agents::with_cold_detection_cache(|| {
             sync_project_mcps_to_disk(&conn, "p-refs", secret)
         });
-        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
-        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
-        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
         result.unwrap();
 
         let reference = crate::core::mcp_secret_refs::reference_name("cfg-gh", "GITHUB_TOKEN");
@@ -3976,9 +3976,9 @@ args = ["@example/old-mcp"]
         std::fs::create_dir_all(&repo).unwrap();
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
-        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
-        std::env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
+        crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);
+        crate::core::child_env::set_var("KRONN_MCP_SECRET_REFERENCES", "1");
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = Connection::open_in_memory().unwrap();
@@ -4058,9 +4058,9 @@ args = ["@example/old-mcp"]
         let result = crate::agents::with_cold_detection_cache(|| {
             sync_project_mcps_to_disk(&conn, "p-refs-existing", secret)
         });
-        std::env::remove_var("KRONN_MCP_SECRET_REFERENCES");
-        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
-        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+        crate::core::child_env::remove_var("KRONN_MCP_SECRET_REFERENCES");
+        crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
         result.unwrap();
 
         let reference =

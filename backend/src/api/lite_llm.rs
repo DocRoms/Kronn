@@ -632,7 +632,7 @@ mod tests {
     #[serial]
     fn blank_stored_endpoint_falls_through_to_the_default_port() {
         let prev = crate::core::child_env::var("LITELLM_BASE_URL").ok();
-        std::env::remove_var("LITELLM_BASE_URL");
+        crate::core::child_env::remove_var("LITELLM_BASE_URL");
         for stored in [None, Some(""), Some("   ")] {
             assert!(
                 resolve_base_url(stored).ends_with(":4000"),
@@ -641,7 +641,7 @@ mod tests {
             );
         }
         if let Some(p) = prev {
-            std::env::set_var("LITELLM_BASE_URL", p);
+            crate::core::child_env::set_var("LITELLM_BASE_URL", p);
         }
     }
 

@@ -1012,7 +1012,7 @@ mod tests {
         let scratch = std::env::temp_dir().join(format!("kronn-media-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&scratch).expect("scratch dir");
         let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &scratch);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &scratch);
 
         let now = at("2026-09-01T10:00:00Z");
         let db = Database::open_in_memory().expect("in-memory db");
@@ -1114,8 +1114,8 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&scratch);
     }

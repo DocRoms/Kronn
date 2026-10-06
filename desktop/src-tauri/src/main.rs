@@ -399,7 +399,7 @@ fn enrich_path() {
             #[cfg(not(target_os = "macos"))]
             let home_guess = format!("/home/{}", user);
             if std::path::Path::new(&home_guess).is_dir() {
-                std::env::set_var("HOME", &home_guess);
+                kronn::core::child_env::set_var("HOME", &home_guess);
                 tracing::warn!("HOME was not set, recovered to {}", home_guess);
             }
         }
@@ -525,7 +525,7 @@ fn enrich_path() {
     }
 
     let new_path = paths.join(separator);
-    std::env::set_var("PATH", &new_path);
+    kronn::core::child_env::set_var("PATH", &new_path);
     tracing::info!(
         "PATH enriched: {} fallback dirs added, total {} entries",
         added,
@@ -567,7 +567,7 @@ async fn start_backend(
     enrich_path();
     // Every child belongs to this embedded instance, including when a shell
     // inherited an override for a separate Docker/standalone installation.
-    std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{port}"));
+    kronn::core::child_env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{port}"));
 
     // Load or create config
     let mut app_config = match config::load().await? {
@@ -973,7 +973,7 @@ fn reserve_backend_port() -> std::io::Result<port::ChosenPort> {
 
 fn main() {
     // The update banner then only offers a release that has an installer.
-    std::env::set_var(kronn::api::version::DESKTOP_APP_ENV, "1");
+    kronn::core::child_env::set_var(kronn::api::version::DESKTOP_APP_ENV, "1");
     // An operator-set KRONN_AUTH_TOKEN leaves the environment before any thread
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
@@ -1076,7 +1076,7 @@ fn main() {
                 Ok(resource_dir) => {
                     let mcp_sidecar = bundled_mcp_sidecar_path(&resource_dir);
                     if mcp_sidecar.is_file() || !cfg!(debug_assertions) {
-                        std::env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", &mcp_sidecar);
+                        kronn::core::child_env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", &mcp_sidecar);
                         if !mcp_sidecar.is_file() {
                             tracing::error!(
                                 "Bundled MCP bridge missing at {}; repair the installation",
@@ -1086,7 +1086,7 @@ fn main() {
                     }
                     let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
                     if docs_sidecar.is_file() {
-                        std::env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
+                        kronn::core::child_env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
                         tracing::info!(
                             "Bundled document sidecar configured at {}",
                             docs_sidecar.display()
@@ -1100,7 +1100,7 @@ fn main() {
                 }
                 Err(error) => {
                     if !cfg!(debug_assertions) {
-                        std::env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", "");
+                        kronn::core::child_env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", "");
                     }
                     // Document generation is optional. A damaged/missing
                     // sidecar must not terminate or relaunch the whole desktop.
@@ -1432,14 +1432,14 @@ mod enrich_path_tests {
         // /bin/false is the canonical "shell that always exits 1" — must
         // gracefully return None instead of hanging or panicking.
         let prev = kronn::core::child_env::var("SHELL").ok();
-        std::env::set_var("SHELL", "/bin/false");
+        kronn::core::child_env::set_var("SHELL", "/bin/false");
         let result = shell_path_from_user_shell();
         // Either None (false rejected) or some PATH from the bash fallback —
         // both are acceptable, what we care about is that it returns quickly.
         let _ = result;
         match prev {
-            Some(s) => std::env::set_var("SHELL", s),
-            None => std::env::remove_var("SHELL"),
+            Some(s) => kronn::core::child_env::set_var("SHELL", s),
+            None => kronn::core::child_env::remove_var("SHELL"),
         }
     }
 }

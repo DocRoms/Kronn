@@ -24,8 +24,8 @@ impl DataDir {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let previous = crate::core::child_env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", dir.path());
-        std::env::remove_var(crate::core::keyvault::ENV_KEK);
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
+        crate::core::child_env::remove_var(crate::core::keyvault::ENV_KEK);
         Self { dir, previous }
     }
 
@@ -63,8 +63,8 @@ impl Drop for DataDir {
     fn drop(&mut self) {
         self.restart();
         match &self.previous {
-            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(v) => crate::core::child_env::set_var("KRONN_DATA_DIR", v),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 }
@@ -590,7 +590,7 @@ fn merge_prefers_the_file_and_keeps_table_order() {
 async fn an_env_auth_token_is_stored_encrypted_and_leaves_the_environment() {
     let dir = DataDir::new();
     let db = Arc::new(Database::open_in_memory().unwrap());
-    std::env::set_var("KRONN_AUTH_TOKEN", " operator-env-token-0007 ");
+    crate::core::child_env::set_var("KRONN_AUTH_TOKEN", " operator-env-token-0007 ");
     let env_token = config::take_env_auth_token();
     assert_eq!(env_token.as_deref(), Some("operator-env-token-0007"));
     assert!(
@@ -1334,7 +1334,7 @@ async fn a_restore_keeps_the_session_token_and_auth_enabled() {
     })
     .await
     .unwrap();
-    std::env::set_var("KRONN_IN_DOCKER", "1");
+    crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
     let mut cfg = config::load().await.unwrap().unwrap();
     crate::resolve_key_and_credentials(&mut cfg, &db, Some("operator-token".into()))
         .await
@@ -1352,7 +1352,7 @@ async fn a_restore_keeps_the_session_token_and_auth_enabled() {
         [127, 0, 0, 1],
     )
     .await;
-    std::env::remove_var("KRONN_IN_DOCKER");
+    crate::core::child_env::remove_var("KRONN_IN_DOCKER");
     assert_eq!(body["success"], true, "{body}");
     let after = state.config.read().await.clone();
     assert_eq!(after.server.auth_token.as_deref(), Some("operator-token"));

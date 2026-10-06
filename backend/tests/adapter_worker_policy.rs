@@ -13,10 +13,10 @@ impl Environment {
             self.0.push((name, kronn::core::child_env::var_os(name)));
         }
         // This integration binary deliberately has one current-thread test.
-        unsafe {
+        {
             match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
+                Some(value) => kronn::core::child_env::set_var(name, value),
+                None => kronn::core::child_env::remove_var(name),
             }
         }
     }
@@ -27,10 +27,10 @@ impl Environment {
 impl Drop for Environment {
     fn drop(&mut self) {
         for (name, value) in self.0.iter().rev() {
-            unsafe {
+            {
                 match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => kronn::core::child_env::set_var(name, value),
+                    None => kronn::core::child_env::remove_var(name),
                 }
             }
         }
