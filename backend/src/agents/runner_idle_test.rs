@@ -786,6 +786,7 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
         idle_timeout: run.idle,
         cancel_token: run.cancel.cloned(),
         test_acp_transport: Some(transport),
+        full_access: true,
         ..AgentStartConfig::new(
             &AgentType::OpenCode,
             project.path().to_str().unwrap(),
@@ -1157,6 +1158,7 @@ async fn start_scripted(
         idle_timeout: idle,
         cancel_token: cancel.cloned(),
         test_acp_transport: Some(agent.clone()),
+        full_access: true,
         ..AgentStartConfig::new(
             &AgentType::OpenCode,
             project.path().to_str().unwrap(),

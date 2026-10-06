@@ -89,6 +89,10 @@ pub(super) struct AuditAgentLauncher {
     /// agents, and Claude and Codex through their adapters. What `start` hands
     /// back is then a lifeline process, not the agent (KT-927).
     acp: bool,
+    /// Whether a CLI agent runs with full access. A native ACP agent needs its
+    /// own full-access setting (an audit is no explicit choice); every other
+    /// agent keeps the audit's established full access.
+    full_access: bool,
     /// The named connection the user picked for an HTTP agent (KT-980), with
     /// its resolved endpoint and key. `None` uses the provider's default slot.
     connection: Option<(
@@ -120,10 +124,13 @@ impl AuditAgentLauncher {
             route,
             crate::acp::AcpProductionRoute::NativeAcp | crate::acp::AcpProductionRoute::AdaptedAcp
         );
+        let full_access = route != crate::acp::AcpProductionRoute::NativeAcp
+            || state.config.read().await.agents.full_access_for(agent);
         Self {
             state: state.clone(),
             http,
             acp,
+            full_access,
             connection: None,
             provenance: Default::default(),
         }
@@ -137,6 +144,11 @@ impl AuditAgentLauncher {
         connection_id: Option<&str>,
     ) -> Result<Self, String> {
         let mut launcher = Self::new(state, agent).await;
+        // Refused before the audit starts rather than at its first step.
+        if !launcher.full_access {
+            let language = state.config.read().await.language.clone();
+            return Err(runner::native_full_access_refusal_in(agent, &language));
+        }
         let Some(id) =
             crate::http_transport::validate_connection_target(state, agent, connection_id).await?
         else {
@@ -226,7 +238,7 @@ impl AuditAgentLauncher {
             return runner::start_agent_with_config(AgentStartConfig {
                 provenance: Some(self.provenance.clone()),
                 activity,
-                full_access: true,
+                full_access: self.full_access,
                 tier,
                 // A CLI agent reaches the project through its own filesystem;
                 // native tools stay absent rather than inherited by omission.

@@ -130,98 +130,10 @@ pub fn opencode_config_content() -> String {
     )
 }
 
-/// OpenCode permission keys that act on the machine or reach out (1.18): asked,
-/// so the broker decides, when the session has no full access. OpenCode's own
-/// default for every key is `allow`.
-const OPENCODE_ASKED: &[&str] = &[
-    "bash",
-    "doom_loop",
-    "edit",
-    "external_directory",
-    "skill",
-    "task",
-    "webfetch",
-    "websearch",
-];
-
 /// The inline configuration OpenCode starts with, or `None` to leave the
-/// operator's own untouched (full access only).
-///
-/// Without full access every permission is `ask` (`"*"` first: OpenCode keeps
-/// the last matching rule) except reading and listing, the todo list, and the
-/// tools of Kronn's bridge (`bridge_tools`, OpenCode permission names). The
-/// same ruleset is set on the `build` agent, made the default, because an
-/// agent's own permissions override the top-level ones. An operator's
-/// `OPENCODE_CONFIG_CONTENT` keeps its other settings; one that is not a JSON
-/// object refuses the launch rather than run unrestricted.
-pub fn opencode_launch_config(
-    full_access: bool,
-    bridge_tools: &[String],
-    operator: Option<&str>,
-) -> Result<Option<String>, String> {
-    if full_access {
-        return Ok(operator.is_none().then(opencode_config_content));
-    }
-    let mut config: serde_json::Value = match operator {
-        Some(raw) => serde_json::from_str(raw)
-            .ok()
-            .filter(serde_json::Value::is_object)
-            .ok_or("OPENCODE_CONFIG_CONTENT is not a JSON object: Kronn cannot apply its OpenCode permissions, so OpenCode is not started without full access")?,
-        None => serde_json::json!({}),
-    };
-    let base: serde_json::Value =
-        serde_json::from_str(&opencode_config_content()).expect("valid OpenCode config");
-    let mut read = serde_json::Map::new();
-    read.insert("*".into(), "allow".into());
-    if let Some(rules) = base["permission"]["read"].as_object() {
-        read.extend(rules.clone());
-    }
-    let mut permission = serde_json::Map::new();
-    permission.insert("*".into(), "ask".into());
-    permission.insert("read".into(), serde_json::Value::Object(read));
-    for key in ["glob", "grep", "list", "lsp", "todowrite"] {
-        permission.insert(key.into(), "allow".into());
-    }
-    for key in OPENCODE_ASKED {
-        permission.insert((*key).into(), "ask".into());
-    }
-    permission.insert("question".into(), "deny".into());
-    for tool in bridge_tools {
-        permission.insert(tool.clone(), "allow".into());
-    }
-    let permission = serde_json::Value::Object(permission);
-    let object = config.as_object_mut().expect("checked above");
-    object.insert("permission".into(), permission.clone());
-    object.insert("default_agent".into(), "build".into());
-    let agent = object
-        .entry("agent")
-        .or_insert_with(|| serde_json::json!({}));
-    if !agent.is_object() {
-        *agent = serde_json::json!({});
-    }
-    let build = agent
-        .as_object_mut()
-        .expect("object")
-        .entry("build")
-        .or_insert_with(|| serde_json::json!({}));
-    if !build.is_object() {
-        *build = serde_json::json!({});
-    }
-    build
-        .as_object_mut()
-        .expect("object")
-        .insert("permission".into(), permission);
-    let experimental = object
-        .entry("experimental")
-        .or_insert_with(|| serde_json::json!({}));
-    if !experimental.is_object() {
-        *experimental = serde_json::json!({});
-    }
-    experimental
-        .as_object_mut()
-        .expect("object")
-        .insert("continue_loop_on_deny".into(), true.into());
-    Ok(Some(config.to_string()))
+/// operator's own untouched. OpenCode runs only with full access.
+pub fn opencode_full_access_config(operator: Option<&str>) -> Option<String> {
+    operator.is_none().then(opencode_config_content)
 }
 
 #[cfg(test)]
@@ -353,67 +265,11 @@ mod tests {
         }
     }
 
-    fn restricted(operator: Option<&str>) -> Value {
-        let tools = vec!["kronn-internal-0123456789ab_*".to_owned()];
-        serde_json::from_str(
-            &opencode_launch_config(false, &tools, operator)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn without_full_access_opencode_asks_before_acting_and_keeps_the_bridge() {
-        let config = restricted(None);
-        for permission in [
-            &config["permission"],
-            &config["agent"]["build"]["permission"],
-        ] {
-            assert_eq!(permission["*"], "ask");
-            for key in OPENCODE_ASKED {
-                assert_eq!(permission[*key], "ask", "{key}");
-            }
-            for key in ["glob", "grep", "list", "lsp", "todowrite"] {
-                assert_eq!(permission[key], "allow", "{key}");
-            }
-            assert_eq!(permission["question"], "deny");
-            assert_eq!(permission["read"]["*"], "allow");
-            assert_eq!(permission["read"]["*.env"], "deny");
-            assert_eq!(permission["kronn-internal-0123456789ab_*"], "allow");
-        }
-        assert_eq!(config["default_agent"], "build");
-        assert_eq!(config["experimental"]["continue_loop_on_deny"], true);
-        // OpenCode keeps the last matching rule: the catch-all comes first.
-        let text = opencode_launch_config(false, &[], None).unwrap().unwrap();
-        let at = |text: &str, needle: &str| text.find(needle).expect(needle);
-        assert!(at(&text, r#""*":"ask""#) < at(&text, r#""bash":"ask""#));
-        let read = &text[at(&text, r#""read":{"#)..];
-        assert!(at(read, r#""*":"allow""#) < at(read, r#""*.env":"deny""#));
-    }
-
-    #[test]
-    fn an_operator_config_keeps_its_settings_but_not_its_permissions() {
-        let config = restricted(Some(
-            r#"{"theme":"mine","default_agent":"yolo","permission":{"bash":"allow","*":"allow"},
-                "agent":{"build":{"model":"m","permission":{"bash":"allow"}}}}"#,
-        ));
-        assert_eq!(config["theme"], "mine");
-        assert_eq!(config["agent"]["build"]["model"], "m");
-        assert_eq!(config["default_agent"], "build");
-        assert_eq!(config["permission"]["bash"], "ask");
-        assert_eq!(config["permission"]["*"], "ask");
-        assert_eq!(config["agent"]["build"]["permission"]["bash"], "ask");
-        for refused in ["not json", "[1]", "\"allow\""] {
-            assert!(
-                opencode_launch_config(false, &[], Some(refused)).is_err(),
-                "{refused}"
-            );
-        }
-        // Full access: the operator's configuration is theirs.
-        assert_eq!(opencode_launch_config(true, &[], Some("{}")).unwrap(), None);
+    fn the_operator_s_inline_config_is_theirs() {
+        assert_eq!(opencode_full_access_config(Some("{}")), None);
         assert_eq!(
-            opencode_launch_config(true, &[], None).unwrap(),
+            opencode_full_access_config(None),
             Some(opencode_config_content())
         );
     }

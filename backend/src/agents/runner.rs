@@ -3540,6 +3540,63 @@ pub async fn start_agent(
 pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
     "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
 
+/// Prefix of the refusal of a native ACP launch without full access.
+pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
+
+/// Whether `agent` runs only with its full-access setting on: a native ACP
+/// runtime (OpenCode, Vibe, GitHub Copilot, Gemini CLI, Kiro) loads repository
+/// plugins, tools, hooks and MCP servers before any permission check, so no
+/// restricted mode can be promised for it (0.14.3; an isolated runner is the
+/// 0.15 plan).
+pub fn requires_explicit_full_access(agent: &AgentType) -> bool {
+    crate::acp::resolve_acp_route(agent) == crate::acp::AcpProductionRoute::NativeAcp
+}
+
+/// The agent's name as Config › Agents shows it.
+pub fn agent_settings_label(agent: &AgentType) -> &'static str {
+    match agent {
+        AgentType::ClaudeCode => "Claude Code",
+        AgentType::Codex => "Codex",
+        AgentType::OpenCode => "OpenCode",
+        AgentType::Vibe => "Vibe",
+        AgentType::GeminiCli => "Gemini CLI",
+        AgentType::Kiro => "Kiro",
+        AgentType::CopilotCli => "GitHub Copilot",
+        AgentType::Ollama => "Ollama",
+        AgentType::LiteLlm => "LiteLLM",
+        AgentType::Nvidia => "NVIDIA",
+        AgentType::Custom => "Custom",
+    }
+}
+
+/// The refusal of a native launch whose agent does not have full access on.
+pub fn native_full_access_refusal(agent: &AgentType) -> String {
+    let label = agent_settings_label(agent);
+    format!(
+        "{NATIVE_FULL_ACCESS_REQUIRED}: {label} runs only with full access. Enable it in Config › Agents › {label} › Full access, or choose another agent."
+    )
+}
+
+/// The same refusal in the user's language (`fr`, `es`, `zh`, else English),
+/// for the place a user reads it: a discussion message, an audit error.
+pub fn native_full_access_refusal_in(agent: &AgentType, language: &str) -> String {
+    let label = agent_settings_label(agent);
+    match language {
+        "fr" => format!(
+            "{label} ne fonctionne qu'avec l'accès complet. Activez-le dans Config › Agents › {label} › Accès complet, ou choisissez un autre agent."
+        ),
+        "es" => format!(
+            "{label} solo funciona con acceso completo. Actívalo en Config › Agentes › {label} › Acceso completo, o elige otro agente."
+        ),
+        "zh" => format!(
+            "{label} 只能在完全访问模式下运行。请在 配置 › 智能体 › {label} › 完全访问 中启用，或选择其他智能体。"
+        ),
+        _ => format!(
+            "{label} runs only with full access. Enable it in Config › Agents › {label} › Full access, or choose another agent."
+        ),
+    }
+}
+
 /// The worker policy shared by every launch route and by worker preparation.
 /// Returns the `full_access` the launch may use, or why a task worker cannot
 /// run on this agent's resolved transport. A worker never inherits the
@@ -3562,6 +3619,12 @@ pub fn task_worker_route_policy(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    // Every route (discussion, room, workflow step, Quick Prompt, audit,
+    // resume) launches through here: a native runtime without full access is
+    // refused before anything is prepared or spawned, never upgraded.
+    if requires_explicit_full_access(config.agent_type) && !config.full_access {
+        return Err(native_full_access_refusal(config.agent_type));
+    }
     let has_read_only_paths =
         !config.read_only_repos.is_empty() || !config.read_only_dirs.is_empty();
     if config.task_worker_context.is_some() && has_read_only_paths {
@@ -5300,7 +5363,9 @@ fn acp_project_mcp_servers(
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
-            if id == "kronn-internal" {
+            // Only the runtime supplies the bridge; a project server named
+            // like it (`kronn-internal-1`) is dropped, never trusted.
+            if crate::acp::is_bridge_like(&id) {
                 return None;
             }
             let command = entry.command.clone()?;

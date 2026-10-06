@@ -4863,10 +4863,24 @@ async fn make_agent_stream_inner(
                     return;
                 }
                 tracing::error!("Agent start failed: {}", e);
+                // A native agent without full access: said in the user's
+                // language, and settled, never deferred and retried.
+                let refused_full_access = e.starts_with(runner::NATIVE_FULL_ACCESS_REQUIRED);
+                let e = if refused_full_access {
+                    runner::native_full_access_refusal_in(&agent_type, &disc.language)
+                } else {
+                    e
+                };
 
-                let tracked_outcome = completion_tx
-                    .as_ref()
-                    .map(|_| agent_start_failure_outcome(&agent_type, &e));
+                let tracked_outcome = completion_tx.as_ref().map(|_| {
+                    if refused_full_access {
+                        AgentExecutionOutcome::PreflightFailed {
+                            diagnostic: e.clone(),
+                        }
+                    } else {
+                        agent_start_failure_outcome(&agent_type, &e)
+                    }
+                });
                 if matches!(
                     &tracked_outcome,
                     Some(AgentExecutionOutcome::RuntimeUnavailable { .. })
@@ -7372,6 +7386,7 @@ mod resume_delta_tests {
             acp_session_store: Some(store.clone()),
             discussion_id: Some("chain-disc"),
             test_acp_transport: Some(transport.clone()),
+            full_access: true,
             ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt1, &tokens)
         })
         .await
@@ -7474,6 +7489,7 @@ mod resume_delta_tests {
             acp_session_store: Some(store2.clone()),
             discussion_id: Some("chain-disc"),
             test_acp_transport: Some(transport.clone()),
+            full_access: true,
             ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt2, &tokens)
         })
         .await

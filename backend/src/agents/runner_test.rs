@@ -254,6 +254,100 @@ mod tests {
         }
     }
 
+    /// Every route launches through `start_agent_with_config`: a native agent
+    /// without full access is refused there, before its transport is touched,
+    /// on a fresh launch and on a resume alike; with full access it runs.
+    #[tokio::test]
+    async fn a_native_agent_without_full_access_never_reaches_its_transport() {
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        for agent in [
+            AgentType::OpenCode,
+            AgentType::Vibe,
+            AgentType::CopilotCli,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+        ] {
+            assert!(requires_explicit_full_access(&agent), "{agent:?}");
+            for resume in [None, Some("native-session")] {
+                let fixture = Arc::new(NativeRouteFixture {
+                    created: std::sync::atomic::AtomicUsize::new(0),
+                    resumed: std::sync::atomic::AtomicUsize::new(0),
+                    prompts: Mutex::new(Vec::new()),
+                });
+                let result = start_agent_with_config(AgentStartConfig {
+                    cli_resume_id: resume,
+                    test_acp_transport: Some(fixture.clone()),
+                    ..AgentStartConfig::new(
+                        &agent,
+                        project.path().to_str().unwrap(),
+                        "hello",
+                        &tokens,
+                    )
+                })
+                .await;
+                let error = result.err().expect("a restricted native launch is refused");
+                assert!(
+                    error.starts_with(NATIVE_FULL_ACCESS_REQUIRED),
+                    "{agent:?}: {error}"
+                );
+                assert!(
+                    error.contains(&format!(
+                        "Config › Agents › {} › Full access",
+                        agent_settings_label(&agent)
+                    )),
+                    "{error}"
+                );
+                assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(fixture.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(fixture.prompts.lock().unwrap().is_empty());
+            }
+        }
+        // Claude, Codex and the HTTP agents keep their own access model.
+        for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama] {
+            assert!(!requires_explicit_full_access(&agent), "{agent:?}");
+        }
+        // With full access the same launch reaches the runtime.
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let mut process = start_agent_with_config(AgentStartConfig {
+            full_access: true,
+            test_acp_transport: Some(fixture.clone()),
+            ..AgentStartConfig::new(
+                &AgentType::OpenCode,
+                project.path().to_str().unwrap(),
+                "hello",
+                &tokens,
+            )
+        })
+        .await
+        .expect("a full-access launch runs");
+        while process.next_line().await.is_some() {}
+        assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn the_refusal_names_the_setting_in_the_user_s_language() {
+        for (language, path) in [
+            ("en", "Config › Agents › OpenCode › Full access"),
+            ("fr", "Config › Agents › OpenCode › Accès complet"),
+            ("es", "Config › Agentes › OpenCode › Acceso completo"),
+            ("zh", "配置 › 智能体 › OpenCode › 完全访问"),
+        ] {
+            let message = native_full_access_refusal_in(&AgentType::OpenCode, language);
+            assert!(message.contains(path), "{language}: {message}");
+        }
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
@@ -272,6 +366,7 @@ mod tests {
         let agent = AgentType::OpenCode;
         let mut first = start_agent_with_config(AgentStartConfig {
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(
                 &agent,
                 project.path().to_str().unwrap(),
@@ -288,6 +383,7 @@ mod tests {
             cli_resume_id: Some("native-route-session"),
             native_acp_full_prompt: Some("full history"),
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(
                 &agent,
                 project.path().to_str().unwrap(),
@@ -366,6 +462,7 @@ mod tests {
             skill_ids: &["repository:p1:block-migration".to_string()],
             repository_skills: std::slice::from_ref(&skill),
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "migrate", &tokens)
         })
         .await
