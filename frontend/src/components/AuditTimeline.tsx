@@ -15,7 +15,9 @@ import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
 import { formatUsd, summarizeAuditCost } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
-import type { AgentDetection, AgentType, AuditEntry, ModelTier, ModelTiersConfig } from '../types/generated';
+import type {
+  AgentDetection, AgentType, AuditEntry, AuditTimelineValidation, ModelTier, ModelTiersConfig,
+} from '../types/generated';
 import './AuditTimeline.css';
 
 type StepStatus = 'done' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
@@ -71,6 +73,10 @@ export interface AuditTimelineProps {
   onLaunch: () => void;
   validationInProgress: boolean;
   onValidate: () => void;
+  /** Records the validation once the linked discussion has finished. */
+  onMarkValid: () => Promise<void>;
+  /** Opens a discussion, archived ones included. */
+  onOpenValidation: (discussionId: string) => void;
   onViewTechDebts: () => void;
   refreshTrigger: number;
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
@@ -153,6 +159,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [plan, setPlan] = useState<Map<number, string>>(new Map());
   // Audits the branch's `.kronn.json` records: another instance, an attestation.
   const [recorded, setRecorded] = useState<AuditEntry[]>([]);
+  const [linkedValidation, setLinkedValidation] = useState<AuditTimelineValidation | null>(null);
+  const [marking, setMarking] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -189,13 +197,19 @@ export function AuditTimeline(props: AuditTimelineProps) {
         }
       }
       const latest = data.runs.find(run => run.kind === 'Full');
-      return { id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0, recorded: data.recorded_audits };
+      return {
+        id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0,
+        recorded: data.recorded_audits, validation: data.latest_validation ?? null,
+      };
     };
     load()
-      .then(({ id, rows, td, recorded: entries }) => {
-        if (alive) { setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries); setStepsLoaded(true); }
+      .then(({ id, rows, td, recorded: entries, validation }) => {
+        if (alive) {
+          setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
+          setLinkedValidation(validation); setStepsLoaded(true);
+        }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setStepsLoaded(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep]);
 
@@ -576,7 +590,30 @@ export function AuditTimeline(props: AuditTimelineProps) {
             {audited && tdTotal > 0 && (
               <p className="audit-tl-muted" data-testid="audit-timeline-td-count">{t('auditTimeline.validation.tdCount', tdTotal)}</p>
             )}
-            {audited && !validated && (
+            {auditStatus === 'Audited' && linkedValidation?.finished ? (
+              // The finished discussion is auto-archived: validate from here, never start a new one.
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
+                <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  disabled={marking}
+                  onClick={() => {
+                    setMarking(true);
+                    void props.onMarkValid().finally(() => setMarking(false));
+                  }}
+                >
+                  {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
+                </button>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  onClick={() => props.onOpenValidation(linkedValidation.discussion_id)}
+                >
+                  <FileText size={12} /> {t('auditTimeline.validation.viewDiscussion')}
+                </button>
+              </div>
+            ) : audited && !validated && (
               <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onValidate}>
                 <ShieldCheck size={12} /> {props.validationInProgress ? t('audit.resumeValidation') : t('audit.validate')}
               </button>

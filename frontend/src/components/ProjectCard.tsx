@@ -2,6 +2,7 @@ import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { planning, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { userError } from '../lib/userError';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
@@ -2417,6 +2418,24 @@ export function ProjectCard({
                         prompt: t('audit.validationPrompt'),
                         locked: true,
                       });
+                      onNavigate('discussions');
+                    }}
+                    onMarkValid={async () => {
+                      try {
+                        await projectsApi.validateAudit(proj.id);
+                        await Promise.all([
+                          Promise.resolve(onRefetch()),
+                          Promise.resolve(onRefetchDiscussions()),
+                        ]);
+                        setAuditCompletedTick(n => n + 1);
+                        toast(t('audit.done'), 'success');
+                        if (detailMode) selectDetailView('audit');
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
+                    onOpenValidation={(discussionId) => {
+                      onOpenDiscussion(discussionId);
                       onNavigate('discussions');
                     }}
                     onViewTechDebts={() => {

@@ -4739,17 +4739,17 @@ async fn make_agent_stream_inner(
                 // ── 0.8.4 (#329 / F9) Auto-archive on validation complete ──
                 //
                 // When a validation disc emits `KRONN:VALIDATION_COMPLETE`,
-                // its job is over: the agent has reviewed the audit, the TD
-                // status updates landed, the project flips to `Validated`.
+                // the agent's part is over. The project stays `Audited`
+                // until the human validates: the audit timeline offers that
+                // action and opens the archived disc (validate_audit accepts
+                // an archived linked disc).
                 // Pre-fix the disc stayed visible in the sidebar forever,
                 // accumulating one new disc per audit run (Marc-persona
                 // discovery during the 0.8.4 Playwright pass: 3 stale
                 // "Validation audit AI" discs after a Full + 2 sub-audits).
                 //
-                // Archiving silently lifts the noise — the disc is still
-                // reachable via the Archives toggle if the user wants to
-                // re-read the conversation, but it stops cluttering the
-                // active list.
+                // Archiving lifts the noise; the disc stays reachable from the
+                // Archives toggle and from the audit timeline.
                 //
                 // Bootstrap + briefing discs follow the same lifecycle and
                 // are handled here too (they ship the *_COMPLETE family).

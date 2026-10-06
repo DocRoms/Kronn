@@ -1,6 +1,6 @@
 // KT-977 — the audit tab as a timeline.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 
@@ -31,12 +31,12 @@ const step = (index: number, extra: Record<string, unknown> = {}) => ({
 type RunStub = { id: string; kind?: string; td_total?: number; status?: string; started_at?: string };
 
 /** The timeline's single request: runs, their steps, the branch's recorded audits. */
-function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = []) {
+function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = [], latestValidation: unknown = null) {
   vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
     runs: runs.map(r => ({
       project_id: 'p1', agent_type: 'ClaudeCode', started_at: '', status: 'Completed', td_total: 0, kind: 'Full', ...r,
     })),
-    steps, recorded_audits: recorded, recorded_validated_at: null,
+    steps, recorded_audits: recorded, recorded_validated_at: null, latest_validation: latestValidation,
   } as never);
 }
 
@@ -48,7 +48,8 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     briefingDone: false, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
-    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(), onViewTechDebts: vi.fn(),
+    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
+    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }
@@ -436,5 +437,29 @@ describe('AuditTimeline', () => {
     fireEvent.click(live.querySelector('button')!);
     expect(p.onCancel).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('audit-timeline-launch')).toBeDisabled();
+  });
+  it('validates directly from a finished linked validation, archived, and opens it', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1)], [], { discussion_id: 'd-val', finished: true, archived: true });
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    const block = await screen.findByTestId('audit-timeline-validation-finished');
+    fireEvent.click(within(block).getByRole('button', { name: /Valider l'audit/ }));
+    await waitFor(() => expect(p.onMarkValid).toHaveBeenCalledTimes(1));
+    expect(p.onValidate).not.toHaveBeenCalled();
+    fireEvent.click(within(block).getByRole('button', { name: /Voir la discussion de validation/ }));
+    expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
+  });
+
+  it('keeps starting or resuming a validation while the linked one is unfinished', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1)], [], { discussion_id: 'd-val', finished: false, archived: false });
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Valider l'audit/ }));
+    expect(p.onValidate).toHaveBeenCalledTimes(1);
+    expect(p.onMarkValid).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
   });
 });

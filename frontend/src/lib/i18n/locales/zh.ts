@@ -5533,6 +5533,8 @@ const zh: TranslationDict = {
   "auditTimeline.agent.notConfigured": "未配置",
   "auditTimeline.audit.failedCount": "{0} 个步骤失败",
   "auditTimeline.validation.tdCount": "上一次审计产生了 {0} 条技术债记录，待复查。",
+  "auditTimeline.validation.finished": "验证讨论已结束：只需确认审计即可。",
+  "auditTimeline.validation.viewDiscussion": "查看验证讨论",
   "github.title": "GitHub",
   "github.loading": "正在检查 GitHub…",
   "github.error": "GitHub 连接：{0}",

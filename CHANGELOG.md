@@ -190,6 +190,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A project whose validation discussion has finished no longer stays stuck at
+  Audited: that discussion archives itself on its last word, which hid the
+  "Mark audit valid" banner, while the audit timeline's "Validate the audit"
+  only opened a form to start a whole new validation. The timeline now reads
+  the latest run's linked validation (same terminal-signal check as the
+  validate gate), validates the audit directly with an error toast on refusal,
+  and opens the finished discussion even when archived. A new validation can
+  only be started while no finished one is linked.
 - A Kronn-launched agent's bridge token is checked against what each request
   really does: ids nested anywhere in a body or in an imported workflow, task
   references, offers, invites and sessions are resolved before the check;

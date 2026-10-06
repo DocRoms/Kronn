@@ -902,7 +902,19 @@ steps: Array<AuditRunStep>,
  * Audits the branch's `docs/.kronn.json` records (another instance, an
  * attestation, legacy evidence), oldest first. Empty without the file.
  */
-recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null, };
+recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
+/**
+ * The validation discussion linked to the latest run when that run is
+ * Completed, archived or not: the timeline offers to validate once it
+ * has finished.
+ */
+latest_validation: AuditTimelineValidation | null, };
+
+export type AuditTimelineValidation = { discussion_id: string,
+/**
+ * Same terminal-signal parser as the validate-audit gate.
+ */
+finished: boolean, archived: boolean, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
 

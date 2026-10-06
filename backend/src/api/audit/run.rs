@@ -161,6 +161,19 @@ pub struct AuditTimelineData {
     /// attestation, legacy evidence), oldest first. Empty without the file.
     pub recorded_audits: Vec<crate::core::kronn_state::AuditEntry>,
     pub recorded_validated_at: Option<String>,
+    /// The validation discussion linked to the latest run when that run is
+    /// Completed, archived or not: the timeline offers to validate once it
+    /// has finished.
+    pub latest_validation: Option<AuditTimelineValidation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AuditTimelineValidation {
+    pub discussion_id: String,
+    /// Same terminal-signal parser as the validate-audit gate.
+    pub finished: bool,
+    pub archived: bool,
 }
 
 /// GET /api/projects/{id}/audit-timeline
@@ -181,12 +194,26 @@ pub async fn audit_timeline(
             {
                 steps.extend(crate::db::audit_runs::list_audit_steps(conn, &run.id)?);
             }
-            Ok((project, runs, steps))
+            // The latest run of any kind, as the validate-audit gate reads it.
+            let latest_validation = match runs.first() {
+                Some(run) if run.status == "Completed" => match &run.validation_discussion_id {
+                    Some(disc_id) => crate::db::discussions::get_discussion(conn, disc_id)?
+                        .filter(|disc| disc.project_id.as_deref() == Some(id.as_str()))
+                        .map(|disc| AuditTimelineValidation {
+                            finished: super::validate::validation_discussion_finished(&disc),
+                            archived: disc.archived,
+                            discussion_id: disc.id,
+                        }),
+                    None => None,
+                },
+                _ => None,
+            };
+            Ok((project, runs, steps, latest_validation))
         })
         .await;
-    let (project, runs, steps) = match result {
-        Ok((Some(project), runs, steps)) => (project, runs, steps),
-        Ok((None, _, _)) => return Json(ApiResponse::err("Project not found")),
+    let (project, runs, steps, latest_validation) = match result {
+        Ok((Some(project), runs, steps, latest)) => (project, runs, steps, latest),
+        Ok((None, _, _, _)) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
     };
     let recorded = tokio::task::spawn_blocking(move || {
@@ -204,6 +231,7 @@ pub async fn audit_timeline(
         steps,
         recorded_audits,
         recorded_validated_at,
+        latest_validation,
     }))
 }
 
