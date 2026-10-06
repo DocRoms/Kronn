@@ -3692,6 +3692,20 @@ pub(crate) async fn claim_interrupted_run_row(
     state: &AppState,
     run: &mut WorkflowRun,
 ) -> Result<()> {
+    let id = run.id.clone();
+    try_claim_interrupted_run_row(state, run)
+        .await?
+        .map_err(|reason| anyhow::anyhow!("Run {id} cannot resume: {reason}"))
+}
+
+/// Claims an `Interrupted` run, its concurrency key and resume trail included,
+/// in the same closure as the admission check. `Ok(Err(reason))`: the
+/// workflow's concurrency limit refused it; `run` is then left unchanged, so
+/// the caller may wait and try again.
+pub(crate) async fn try_claim_interrupted_run_row(
+    state: &AppState,
+    run: &mut WorkflowRun,
+) -> Result<std::result::Result<(), String>> {
     use anyhow::anyhow;
     if run.status != RunStatus::Interrupted {
         return Err(anyhow!(
@@ -3700,38 +3714,44 @@ pub(crate) async fn claim_interrupted_run_row(
             run.status
         ));
     }
-    append_resume_transition(run);
-    let claim_run = run.clone();
+    let mut claim_run = run.clone();
+    append_resume_transition(&mut claim_run);
+    let candidate = claim_run.clone();
     let claimed = state
         .db
         .with_conn(move |conn| {
             if let Some(workflow) =
-                crate::db::workflows::get_workflow(conn, &claim_run.workflow_id)?
+                crate::db::workflows::get_workflow(conn, &candidate.workflow_id)?
             {
                 if let Err(reason) =
-                    super::concurrency::resume_within_limit(conn, &workflow, &claim_run)?
+                    super::concurrency::resume_within_limit(conn, &workflow, &candidate)?
                 {
                     return Ok(Err(reason));
                 }
             }
             crate::db::workflows::claim_interrupted_run_status(
                 conn,
-                &claim_run.id,
-                &claim_run.state,
+                &candidate.id,
+                &candidate.state,
+                candidate.concurrency_key.as_deref(),
             )
             .map(Ok)
         })
-        .await?
-        .map_err(|reason| anyhow!("Run {} cannot resume: {reason}", run.id))?;
+        .await?;
+    let claimed = match claimed {
+        Ok(claimed) => claimed,
+        Err(reason) => return Ok(Err(reason)),
+    };
     if !claimed {
         return Err(anyhow!(
             "Run {} was just claimed by another caller — resume ignored (no double-resume)",
             run.id
         ));
     }
+    *run = claim_run;
     run.status = RunStatus::Running;
     run.finished_at = None;
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// A2 — validate + atomically claim an `Interrupted` top-level run for manual

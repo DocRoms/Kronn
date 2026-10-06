@@ -559,6 +559,76 @@ pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
     })
 }
 
+/// How often a foreach item re-checks its child workflow's capacity.
+#[cfg(not(test))]
+const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Until when a foreach item may wait for capacity: the parent run's own
+/// timeout guard. An unreadable parent gives no wait at all.
+async fn capacity_deadline(state: &crate::AppState, parent_run_id: &str) -> chrono::DateTime<Utc> {
+    let id = parent_run_id.to_string();
+    let found = state
+        .db
+        .with_conn(move |conn| {
+            let Some(run) = crate::db::workflows::get_run(conn, &id)? else {
+                return Ok(None);
+            };
+            let guards = crate::db::workflows::get_workflow(conn, &run.workflow_id)?
+                .and_then(|workflow| workflow.guards);
+            Ok(Some((run.started_at, guards)))
+        })
+        .await;
+    match found {
+        Ok(Some((started_at, guards))) => {
+            let timeout =
+                crate::models::WorkflowGuards::resolve_optional(guards.as_ref()).timeout_seconds;
+            started_at + chrono::Duration::seconds(i64::try_from(timeout).unwrap_or(i64::MAX / 2))
+        }
+        _ => Utc::now(),
+    }
+}
+
+fn parent_cancelled(state: &crate::AppState, parent_run_id: &str) -> bool {
+    state
+        .cancel_registry
+        .lock()
+        .ok()
+        .and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
+        .unwrap_or(false)
+}
+
+/// Retries `attempt` while the child workflow's concurrency limit refuses it,
+/// until `deadline` or a parent cancel. A restart meanwhile interrupts the
+/// parent, and its resume retries the item: nothing was inserted yet.
+async fn wait_for_capacity<F, Fut>(
+    state: &crate::AppState,
+    parent_run_id: &str,
+    deadline: chrono::DateTime<Utc>,
+    mut attempt: F,
+) -> anyhow::Result<Result<(), String>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Result<(), String>>>,
+{
+    let started = Instant::now();
+    loop {
+        match attempt().await? {
+            Ok(()) => return Ok(Ok(())),
+            Err(reason) => {
+                if Utc::now() >= deadline || parent_cancelled(state, parent_run_id) {
+                    return Ok(Err(format!(
+                        "{reason} Waited {} s for capacity, until the run's timeout or cancel.",
+                        started.elapsed().as_secs()
+                    )));
+                }
+                tokio::time::sleep(CAPACITY_POLL).await;
+            }
+        }
+    }
+}
+
 /// Run-time read: the saved shape again (a workflow stored before the check,
 /// or edited by hand), then a worktree-rooted read that follows no symlink.
 /// The items reach child agents, so a file outside it must never be read.
@@ -896,9 +966,11 @@ async fn execute_foreach(
     // (untracked, so absent from a fresh worktree) is created on the way.
     let ws_root = std::path::Path::new(&ws).to_path_buf();
     let task_file = std::path::Path::new(".kronn/current_task.json");
+    let capacity_deadline = capacity_deadline(state, parent_run_id).await;
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
+    let mut skipped_for_capacity = 0usize;
     let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
@@ -1106,12 +1178,36 @@ async fn execute_foreach(
         let mut resumed = false;
         let mut child_run = if let Some(mut child) = interrupted_child {
             child.trigger_context = Some(trigger_context.clone());
-            if let Err(e) = super::runner::claim_interrupted_run_row(state, &mut child).await {
-                tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx, error=%e,
-                    "foreach: interrupted child could not be claimed");
-                failed += 1;
-                results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "ResumeClaimFailed", "error": e.to_string() }));
-                continue;
+            // Re-rendered key, persisted with the claim: a child interrupted
+            // before keys were stored must not resume outside its bucket.
+            child.concurrency_key = concurrency_key;
+            let claim = std::sync::Arc::new(tokio::sync::Mutex::new(child));
+            let claimed = wait_for_capacity(state, parent_run_id, capacity_deadline, || {
+                let claim = claim.clone();
+                async move {
+                    let mut child = claim.lock().await;
+                    super::runner::try_claim_interrupted_run_row(state, &mut child).await
+                }
+            })
+            .await;
+            let child = claim.lock().await.clone();
+            match claimed {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx,
+                        "foreach: interrupted child still refused by its concurrency limit ({reason}) — skipping this item");
+                    failed += 1;
+                    skipped_for_capacity += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "SkippedConcurrencyLimit", "error": reason }));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx, error=%e,
+                        "foreach: interrupted child could not be claimed");
+                    failed += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "ResumeClaimFailed", "error": e.to_string() }));
+                    continue;
+                }
             }
             resumed = true;
             child
@@ -1143,21 +1239,29 @@ async fn execute_foreach(
                 parent_workflow_name: None,
                 parent_run_started_at: None,
             };
-            let to_insert = child.clone();
-            let admission = child_wf.clone();
-            match state
-                .db
-                .with_conn(move |c| {
-                    crate::workflows::concurrency::insert_run_within_limit(
-                        c, &admission, &to_insert,
-                    )
-                })
-                .await
-            {
+            // Another run of the child workflow may hold its slot: wait for it
+            // (bounded by the parent's timeout) rather than skip the item.
+            let admitted = wait_for_capacity(state, parent_run_id, capacity_deadline, || {
+                let to_insert = child.clone();
+                let admission = child_wf.clone();
+                async move {
+                    state
+                        .db
+                        .with_conn(move |c| {
+                            crate::workflows::concurrency::insert_run_within_limit(
+                                c, &admission, &to_insert,
+                            )
+                        })
+                        .await
+                }
+            })
+            .await;
+            match admitted {
                 Ok(Ok(())) => {}
                 Ok(Err(reason)) => {
                     tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: child refused by its concurrency limit ({reason}) — skipping this item");
                     failed += 1;
+                    skipped_for_capacity += 1;
                     results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedConcurrencyLimit", "error": reason }));
                     continue;
                 }
@@ -1257,12 +1361,18 @@ async fn execute_foreach(
     let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
     let (status_str, signal) = aggregate_foreach(succeeded, failed);
+    let skipped_note = if skipped_for_capacity > 0 {
+        format!(", dont {skipped_for_capacity} sautée(s) faute de place (limite de concurrence)")
+    } else {
+        String::new()
+    };
     let summary = format!(
-        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s) ({})",
+        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s){} ({})",
         child_wf.name,
         results.len(),
         succeeded,
         failed,
+        skipped_note,
         tokens_label(total_tokens),
     );
     let data = json!({
@@ -1271,12 +1381,20 @@ async fn execute_foreach(
         "total": results.len(),
         "succeeded": succeeded,
         "failed": failed,
+        "skipped_concurrency_limit": skipped_for_capacity,
         "items": results,
         "child_run_id": last_child_id,
         "last_output": last_output,
     });
+    // SKIPPED is branchable on its own: a step with skipped items never
+    // reports a plain OK (aggregate_foreach already gives PARTIAL or failed).
+    let signals: Vec<&str> = if skipped_for_capacity > 0 {
+        vec![signal, "SKIPPED"]
+    } else {
+        vec![signal]
+    };
     let output =
-        super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
+        super::step_output_format::format_step_output(data, status_str, &summary, None, &signals);
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
         crate::models::ConditionAction::Stop => "Stop".to_string(),
@@ -2127,6 +2245,40 @@ mod tests {
     }
 
     // ─── KT-1045 — a child goes through its workflow's admission ───
+    /// Bounds a foreach wait for capacity through the parent's timeout guard.
+    async fn set_parent_timeout(state: &crate::AppState, seconds: Option<u64>) {
+        state
+            .db
+            .with_conn(move |c| {
+                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                parent.guards = Some(crate::models::WorkflowGuards {
+                    timeout_seconds: seconds,
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(c, &parent)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn finish_run_later(state: &crate::AppState, run_id: &'static str, after_ms: u64) {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(after_ms)).await;
+            state
+                .db
+                .with_conn(move |c| {
+                    c.execute(
+                        "UPDATE workflow_runs SET status = 'Success', finished_at = datetime('now') WHERE id = ?1",
+                        [run_id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+    }
 
     #[tokio::test]
     async fn a_child_over_its_concurrency_limit_is_not_started() {
@@ -2206,6 +2358,8 @@ mod tests {
             "no child row was inserted"
         );
 
+        // The wait for capacity ends at the parent's timeout guard.
+        set_parent_timeout(&state, Some(1)).await;
         let foreach = super::execute_sub_workflow_step(
             &state,
             "parent-run",
@@ -2231,6 +2385,19 @@ mod tests {
             !statuses.is_empty() && statuses.iter().all(|s| s == "SkippedConcurrencyLimit"),
             "{}",
             foreach.result.output
+        );
+        assert_eq!(data["skipped_concurrency_limit"], 2);
+        assert!(
+            foreach.result.output.contains("SKIPPED"),
+            "{}",
+            foreach.result.output
+        );
+        assert!(
+            data["items"][0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Waited"),
+            "{data}"
         );
         assert_eq!(children(state.clone()).await, 0);
 
@@ -2264,6 +2431,148 @@ mod tests {
             "{}",
             admitted.result.output
         );
+    }
+
+    #[tokio::test]
+    async fn a_foreach_item_waits_for_capacity_then_runs() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let mut active = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "parent-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        active.id = "holder".into();
+        active.workflow_id = "child-wf".into();
+        state
+            .db
+            .with_conn(move |c| {
+                let mut child = crate::db::workflows::get_workflow(c, "child-wf")?.unwrap();
+                child.concurrency_limit = Some(1);
+                crate::db::workflows::update_workflow(c, &child)?;
+                crate::db::workflows::insert_run(c, &active)
+            })
+            .await
+            .unwrap();
+        finish_run_later(&state, "holder", 300).await;
+        let started = std::time::Instant::now();
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+        let items = data["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|item| item["status"] == "Success"),
+            "{data}"
+        );
+        assert_eq!(data["skipped_concurrency_limit"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_pre_upgrade_child_resumes_under_its_rendered_key() {
+        let (state, tokens, agents, ws, _) = foreach_fixture().await;
+        std::fs::write(ws.path().join("tasks.json"), r#"[{"id":"T1"}]"#).unwrap();
+        let keyed: crate::models::Workflow = serde_json::from_value(serde_json::json!({
+            "id": "keyed", "name": "keyed", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "noop", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+            "actions": [], "safety": {}, "workspace_config": null,
+            "concurrency_limit": 1, "concurrency_key": "{{ticketKey}}",
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::insert_workflow(c, &keyed)?;
+                // Interrupted by an older version: no key stored.
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, parent_run_id, concurrency_key,
+                      trigger_context, step_results_json, started_at, finished_at)
+                     VALUES ('old-child', 'keyed', 'Interrupted', 'subworkflow', 'parent-run', NULL,
+                      '{\"__subwf_item__\":0,\"__subwf_item_id__\":\"T1\"}', '[]',
+                      datetime('now'), datetime('now'))",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, concurrency_key,
+                      trigger_context, step_results_json, started_at)
+                     VALUES ('t1-holder', 'keyed', 'Running', 'linear', 'T1', NULL, '[]', datetime('now'))",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let step = step_json(serde_json::json!({
+            "name": "fanout", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "keyed",
+            "sub_workflow_foreach_file": "tasks.json",
+            "sub_workflow_variables": {"ticketKey": "{{current_task.id}}"},
+        }));
+        let run = |state: crate::AppState| {
+            let (tokens, agents, ws, step) = (
+                tokens.clone(),
+                agents.clone(),
+                ws.path().to_path_buf(),
+                step.clone(),
+            );
+            async move {
+                let ctx = crate::workflows::template::TemplateContext::new();
+                super::execute_sub_workflow_step(
+                    &state,
+                    "parent-run",
+                    0,
+                    &step,
+                    &tokens,
+                    &agents,
+                    crate::workflows::runner::SharedBudget::root(50),
+                    Some(ws.to_string_lossy().to_string()),
+                    super::ChildLaunch {
+                        ctx: &ctx,
+                        parent_variables: &[],
+                        parent_project_id: None,
+                    },
+                )
+                .await
+            }
+        };
+        let stored = |state: crate::AppState| async move {
+            state
+                .db
+                .with_conn(|c| crate::db::workflows::get_run(c, "old-child"))
+                .await
+                .unwrap()
+                .unwrap()
+        };
+
+        // The rendered key T1 is held: the old child does not slip through.
+        set_parent_timeout(&state, Some(1)).await;
+        let refused = run(state.clone()).await;
+        assert!(
+            refused.result.output.contains("SkippedConcurrencyLimit"),
+            "{}",
+            refused.result.output
+        );
+        assert_eq!(
+            stored(state.clone()).await.status,
+            crate::models::RunStatus::Interrupted
+        );
+
+        // Once T1 is free, it resumes and keeps the rendered key.
+        set_parent_timeout(&state, None).await;
+        finish_run_later(&state, "t1-holder", 0).await;
+        let resumed = run(state.clone()).await;
+        assert!(
+            resumed.result.output.contains("\"old-child\""),
+            "{}",
+            resumed.result.output
+        );
+        let child = stored(state.clone()).await;
+        assert_eq!(child.status, crate::models::RunStatus::Success);
+        assert_eq!(child.concurrency_key.as_deref(), Some("T1"));
     }
 
     #[tokio::test]
