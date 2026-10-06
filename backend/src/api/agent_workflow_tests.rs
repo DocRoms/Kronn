@@ -167,3 +167,38 @@ fn workflow_schema_sections_preserve_the_canonical_contract() {
     assert!(schema_section(&json!({"step_type":"invented"})).is_err());
     assert!(schema_section(&json!({"section":"invented"})).is_err());
 }
+
+/// B7-07 — an in-process principal's `last_run` is one of its project's runs.
+#[tokio::test]
+async fn workflow_list_shows_only_the_principal_s_project_runs() {
+    let state = super::super::quick_prompt_tests::state_with_prompts().await;
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO workflows(id, name, project_id, trigger_json, steps_json, created_at, updated_at) \
+                 VALUES ('wf-shared', 'shared', NULL, '{\"type\":\"Manual\"}', '[]', \
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs(id, workflow_id, project_id, status, started_at) VALUES \
+                 ('run-in-a', 'wf-shared', 'a', 'Success', '2026-01-01T00:00:00Z'), \
+                 ('run-in-b', 'wf-shared', 'b', 'Success', '2026-01-02T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let executor = KronnToolExecutor::new(state, Some("room-a".into()));
+    let list = call(&executor, "workflow_list", json!({})).await;
+    assert!(list.ok, "{}", list.content);
+    let shared = list.content["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workflow| workflow["id"] == "wf-shared")
+        .expect("the shared workflow is listed");
+    assert_eq!(shared["last_run"]["id"], "run-in-a", "{shared}");
+}
