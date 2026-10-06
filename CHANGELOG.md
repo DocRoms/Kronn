@@ -248,6 +248,23 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
+- GitHub Copilot CLI and Mistral Vibe, as native ACP agents, can call Kronn's
+  own tools (`kronn-internal`: `bridge_info`, `disc_meta`…) without full
+  access. Kronn refused every such call: their permission requests do not name
+  the server the way the Claude/Codex adapters do. Copilot is now launched with
+  `--allow-tool=kronn-internal` when the session authorizes the bridge (Copilot
+  loads the bridge from its own MCP config and rejects client-declared stdio
+  servers). Vibe's calls are identified by the tool its harness announced
+  before asking, never by the title, which the model can write. Shell commands,
+  unknown tools, other servers and project servers without full access stay
+  refused. Not verified for Gemini, Kiro and OpenCode.
+- A bridge-token request with no body labelled `application/json`, as the
+  bridge sends every GET, was refused with "invalid JSON body": every reading
+  tool (`disc_meta`…) failed under a bridge token.
+- `KRONN_HOST_MCP_SYNC=0` keeps a second Kronn instance (a test or an isolated
+  check) from rewriting the host CLIs' global MCP configs
+  (`~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json`,
+  `~/.gemini/settings.json`) to its own bridge path.
 - The other processes Kronn starts get a built environment too (KT-1006):
   dependency checks (`npm`, `cargo`, `go`, `bundle`, `dotnet`, `poetry`,
   `composer`, Renovate through `npx`, and Composer through Docker) keep only

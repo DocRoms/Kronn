@@ -116,6 +116,9 @@ discussion (or one task execution, or one workflow run) and to its project.
   when the discussion or run is deleted. A subprocess that outlives its launch
   holds a dead token. Tests cover cross-room and cross-project refusals for
   path and body ids.
+- A body-less GET labelled `application/json` (the bridge labels every
+  request) is read as having no body; any other labelled body that is not
+  JSON is refused.
 - The agent can read this token. Its scope is by design what the agent may do
   through room tools.
 
@@ -438,6 +441,18 @@ routes); workspace hooks and Kronn's internal Quick Exec callers (task
 validations, probes) carry no project and get none.
 Native ACP agents now receive their configured key and their room and workflow
 contexts (KT-1013).
+
+*Native ACP tool permissions.* The ACP broker (`acp/permission_broker.rs`)
+answers each `session/request_permission`, deny by default. Without full access
+it allows read-like kinds inside the project and the tools of Kronn's own
+bridge, never a project server's tool: a project `.mcp.json` is
+agent-writable (section 3, row 9). The bridge is identified by structured
+fields only, never by the title, which can be model text: `rawInput.server/tool`
+(adapters), or for Vibe the `_meta.tool_name` of the `tool_call` its harness
+announced for that call id (`mcp_kronn_internal.<tool>`). Copilot's request
+names the tool without its server, so the broker cannot tell the bridge apart;
+Copilot is launched with `--allow-tool=kronn-internal` when the session's broker
+authorized the bridge, and every other request still reaches the broker.
 
 *Spawn inventory.* The compiler enforces it. `core::cmd::{async_cmd,sync_cmd}`
 take a `ChildRoute` and build the environment before returning the command
