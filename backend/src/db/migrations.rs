@@ -1078,6 +1078,10 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
     run_with_backup_checked(conn, db_path, |dir| fs2::available_space(dir))
 }
 
+fn backup_disabled() -> bool {
+    crate::core::child_env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0")
+}
+
 /// Copy the database to `<db>.backup` before a migration touches it.
 ///
 /// Written to a temporary file, synced, then renamed, so a copy cut short by a
@@ -1088,8 +1092,7 @@ pub(crate) fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {
-    if crate::core::child_env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0")
-    {
+    if backup_disabled() {
         tracing::warn!("KRONN_MIGRATION_BACKUP=0: migrating without a database backup");
         return Ok(());
     }
@@ -1144,6 +1147,60 @@ pub(crate) fn backup_before_migration(
     Ok(())
 }
 
+/// Checkpoint attempts before the upgrade is refused; each one may already
+/// wait for the connection's busy timeout.
+const CHECKPOINT_ATTEMPTS: u32 = 3;
+
+/// Folds the WAL into the main file, then opens a read transaction on that
+/// state. A reader that started on an empty WAL reads the main file only, and
+/// while it is open no connection can copy WAL frames into that file, so a
+/// plain copy taken meanwhile is consistent. `Ok(false)`: no checkpoint
+/// completed, typically because another connection is still reading.
+/// The caller ends the transaction.
+fn pin_checkpointed_file(conn: &Connection, path: &Path) -> Result<bool> {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let wal = std::path::PathBuf::from(wal);
+    for attempt in 0..CHECKPOINT_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // (busy, frames in the WAL, frames checkpointed); -1 outside WAL mode.
+        let row = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        });
+        match row {
+            Ok((0, log, checkpointed)) if log == checkpointed => {}
+            Ok((busy, log, checkpointed)) => {
+                tracing::warn!(
+                    "WAL checkpoint before the backup incomplete (busy={busy}, {checkpointed}/{log} frames), attempt {}",
+                    attempt + 1
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!("WAL checkpoint before the backup failed: {e}");
+                continue;
+            }
+        }
+        conn.execute_batch("BEGIN")?;
+        conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        // A writer may have appended frames between the checkpoint and the read.
+        let wal_empty = std::fs::metadata(&wal).map_or(true, |meta| meta.len() == 0);
+        if wal_empty {
+            return Ok(true);
+        }
+        conn.execute_batch("ROLLBACK")?;
+    }
+    Ok(false)
+}
+
 fn run_with_backup_checked(
     conn: &Connection,
     db_path: Option<&Path>,
@@ -1166,17 +1223,28 @@ fn run_with_backup_checked(
                 .iter()
                 .any(|(name, _)| !migration_is_applied(conn, name).unwrap_or(false));
             if has_pending {
-                // Fold the WAL back into the main db file FIRST, so a plain
-                // file copy is a consistent snapshot. Without this, recent
-                // writes live only in `<db>-wal` and the backup is stale/torn
-                // (it would omit everything since the last checkpoint).
-                if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-                    tracing::warn!(
-                        "WAL checkpoint before backup failed (backup may be stale): {}",
-                        e
-                    );
+                // Recent writes may live only in `<db>-wal`: a copy of the main
+                // file is a backup only once they are folded in and pinned.
+                // VACUUM INTO would not need the checkpoint, but it rewrites
+                // every page of a multi-GB base and needs a full extra copy of
+                // space, where fs::copy is a sequential copy (a clone on APFS).
+                if backup_disabled() {
+                    backup_before_migration(path, available_space)?;
+                } else {
+                    if !pin_checkpointed_file(conn, path)? {
+                        anyhow::bail!(
+                            "could not fold the write-ahead log into {} before backing it up: \
+                             another connection is still reading the database (another Kronn \
+                             process?). No migration was applied. Close it and restart, or set \
+                             KRONN_MIGRATION_BACKUP=0 to upgrade without a backup.",
+                            path.display()
+                        );
+                    }
+                    let backed_up = backup_before_migration(path, available_space);
+                    let released = conn.execute_batch("COMMIT");
+                    backed_up?;
+                    released?;
                 }
-                backup_before_migration(path, available_space)?;
                 // Also snapshot config.toml (co-located in the data dir) — it
                 // holds auth_token + other config a bad migration/crash could
                 // strand. Best-effort; absence is fine (Docker/env configs).
@@ -1768,6 +1836,76 @@ mod tests {
             .query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(val, "été");
+        assert!(applied_migrations(&conn) > 0);
+    }
+
+    /// A WAL-mode file whose latest row is still only in the WAL.
+    fn wal_db_with_unfolded_write(dir: &Path) -> (std::path::PathBuf, Connection) {
+        let db_path = dir.join("wal.db");
+        let conn = Connection::open(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        conn.execute_batch(
+            "PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT);
+             INSERT INTO t(val) VALUES ('first');",
+        )
+        .unwrap();
+        (db_path, conn)
+    }
+
+    #[test]
+    fn a_checkpoint_blocked_by_a_reader_refuses_the_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db_path, conn) = wal_db_with_unfolded_write(dir.path());
+        let reader = Connection::open(&db_path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let seen: i64 = reader
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(seen, 1);
+        conn.execute("INSERT INTO t(val) VALUES ('latest')", [])
+            .unwrap();
+
+        let error = run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX))
+            .expect_err("no consistent backup, no upgrade");
+        assert!(
+            error.to_string().contains("No migration was applied"),
+            "{error}"
+        );
+        assert!(!db_path.with_extension("db.backup").exists());
+        assert_eq!(applied_migrations(&conn), 0);
+        assert!(conn.is_autocommit(), "no transaction is left open");
+
+        // Once the reader is gone, the same upgrade goes through.
+        reader.execute_batch("COMMIT").unwrap();
+        drop(reader);
+        run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX)).unwrap();
+        assert!(applied_migrations(&conn) > 0);
+    }
+
+    #[test]
+    fn the_migration_backup_holds_the_writes_still_in_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db_path, conn) = wal_db_with_unfolded_write(dir.path());
+        conn.execute("INSERT INTO t(val) VALUES ('latest')", [])
+            .unwrap();
+        // An idle second connection does not block the checkpoint.
+        let _idle = Connection::open(&db_path).unwrap();
+
+        run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX)).unwrap();
+        assert!(conn.is_autocommit(), "the pinning read is released");
+        let backup = Connection::open(db_path.with_extension("db.backup")).unwrap();
+        let rows: Vec<String> = backup
+            .prepare("SELECT val FROM t ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, ["first", "latest"]);
         assert!(applied_migrations(&conn) > 0);
     }
 
