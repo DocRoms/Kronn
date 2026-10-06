@@ -135,8 +135,14 @@ impl KronnToolExecutor {
                 Err(error) => fail(call, error),
             },
             "workflow_list" => {
+                // An in-process principal sees only its project's last runs.
+                let visibility = crate::db::workflows::RunVisibility {
+                    project: project_id.clone(),
+                    own_run: None,
+                };
                 let Json(response) =
-                    crate::api::workflows::list(State(self.state.clone()), None).await;
+                    crate::api::workflows::list_with_visibility(&self.state, Some(visibility))
+                        .await;
                 match (response.success, response.data) {
                     (true, Some(items)) => ok(
                         call,

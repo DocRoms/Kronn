@@ -1736,9 +1736,12 @@ impl ToolExecutor for KronnToolExecutor {
                             ..Default::default()
                         }),
                     };
-                    let Json(res) =
-                        crate::api::mcp_remote::qp_run(State(self.state.clone()), Json(request))
-                            .await;
+                    let Json(res) = crate::api::mcp_remote::qp_run(
+                        State(self.state.clone()),
+                        None,
+                        Json(request),
+                    )
+                    .await;
                     unwrap_api(call, res.success, res.data, res.error)
                 }
             }

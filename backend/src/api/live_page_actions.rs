@@ -259,6 +259,7 @@ async fn execute_claimed_action(
         DiscussionActionKind::QuickPrompt => {
             let response = crate::api::mcp_remote::qp_run(
                 State(state.clone()),
+                None,
                 Json(crate::api::mcp_remote::McpQpRunRequest {
                     qp_id: action.target_id.clone(),
                     vars: variables,

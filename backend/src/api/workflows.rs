@@ -1654,7 +1654,15 @@ pub async fn list(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
 ) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
-    let visibility = run_visibility(&bridge);
+    list_with_visibility(&state, run_visibility(&bridge)).await
+}
+
+/// The workflow list, with each `last_run` taken from the runs `visibility`
+/// admits (`None`: every run, for a human).
+pub(crate) async fn list_with_visibility(
+    state: &AppState,
+    visibility: Option<crate::db::workflows::RunVisibility>,
+) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
     // Read connection: a list must not queue behind a run writing its steps.
     match state
         .db
@@ -4332,7 +4340,7 @@ pub struct ListRunsQuery {
 
 /// The runs a bridge caller may see (its project's, or its own run); `None`
 /// for a human caller.
-fn run_visibility(
+pub(crate) fn run_visibility(
     bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
 ) -> Option<crate::db::workflows::RunVisibility> {
     bridge

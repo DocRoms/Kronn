@@ -6653,6 +6653,7 @@ mod tests {
             loop {
                 let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
                     axum::extract::State(state.clone()),
+                    None,
                     axum::extract::Path("run-activity".to_string()),
                 )
                 .await;
