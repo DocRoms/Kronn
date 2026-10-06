@@ -30,7 +30,7 @@ pub fn resolve_base_url_pub(explicit: Option<&str>) -> String {
 /// Priority: OLLAMA_HOST env var > Docker heuristic > localhost.
 fn ollama_base_url() -> String {
     if let Ok(host) = crate::core::child_env::var("OLLAMA_HOST") {
-        if !host.is_empty() && host != "0.0.0.0" {
+        if !host.is_empty() && !crate::core::net_expose::is_exposed_host(&host) {
             if host.starts_with("http://") || host.starts_with("https://") {
                 return host;
             }
