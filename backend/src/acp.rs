@@ -23,6 +23,7 @@ mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
 mod secret_files;
+mod vibe_policy;
 
 pub use claude_adapter::ClaudeAcpAdapter;
 pub use codex_adapter::CodexAcpAdapter;
@@ -577,6 +578,8 @@ pub struct AcpJsonRpcTransport {
     launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
     /// The name this session declares Kronn's bridge under.
     bridge_id: String,
+    /// A per-launch directory Kronn wrote for the runtime, removed at shutdown.
+    launch_dir: Option<std::path::PathBuf>,
 }
 
 /// How long `shutdown` waits for the stdout dispatcher after the child is
@@ -905,6 +908,24 @@ impl AcpJsonRpcTransport {
             apply_opencode_policy(&mut command, full_access, &servers)
                 .map_err(AcpError::Transport)?;
         }
+        // Without full access Vibe runs under Kronn's agent profile: nothing it
+        // or the user's config would approve unasked skips the broker.
+        let vibe_profile_dir = if agent == AcpAgent::Vibe && !full_access {
+            let vibe_home = vibe_policy::vibe_home().ok_or_else(|| {
+                AcpError::Transport(
+                    "cannot locate Vibe's home (VIBE_HOME or HOME): Vibe is not started without full access".into(),
+                )
+            })?;
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            let policy = vibe_policy::prepare(std::path::Path::new(cwd), &vibe_home, &suffix[..12])
+                .map_err(AcpError::Transport)?;
+            for (name, value) in &policy.env {
+                command.env(name, value);
+            }
+            Some(policy.dir)
+        } else {
+            None
+        };
         let launch_args = native_mcp_launch_args(agent, &servers);
         if let Some(bridge) = servers
             .iter()
@@ -918,8 +939,17 @@ impl AcpJsonRpcTransport {
             broker.record_launch_grant(&bridge.id, &bridge.allowed_tools);
         }
         command.args(launch_args);
-        let mut transport = Self::spawn_with_broker(agent, command, broker).await?;
+        let mut transport = match Self::spawn_with_broker(agent, command, broker).await {
+            Ok(transport) => transport,
+            Err(error) => {
+                if let Some(dir) = &vibe_profile_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+                return Err(error);
+            }
+        };
         transport.bridge_id = bridge_id;
+        transport.launch_dir = vibe_profile_dir;
         *transport.launch_mcp_servers.lock().await = Some((mcp_candidates, servers));
         Ok(transport)
     }
@@ -994,6 +1024,7 @@ impl AcpJsonRpcTransport {
             broker,
             launch_mcp_servers: Mutex::new(None),
             bridge_id: "kronn-internal".into(),
+            launch_dir: None,
         })
     }
 
@@ -1731,6 +1762,9 @@ impl AcpTransport for AcpJsonRpcTransport {
         // idempotent: the first caller reaps and joins, later callers observe
         // an already-finished lifecycle instead of racing the reap.
         let mut process = self.process.lock().await;
+        if let Some(dir) = &self.launch_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         let mut errors = Vec::new();
         if let Some(mut child) = process.child.take() {
             // The group first: what the agent started must not outlive it.
