@@ -1741,6 +1741,17 @@ pub(crate) fn approvals_seal(
         .collect()
 }
 
+/// Whether a backup's seal equals the expected one, compared in constant time.
+fn seal_matches(seal: &str, expected: &str) -> bool {
+    let (seal, expected) = (seal.as_bytes(), expected.as_bytes());
+    seal.len() == expected.len()
+        && seal
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
 /// A restore from an archive this instance did not seal drops every approval
 /// and marks each line with run values as an agent's (KT-1017).
 async fn distrust_foreign_approvals(
@@ -1750,7 +1761,8 @@ async fn distrust_foreign_approvals(
     let secret = state.config.read().await.encryption_secret.clone();
     let sealed = matches!(
         (&secret, &data.trust_seal),
-        (Some(secret), Some(seal)) if *seal == approvals_seal(secret, &data.workflows, &data.quick_execs)
+        (Some(secret), Some(seal))
+            if seal_matches(seal, &approvals_seal(secret, &data.workflows, &data.quick_execs))
     );
     let mut workflows = data.workflows.clone();
     let mut quick_execs = data.quick_execs.clone();
@@ -1758,6 +1770,7 @@ async fn distrust_foreign_approvals(
         for workflow in &mut workflows {
             for chain in [&mut workflow.steps, &mut workflow.on_failure] {
                 crate::api::workflows::clear_human_approvals(chain);
+                crate::api::workflows::blank_unpinned_hashes(chain, &[]);
                 crate::api::workflows::mark_line_writers(
                     chain,
                     &[],
@@ -4232,6 +4245,56 @@ mod tests {
             assert_eq!(kept, "ciphertext-local");
         })
         .await;
+    }
+
+    /// F-07: RFC 4231 vectors 1, 2 and 6 (key longer than a block), and a
+    /// seal compared in constant time refuses any change.
+    #[test]
+    fn the_seal_hmac_matches_rfc_4231_and_refuses_a_tampered_seal() {
+        let hex = |bytes: [u8; 32]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(hmac_sha256(&[0x0b; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hex(hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+        let seal = approvals_seal("s", &[], &[]);
+        assert!(seal_matches(&seal, &seal));
+        let mut tampered = seal.clone();
+        tampered.replace_range(0..1, if seal.starts_with('0') { "1" } else { "0" });
+        assert!(!seal_matches(&tampered, &seal));
+        assert!(!seal_matches(&seal[..10], &seal));
+    }
+
+    /// F-04: an unsealed restore blanks the script hashes it carries.
+    #[tokio::test]
+    async fn an_unsealed_restore_blanks_carried_script_hashes() {
+        let state = test_state();
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "tool", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["python3"], "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null, "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "steps": [{"name": "run", "step_type": {"type": "Exec"}, "exec_command": "python3",
+                       "exec_args": ["tool.py"],
+                       "exec_script_files": [{"path": "tool.py", "sha256": "a".repeat(64)}]}]
+        }))
+        .unwrap();
+        let mut data = empty_export();
+        data.workflows = vec![workflow];
+        let (restored, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed);
+        assert_eq!(restored[0].steps[0].exec_script_files[0].sha256, "");
     }
 
     /// R6-11: a restore keeps approvals only from an archive this instance

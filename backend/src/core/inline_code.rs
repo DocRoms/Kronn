@@ -339,12 +339,50 @@ pub fn trusted_script(cmd: &str, args: &[String]) -> Option<String> {
 /// stdin into the program.
 pub fn stdin_fed_script(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
     untrusted_in(stdin)?;
-    let (program, program_args) = crate::core::argv_roles::launched_program(cmd, args)
-        .unwrap_or_else(|| (cmd.to_string(), args.to_vec()));
-    option_parsing(&program)?;
-    interpreter_script(&program, &program_args)
-        .filter(|script| *script != "-")
-        .map(str::to_string)
+    program_file(cmd, args, 0)
+}
+
+/// The file a code reader takes its program from: an interpreter's script,
+/// `awk|sed|make|psql -f FILE`, a `lua|tclsh|osascript|Rscript` script, after
+/// wrappers and launchers that pass stdin on.
+fn program_file(cmd: &str, args: &[String], depth: usize) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    let name = base_name(cmd);
+    if let Some((inner, inner_args)) = crate::core::argv_roles::launched_program(cmd, args)
+        .or_else(|| stdin_forwarded_to(&name, cmd, args))
+    {
+        return program_file(&inner, &inner_args, depth + 1);
+    }
+    let file = match name.as_str() {
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "gsed" | "psql" => {
+            file_option(args, &["-f", "--file"]).map(str::to_string)
+        }
+        "make" | "gmake" | "bmake" => {
+            file_option(args, &["-f", "--file", "--makefile"]).map(str::to_string)
+        }
+        "lua" | "luajit" | "tclsh" | "wish" | "osascript" | "rscript" => {
+            // A script given with `-e` is inline code, not a file.
+            if args.iter().any(|arg| arg == "-e") {
+                return None;
+            }
+            let values = ["-l", "-s", "-encoding"];
+            let mut skip = false;
+            args.iter()
+                .find(|arg| {
+                    let operand = !skip && !arg.starts_with('-');
+                    skip = values.contains(&arg.as_str());
+                    operand
+                })
+                .cloned()
+        }
+        _ => {
+            option_parsing(cmd)?;
+            interpreter_script(cmd, args).map(str::to_string)
+        }
+    };
+    file.filter(|file| file != "-")
 }
 
 /// The [`Trust`] of a saved step's lines.
@@ -876,19 +914,7 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
         .filter(|arg| !arg.starts_with('-') || *arg == "-")
         .collect();
     // The file named by one of `options` (`-f FILE`, `-fFILE`, `--file=FILE`).
-    let file_option = |options: &[&str]| -> Option<&str> {
-        args.iter().enumerate().find_map(|(i, arg)| {
-            options.iter().find_map(|option| {
-                if arg == option {
-                    args.get(i + 1).map(String::as_str)
-                } else if option.starts_with("--") {
-                    arg.strip_prefix(&format!("{option}="))
-                } else {
-                    arg.strip_prefix(option).filter(|rest| !rest.is_empty())
-                }
-            })
-        })
-    };
+    let file_option = |options: &[&str]| file_option(args, options);
     let stdin = |path: &str| crate::core::argv_roles::is_stdin_path(path);
     if let Some(parsing) = option_parsing(cmd) {
         if parsing == OptionParsing::Never {
@@ -973,25 +999,109 @@ fn starts_a_default_shell(name: &str, cmd: &str, args: &[String]) -> bool {
                 .any(|option| arg == option || arg.starts_with(&format!("{option}=")))
         })
     };
-    let operands = args.iter().filter(|arg| !arg.starts_with('-')).count();
-    let shell_flag = args
-        .iter()
-        .take_while(|arg| arg.starts_with('-'))
-        .any(|arg| {
-            matches!(arg.as_str(), "--shell" | "--login")
-                || (!arg.starts_with("--") && arg[1..].contains(['s', 'i']))
-        });
+    // BSD `script -F PIPE -t TIME`, util-linux `-E -T -I -O -B -m`.
+    const SCRIPT_VALUES: &[&str] = &[
+        "-F",
+        "-t",
+        "-E",
+        "-T",
+        "-I",
+        "-O",
+        "-B",
+        "-m",
+        "--echo",
+        "--timing",
+        "--log-io",
+        "--log-in",
+        "--log-out",
+        "--log-timing",
+        "--logging-format",
+    ];
     match name {
         "chroot" | "unshare" | "nsenter" => {
             crate::core::argv_roles::launched_program(cmd, args).is_none()
         }
-        "sudo" | "doas" => shell_flag,
+        "sudo" | "doas" => asks_for_a_shell(cmd, args),
         "su" => !has(&["-c", "--command"]),
-        "script" => !has(&["-c", "--command"]) && operands <= 1,
+        "script" => !has(&["-c", "--command"]) && operands_after_values(args, SCRIPT_VALUES) <= 1,
         "newgrp" => true,
-        "sg" => !has(&["-c"]) && operands <= 1,
+        "sg" => !has(&["-c"]) && operands_after_values(args, &[]) <= 1,
         _ => false,
     }
+}
+
+/// The file named by one of `options` (`-f FILE`, `-fFILE`, `--file=FILE`).
+fn file_option<'a>(args: &'a [String], options: &[&str]) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(i, arg)| {
+        options.iter().find_map(|option| {
+            if arg == option {
+                args.get(i + 1).map(String::as_str)
+            } else if option.starts_with("--") {
+                arg.strip_prefix(&format!("{option}="))
+            } else {
+                arg.strip_prefix(option).filter(|rest| !rest.is_empty())
+            }
+        })
+    })
+}
+
+/// The operands of `args` once the values of `value_options` are skipped
+/// (`script -t 0 FILE` has one operand, not two).
+fn operands_after_values(args: &[String], value_options: &[&str]) -> usize {
+    let mut operands = 0;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if value_options.contains(&arg) {
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            operands += 1;
+        }
+        i += 1;
+    }
+    operands
+}
+
+/// Whether a `sudo`/`doas` option zone asks for a shell (`-s`, `-i`,
+/// `--shell`, `--login`), skipping the values of its options (`-u USER`).
+fn asks_for_a_shell(cmd: &str, args: &[String]) -> bool {
+    let values = crate::core::argv_roles::wrapper_value_options(cmd);
+    let short_values: Vec<char> = values
+        .iter()
+        .filter(|option| option.len() == 2 && !option.starts_with("--"))
+        .filter_map(|option| option.chars().nth(1))
+        .collect();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" || !arg.starts_with('-') || arg.len() < 2 {
+            return false;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or_default();
+            if matches!(name, "shell" | "login") {
+                return true;
+            }
+            i += if values.contains(&arg) { 2 } else { 1 };
+            continue;
+        }
+        let cluster: Vec<char> = arg[1..].chars().collect();
+        let mut skip_next = false;
+        for (at, letter) in cluster.iter().enumerate() {
+            if matches!(letter, 's' | 'i') {
+                return true;
+            }
+            if short_values.contains(letter) {
+                // The rest of the cluster, or the next argument, is its value.
+                skip_next = at + 1 == cluster.len();
+                break;
+            }
+        }
+        i += if skip_next { 2 } else { 1 };
+    }
+    false
 }
 
 /// The program a launcher hands its stdin to: `npx`/`bunx`/`uvx`,
@@ -2709,6 +2819,28 @@ mod tests {
         assert!(validation_error("s", "cp", &args(&["a", "{{run.artifacts_dir"]), false).is_some());
         let malformed = args(&["a", "{{run.artifacts_dir"]);
         assert!(rendered_refusal("s", "cp", &malformed, &args(&["a", "x"]), false).is_some());
+    }
+
+    /// F-01/F-02: a shell flag after an option value, and option values
+    /// counted apart from operands, still start a default shell.
+    #[test]
+    fn option_values_never_hide_a_default_shell() {
+        for (cmd, line) in [
+            ("sudo", vec!["-u", "u", "-s"]),
+            ("sudo", vec!["-u", "u", "-i"]),
+            ("sudo", vec!["--user", "u", "--login"]),
+            ("doas", vec!["-u", "u", "-s"]),
+            ("script", vec!["-q", "-t", "0", "/dev/null"]),
+            ("script", vec!["-E", "never", "f"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        assert!(
+            stdin_validation_error("s", "sudo", &args(&["-u", "u", "id"]), "{{x}}", true).is_none()
+        );
     }
 
     #[test]

@@ -576,6 +576,7 @@ fn mark_bundle_lines(
     crate::api::workflows::drop_foreign_fields(steps);
     if writer == crate::api::workflows::WorkflowWriter::Agent {
         crate::api::workflows::clear_human_approvals(steps);
+        crate::api::workflows::blank_unpinned_hashes(steps, &[]);
     }
     crate::api::workflows::mark_line_writers(steps, &[], writer);
     crate::api::workflows::clear_stale_approvals(steps);
@@ -635,6 +636,21 @@ mod tests {
         assert_eq!(step.exec_unmodelled_args_approved, None);
         assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
         assert!(crate::core::inline_code::runtime_refusal(&step).is_some());
+    }
+
+    /// F-04: an agent bundle never brings a script hash.
+    #[tokio::test]
+    async fn an_agent_bundle_blanks_its_script_hashes() {
+        let state = bundle_state();
+        let mut request = bundle_with("python3", json!(["tool.py"]));
+        request.workflow.steps[0].exec_unmodelled_args_approved = None;
+        request.workflow.steps[0].exec_script_files = vec![crate::models::ExecScriptFile {
+            path: "tool.py".into(),
+            sha256: "a".repeat(64),
+        }];
+        let Json(created) = create_bundle(State(state.clone()), Json(request)).await;
+        assert!(created.success, "{:?}", created.error);
+        assert_eq!(stored_step(&state).await.exec_script_files[0].sha256, "");
     }
 
     /// R6-12: the wizard's own decomposed preset keeps the approval its human

@@ -10,6 +10,11 @@
 //! `npx`…) only decide what no approval lifts: a value in code, at an option
 //! position or naming a program, and the run-time checks of rendered values.
 
+/// The options of wrapper `cmd` that take a value (`sudo -u USER`).
+pub fn wrapper_value_options(cmd: &str) -> &'static [&'static str] {
+    wrapper(&normalize_command(cmd)).map_or(&[], |spec| spec.value_options)
+}
+
 /// The program that receives argument `index`: the nearest program position
 /// before it (a wrapper's program, `find -exec`, `docker run`…), else `cmd`.
 pub fn owning_program(cmd: &str, args: &[String], roles: &[Role], index: usize) -> String {

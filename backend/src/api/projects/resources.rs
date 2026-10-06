@@ -2010,6 +2010,8 @@ fn import_document(
             let (stored_steps, stored_failure) = stored
                 .map(|stored| (stored.steps, stored.on_failure))
                 .unwrap_or_default();
+            crate::api::workflows::blank_unpinned_hashes(&mut resource.steps, &stored_steps);
+            crate::api::workflows::blank_unpinned_hashes(&mut resource.on_failure, &stored_failure);
             crate::api::workflows::keep_human_approvals(&mut resource.steps, &stored_steps);
             crate::api::workflows::keep_human_approvals(&mut resource.on_failure, &stored_failure);
             crate::api::workflows::mark_line_writers(
@@ -3564,6 +3566,34 @@ mod tests {
         assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
         assert!(crate::core::inline_code::runtime_refusal(step).is_some());
         assert_eq!(quick_exec.agent_written, Some(true));
+    }
+
+    /// F-04: a `kronn/` file never brings a script hash this instance did
+    /// not store.
+    #[tokio::test]
+    async fn a_kronn_import_blanks_a_carried_script_hash() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let mut document = workflow_document(
+            "pinned",
+            serde_json::json!([
+                {"name": "run", "step_type": {"type": "Exec"}, "exec_command": "python3",
+                 "exec_args": ["tool.py"],
+                 "exec_script_files": [{"path": "tool.py", "sha256": "a".repeat(64)}]}
+            ]),
+        );
+        document.resource["exec_allowlist"] = serde_json::json!(["python3"]);
+        let workflow = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let id = import_document(conn, "project-1", &key, &document)?;
+                Ok::<_, anyhow::Error>(crate::db::workflows::get_workflow(conn, &id)?.unwrap())
+            })
+            .await
+            .unwrap();
+        assert_eq!(workflow.steps[0].exec_script_files[0].sha256, "");
     }
 
     #[tokio::test]

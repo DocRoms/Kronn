@@ -692,7 +692,9 @@ Release notes for 0.9.3 and earlier are available in the
   approval" with the line and an approve action. Inline CollectApiData
   sources get the approval box in the editor.
 - Whatever originates from an agent is agent-written, whatever the transport
-  (KT-1017): a `KRONN:WORKFLOW_READY` or `BUNDLE_READY` proposal accepted by a
+  that carries a bridge token or an agent signal (KT-1017; residual for 0.15:
+  a local agent that drops its bridge token is still trusted as a human through
+  loopback): a `KRONN:WORKFLOW_READY` or `BUNDLE_READY` proposal accepted by a
   click, and a new or changed line of a `kronn/` file, wait for an approval in
   the editor; the creation banner and the approve sheet list the Exec lines.
   The writer is tracked per line (main, setup, stdin, each source) and a line's
@@ -704,7 +706,12 @@ Release notes for 0.9.3 and earlier are available in the
   that start a default shell (`su`, `script`, `chroot`, `unshare`, `nsenter`,
   `sudo -s`, `newgrp`, `sg`) and stdin paths climbing to `/dev` count as code
   readers, and a script fed by a templated stdin must be a regular file at run
-  time. `date` options are matched in clusters and abbreviations. A script
+  time. `date` options are matched in clusters and abbreviations. Option
+  values never hide a default shell (`sudo -u u -s`, `script -t 0 FILE`), an
+  `awk|sed|make|psql -f` or `lua`/`Rscript` program file fed by a templated
+  stdin must be a regular file, script hashes carried by an agent-origin import
+  or an unsealed restore are blanked, the stdin line has its own writer, and
+  the restore seal is compared in constant time. A script
   shape (`python3 tool.py …`) needs its script pinned in `exec_script_files`,
   checked at run time to be a regular file; a shell script given to `-c`
   never starts with `-` or `+`; shells are not trusted shapes on Windows.

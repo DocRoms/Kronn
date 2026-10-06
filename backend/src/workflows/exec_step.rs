@@ -1587,6 +1587,33 @@ mod tests {
         );
     }
 
+    /// F-03: a program file read by `awk -f` while a templated stdin feeds
+    /// it must be a regular file too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_awk_program_file_linked_to_stdin_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/stdin", dir.path().join("p.awk")).unwrap();
+        let mut step = exec_step("linked", Some("awk"), vec!["-f", "p.awk"], None);
+        step.exec_unmodelled_args_approved = Some(true);
+        step.exec_stdin = Some("{{x}}".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set("x", "BEGIN { print \"stdin ran\" }");
+        let outcome =
+            execute_exec_step(&step, &["awk".into()], &dir.path().to_string_lossy(), &ctx).await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Failed,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("fichier ordinaire"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
     #[tokio::test]
     async fn stdin_is_templated_before_piping() {
         let mut step = exec_step("pipe", Some("cat"), vec![], None);

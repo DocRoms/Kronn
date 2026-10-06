@@ -1500,8 +1500,15 @@ async fn pin_exec_script_files(
             }
             let known = stored.iter().find(|known| known.name == step.name);
             let checked = if writer == WorkflowWriter::Human {
+                // The scripts belong to the main line: only its own edit,
+                // or an approval given now, pins them.
+                let main_line = |step: &WorkflowStep| {
+                    line_identities(step)
+                        .into_iter()
+                        .find(|(key, _)| key == "main")
+                };
                 let own_save = known.is_none_or(|known| {
-                    line_identities(known) != line_identities(step)
+                    main_line(known) != main_line(step)
                         || (known.exec_unmodelled_args_approved != Some(true)
                             && step.exec_unmodelled_args_approved == Some(true))
                 });
@@ -1909,12 +1916,7 @@ pub(crate) fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::V
     if step.exec_stdin.is_some() {
         lines.push((
             "stdin".to_string(),
-            serde_json::json!([
-                step_type,
-                step.exec_command,
-                step.exec_args,
-                step.exec_stdin
-            ]),
+            serde_json::json!([step_type, step.exec_stdin]),
         ));
     }
     for source in step
@@ -1928,6 +1930,28 @@ pub(crate) fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::V
         ));
     }
     lines
+}
+
+/// On a path an agent's content comes through (bridge import, agent bundle,
+/// `kronn/` import, unsealed restore), a script hash this instance did not
+/// store for the same step and path is blanked: only a human's approval pins
+/// it again, from the file on disk.
+pub(crate) fn blank_unpinned_hashes(steps: &mut [WorkflowStep], stored: &[WorkflowStep]) {
+    for step in steps {
+        let known = stored.iter().find(|known| known.name == step.name);
+        for file in &mut step.exec_script_files {
+            let stored_hash = known.and_then(|known| {
+                known
+                    .exec_script_files
+                    .iter()
+                    .find(|stored| stored.path == file.path)
+                    .map(|stored| stored.sha256.as_str())
+            });
+            if stored_hash != Some(file.sha256.as_str()) {
+                file.sha256.clear();
+            }
+        }
+    }
 }
 
 /// A step's fields that its type never reads are dropped, so they cannot be
@@ -3320,6 +3344,10 @@ async fn import_workflow_written(
         clear_human_approvals(&mut w.on_failure);
         drop_foreign_fields(&mut w.steps);
         drop_foreign_fields(&mut w.on_failure);
+        if by_agent {
+            blank_unpinned_hashes(&mut w.steps, &[]);
+            blank_unpinned_hashes(&mut w.on_failure, &[]);
+        }
         mark_line_writers(&mut w.steps, &[], writer);
         mark_line_writers(&mut w.on_failure, &[], writer);
     }
@@ -7193,6 +7221,62 @@ mod tests {
             "step a was not saved by the human"
         );
         assert_eq!(human[1].exec_script_files[0].sha256.len(), 64, "step b was");
+        // F-06: a human edit of another line of the step does not pin it.
+        let stored = vec![step("a", "")];
+        let mut setup_only = stored.clone();
+        setup_only[0].exec_setup_command = Some("python3".into());
+        setup_only[0].exec_setup_args = vec!["-V".into()];
+        pin_exec_script_files(
+            &state,
+            Some("p1".into()),
+            (&mut setup_only, &stored),
+            (&mut [], &[]),
+            WorkflowWriter::Human,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            setup_only[0].exec_script_files[0].sha256, "",
+            "only the main line pins"
+        );
+    }
+
+    /// F-04: the bridge import and the `kronn/`-style re-import keep only a
+    /// hash this instance stored for the same step and path.
+    #[test]
+    fn carried_script_hashes_are_blanked_unless_stored_here() {
+        let step = |hash: &str| {
+            let mut step = mk_exec_step("run", Some("python3"), vec!["tool.py"], None);
+            step.exec_script_files = vec![ExecScriptFile {
+                path: "tool.py".into(),
+                sha256: hash.into(),
+            }];
+            step
+        };
+        let mut fresh = vec![step(&"a".repeat(64))];
+        blank_unpinned_hashes(&mut fresh, &[]);
+        assert_eq!(fresh[0].exec_script_files[0].sha256, "");
+        let stored = vec![step(&"b".repeat(64))];
+        let mut same = stored.clone();
+        blank_unpinned_hashes(&mut same, &stored);
+        assert_eq!(same[0].exec_script_files[0].sha256, "b".repeat(64));
+        let mut other = vec![step(&"c".repeat(64))];
+        blank_unpinned_hashes(&mut other, &stored);
+        assert_eq!(other[0].exec_script_files[0].sha256, "");
+    }
+
+    /// F-05: the stdin line has its own identity: a human edit of the main
+    /// line leaves an agent's stdin line the agent's.
+    #[test]
+    fn a_main_line_edit_keeps_the_agent_s_stdin_line() {
+        let mut agent = vec![mk_exec_step("pipe", Some("cat"), vec![], None)];
+        agent[0].exec_stdin = Some("{{x}}".into());
+        mark_line_writers(&mut agent, &[], WorkflowWriter::Agent);
+        assert_eq!(agent[0].exec_agent_lines, vec!["stdin".to_string()]);
+        let mut human = agent.clone();
+        human[0].exec_args = vec!["-n".into()];
+        mark_line_writers(&mut human, &agent, WorkflowWriter::Human);
+        assert_eq!(human[0].exec_agent_lines, vec!["stdin".to_string()]);
     }
 
     /// R6-13: the line check knows the step's pinned scripts.
