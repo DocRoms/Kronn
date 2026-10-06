@@ -24,14 +24,14 @@ Release notes for 0.9.3 and earlier are available in the
   fine-grained token when the gh token reaches every repository. Turning it
   off applies to new launches; agents already running keep what they received.
 - A running audit step now has a "Details" toggle listing the agent's latest
-  tool calls, newest first, with their age. What is shown is built from each
-  call's structured input, never copied from free text: a shell command shows
-  only its program names (`curl | jq`, `PGPASSWORD=… psql`, `cat > ~/.pgpass`),
-  a URL its scheme and host, a file tool its path, a search where it looks.
-  Model prose and runtime titles are never shown, a progress update replaces
-  its call's entry, and the panel is kept in memory only and withheld from
-  agents' bridge tokens. It works for CLI, HTTP and ACP agents in Full and
-  drift audits; the open state is remembered per project for the session.
+  actions, newest first: each one only as a fixed category (read, search,
+  edit, command, web, MCP tool, Kronn, plan, other) with its age. Tool names,
+  paths, commands, URLs and titles are never shown or kept, whatever the agent
+  or runtime. The same categories replace the tool name and target in the live
+  tool chip, the audit stream's events, an HTTP agent's label and a workflow
+  step's live activity; an activity a workflow run stored before keeps its
+  count only when read. Agents' bridge tokens get the counts, not the list.
+  The open state is remembered per project for the session.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).

@@ -943,6 +943,8 @@ pub struct AuditProgress {
     pub step_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens_so_far: Option<u64>,
+    /// The current tool call's category (`ActivityCategory::as_str`), never
+    /// the tool's own name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<String>,
     /// 0.8.4 (#319 / B3) — running count of `tool_call` events the
@@ -977,23 +979,18 @@ pub struct AuditProgress {
     pub step_breakdown: Option<AuditTokenBreakdown>,
 }
 
-/// The running step's latest tool calls, newest first. Model prose is never
-/// included: it can quote anything the agent read.
+/// The running step's latest tool calls, newest first, by category only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditRecentActivity {
     pub entries: Vec<AuditActivityEntry>,
 }
 
-/// One tool call: its name and a target built from its structured input
-/// (`agents::activity`): program names, a path, a URL's host.
+/// One tool call: its category and when it started, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditActivityEntry {
-    pub tool: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub target: Option<String>,
+    pub category: crate::models::ActivityCategory,
     pub at: DateTime<Utc>,
 }
 

@@ -41,9 +41,6 @@ use crate::agents::runner::{
     parse_claude_stream_line, AdapterLaunchOptions, SpawnIo, StreamJsonEvent,
 };
 
-/// Largest tool input buffered to find its target.
-const TOOL_INPUT_MAX_BYTES: usize = 256 * 1024;
-
 pub struct ClaudeAcpAdapter {
     program: String,
     cwd: Mutex<Option<PathBuf>>,
@@ -394,8 +391,6 @@ impl AcpTransport for ClaudeAcpAdapter {
 
         let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut failure: Option<String> = None;
-        // Input of the tool call in progress, streamed as partial JSON.
-        let mut tool_input: Option<String> = None;
         let mut tool_calls: u64 = 0;
         let mut text_blocks = crate::agents::runner::TextBlockJoiner::default();
         loop {
@@ -443,47 +438,21 @@ impl AcpTransport for ClaudeAcpAdapter {
                             }
                         }
                         StreamJsonEvent::ToolStart(name) => {
-                            tool_input = Some(String::new());
                             tool_calls += 1;
                             let _ = events
                                 .send(AcpSessionEvent::ToolActivity(
-                                    crate::agents::activity::ToolActivityUpdate::call(
+                                    crate::agents::activity::ToolActivityUpdate::named(
                                         Some(tool_calls.to_string()),
                                         &name,
-                                        None,
                                     ),
                                 ))
                                 .await;
                             let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
                         }
-                        StreamJsonEvent::ToolInputDelta(partial) => {
-                            if let Some(input) = tool_input.as_mut() {
-                                // A larger input (a whole file written) has no
-                                // target worth holding it for.
-                                if input.len() + partial.len() <= TOOL_INPUT_MAX_BYTES {
-                                    input.push_str(&partial);
-                                } else {
-                                    tool_input = None;
-                                }
-                            }
-                        }
+                        // A tool's input is never read: nothing of it is shown.
+                        StreamJsonEvent::ToolInputDelta(_) => {}
                         StreamJsonEvent::ToolEnd => {
                             text_blocks.block_ended();
-                            let target = tool_input.take().and_then(|input| {
-                                serde_json::from_str::<serde_json::Value>(&input)
-                                    .ok()
-                                    .and_then(|value| crate::agents::activity::input_target(&value))
-                            });
-                            if let Some(target) = target {
-                                let _ = events
-                                    .send(AcpSessionEvent::ToolActivity(
-                                        crate::agents::activity::ToolActivityUpdate::target(
-                                            Some(tool_calls.to_string()),
-                                            target,
-                                        ),
-                                    ))
-                                    .await;
-                            }
                         }
                         StreamJsonEvent::TerminalError(terminal_failure) => {
                             failure = Some(terminal_failure.user_message());
@@ -656,14 +625,18 @@ mod tests {
                     }
             })
             .expect("tool call reported");
-        let tool_target = events
-            .iter()
-            .position(|event| {
-                matches!(event, AcpSessionEvent::ToolActivity(update)
-                    if update.target_text() == Some("src/lib.rs"))
-            })
-            .expect("tool target reported");
-        assert!(tool_call < tool_target, "{events:?}");
+        // The call reaches the live views as its category only.
+        assert!(
+            events
+                .iter()
+                .skip(tool_call.saturating_sub(1))
+                .any(|event| matches!(
+                    event,
+                    AcpSessionEvent::ToolActivity(update)
+                        if update.category() == Some(crate::models::ActivityCategory::Read)
+                )),
+            "{events:?}"
+        );
         assert!(events.contains(&AcpSessionEvent::Usage {
             input_tokens: 48,
             output_tokens: 21_545,

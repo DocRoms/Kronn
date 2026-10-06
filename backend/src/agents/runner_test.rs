@@ -133,10 +133,7 @@ mod tests {
             ["claude-opus-5-5-20260915"]
         );
         let latest = activity_rx.borrow().clone().expect("tool call recorded");
-        assert_eq!(
-            (latest.tool.as_str(), latest.target.as_deref()),
-            ("Read", Some("src/lib.rs"))
-        );
+        assert_eq!(latest.category, crate::models::ActivityCategory::Read);
     }
 
     struct RestoreAdapterToggles([(&'static str, Option<std::ffi::OsString>); 2]);
@@ -15142,10 +15139,10 @@ sleep 3600
         assert_eq!(process.reported_token_usage(), Some(312));
         assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
         assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
-        // KT-994 — the card shows what an HTTP agent is doing, as for a CLI.
+        // KT-994 — the card shows what an HTTP agent is doing, by category.
         assert_eq!(
             process.tool_activity_probe().read(),
-            Some(("read_file · docs/result.md".to_string(), 1))
+            Some((crate::models::ActivityCategory::Read, 1))
         );
     }
 

@@ -1560,12 +1560,9 @@ async fn minutes_of_tool_turns_without_text_move_the_counters_at_each_tick() {
             assert_eq!(watch.tool_moved(), None, "turn {turn}: nothing happened");
             assert_eq!(watch.tokens_moved(), None, "turn {turn}: nothing happened");
         }
-        http.record_turn(90, 10, Some(&format!("read_file · src/é{turn}.rs")));
+        http.record_turn(90, 10, Some("read_file"));
         tick.tick().await;
-        assert_eq!(
-            watch.tool_moved(),
-            Some((format!("read_file · src/é{turn}.rs"), turn as u32))
-        );
+        assert_eq!(watch.tool_moved(), Some(("Read".to_string(), turn as u32)));
         let tokens = watch.tokens_moved().expect("the turn's usage shows");
         assert_eq!(tokens.total(), Some(100 * turn));
     }
@@ -1584,12 +1581,11 @@ fn the_activity_probe_reads_the_acp_sink_when_the_http_run_is_silent() {
     let http = runner::ToolActivityProbe::scripted();
     let probe = AuditActivityProbe::new(http.clone(), Some(rx));
     assert_eq!(probe.tool(), None);
-    crate::agents::activity::tool_started(Some(&sink), "Bash");
-    crate::agents::activity::tool_started(Some(&sink), "Read");
-    crate::agents::activity::tool_target(Some(&sink), "docs/é.md".into());
-    assert_eq!(probe.tool(), Some(("Read · docs/é.md".to_string(), 2)));
+    crate::agents::activity::tool_started(Some(&sink), crate::models::ActivityCategory::Execute);
+    crate::agents::activity::tool_started(Some(&sink), crate::models::ActivityCategory::Read);
+    assert_eq!(probe.tool(), Some(("Read".to_string(), 2)));
     http.record_turn(1, 1, Some("write_file"));
-    assert_eq!(probe.tool(), Some(("write_file".to_string(), 1)));
+    assert_eq!(probe.tool(), Some(("Edit".to_string(), 1)));
 }
 
 fn stream_line(event: serde_json::Value) -> runner::StreamJsonEvent {
@@ -1598,11 +1594,11 @@ fn stream_line(event: serde_json::Value) -> runner::StreamJsonEvent {
     )
 }
 
-/// A CLI's stream-json feeds the details panel: each tool with a target built
-/// from its input, newest first. Prose, a command's arguments and a written
-/// file's contents never reach it.
+/// A CLI's stream-json feeds the details panel and the chip by category only:
+/// a tool's name, its input and the prose never reach them.
 #[test]
-fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
+fn a_cli_stream_feeds_the_recent_actions_by_category_only() {
+    use crate::agents::activity::tests::SENTINEL;
     let mut feed = StepRecentFeed::new(None);
     assert_eq!(
         feed.moved(),
@@ -1613,85 +1609,55 @@ fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
         feed.on_stream_event(&stream_line(serde_json::json!({
             "type": "content_block_start", "content_block": { "type": "tool_use", "name": name }
         })));
-        let raw = input.to_string();
-        let (head, tail) = raw.split_at(raw.len() / 2);
-        for part in [head, tail] {
-            feed.on_stream_event(&stream_line(serde_json::json!({
-                "type": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": part }
-            })));
-        }
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": input.to_string() }
+        })));
         feed.on_stream_event(&stream_line(
             serde_json::json!({ "type": "content_block_stop" }),
         ));
     };
-    // 600 characters and more of prose, a password and a bearer token in it.
-    let prose = format!(
-        "{} the db password: hunter2 and Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 then",
-        "filler ".repeat(100)
-    );
     feed.on_stream_event(&stream_line(serde_json::json!({
-        "type": "content_block_delta", "delta": { "type": "text_delta", "text": prose }
+        "type": "content_block_delta", "delta": { "type": "text_delta", "text": SENTINEL }
     })));
     tool(
         &mut feed,
         "Read",
-        serde_json::json!({ "file_path": "docs/architecture.md" }),
+        serde_json::json!({ "file_path": SENTINEL }),
     );
     tool(
         &mut feed,
         "Grep",
-        serde_json::json!({ "pattern": "useAuth", "path": "src/" }),
+        serde_json::json!({ "pattern": SENTINEL, "path": SENTINEL }),
     );
     tool(
         &mut feed,
         "Bash",
-        serde_json::json!({ "command": "curl -u admin:hunter2 -H 'x: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' https://api.example.com/v1?key=ghp_abcdefghijklmnopqrstuvwxyz0123456789 && npm test" }),
+        serde_json::json!({ "command": format!("mysql -p{SENTINEL}") }),
     );
+    tool(&mut feed, SENTINEL, serde_json::json!({}));
     tool(
         &mut feed,
-        "Write",
-        serde_json::json!({ "file_path": "docs/AGENTS.md", "content": "TOP SECRET CONTENT" }),
+        &format!("mcp__{SENTINEL}__x"),
+        serde_json::json!({}),
     );
-    for _ in 0..50 {
-        feed.on_stream_event(&stream_line(serde_json::json!({
-            "type": "content_block_delta", "delta": { "type": "text_delta", "text": "w " }
-        })));
-    }
 
     let shown = feed.moved().expect("the actions show");
-    let entries: Vec<_> = shown
-        .entries
-        .iter()
-        .map(|e| (e.tool.as_str(), e.target.as_deref().unwrap_or("")))
-        .collect();
-    assert_eq!(
-        entries,
-        [
-            ("Write", "docs/AGENTS.md"),
-            ("Bash", "curl && npm"),
-            ("Grep", "in src/"),
-            ("Read", "docs/architecture.md"),
-        ]
-    );
+    let categories: Vec<_> = shown.entries.iter().map(|e| e.category).collect();
+    use crate::models::ActivityCategory::*;
+    assert_eq!(categories, [Mcp, Other, Execute, Search, Read]);
     let all = serde_json::to_string(&shown).unwrap();
-    for leaked in [
-        "hunter2",
-        "abcdefghij",
-        "TOP SECRET",
-        "useAuth",
-        "filler",
-        "Bearer",
-        "admin",
-    ] {
-        assert!(!all.contains(leaked), "{leaked} leaked: {all}");
-    }
+    assert!(
+        !all.contains("hunter2") && !all.contains("SENTINEL"),
+        "{all}"
+    );
     assert_eq!(feed.moved(), None, "unchanged, nothing new to send");
 }
 
-/// An HTTP agent's run feeds the same panel through its probe, with the same
-/// rules, recorded the way its tool loop records each call.
+/// An HTTP agent's run feeds the same panel and its chip label through its
+/// probe, recorded the way its tool loop records each call.
 #[test]
-fn an_http_run_feeds_the_recent_actions_through_its_probe() {
+fn an_http_run_feeds_the_recent_actions_and_its_label_by_category_only() {
+    use crate::agents::activity::tests::SENTINEL;
     let http = runner::ToolActivityProbe::scripted();
     let mut feed = StepRecentFeed::new(Some(http.clone()));
     assert_eq!(feed.moved(), None);
@@ -1699,13 +1665,13 @@ fn an_http_run_feeds_the_recent_actions_through_its_probe() {
         http.record_http_call(&ToolCall {
             id: format!("c{turn}"),
             name: "read_file".into(),
-            arguments: json!({ "path": format!("src/{turn}.rs") }),
+            arguments: json!({ "path": SENTINEL }),
         });
     }
     http.record_http_call(&ToolCall {
-        id: "bash".into(),
-        name: "run_command".into(),
-        arguments: json!({ "command": "mysql -u root -phunter2 mydb" }),
+        id: "x".into(),
+        name: SENTINEL.into(),
+        arguments: json!({ "command": SENTINEL }),
     });
     let shown = feed.moved().expect("the run's calls show");
     assert_eq!(
@@ -1713,13 +1679,24 @@ fn an_http_run_feeds_the_recent_actions_through_its_probe() {
         crate::agents::activity::RECENT_MAX_ENTRIES
     );
     assert_eq!(
-        (
-            shown.entries[0].tool.as_str(),
-            shown.entries[0].target.as_deref()
-        ),
-        ("run_command", Some("mysql"))
+        shown.entries[0].category,
+        crate::models::ActivityCategory::Other
     );
-    assert_eq!(shown.entries[1].target.as_deref(), Some("src/19.rs"));
-    assert_eq!(http.read(), Some(("run_command · mysql".to_string(), 21)));
-    assert!(!serde_json::to_string(&shown).unwrap().contains("hunter2"));
+    assert_eq!(
+        shown.entries[1].category,
+        crate::models::ActivityCategory::Read
+    );
+    assert_eq!(
+        http.read(),
+        Some((crate::models::ActivityCategory::Other, 21))
+    );
+    let all = format!(
+        "{} {:?}",
+        serde_json::to_string(&shown).unwrap(),
+        http.read()
+    );
+    assert!(
+        !all.contains("hunter2") && !all.contains("SENTINEL"),
+        "{all}"
+    );
 }

@@ -390,8 +390,7 @@ mod audit_status_tests {
                 "p1",
                 crate::models::AuditRecentActivity {
                     entries: vec![crate::models::AuditActivityEntry {
-                        tool: "Bash".into(),
-                        target: Some("psql".into()),
+                        category: crate::models::ActivityCategory::Execute,
                         at: chrono::Utc::now(),
                     }],
                 },

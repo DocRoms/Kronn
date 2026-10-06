@@ -114,7 +114,8 @@ describe('AuditTimeline', () => {
     const p = props({
       auditActive: true, liveStep: 2, liveTotal: 16, liveFile: 'docs/step-2.md',
       liveStartedAt: Date.parse('2026-10-03T09:46:00Z'),
-      liveActivity: { entries: [{ tool: 'Read', target: 'docs/architecture.md', at: new Date().toISOString() }] },
+      liveTool: 'Read',
+      liveActivity: { entries: [{ category: 'Read', at: new Date().toISOString() }] },
     });
     wrap(<AuditTimeline {...p} />);
 
@@ -123,7 +124,9 @@ describe('AuditTimeline', () => {
     const toggle = running.querySelector('button[aria-expanded]') as HTMLButtonElement;
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(toggle);
-    expect(running).toHaveTextContent('Read docs/architecture.md');
+    expect(running).toHaveTextContent(/Lecture|Read/);
+    // The chip shows the category's label too.
+    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent(/Lecture|Read/);
   });
 
   it('does not present its own choice as the running agent when the server does not say (KT-994)', async () => {
@@ -182,7 +185,7 @@ describe('AuditTimeline', () => {
     }] as never);
     const p = props({
       auditActive: true, liveStep: 1, liveTotal: 16, liveFile: 'docs/AGENTS.md',
-      liveTool: 'read_file · package.json', liveToolCalls: 7,
+      liveTool: 'Read', liveToolCalls: 7,
       selectedAgent: 'ClaudeCode', selectedTier: 'default',
       liveAuditor: { agent: 'Custom', tier: 'reasoning', connectionId: 'conn-or' },
     });
@@ -204,7 +207,7 @@ describe('AuditTimeline', () => {
     expect(launch).toHaveTextContent(/Audit en cours|Audit running/);
     // The audit read the briefing at start: editing it now would change nothing.
     expect(screen.getByTestId('audit-timeline-briefing-open')).toBeDisabled();
-    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent('read_file · package.json');
+    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent(/(Lecture|Read) \(7\)/);
   });
 
   it('resumes a failed step through the resume launcher and says consolidation reruns', async () => {

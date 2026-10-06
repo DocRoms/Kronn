@@ -1489,8 +1489,9 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                     });
                 }
                 // A terminal update refines a call; it never announces one.
-                if let Some(activity) = crate::agents::activity::acp_tool_update(update)
-                    .filter(|activity| !terminal || activity.carries_detail())
+                if let Some(activity) =
+                    crate::agents::activity::ToolActivityUpdate::from_acp(update)
+                        .filter(|activity| !terminal || activity.carries_detail())
                 {
                     events.push(AcpSessionEvent::ToolActivity(activity));
                 }
@@ -3194,12 +3195,13 @@ mod tests {
         let started: Vec<bool> = activity.iter().map(|update| recent.apply(update)).collect();
         assert_eq!(started, [true, false], "one call, one entry");
         let shown = recent.snapshot();
-        assert_eq!(shown.entries[0].tool, "Execute");
         assert_eq!(
-            shown.entries[0].target.as_deref(),
-            Some("PGPASSWORD=***REDACTED*** psql")
+            shown.entries[0].category,
+            crate::models::ActivityCategory::Execute
         );
+        // Neither the event nor what it becomes carries the title or the input.
         assert!(!format!("{activity:?}").contains("hunter2"));
+        assert!(!serde_json::to_string(&shown).unwrap().contains("hunter2"));
     }
 
     /// The events other than the live-view activity, which its own tests pin.

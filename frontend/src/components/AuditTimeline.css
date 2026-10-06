@@ -80,10 +80,8 @@
   border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-subtle); min-width: 0; }
 .audit-tl-activity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--kr-sp-1); }
 .audit-tl-activity-list li { display: flex; justify-content: space-between; gap: var(--kr-sp-4); align-items: baseline; min-width: 0; }
-.audit-tl-activity-action { font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audit-tl-activity-tool { color: var(--kr-text-primary); font-weight: 600; }
-.audit-tl-activity-target { color: var(--kr-text-muted); }
+.audit-tl-activity-action { display: inline-flex; align-items: center; gap: var(--kr-sp-2); font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary); min-width: 0; }
 .audit-tl-activity-time { flex-shrink: 0; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); white-space: nowrap; }
 
 .audit-tl-side { display: flex; flex-direction: column; gap: var(--kr-sp-8); position: sticky; top: var(--kr-sp-8); }

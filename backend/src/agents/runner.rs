@@ -1773,9 +1773,9 @@ pub struct ToolActivityProbe(Arc<Mutex<AgentUsage>>);
 
 impl ToolActivityProbe {
     /// The last tool called and the running count, `None` before the first call.
-    pub fn read(&self) -> Option<(String, u32)> {
+    pub fn read(&self) -> Option<(crate::models::ActivityCategory, u32)> {
         let usage = self.0.lock().ok()?;
-        usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
+        usage.last_tool.map(|category| (category, usage.tool_calls))
     }
 
     /// The run's latest tool calls, newest first; prose is not recorded here.
@@ -1814,11 +1814,10 @@ impl ToolActivityProbe {
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
         usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
         if let Some(tool) = tool {
-            usage.last_tool = Some(tool.to_owned());
+            let update = super::activity::ToolActivityUpdate::named(None, tool);
+            usage.last_tool = update.category();
             usage.tool_calls = usage.tool_calls.saturating_add(1);
-            usage
-                .recent
-                .apply(&super::activity::ToolActivityUpdate::call(None, tool, None));
+            usage.recent.apply(&update);
         }
     }
 }
@@ -1826,15 +1825,10 @@ impl ToolActivityProbe {
 /// An HTTP agent's tool call on its run: the last tool, the count and the
 /// recent actions, read from outside the run by `ToolActivityProbe`.
 fn record_http_tool_call(usage: &Mutex<AgentUsage>, call: &crate::agents::tools::ToolCall) {
-    // Built outside the lock: the target's parse is bounded but not free.
-    let target = super::activity::input_target(&call.arguments);
-    let label = match &target {
-        Some(target) => format!("{} · {}", call.name, target.as_str()),
-        None => call.name.clone(),
-    };
-    let update = super::activity::ToolActivityUpdate::call(None, &call.name, target);
+    // Its category only: the name and arguments are the model's own strings.
+    let update = super::activity::ToolActivityUpdate::named(None, &call.name);
     if let Ok(mut usage) = usage.lock() {
-        usage.last_tool = Some(label);
+        usage.last_tool = update.category();
         usage.tool_calls = usage.tool_calls.saturating_add(1);
         usage.recent.apply(&update);
     }
@@ -1851,9 +1845,9 @@ struct AgentUsage {
     /// At least one response reported no cost: the sum is then only a part of
     /// the run's cost, so the run's cost is unknown.
     cost_incomplete: bool,
-    /// The last native tool an HTTP agent called (with its path when it has
-    /// one) and how many it has called: what a CLI's stream-json shows.
-    last_tool: Option<String>,
+    /// The category of the last native tool an HTTP agent called, and how
+    /// many it has called.
+    last_tool: Option<crate::models::ActivityCategory>,
     tool_calls: u32,
     /// The run's latest tool calls, for an audit's details panel.
     recent: super::activity::RecentActivity,
@@ -5056,11 +5050,8 @@ async fn run_acp_session(
                             .lock()
                             .map(|mut usage| usage.recent.apply(&update))
                             .unwrap_or(false);
-                        if let (true, Some(tool)) = (started, update.tool()) {
-                            super::activity::tool_started(activity.as_ref(), tool);
-                        }
-                        if let Some(target) = update.target_text() {
-                            super::activity::tool_target(activity.as_ref(), target.to_owned());
+                        if let (true, Some(category)) = (started, update.category()) {
+                            super::activity::tool_started(activity.as_ref(), category);
                         }
                     }
                     AcpSessionEvent::ToolTrace(trace) => {

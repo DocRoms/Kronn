@@ -34,6 +34,13 @@ progress_phase?: string, };
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
+ * What kind of action an agent's tool call is, from a fixed table
+ * (`agents::activity::category_of`). The only description of a call that
+ * leaves the agent's run: its name, arguments and targets never do.
+ */
+export type ActivityCategory = "Read" | "Search" | "Edit" | "Execute" | "Web" | "Mcp" | "Kronn" | "Think" | "Other";
+
+/**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
 export type AddContactResult = { contact: Contact,
@@ -60,14 +67,11 @@ scope: HostScope,
 name: string, };
 
 /**
- * The latest tool call an agent started, as its runtime reported it.
+ * The latest tool call an agent started: its category and the count. A row
+ * stored before 0.14.3 also held the tool's name and target; they are not
+ * read back, so they are never served again.
  */
-export type AgentActivity = { tool: string,
-/**
- * The call's most informative input (file, command, pattern or URL),
- * truncated. `None` until the input is complete or when it has none.
- */
-target?: string | null, at: string,
+export type AgentActivity = { category: ActivityCategory, at: string,
 /**
  * Tool calls the launch has started so far, this one included.
  */
@@ -631,10 +635,9 @@ path: string,
 format?: string | null, };
 
 /**
- * One tool call: its name and a target built from its structured input
- * (`agents::activity`): program names, a path, a URL's host.
+ * One tool call: its category and when it started, nothing else.
  */
-export type AuditActivityEntry = { tool: string, target?: string, at: string, };
+export type AuditActivityEntry = { category: ActivityCategory, at: string, };
 
 export type AuditEntry = {
 /**
@@ -728,7 +731,12 @@ kind: string,
  * chips from these fields. Optional so the JSON shape stays
  * backwards-compatible with old clients.
  */
-step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?: string | null,
+step_tokens?: number | null, total_tokens_so_far?: number | null,
+/**
+ * The current tool call's category (`ActivityCategory::as_str`), never
+ * the tool's own name.
+ */
+current_tool?: string | null,
 /**
  * 0.8.4 (#319 / B3) — running count of `tool_call` events the
  * agent has fired DURING the current step. Reset on every
@@ -761,8 +769,7 @@ step_breakdown?: AuditTokenBreakdown, };
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
 /**
- * The running step's latest tool calls, newest first. Model prose is never
- * included: it can quote anything the agent read.
+ * The running step's latest tool calls, newest first, by category only.
  */
 export type AuditRecentActivity = { entries: Array<AuditActivityEntry>, };
 

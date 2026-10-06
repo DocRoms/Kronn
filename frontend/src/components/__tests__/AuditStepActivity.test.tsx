@@ -10,9 +10,9 @@ const wrap = (ui: ReactElement) => render(<I18nProvider>{ui}</I18nProvider>);
 
 const recent: AuditRecentActivity = {
   entries: [
-    { tool: 'Edit', target: 'docs/AGENTS.md', at: new Date(Date.now() - 5_000).toISOString() },
-    { tool: 'Grep', target: '"useAuth" src/', at: new Date(Date.now() - 65_000).toISOString() },
-    { tool: 'TodoWrite', at: new Date(Date.now() - 70_000).toISOString() },
+    { category: 'Edit', at: new Date(Date.now() - 5_000).toISOString() },
+    { category: 'Search', at: new Date(Date.now() - 65_000).toISOString() },
+    { category: 'Execute', at: new Date(Date.now() - 70_000).toISOString() },
   ],
 };
 
@@ -21,7 +21,7 @@ describe('AuditStepActivity', () => {
     try { sessionStorage.clear(); } catch { /* jsdom */ }
   });
 
-  it('is collapsed by default, then lists the actions newest first with their age', () => {
+  it('is collapsed by default, then lists the actions newest first by category with their age', () => {
     wrap(<AuditStepActivity projectId="p1" recent={recent} />);
     const toggle = screen.getByRole('button', { expanded: false });
     expect(screen.queryByRole('list')).toBeNull();
@@ -30,9 +30,10 @@ describe('AuditStepActivity', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const entries = screen.getAllByTestId('audit-step-activity-entry');
     expect(entries).toHaveLength(3);
-    expect(entries[0]).toHaveTextContent('Edit docs/AGENTS.md');
-    expect(entries[1]).toHaveTextContent('Grep "useAuth" src/');
-    expect(entries[2]).toHaveTextContent('TodoWrite');
+    expect(entries[0]).toHaveTextContent(/Modification|Edit/);
+    expect(entries[1]).toHaveTextContent(/Recherche|Search/);
+    expect(entries[2]).toHaveTextContent(/Commande|Run a command/);
+    expect(entries[0].querySelector('svg')).not.toBeNull();
     expect(entries[0].querySelector('time')?.textContent).toMatch(/5/);
     expect(screen.getByRole('list')).toBeInTheDocument();
   });
@@ -55,5 +56,14 @@ describe('AuditStepActivity', () => {
 
     wrap(<AuditStepActivity projectId="p2" recent={recent} />);
     expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows an unknown category from an older server as Other, never its text', () => {
+    const legacy = { entries: [{ category: 'cat hunter2' as never, at: new Date().toISOString() }] };
+    wrap(<AuditStepActivity projectId="p1" recent={legacy} />);
+    fireEvent.click(screen.getByRole('button'));
+    const entry = screen.getByTestId('audit-step-activity-entry');
+    expect(entry).not.toHaveTextContent('hunter2');
+    expect(entry).toHaveTextContent(/Autre outil|Other tool/);
   });
 });

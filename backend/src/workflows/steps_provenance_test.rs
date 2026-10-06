@@ -495,10 +495,7 @@ async fn a_claude_code_step_reports_its_cache_reads_and_writes() {
         Some("claude-opus-5-5-20260915")
     );
     let latest = activity_rx.borrow().clone().expect("tool call recorded");
-    assert_eq!(
-        (latest.tool.as_str(), latest.target.as_deref()),
-        ("Read", Some("src/lib.rs"))
-    );
+    assert_eq!(latest.category, crate::models::ActivityCategory::Read);
 
     let persisted: serde_json::Value = serde_json::to_value(&result).unwrap();
     assert_eq!(persisted["cached_prompt_tokens"], 1_554_330);

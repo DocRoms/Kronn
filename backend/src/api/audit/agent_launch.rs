@@ -288,16 +288,14 @@ impl AuditActivityProbe {
         Self { http, acp }
     }
 
-    /// The last tool called and the step's call count, `None` before the first.
+    /// The last tool call's category and the step's call count, `None`
+    /// before the first.
     pub(super) fn tool(&self) -> Option<(String, u32)> {
-        self.http.read().or_else(|| {
+        let (category, calls) = self.http.read().or_else(|| {
             let activity = self.acp.as_ref()?.borrow().clone()?;
-            let label = match activity.target {
-                Some(target) => format!("{} · {target}", activity.tool),
-                None => activity.tool,
-            };
-            Some((label, activity.calls))
-        })
+            Some((activity.category, activity.calls))
+        })?;
+        Some((category.as_str().to_owned(), calls))
     }
 
     pub(super) fn usage(&self) -> Option<runner::ReportedUsage> {
@@ -345,17 +343,12 @@ impl StepActivityWatch {
     }
 }
 
-/// Largest tool input buffered to find its target; a bigger one (a long file
-/// written) is dropped rather than held.
-const TOOL_INPUT_MAX_BYTES: usize = 256 * 1024;
-
-/// The running step's latest actions for the details panel, fed by whichever
-/// pipeline runs the agent: a CLI's stream-json lines here, an HTTP or ACP
-/// run's calls through its probe.
+/// The running step's latest actions for the details panel, by category,
+/// fed by whichever pipeline runs the agent: a CLI's stream-json lines here,
+/// an HTTP or ACP run's calls through its probe.
 pub(super) struct StepRecentFeed {
     local: crate::agents::activity::RecentActivity,
     probe: Option<runner::ToolActivityProbe>,
-    tool_input: Option<String>,
     calls: u64,
     seen: Option<crate::models::AuditRecentActivity>,
 }
@@ -366,48 +359,21 @@ impl StepRecentFeed {
         Self {
             local: Default::default(),
             probe,
-            tool_input: None,
             calls: 0,
             seen: None,
         }
     }
 
-    /// One parsed stream-json event of a CLI agent. Text is never kept.
+    /// One parsed stream-json event of a CLI agent: a tool's start counts, by
+    /// its category. Its input and the prose are never read.
     pub(super) fn on_stream_event(&mut self, event: &runner::StreamJsonEvent) {
-        use crate::agents::activity::ToolActivityUpdate;
-        match event {
-            runner::StreamJsonEvent::ToolStart(name) => {
-                self.calls += 1;
-                self.local.apply(&ToolActivityUpdate::call(
+        if let runner::StreamJsonEvent::ToolStart(name) = event {
+            self.calls += 1;
+            self.local
+                .apply(&crate::agents::activity::ToolActivityUpdate::named(
                     Some(self.calls.to_string()),
                     name,
-                    None,
                 ));
-                self.tool_input = Some(String::new());
-            }
-            runner::StreamJsonEvent::ToolInputDelta(delta) => {
-                if let Some(input) = self.tool_input.as_mut() {
-                    if input.len() + delta.len() <= TOOL_INPUT_MAX_BYTES {
-                        input.push_str(delta);
-                    } else {
-                        self.tool_input = None;
-                    }
-                }
-            }
-            runner::StreamJsonEvent::ToolEnd => {
-                let target = self.tool_input.take().and_then(|input| {
-                    serde_json::from_str::<serde_json::Value>(&input)
-                        .ok()
-                        .and_then(|value| crate::agents::activity::input_target(&value))
-                });
-                if let Some(target) = target {
-                    self.local.apply(&ToolActivityUpdate::target(
-                        Some(self.calls.to_string()),
-                        target,
-                    ));
-                }
-            }
-            _ => {}
         }
     }
 

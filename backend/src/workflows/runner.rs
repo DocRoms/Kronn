@@ -6572,15 +6572,16 @@ mod tests {
                     name: "Bash".into(),
                 })
                 .await;
+            // A secret in the title and the raw input: neither is ever stored.
+            let sentinel = crate::agents::activity::tests::SENTINEL;
             let _ = events
                 .send(AcpSessionEvent::ToolActivity(
-                    crate::agents::activity::ToolActivityUpdate::call(
-                        Some("1".into()),
-                        "Bash",
-                        crate::agents::activity::input_target(
-                            &serde_json::json!({"command": "cargo test --no-fail-fast"}),
-                        ),
-                    ),
+                    crate::agents::activity::ToolActivityUpdate::from_acp(&serde_json::json!({
+                        "toolCallId": "1", "kind": "execute",
+                        "title": format!("mysql -p{sentinel}"),
+                        "rawInput": {"command": format!("mysql -p{sentinel}")}
+                    }))
+                    .unwrap(),
                 ))
                 .await;
             self.release.notified().await;
@@ -6674,17 +6675,24 @@ mod tests {
         .await
         .expect("the running step's activity must become readable");
         assert_eq!(status.current_step.as_deref(), Some("orchestrateur"));
-        let activity = status.current_activity.unwrap();
-        assert_eq!(
-            (activity.tool.as_str(), activity.target.as_deref()),
-            ("Bash", Some("cargo"))
-        );
+        let activity = status.current_activity.clone().unwrap();
+        assert_eq!(activity.category, crate::models::ActivityCategory::Execute);
         let axum::Json(detail) = crate::api::workflows::get_run(
             axum::extract::State(state.clone()),
             axum::extract::Path(("wf-activity".to_string(), "run-activity".to_string())),
         )
         .await;
-        let in_flight = detail.data.unwrap().step_results.pop().unwrap();
+        let detail = detail.data.unwrap();
+        let served = format!(
+            "{} {}",
+            serde_json::to_string(&detail).unwrap(),
+            serde_json::to_string(&status).unwrap()
+        );
+        assert!(
+            !served.contains("SENTINEL") && !served.contains("hunter2"),
+            "{served}"
+        );
+        let in_flight = detail.step_results.clone().pop().unwrap();
         assert_eq!(in_flight.status, RunStatus::Running);
         assert_eq!(in_flight.last_activity, Some(activity));
 

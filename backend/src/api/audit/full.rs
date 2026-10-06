@@ -1407,7 +1407,9 @@ pub async fn full_audit(
                                         usage_moved = true;
                                     }
                                 }
-                                runner::StreamJsonEvent::ToolStart(name) => {
+                                runner::StreamJsonEvent::ToolStart(raw_name) => {
+                                    // Its category only, never the name.
+                                    let name = crate::agents::activity::category_of(&raw_name).as_str().to_owned();
                                     // 0.8.3 — also persist the tool in
                                     // the tracker so the poll re-seeds
                                     // it after a buffer / re-mount.

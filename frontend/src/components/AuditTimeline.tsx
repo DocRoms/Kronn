@@ -16,6 +16,7 @@ import { formatStepList } from '../lib/audit-resume';
 import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
 import { AuditStepActivity } from './AuditStepActivity';
+import { activityCategoryLabel } from '../lib/activity-category';
 import type {
   AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
   ModelTier, ModelTiersConfig,
@@ -449,7 +450,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 {props.liveElapsed && <span className="audit-tl-muted">{props.liveElapsed}</span>}
                 {props.liveTool && (
                   <span className="audit-tl-muted">
-                    {t('audit.currentTool', props.liveTool)}
+                    {t('audit.currentTool', activityCategoryLabel(t, props.liveTool))}
                     {props.liveToolCalls != null && props.liveToolCalls > 0 && ` (${props.liveToolCalls})`}
                   </span>
                 )}

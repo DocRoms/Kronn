@@ -146,13 +146,15 @@ impl AcpTransport for ScriptedAgent {
                         .await;
                     let _ = events
                         .send(AcpSessionEvent::ToolActivity(
-                            crate::agents::activity::ToolActivityUpdate::call(
-                                Some(call.to_string()),
-                                "Read",
-                                crate::agents::activity::input_target(
-                                    &json!({"file_path": format!("src/é{call}.rs")}),
-                                ),
-                            ),
+                            // As a generic ACP runtime reports it: a secret in
+                            // the title and the raw input, neither ever shown.
+                            crate::agents::activity::ToolActivityUpdate::from_acp(&json!({
+                                "toolCallId": call.to_string(), "kind": "read",
+                                "title": format!("cat {}", crate::agents::activity::tests::SENTINEL),
+                                "rawInput": {"file_path": crate::agents::activity::tests::SENTINEL},
+                                "locations": [{"path": crate::agents::activity::tests::SENTINEL}]
+                            }))
+                            .unwrap(),
                         ))
                         .await;
                     let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
@@ -666,30 +668,27 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
             p.current_tool_call_count == Some(CALLS)
                 && p.step_tokens == Some(u64::from(CALLS) * 110)
                 && p.recent_activity.as_ref().is_some_and(|recent| {
-                    recent.entries.first().and_then(|e| e.target.as_deref())
-                        == Some(format!("src/é{CALLS}.rs").as_str())
+                    recent.entries.len() == crate::agents::activity::RECENT_MAX_ENTRIES
                 })
         })
     })
     .await;
     let shown = progress().unwrap();
-    assert_eq!(
-        shown.current_tool.as_deref(),
-        Some(format!("Read · src/é{CALLS}.rs").as_str()),
-        "{pipeline:?}"
-    );
-    // The details panel: the latest calls, newest first, bounded.
-    let recent = shown.recent_activity.expect("the step's recent actions");
-    let targets: Vec<_> = recent
+    // The chip and the details panel: categories only, bounded.
+    assert_eq!(shown.current_tool.as_deref(), Some("Read"), "{pipeline:?}");
+    let recent = shown
+        .recent_activity
+        .clone()
+        .expect("the step's recent actions");
+    assert!(recent
         .entries
         .iter()
-        .map(|e| (e.tool.as_str(), e.target.clone().unwrap_or_default()))
-        .collect();
-    let expected: Vec<_> = (CALLS - 14..=CALLS)
-        .rev()
-        .map(|call| ("Read", format!("src/é{call}.rs")))
-        .collect();
-    assert_eq!(targets, expected, "{pipeline:?}");
+        .all(|e| e.category == crate::models::ActivityCategory::Read));
+    let progress_json = serde_json::to_string(&shown).unwrap();
+    assert!(
+        !progress_json.contains("SENTINEL") && !progress_json.contains("hunter2"),
+        "{pipeline:?}: {progress_json}"
+    );
 
     let response = crate::api::audit::full::cancel_audit(
         axum::extract::State(state.clone()),
@@ -715,9 +714,15 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         .find(|(name, _)| name == "activity")
         .unwrap_or_else(|| panic!("{pipeline:?}: no activity: {body}"));
     assert_eq!(
-        activity.1["recent"]["entries"][0]["target"],
-        json!(format!("src/é{CALLS}.rs")),
+        activity.1["recent"]["entries"][0],
+        json!({"category": "Read", "at": activity.1["recent"]["entries"][0]["at"]}),
         "{pipeline:?}"
+    );
+    // Neither the `tool_call` nor the `activity` events, nor anything else in
+    // the stream, carry the title or the raw input.
+    assert!(
+        !body.contains("SENTINEL") && !body.contains("hunter2"),
+        "{pipeline:?}: {body}"
     );
     let progress_event = events
         .iter()

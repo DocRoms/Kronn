@@ -1,11 +1,12 @@
 /**
  * The running audit step's latest actions behind a "Details" toggle, so a
- * 10-minute step reads as work in progress rather than a stuck one. Entries
- * arrive sanitized and bounded from the server.
+ * 10-minute step reads as work in progress rather than a stuck one. Each is a
+ * fixed category and its age: never a tool's name, a path or a command.
  */
 import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
+import { ACTIVITY_CATEGORY_ICONS, activityCategoryLabel, asActivityCategory } from '../lib/activity-category';
 import type { AuditRecentActivity } from '../types/generated';
 
 const OPEN_KEY_PREFIX = 'kr.audit.activity.open.';
@@ -68,15 +69,18 @@ export function AuditStepActivity({ projectId, recent }: { projectId: string; re
             <p className="audit-tl-muted" data-testid="audit-step-activity-empty">{t('auditTimeline.activity.empty')}</p>
           ) : (
             <ul className="audit-tl-activity-list" aria-label={t('auditTimeline.activity.label')}>
-              {entries.map((entry, i) => (
-                <li key={`${entry.at}-${i}`} data-testid="audit-step-activity-entry">
-                  <span className="audit-tl-activity-action" title={entry.target ? `${entry.tool} ${entry.target}` : entry.tool}>
-                    <span className="audit-tl-activity-tool">{entry.tool}</span>
-                    {entry.target && <span className="audit-tl-activity-target"> {entry.target}</span>}
-                  </span>
-                  <time className="audit-tl-activity-time" dateTime={entry.at}>{relativeTime(entry.at, now, locale)}</time>
-                </li>
-              ))}
+              {entries.map((entry, i) => {
+                const Icon = ACTIVITY_CATEGORY_ICONS[asActivityCategory(entry.category)];
+                return (
+                  <li key={`${entry.at}-${i}`} data-testid="audit-step-activity-entry">
+                    <span className="audit-tl-activity-action">
+                      <Icon size={12} aria-hidden="true" />
+                      <span>{activityCategoryLabel(t, entry.category)}</span>
+                    </span>
+                    <time className="audit-tl-activity-time" dateTime={entry.at}>{relativeTime(entry.at, now, locale)}</time>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
