@@ -386,7 +386,9 @@ impl AcpPermissionBroker {
             .pointer("/_meta/tool_name")
             .and_then(Value::as_str)
             .filter(|name| name.len() <= 512)
-            .filter(|_| update.pointer("/_meta/effect_kind").and_then(Value::as_str) == Some("tool"))
+            .filter(|_| {
+                update.pointer("/_meta/effect_kind").and_then(Value::as_str) == Some("tool")
+            })
             .unwrap_or_default();
         let mut observed = self
             .observed_tools
@@ -395,7 +397,9 @@ impl AcpPermissionBroker {
         if observed.len() >= MAX_OBSERVED_TOOL_CALLS {
             observed.clear();
         }
-        observed.entry(id.to_owned()).or_insert_with(|| name.to_owned());
+        observed
+            .entry(id.to_owned())
+            .or_insert_with(|| name.to_owned());
     }
 
     /// Server and tool of a harness-named call. Vibe routes an MCP tool as
@@ -752,7 +756,13 @@ fn tool_identity(tool_call: Option<&Value>) -> (Option<String>, Option<String>) 
 /// matches nothing and stays denied.
 fn vibe_identifier(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -762,7 +772,14 @@ fn vibe_identifier(name: &str) -> String {
 /// `_meta.tool_name`/`effect_kind`, truncated.
 pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
     const LABELS: &[&str] = &[
-        "kind", "status", "title", "toolCallId", "optionId", "sessionUpdate", "tool_name", "effect_kind",
+        "kind",
+        "status",
+        "title",
+        "toolCallId",
+        "optionId",
+        "sessionUpdate",
+        "tool_name",
+        "effect_kind",
     ];
     match value {
         Value::Object(map) if depth < 4 => {
@@ -784,7 +801,12 @@ pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
         }
         Value::Array(items) if depth < 4 => format!(
             "[{}]",
-            items.iter().take(4).map(|item| value_shape(item, depth + 1)).collect::<Vec<_>>().join(",")
+            items
+                .iter()
+                .take(4)
+                .map(|item| value_shape(item, depth + 1))
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         Value::Object(_) => "{..}".into(),
         Value::Array(_) => "[..]".into(),
@@ -1442,7 +1464,13 @@ mod tests {
     }
 
     /// Mistral Vibe 2.25.8: the `tool_call` update that precedes a permission request.
-    fn vibe_tool_call(id: &str, effect_kind: &str, tool_name: &str, kind: &str, title: &str) -> Value {
+    fn vibe_tool_call(
+        id: &str,
+        effect_kind: &str,
+        tool_name: &str,
+        kind: &str,
+        title: &str,
+    ) -> Value {
         json!({
             "sessionId": "s-vibe",
             "update": {
@@ -1473,7 +1501,8 @@ mod tests {
 
     fn vibe_decision(broker: &AcpPermissionBroker, update: &Value, id: &str) -> Value {
         broker.observe_tool_call_update(update);
-        broker.decide_tool_call_permission("session/request_permission", &vibe_permission_request(id))
+        broker
+            .decide_tool_call_permission("session/request_permission", &vibe_permission_request(id))
             ["outcome"]["optionId"]
             .clone()
     }
@@ -1485,7 +1514,11 @@ mod tests {
         for (id, tool) in [("effect-1", "bridge_info"), ("effect-2", "disc_meta")] {
             let name = format!("mcp_kronn_internal.{tool}");
             assert_eq!(
-                vibe_decision(&broker, &vibe_tool_call(id, "tool", &name, "other", &name), id),
+                vibe_decision(
+                    &broker,
+                    &vibe_tool_call(id, "tool", &name, "other", &name),
+                    id
+                ),
                 "allow_once",
                 "{tool}"
             );
@@ -1493,7 +1526,11 @@ mod tests {
         let allowed = broker.audit_log();
         assert_eq!(allowed[1].server.as_deref(), Some("kronn-internal"));
         assert_eq!(allowed[1].tool.as_deref(), Some("disc_meta"));
-        assert!(allowed[1].reason.contains("identity=harness"), "{}", allowed[1].reason);
+        assert!(
+            allowed[1].reason.contains("identity=harness"),
+            "{}",
+            allowed[1].reason
+        );
     }
 
     #[test]
@@ -1514,17 +1551,51 @@ mod tests {
         }]);
         for (id, effect_kind, tool_name, kind, title) in [
             // A shell command, even one titled like the bridge's tool.
-            ("e-shell", "shell", "bash", "execute", "bash: env | cut -d= -f1"),
-            ("e-forged", "shell", "bash", "execute", "mcp_kronn_internal.bridge_info"),
+            (
+                "e-shell",
+                "shell",
+                "bash",
+                "execute",
+                "bash: env | cut -d= -f1",
+            ),
+            (
+                "e-forged",
+                "shell",
+                "bash",
+                "execute",
+                "mcp_kronn_internal.bridge_info",
+            ),
             // A server this session never declared.
-            ("e-unknown", "tool", "mcp_other_server.do_it", "other", "mcp_other_server.do_it"),
+            (
+                "e-unknown",
+                "tool",
+                "mcp_other_server.do_it",
+                "other",
+                "mcp_other_server.do_it",
+            ),
             // A project server: authorized, but a declaration confers no trust.
-            ("e-project", "tool", "mcp_github_tools.create_issue", "other", "mcp_github_tools.create_issue"),
+            (
+                "e-project",
+                "tool",
+                "mcp_github_tools.create_issue",
+                "other",
+                "mcp_github_tools.create_issue",
+            ),
             // Not an MCP route at all.
-            ("e-builtin", "tool", "write_file", "edit", "Writing notes.txt"),
+            (
+                "e-builtin",
+                "tool",
+                "write_file",
+                "edit",
+                "Writing notes.txt",
+            ),
         ] {
             assert_eq!(
-                vibe_decision(&broker, &vibe_tool_call(id, effect_kind, tool_name, kind, title), id),
+                vibe_decision(
+                    &broker,
+                    &vibe_tool_call(id, effect_kind, tool_name, kind, title),
+                    id
+                ),
                 "reject_once",
                 "{id}"
             );
@@ -1559,7 +1630,9 @@ mod tests {
             "reject_once"
         );
         // A later update cannot rename an announced call.
-        broker.observe_tool_call_update(&vibe_tool_call("e-3", "shell", "bash", "execute", "bash: ls"));
+        broker.observe_tool_call_update(&vibe_tool_call(
+            "e-3", "shell", "bash", "execute", "bash: ls",
+        ));
         broker.observe_tool_call_update(&vibe_tool_call("e-3", "tool", name, "other", name));
         assert_eq!(
             broker.decide_tool_call_permission(
@@ -1578,14 +1651,26 @@ mod tests {
             let name = format!("mcp_kronn_internal.{tool}");
             vibe_tool_call(id, "tool", &name, "other", &name)
         };
-        assert_eq!(vibe_decision(&broker, &call("e-1", "disc_meta"), "e-1"), "allow_once");
-        assert_eq!(vibe_decision(&broker, &call("e-2", "disc_append"), "e-2"), "reject_once");
+        assert_eq!(
+            vibe_decision(&broker, &call("e-1", "disc_meta"), "e-1"),
+            "allow_once"
+        );
+        assert_eq!(
+            vibe_decision(&broker, &call("e-2", "disc_append"), "e-2"),
+            "reject_once"
+        );
 
         // Two authorized servers that normalize to one route group.
         let ambiguous = vibe_broker(true, None);
         ambiguous.register_authorized_servers(&[
-            crate::acp::AcpMcpServer { id: "a-b".into(), ..bridge(&[]) },
-            crate::acp::AcpMcpServer { id: "a_b".into(), ..bridge(&[]) },
+            crate::acp::AcpMcpServer {
+                id: "a-b".into(),
+                ..bridge(&[])
+            },
+            crate::acp::AcpMcpServer {
+                id: "a_b".into(),
+                ..bridge(&[])
+            },
         ]);
         let update = vibe_tool_call("e-3", "tool", "mcp_a_b.t", "other", "mcp_a_b.t");
         assert_eq!(vibe_decision(&ambiguous, &update, "e-3"), "reject_once");
@@ -1598,7 +1683,11 @@ mod tests {
         broker.register_trusted_mcp_server(&bridge(&[]));
         let name = "mcp_kronn_internal.bridge_info";
         assert_eq!(
-            vibe_decision(&broker, &vibe_tool_call("e-1", "tool", name, "other", name), "e-1"),
+            vibe_decision(
+                &broker,
+                &vibe_tool_call("e-1", "tool", name, "other", name),
+                "e-1"
+            ),
             "reject_once"
         );
     }

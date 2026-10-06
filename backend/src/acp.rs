@@ -1181,7 +1181,9 @@ pub(crate) fn native_mcp_launch_grants(agent: AcpAgent, servers: &[AcpMcpServer]
         .filter(|tool| {
             !tool.is_empty()
                 && tool.len() <= 128
-                && tool.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                && tool
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
         })
         .map(|tool| format!("--allow-tool=kronn-internal({tool})"))
         .collect()
@@ -1432,13 +1434,13 @@ impl AcpTransport for AcpJsonRpcTransport {
             ),
         };
         let servers: Vec<Value> = servers
-        .into_iter()
-        .map(|server| {
-            json!({
-                "name": server.id, "command": server.command, "args": server.args, "env": [],
+            .into_iter()
+            .map(|server| {
+                json!({
+                    "name": server.id, "command": server.command, "args": server.args, "env": [],
+                })
             })
-        })
-        .collect();
+            .collect();
         let result = self
             .request(
                 "initialize",
@@ -1959,7 +1961,10 @@ mod tests {
         assert_eq!(
             native_mcp_launch_grants(
                 AcpAgent::CopilotCli,
-                &[server("kronn-internal", &["disc_meta", "disc_append", "x(y)", "a,b"])]
+                &[server(
+                    "kronn-internal",
+                    &["disc_meta", "disc_append", "x(y)", "a,b"]
+                )]
             ),
             vec![
                 "--allow-tool=kronn-internal(disc_meta)",
@@ -1972,8 +1977,16 @@ mod tests {
                 .is_empty(),
             "no bridge authorized (audit, step without Kronn tools): no grant"
         );
-        for agent in [AcpAgent::Vibe, AcpAgent::GeminiCli, AcpAgent::Kiro, AcpAgent::OpenCode] {
-            assert!(native_mcp_launch_grants(agent, &authorized).is_empty(), "{agent:?}");
+        for agent in [
+            AcpAgent::Vibe,
+            AcpAgent::GeminiCli,
+            AcpAgent::Kiro,
+            AcpAgent::OpenCode,
+        ] {
+            assert!(
+                native_mcp_launch_grants(agent, &authorized).is_empty(),
+                "{agent:?}"
+            );
         }
     }
 

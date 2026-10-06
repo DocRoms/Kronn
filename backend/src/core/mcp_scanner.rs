@@ -2537,8 +2537,14 @@ pub fn sync_affected_projects(conn: &rusqlite::Connection, project_ids: &[String
     // Iterate through every registered HostMcpSync impl. Adding a 5th
     // CLI = one more entry in this slice; everything else (mtime guard,
     // workflow-run gate above, log shape) flows through `run_host_sync`.
-    if !host_mcp_sync_enabled(crate::core::child_env::var("KRONN_HOST_MCP_SYNC").ok().as_deref()) {
-        tracing::info!("MCP host sync disabled by KRONN_HOST_MCP_SYNC; host CLI configs left untouched");
+    if !host_mcp_sync_enabled(
+        crate::core::child_env::var("KRONN_HOST_MCP_SYNC")
+            .ok()
+            .as_deref(),
+    ) {
+        tracing::info!(
+            "MCP host sync disabled by KRONN_HOST_MCP_SYNC; host CLI configs left untouched"
+        );
         return;
     }
     let registry: &[&dyn HostMcpSync] = &[&CodexSync, &CopilotSync, &ClaudeSync, &GeminiSync];
@@ -5594,15 +5600,24 @@ Always send emails from contact@example.com
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
         let written = |root: &Path| {
-            [".copilot/mcp-config.json", ".codex/config.toml", ".claude.json", ".gemini/settings.json"]
-                .into_iter()
-                .filter(|path| root.join(path).exists())
-                .collect::<Vec<_>>()
+            [
+                ".copilot/mcp-config.json",
+                ".codex/config.toml",
+                ".claude.json",
+                ".gemini/settings.json",
+            ]
+            .into_iter()
+            .filter(|path| root.join(path).exists())
+            .collect::<Vec<_>>()
         };
 
         crate::core::child_env::set_var("KRONN_HOST_MCP_SYNC", "0");
         sync_affected_projects(&conn, &[], "test-secret");
-        assert!(written(root.path()).is_empty(), "{:?}", written(root.path()));
+        assert!(
+            written(root.path()).is_empty(),
+            "{:?}",
+            written(root.path())
+        );
 
         // Control: without the switch the same call does write the bridge entry.
         crate::core::child_env::remove_var("KRONN_HOST_MCP_SYNC");
