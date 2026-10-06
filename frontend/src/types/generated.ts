@@ -6163,6 +6163,11 @@ config_set_aside: string | null,
  */
 rows_moved_from_files: Array<string>,
 /**
+ * Such moves still to do (no durable copy yet, or a failed write):
+ * retried at the next start, nothing changed meanwhile.
+ */
+file_key_moves_pending: Array<string>,
+/**
  * Encrypted rows the key in use cannot decrypt (0 when the key is locked).
  */
 undecryptable_rows: number,
@@ -7435,6 +7440,16 @@ connection_id?: string | null, };
 export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discussion_id: string, status: string, };
 
 export type StartBriefingResponse = { discussion_id: string, };
+
+export type StartNewKeyResponse = {
+/**
+ * Owner-only file in the data directory holding the rows set aside.
+ */
+kept_file: string, rows: number,
+/**
+ * The new API token when auth is on (shown once, to a local caller).
+ */
+auth_token: string | null, };
 
 /**
  * A state file absent from the checked-out branch but present in git history,

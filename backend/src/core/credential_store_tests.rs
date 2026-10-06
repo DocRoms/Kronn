@@ -1623,6 +1623,8 @@ async fn a_reset_while_locked_lets_the_next_start_mint() {
     )
     .await;
     assert_eq!(body["success"], true, "{body}");
+    // C6-06: a reset is a first run, locked or not.
+    assert!(config::is_first_run().await.unwrap());
     // C5-06: the running instance has a key and an armed store right away.
     let (_, status) = json_of(
         router.clone(),
@@ -1999,4 +2001,209 @@ async fn a_failed_api_key_save_leaves_the_live_config_unchanged() {
     assert_eq!(saved["success"], false, "{saved}");
     let (_, tokens) = json_of(router, "GET", "/api/config/tokens", serde_json::json!({})).await;
     assert!(!tokens.to_string().contains("never"), "{tokens}");
+}
+
+// ── review round 7 ──────────────────────────────────────────────────────────
+
+/// C6-01 — a locked reset whose new key cannot be set up keeps the previous
+/// auth (the session token) and no key: a LAN request without a bearer is
+/// still refused.
+#[tokio::test]
+#[serial]
+async fn a_failed_locked_reset_keeps_auth_and_no_key() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, Some("session-token".into()))
+        .await
+        .unwrap();
+    assert!(cfg.encryption_secret.is_none());
+    // The key store becomes unreadable: the reset's reconcile fails.
+    std::fs::create_dir(dir.path().join(crate::core::keyvault::SIDECAR_FILENAME)).unwrap();
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/setup/reset",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], false, "{body}");
+    let (status, _) = json_from(
+        router.clone(),
+        "GET",
+        "/api/projects",
+        serde_json::json!({}),
+        [192, 168, 1, 9],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+    let live = state.config.read().await;
+    assert!(live.encryption_secret.is_none());
+    assert_eq!(live.server.auth_token.as_deref(), Some("session-token"));
+}
+
+/// C6-02 — key lost for good: the locked secrets go to a kept file, a new key
+/// starts, and the projects stay.
+#[tokio::test]
+#[serial]
+async fn locked_secrets_set_aside_and_a_new_key_starts() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let old = migrated_then_key_lost(&dir, &db).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(
+        cfg.server.auth_locked,
+        "auth locked: the token row is unreadable"
+    );
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/start-new-key",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let new_key = state.config.read().await.encryption_secret.clone().unwrap();
+    assert!(!crate::core::keyvault::same_key(&new_key, &old));
+    let (_, projects) = json_of(router, "GET", "/api/projects", serde_json::json!({})).await;
+    assert!(projects.to_string().contains("p1"), "{projects}");
+    let kept = body["data"]["kept_file"].as_str().unwrap().to_string();
+    let text = std::fs::read_to_string(dir.path().join(&kept)).unwrap();
+    assert!(
+        text.contains("mcp_configs") && text.contains("stored_credentials"),
+        "{text}"
+    );
+    // The MCP config stays, without its secret values.
+    let envs: Vec<String> = db
+        .with_conn(|c| {
+            let mut s = c.prepare("SELECT env_encrypted FROM mcp_configs")?;
+            let v = s
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(v)
+        })
+        .await
+        .unwrap();
+    assert!(!envs.is_empty() && envs.iter().all(|e| e.is_empty()));
+}
+
+/// C6-05 — a connection key whose save fails is reported, not shown as saved.
+#[tokio::test]
+#[serial]
+async fn a_failed_connection_key_save_is_reported() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    let before = cfg.tokens.keys.len();
+    db.with_conn(|c| {
+        c.execute_batch(
+            "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+             UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, created) = json_of(
+        router,
+        "POST",
+        "/api/external-api/connections",
+        serde_json::json!({
+            "display_name": "OpenRouter",
+            "mention_alias": "orfail",
+            "endpoint": "https://openrouter.ai/api",
+            "origin_preset": "open_router",
+            "api_key": "sk-or-v1-neverstoredkey"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], false, "{created}");
+    assert_eq!(state.config.read().await.tokens.keys.len(), before);
+}
+
+/// C6-05 — discovered keys whose save fails are not left in the live config.
+#[tokio::test]
+#[serial]
+async fn failed_discovered_keys_are_not_kept_live() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    let before = cfg.tokens.keys.len();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".vibe")).unwrap();
+    std::fs::write(
+        home.path().join(".vibe/.env"),
+        "MISTRAL_API_KEY=mistral-discovered-never-stored\n",
+    )
+    .unwrap();
+    let old_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
+    crate::core::child_env::set_var("KRONN_HOST_HOME", home.path());
+    db.with_conn(|c| {
+        c.execute_batch(
+            "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+             UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let state = state_with(cfg, &db);
+    let (_, body) = json_of(
+        crate::build_router_with_auth(state.clone(), true),
+        "POST",
+        "/api/config/discover-keys",
+        serde_json::json!({}),
+    )
+    .await;
+    match old_home {
+        Some(h) => crate::core::child_env::set_var("KRONN_HOST_HOME", h),
+        None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
+    }
+    assert_eq!(body["success"], false, "{body}");
+    let live = state.config.read().await;
+    assert_eq!(live.tokens.keys.len(), before);
+    assert!(!live
+        .tokens
+        .keys
+        .iter()
+        .any(|k| k.value == "mistral-discovered-never-stored"));
+}
+
+/// C6-07 — a schema-invalid 0.14.2 config.toml: its provider key reaches the
+/// store, and the notice says the kept file holds credentials in clear.
+#[tokio::test]
+#[serial]
+async fn credentials_of_a_schema_invalid_config_are_recovered() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    // Valid TOML, but a field of the wrong type: not a config this Kronn reads.
+    let text = write_0142_config_text(&key).replacen("port = ", "port = \"x\" # ", 1);
+    assert!(text.contains("port = \"x\""));
+    std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(
+        cfg.tokens.keys.iter().any(|k| k.value == ANTHROPIC),
+        "{:?}",
+        cfg.tokens.keys
+    );
+    let notice = config::set_aside_notice(dir.path()).unwrap();
+    assert!(notice.contains("credentials in clear"), "{notice}");
 }

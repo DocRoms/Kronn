@@ -647,7 +647,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // Skipped while the credential store is locked: they would go to config.toml in clear.
     if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
-        let mut config = state.config.write().await;
+        // Adopted only once saved: a failed save never leaves unsaved keys live.
+        let mut live = state.config.write().await;
+        let mut config = live.clone();
         let mut imported = 0u32;
         for dk in discovered {
             if !config.tokens.keys.iter().any(|k| k.value == dk.value) {
@@ -664,12 +666,13 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
         if imported > 0 {
             match config::save(&config).await {
-                Ok(_) => tracing::info!("Auto-imported {} API key(s) from agent configs", imported),
-                // Don't log success over a failed persist: the keys exist only
-                // in memory and silently vanish (with any user edits layered
-                // on them) at the next restart.
+                Ok(_) => {
+                    *live = config;
+                    tracing::info!("Auto-imported {} API key(s) from agent configs", imported)
+                }
                 Err(e) => tracing::error!(
-                    "Auto-imported {} API key(s) but saving config.toml FAILED: {e} — keys are in-memory only until the next successful save",
+                    "Found {} API key(s) in agent configs but saving them FAILED: {e:#}; none \
+                     was imported",
                     imported
                 ),
             }

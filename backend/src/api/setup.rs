@@ -1256,7 +1256,9 @@ pub async fn discover_keys(
         return Json(ApiResponse::err(locked));
     }
     let discovered = crate::core::key_discovery::discover_keys().await;
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
     let mut imported_count = 0u32;
     let mut results = Vec::new();
 
@@ -1286,13 +1288,19 @@ pub async fn discover_keys(
 
     if imported_count > 0 {
         match config::save(&config).await {
-            Ok(_) => tracing::info!("Auto-imported {} API key(s)", imported_count),
+            Ok(_) => {
+                *live = config;
+                tracing::info!("Auto-imported {} API key(s)", imported_count)
+            }
             // Keys live only in memory now — claiming success would leave the
             // user believing they persisted (they vanish at next restart).
             Err(e) => {
-                tracing::error!("Auto-imported {} API key(s) but SAVING the config failed: {e} — keys are in memory only and will be lost at restart", imported_count);
+                tracing::error!(
+                    "Found {} API key(s) but saving them failed: {e}; none was imported",
+                    imported_count
+                );
                 return Json(ApiResponse::err(format!(
-                    "Imported {imported_count} key(s) but persisting config.toml failed: {e}"
+                    "Found {imported_count} key(s) but storing them failed ({e}); none was imported"
                 )));
             }
         }
@@ -2397,24 +2405,94 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     if key_locked {
         // Nothing encrypted is left: resolve the key and arm the store now
         // (adopt or mint), as a fresh start would, instead of staying keyless.
-        let session = previous
-            .server
-            .auth_token
-            .clone()
-            .filter(|_| previous.server.auth_token_session_only);
-        cfg.server.auth_token = None;
-        cfg.server.auth_token_session_only = false;
-        cfg.server.auth_locked = false;
-        // The value config.toml kept is a candidate (set aside if not used).
-        cfg.encryption_secret = config::retained_disk_key(&dir);
-        if let Err(e) = crate::resolve_key_and_credentials(&mut cfg, &state.db, session).await {
+        if let Err(e) = resolve_fresh_key(&mut cfg, &state.db, &dir).await {
             return Json(ApiResponse::err(format!(
                 "Reset cleared everything, but a new key could not be set up ({e:#}). Restart \
                  Kronn."
             )));
         }
+        // A reset is a first run: the credential boot wrote a full config.toml.
+        if let Err(e) = config::reset_to_key_only().await {
+            tracing::warn!("Reset could not leave config.toml for a first run: {e:#}");
+        }
     }
     Json(ApiResponse::ok(()))
+}
+
+/// Resolve the key and arm the credential store on a copy of `live` (key
+/// locked, nothing undecryptable left), adopted only on success: on failure
+/// `live` keeps no key and its auth fields as they were.
+async fn resolve_fresh_key(
+    live: &mut crate::models::AppConfig,
+    db: &std::sync::Arc<crate::db::Database>,
+    dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let session = live
+        .server
+        .auth_token
+        .clone()
+        .filter(|_| live.server.auth_token_session_only);
+    let mut candidate = live.clone();
+    candidate.server.auth_token = None;
+    candidate.server.auth_token_session_only = false;
+    candidate.server.auth_locked = false;
+    // The value config.toml kept is a candidate (set aside if not used).
+    candidate.encryption_secret = config::retained_disk_key(dir);
+    crate::resolve_key_and_credentials(&mut candidate, db, session).await?;
+    *live = candidate;
+    Ok(())
+}
+
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct StartNewKeyResponse {
+    /// Owner-only file in the data directory holding the rows set aside.
+    pub kept_file: String,
+    pub rows: u32,
+    /// The new API token when auth is on (shown once, to a local caller).
+    pub auth_token: Option<String>,
+}
+
+/// POST /api/config/recovery/start-new-key — the key is lost for good: set the
+/// encrypted rows no key decrypts aside in a kept file, then start a new key.
+/// Discussions, projects and workflows stay. Key locked, local caller only.
+pub async fn start_new_key(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<StartNewKeyResponse>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    let mut cfg = state.config.write().await;
+    if cfg.encryption_secret.is_some() {
+        return Json(ApiResponse::err(
+            "The encryption key is in use: there are no locked secrets to set aside.",
+        ));
+    }
+    let store = crate::core::keyvault::KeyStore::standard(&dir);
+    let set_aside =
+        match crate::core::keystore::set_aside_locked_rows(&state.db, &dir, &store).await {
+            Ok(s) => s,
+            Err(e) => return Json(ApiResponse::err(format!("{e:#}"))),
+        };
+    if let Err(e) = resolve_fresh_key(&mut cfg, &state.db, &dir).await {
+        return Json(ApiResponse::err(format!(
+            "The locked secrets were kept in {} and removed, but a new key could not be set up \
+             ({e:#}). Restart Kronn.",
+            set_aside.file
+        )));
+    }
+    crate::core::credential_store::record_boot_failure(&dir, None);
+    let auth_token = cfg
+        .server
+        .auth_token
+        .clone()
+        .filter(|_| cfg.server.auth_enabled && !cfg.server.auth_token_session_only);
+    Json(ApiResponse::ok(StartNewKeyResponse {
+        kept_file: set_aside.file,
+        rows: set_aside.rows as u32,
+        auth_token,
+    }))
 }
 
 // ── Recovery passphrase (P2) ────────────────────────────────────────────────
@@ -2425,8 +2503,9 @@ pub struct SetRecoveryRequest {
     /// Required to replace an existing recovery passphrase.
     #[serde(default)]
     pub current_passphrase: Option<String>,
-    /// Replace a recovery passphrase from before 0.14.3 without it (kept).
-    #[serde(default)]
+    /// Replace the recovery passphrase without it (from before 0.14.3, or
+    /// forgotten): the old file is kept and a restore still tries it.
+    #[serde(default, alias = "replace_confirmed")]
     pub replace_unverified: bool,
 }
 
@@ -2476,6 +2555,9 @@ pub struct RecoveryStatus {
     /// Rows this start moved from a key kept only in a file (config backup,
     /// retired or corrupt config) to the key in use; the files are kept.
     pub rows_moved_from_files: Vec<String>,
+    /// Such moves still to do (no durable copy yet, or a failed write):
+    /// retried at the next start, nothing changed meanwhile.
+    pub file_key_moves_pending: Vec<String>,
     /// Encrypted rows the key in use cannot decrypt (0 when the key is locked).
     pub undecryptable_rows: u32,
     /// recovery.key predates 0.14.3: it can be replaced without its passphrase
@@ -2548,6 +2630,7 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
         },
         config_set_aside: dir.and_then(config::set_aside_notice),
         rows_moved_from_files: report.rows_moved_from_files.clone(),
+        file_key_moves_pending: report.file_key_moves_pending.clone(),
         undecryptable_rows: 0,
         recovery_unverified: recovery_state
             == Some(crate::core::recovery::RecoveryMatch::Unverified),

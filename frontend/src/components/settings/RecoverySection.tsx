@@ -49,7 +49,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
   // A recovery.key for ANOTHER key, or a damaged one, is replaced without its
   // passphrase (the backend keeps it aside); a matching one needs it, and one
   // from before 0.14.3 needs it unless the user confirms.
-  const confirmedUnverified = !!status?.recovery_unverified && replaceUnverified;
+  // Also a matching one whose passphrase is forgotten, once confirmed.
+  const confirmable = !!status?.recovery_unverified || (!!configured && !!status?.matches_key);
+  const confirmedUnverified = confirmable && replaceUnverified;
   const needsCurrent = !!configured && !status?.recovery_other_key && !status?.recovery_damaged
     && !confirmedUnverified;
   const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving
@@ -163,9 +165,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
             {t('settings.recovery.rowsMoved', (status.rows_moved_from_files ?? []).join('; '))}
           </div>
         )}
-        {/* Only when something is left to re-encrypt: kept blobs alone (a
-            replaced recovery.key) offer nothing. */}
-        {status && !status.key_locked && (status.kept_recovery_blobs ?? 0) > 0
+        {/* Whenever rows remain that the key in use cannot decrypt: a pasted
+            code works without any kept blob. */}
+        {status && !status.key_locked
           && ((status.undecryptable_rows ?? 0) > 0 || (status.locked_credentials ?? 0) > 0) && (
           <RecoveryRestorePanel toast={toast} t={t} onRestored={() => window.location.reload()} />
         )}
@@ -217,7 +219,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                 what3words.com/échouer.insérons.labeur
               </a>
             </p>
-            {configured && status?.recovery_unverified && (
+            {configured && confirmable && (
               <label className="set-hint-xs flex-row gap-3">
                 <input
                   type="checkbox"
@@ -225,7 +227,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                   onChange={e => setReplaceUnverified(e.target.checked)}
                   data-testid="recovery-replace-unverified"
                 />
-                {t('settings.recovery.replaceUnverified')}
+                {t(status?.recovery_unverified ? 'settings.recovery.replaceUnverified' : 'settings.recovery.forgotCurrent')}
               </label>
             )}
             {needsCurrent && (

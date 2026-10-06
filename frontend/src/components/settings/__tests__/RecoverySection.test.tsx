@@ -185,6 +185,25 @@ describe('RecoverySection', () => {
     expect(screen.queryByTestId('recovery-current')).toBeNull();
   });
 
+  it('offers re-encryption without any kept blob when rows remain undecryptable (C6-08)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ kept_recovery_blobs: 0, undecryptable_rows: 2 }));
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-restore-cta')).toBeTruthy();
+  });
+
+  it('lets a forgotten matching passphrase be replaced once confirmed (C6-09)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ matches_key: true }));
+    config.setRecovery.mockResolvedValue({ recovery_code: 'KRECOV1.new' });
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-current')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('recovery-replace-unverified'));
+    expect(screen.queryByTestId('recovery-current')).toBeNull();
+    fireEvent.change(screen.getByTestId('recovery-passphrase'), { target: { value: 'long-enough-pass' } });
+    fireEvent.change(screen.getByTestId('recovery-confirm'), { target: { value: 'long-enough-pass' } });
+    fireEvent.click(screen.getByTestId('recovery-save'));
+    await waitFor(() => expect(config.setRecovery).toHaveBeenCalledWith('long-enough-pass', undefined, true));
+  });
+
   it('offers the restore form, not the set form, when the key is locked', async () => {
     config.getRecoveryStatus.mockResolvedValue(fullStatus({ key_locked: true }));
     render(<RecoverySection toast={toast} t={t} />);

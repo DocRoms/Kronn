@@ -264,7 +264,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus } from '../types/generated';
+import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -917,6 +917,9 @@ export const config = {
    *  key, with that machine's passphrase (the instance key never changes). */
   reencryptImported: (passphrase: string, recoveryCode?: string) =>
     api<ReencryptResponse>('POST', '/config/recovery/reencrypt', { passphrase, recovery_code: recoveryCode || null }),
+  /** Key lost for good: keeps the locked secrets in a file, removes them and
+   *  starts a new key (discussions, projects and workflows stay). */
+  startNewKey: () => api<StartNewKeyResponse>('POST', '/config/recovery/start-new-key'),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   /** Batch storage weight for the discussions currently on screen. Sparse:
    * an id that holds nothing is absent from `weights`. Never call this to

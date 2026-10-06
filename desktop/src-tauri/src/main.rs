@@ -902,7 +902,7 @@ fn restart_app(app: tauri::AppHandle) {
 
 /// The relaunched app: a declared exception (design note §9), its own
 /// environment without the forbidden names, and the operator's key override
-/// handed back, since it left this process's environment at start.
+/// and auth token handed back, since they left this process's environment.
 fn self_restart_command() -> std::io::Result<std::process::Command> {
     let mut command = kronn::core::cmd::full_env_sync_cmd(
         std::env::current_exe()?,
@@ -911,6 +911,10 @@ fn self_restart_command() -> std::io::Result<std::process::Command> {
     command.args(std::env::args_os().skip(1));
     if let Some(key) = kronn::core::keyvault::KeyStore::env_override() {
         command.env(kronn::core::keyvault::ENV_KEK, key);
+    }
+    // The operator's token too: with the key locked it is the only token.
+    if let Some(token) = kronn::core::config::taken_env_auth_token() {
+        command.env("KRONN_AUTH_TOKEN", token);
     }
     Ok(command)
 }

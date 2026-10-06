@@ -375,7 +375,9 @@ pub async fn test(
 
     match probe(&base, effective_key.as_deref()).await {
         Ok(models) => {
-            let mut cfg = state.config.write().await;
+            // Changed on a copy, adopted only once saved.
+            let mut live = state.config.write().await;
+            let mut cfg = live.clone();
             cfg.agents.lite_llm.base_url = Some(base.clone());
             // Only touch the store when the caller actually sent a key, so a
             // re-test from the card doesn't wipe a working credential.
@@ -383,7 +385,10 @@ pub async fn test(
                 upsert_key(&mut cfg, k);
             }
             let saved = match config::save(&cfg).await {
-                Ok(_) => true,
+                Ok(_) => {
+                    *live = cfg;
+                    true
+                }
                 Err(e) => {
                     tracing::warn!("LiteLLM config save failed: {}", e);
                     false

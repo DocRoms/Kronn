@@ -11,6 +11,7 @@ const { config } = vi.hoisted(() => ({
     getRecoveryStatus: vi.fn(),
     regenerateAuthToken: vi.fn(),
     restoreRecovery: vi.fn(),
+    startNewKey: vi.fn(),
   },
 }));
 vi.mock('../../lib/api', () => ({ config }));
@@ -66,5 +67,16 @@ describe('AuthLockedScreen', () => {
     config.getRecoveryStatus.mockResolvedValue({ key_locked: false, credentials_unavailable: 'write config backup: disk full' });
     render(<AuthLockedScreen onRestored={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId('auth-locked-restart')).toBeTruthy());
+  });
+
+  it('offers to start a new key behind a confirmation when the key is lost (C6-02)', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: true });
+    config.startNewKey.mockResolvedValue({ kept_file: 'locked-secrets-1.json', rows: 3, auth_token: 'tok-new' });
+    render(<AuthLockedScreen onRestored={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId('start-new-key-btn'));
+    expect(config.startNewKey).not.toHaveBeenCalled();
+    expect(screen.getByTestId('start-new-key-confirm')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('start-new-key-yes'));
+    await waitFor(() => expect(screen.getByTestId('start-new-key-token').textContent).toBe('tok-new'));
   });
 });

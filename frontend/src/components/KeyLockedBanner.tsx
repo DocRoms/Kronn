@@ -6,6 +6,7 @@ import { useT } from '../lib/I18nContext';
 import { config as configApi } from '../lib/api';
 import type { ToastFn } from '../hooks/useToast';
 import { RecoveryRestorePanel } from './RecoveryRestorePanel';
+import { StartNewKeyPanel } from './StartNewKeyPanel';
 import { AlertTriangle } from 'lucide-react';
 import type { RecoveryStatus } from '../types/generated';
 
@@ -33,6 +34,7 @@ export function KeyLockedBanner() {
           <AlertTriangle size={13} />
           <span>{t('keyLocked.banner')}</span>
           <RecoveryRestorePanel toast={toast} t={t} mode="restore" onRestored={() => window.location.reload()} />
+          <StartNewKeyPanel t={t} onDone={() => window.location.reload()} />
           {message && <span className="set-hint-xs">{message}</span>}
         </div>
       )}

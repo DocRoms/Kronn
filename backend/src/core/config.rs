@@ -101,34 +101,46 @@ pub async fn load() -> Result<Option<AppConfig>> {
             };
             let kept = set_aside_unreadable_config(&dir, &path)?;
             let key = salvage_key_line(&content);
+            // Only a real 32-byte key counts as recovered.
+            let key_ok = key
+                .as_deref()
+                .is_some_and(|k| crate::core::crypto::canonical_secret(k).is_ok());
+            let mut config = default_config_without_key();
+            // Credentials of a parseable file join the credential boot (the
+            // file wins, as in the migration).
+            let salvaged = salvage_credentials(&content, &mut config);
+            let mentions_credentials = salvaged > 0
+                || content.contains("auth_token")
+                || content.contains("[[tokens.keys]]");
             tracing::error!(
                 "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn starts as \
-                 a first run{}",
-                if key.is_some() {
-                    " with the key it held"
+                 a first run{}; {salvaged} credential(s) recovered from it",
+                if key_ok { " with the key it held" } else { "" }
+            );
+            let mut notice = format!(
+                "config.toml could not be read ({cause}) and was kept as {kept}. {} The \
+                 settings start over.",
+                if key_ok {
+                    "The encryption key it held was recovered."
                 } else {
-                    ""
+                    "No valid encryption key could be read from it; the key is looked for in the \
+                     other key stores and backups."
                 }
             );
-            record_set_aside(
-                &dir,
-                if key.is_some() {
-                    format!(
-                        "config.toml could not be read ({cause}) and was kept as {kept}. The \
-                         encryption key it held was recovered; the settings start over"
-                    )
-                } else {
-                    format!(
-                        "config.toml could not be read ({cause}) and was kept as {kept}. No \
-                         encryption key could be read from it; the settings start over, and the \
-                         key is looked for in the other key stores and backups"
-                    )
-                },
-            );
+            if salvaged > 0 {
+                notice.push_str(&format!(
+                    " {salvaged} credential(s) were recovered from it."
+                ));
+            }
+            if mentions_credentials {
+                notice.push_str(&format!(
+                    " {kept} holds credentials in clear: delete it once you have checked them."
+                ));
+            }
+            record_set_aside(&dir, notice);
             if let Some(key) = key.as_deref() {
                 retain_disk_key(&dir, key);
             }
-            let mut config = default_config_without_key();
             config.encryption_secret = key;
             return Ok(Some(config));
         }
@@ -444,9 +456,24 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 pub fn take_env_auth_token() -> Option<String> {
     let token = crate::core::child_env::var("KRONN_AUTH_TOKEN").ok();
     crate::core::child_env::remove_var("KRONN_AUTH_TOKEN");
-    token
+    let token = token
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty());
+    *TAKEN_ENV_AUTH_TOKEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = token.clone();
+    token
+}
+
+/// The token taken by [`take_env_auth_token`], kept in memory only so the
+/// desktop self-restart can hand it back (it may be the session's only token).
+static TAKEN_ENV_AUTH_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn taken_env_auth_token() -> Option<String> {
+    TAKEN_ENV_AUTH_TOKEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 pub fn adopt_env_auth_token(server: &mut ServerConfig, env_token: Option<String>) {
@@ -584,6 +611,37 @@ pub fn default_config() -> AppConfig {
         unlocked_profiles: Vec::new(),
         disabled_auto_skills: Vec::new(),
     }
+}
+
+/// Copy `[server].auth_token` and the `[[tokens.keys]]` entries of a
+/// parseable but schema-invalid config into `config`. Returns how many.
+fn salvage_credentials(content: &str, config: &mut AppConfig) -> usize {
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return 0;
+    };
+    let mut n = 0;
+    if let Some(token) = table
+        .get("server")
+        .and_then(|s| s.get("auth_token"))
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+    {
+        config.server.auth_token = Some(token.to_string());
+        n += 1;
+    }
+    if let Some(keys) = table
+        .get("tokens")
+        .and_then(|t| t.get("keys"))
+        .and_then(|k| k.as_array())
+    {
+        for key in keys {
+            if let Ok(k) = key.clone().try_into::<crate::models::ApiKey>() {
+                config.tokens.keys.push(k);
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// Per data directory, the notice about a config.toml kept aside at start.
@@ -898,11 +956,51 @@ mod tests {
         assert!(notice.contains("config.toml.corrupt."), "{notice}");
         // C5-02: no key could be salvaged, so the notice never claims one is intact.
         assert!(
-            !notice.contains("intact") && notice.contains("No encryption key"),
+            !notice.contains("intact") && notice.contains("No valid encryption key"),
             "{notice}"
         );
         crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C6-07 — a value that is not a key is never announced as recovered.
+    #[tokio::test]
+    #[serial]
+    async fn a_garbage_key_in_a_set_aside_config_is_not_announced() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("garbage-key");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(
+            tmp.join(CONFIG_FILE),
+            "encryption_secret = \"garbage\"\n[server]\nport = \"x\"\n",
+        )
+        .unwrap();
+        load().await.unwrap().expect("first run");
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(!notice.contains("recovered"), "{notice}");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        release_disk_key(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C6-10 — the taken auth token is kept for the desktop self-restart,
+    /// which hands it back.
+    #[test]
+    #[serial]
+    fn the_taken_auth_token_is_handed_to_the_self_restart() {
+        crate::core::child_env::set_var("KRONN_AUTH_TOKEN", "operator-token");
+        assert_eq!(take_env_auth_token().as_deref(), Some("operator-token"));
+        assert_eq!(taken_env_auth_token().as_deref(), Some("operator-token"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let desktop =
+            std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
+        let start = desktop.find("fn self_restart_command()").unwrap();
+        let body = &desktop[start..start + desktop[start..].find("\n}\n").unwrap()];
+        assert!(
+            body.contains("taken_env_auth_token()") && body.contains("\"KRONN_AUTH_TOKEN\""),
+            "{body}"
+        );
+        assert_eq!(take_env_auth_token(), None);
     }
 
     /// C2-31 — only an empty or key-only file counts as "key only".

@@ -9,6 +9,7 @@ import { config as configApi } from '../lib/api';
 import { ApiRequestError } from '../lib/apiRequestError';
 import type { ToastFn } from '../hooks/useToast';
 import { RecoveryRestorePanel } from './RecoveryRestorePanel';
+import { StartNewKeyPanel } from './StartNewKeyPanel';
 import { KeyRound } from 'lucide-react';
 
 interface AuthLockedScreenProps {
@@ -90,6 +91,7 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
         <>
           <p>{t('authLocked.hint')}</p>
           <RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} mode="restore" initiallyOpen />
+          <StartNewKeyPanel t={t} onDone={onRestored} />
         </>
       )}
       {state === 'tokenUnreadable' && (
