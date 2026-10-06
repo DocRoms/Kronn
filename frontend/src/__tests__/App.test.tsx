@@ -96,7 +96,8 @@ describe('App', () => {
     );
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('auth-locked-screen')).toBeTruthy());
-    expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
+    // The panel appears once the screen has read the recovery status.
+    expect(await screen.findByTestId('recovery-restore-panel')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();
     expect(setupApi.getStatus).toHaveBeenCalledTimes(1);
   });
