@@ -34,7 +34,7 @@ The running process still reads `config.tokens.keys` and
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
 [src: file: backend/src/core/credential_store.rs:332-387]
-[src: file: backend/src/core/config.rs:233-257]
+[src: file: backend/src/core/config.rs:234-258]
 
 ## Boot order
 
@@ -50,8 +50,9 @@ the previous file untouched.
    log names the cause, and the setup wizard (`config_set_aside` in
    `GET /api/setup/status`), a dismissible app-wide notice and Settings →
    Recovery say where the file went and whether a valid key was recovered.
-   Credentials of a parseable file (`[server].auth_token`, `[tokens]`) join
-   the credential boot; the notice says the kept file holds credentials in
+   Credentials of a parseable file (`[server].auth_token` with
+   `auth_enabled`, `[tokens]` including the legacy single keys) join the
+   credential boot; the notice says the kept file holds credentials in
    clear and can be deleted once checked.
 2. The database opens, then the reconciler picks the key by decrypt
    self-test across every registered column:
@@ -99,7 +100,7 @@ the previous file untouched.
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:440-679]
+   [src: file: backend/src/core/keystore.rs:440-682]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -129,8 +130,10 @@ the previous file untouched.
    key, never overwritten; also refreshed after a restore),
    `invalid_sources`, `locked_credentials`, `kept_recovery_blobs`,
    `credentials_unavailable`, `recovery_other_key`, `recovery_unverified`,
-   `recovery_damaged`, `config_set_aside`, `rows_moved_from_files` and
-   `undecryptable_rows`; Settings → Recovery shows the warnings, and the
+   `recovery_damaged`, `config_set_aside`, `rows_moved_from_files`,
+   `file_key_moves_pending`, `file_key_rows_pending`, `undecryptable_rows`
+   and `locked_file_rows`; pending file-key moves are shown as "nothing to
+   do"; Settings → Recovery shows the warnings, and the
    app-wide banner shows a locked key, `credentials_unavailable` and
    `config_set_aside`.
    [src: file: backend/src/core/keystore.rs:284-332]
@@ -140,7 +143,7 @@ the previous file untouched.
    as it is. If this step fails before loading the token while a token is
    stored, auth is locked (below), never open. The stored token row also
    records whether auth is enabled, so a lost `config.toml` does not turn
-   auth off. [src: file: backend/src/core/credential_store.rs:452-585]
+   auth off. [src: file: backend/src/core/credential_store.rs:452-587]
 
 An operator-set `KRONN_AUTH_TOKEN` is read and removed from the process
 environment before the database opens (`config::take_env_auth_token`). Step 4
@@ -210,7 +213,7 @@ Safe to interrupt at any point; a rerun converges:
    are reported together.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
-[src: file: backend/src/core/credential_store.rs:697-700]
+[src: file: backend/src/core/credential_store.rs:699-702]
 
 Not migrated in this release: rows that do not decrypt with the current key
 are kept untouched (logged as locked) and never deleted by later saves.
@@ -250,8 +253,14 @@ re-encrypts the rows it decrypts under this instance's key, in one
 transaction with read-back; rows already under the instance key are never
 written, and the instance key never changes. Stored credentials among the
 rewritten rows are reloaded at once (a failed reload is recorded as above).
-Settings offers it whenever rows remain that the key in use cannot decrypt,
-with or without a kept blob (a pasted code works). Without a pasted code it tries
+It also reads back every `locked-secrets-*.json` (see below) with the keys it
+tries plus the key stores and kept files: each row one of them decrypts goes
+back under the key in use (an MCP config only while its secret is still
+empty, any other row only when its primary key is absent), one transaction
+per file with read-back, and a file whose rows are all back is renamed
+`.restored`. Settings offers it whenever rows remain that a passphrase or code
+can bring back (undecryptable rows the next start does not move by itself, or
+`locked_file_rows`), with or without a kept blob (a pasted code works). Without a pasted code it tries
 every kept blob: imported ones, replaced ones and the local `recovery.key`
 (rows may sit under an older local key). The UI picks the flow itself:
 restore when the key is locked, re-encrypt otherwise, and submits nothing
@@ -262,7 +271,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 names the ones whose project is gone.
-[src: file: backend/src/core/keystore.rs:1329-1385]
+[src: file: backend/src/core/keystore.rs:1642-1703]
 
 ## Reset
 
@@ -278,18 +287,25 @@ but `encryption_secret`. The encrypted credential backup is deleted and
 older key). A reset while the key is locked also deletes the token row, which
 no key can read, then resolves the key and arms the credential store at once
 (adopting a key a store holds, or minting one), as a fresh start would. This
-runs on a copy of the live config, adopted only on success: on failure no key
+runs on a copy of the live config in restore mode (auth is never turned on or
+off), adopted only on success and only when a key results: otherwise no key
 stays in memory and the previous auth (an operator session token) is kept.
+Only a session token is replaced; a readable `config.toml` token is stored
+like any other credential. A start never turns off an auth already on.
 `config.toml` is then left for a first run, so the wizard opens.
 
 When the key is lost for good (no passphrase, no code),
 `POST /api/config/recovery/start-new-key` (locked screen and banner, behind a
-confirmation; key locked, local caller only) copies every encrypted row no
-known key decrypts into an owner-only `locked-secrets-<timestamp>.json` in the
-data directory (read back), removes those rows in one transaction (an MCP
-config keeps its settings and loses only its secret values), then resolves a
-new key as above. Discussions, projects and workflows stay; a key found later
-can still read the kept file. The response names the file and, with auth on,
+confirmation; key locked; a local caller, or one with the API token, and only a
+local caller while auth is locked) first reads every key store strictly (an
+unreadable one stops it before anything is written), copies every encrypted
+row no known key decrypts into an owner-only `locked-secrets-<timestamp>.json`
+in the data directory (read back), removes those rows in one transaction,
+each matched by primary key and the copied ciphertext (a row changed
+meanwhile rolls everything back; an MCP config keeps its settings and loses
+only its secret values), then resolves a new key as above. Discussions,
+projects and workflows stay; "Re-encrypt" puts the kept rows back once the
+old passphrase or code is offered. The response names the file and, with auth on,
 the new API token.
 
 When the key is in use but the stored credentials fail to load at start
@@ -329,4 +345,4 @@ rebuild, so macOS would prompt on every restart). To exercise the keychain
 path, including a denied prompt, start the dev backend with
 `KRONN_USE_KEYCHAIN=1`; `KRONN_USE_KEYCHAIN=0` forces the sidecar in a release
 build. Outside macOS and Windows the default is off (no keychain backend).
-[src: file: backend/src/core/keyvault.rs:293-302]
+[src: file: backend/src/core/keyvault.rs:298-307]

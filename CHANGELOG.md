@@ -345,6 +345,11 @@ Release notes for 0.9.3 and earlier are available in the
   only once saved; credentials of an unreadable `config.toml` are recovered;
   a forgotten passphrase can be replaced; and the desktop restart keeps the
   operator's API token (KT-1007).
+- Secrets set aside when a key was given up come back through "Re-encrypt"
+  once the old passphrase or code is offered; starting a new key or a locked
+  reset never turns API auth off (or on), keeps a readable token, stops on an
+  unreadable key store before writing anything, and removes only rows that are
+  still the ones copied (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
