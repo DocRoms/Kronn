@@ -3236,8 +3236,10 @@ export type ExecutionTimeoutKind = "activity" | "total_duration" | "review_wait"
 export type ExportPluginBundleRequest = { config_ids: Array<string>, include_values?: boolean, passphrase?: string | null, confirmation?: string | null, };
 
 /**
- * A named OpenAI-compatible API connection. The credential itself stays in
- * Kronn's encrypted credential store; this model persists only its slug.
+ * A named OpenAI-compatible API connection. This model persists only the
+ * credential's slug; the value is an `ApiKey` kept in the encrypted
+ * `stored_credentials` table, outside the residual cases listed in
+ * TD-20260901-plaintext-connection-credentials.
  */
 export type ExternalApiConnection = { id: string, display_name: string, mention_alias: string, endpoint: string | null, credential_slug: string, origin_preset: ExternalApiConnectionPreset, economy_model: string | null, default_model: string | null, reasoning_model: string | null, created_at: string, updated_at: string,
 /**

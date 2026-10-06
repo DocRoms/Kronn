@@ -2,8 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// A named OpenAI-compatible API connection. The credential itself stays in
-/// Kronn's encrypted credential store; this model persists only its slug.
+/// A named OpenAI-compatible API connection. This model persists only the
+/// credential's slug; the value is an `ApiKey` kept in the encrypted
+/// `stored_credentials` table, outside the residual cases listed in
+/// TD-20260901-plaintext-connection-credentials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ExternalApiConnection {
