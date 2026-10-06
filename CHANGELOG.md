@@ -326,6 +326,14 @@ Release notes for 0.9.3 and earlier are available in the
   while the key is locked sets up a new key at once; a provider key whose
   save fails no longer appears saved; and a recovery passphrase from before
   0.14.3, or a damaged one, can be replaced from Settings (KT-1007).
+- A lost key with no recovery passphrase no longer holds the rest hostage:
+  "set the locked secrets aside and start a new key" keeps them in a file and
+  keeps discussions, projects and workflows. A failed reset while locked keeps
+  the API authenticated; moves from kept key files wait for a durable copy and
+  never stop the start; connection keys, LiteLLM and discovered keys appear
+  only once saved; credentials of an unreadable `config.toml` are recovered;
+  a forgotten passphrase can be replaced; and the desktop restart keeps the
+  operator's API token (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped

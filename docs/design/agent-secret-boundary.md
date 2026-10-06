@@ -243,7 +243,8 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    `config.toml.retired-key.<ts>` and the key in use gets the file copy.
    Config backups, retired-key and corrupt-config files are read-only
    candidates of every decision; rows under such a file key are moved under
-   the live key at boot, the file kept. `mirror()` never writes a vault
+   the live key (or, with none, the file key decrypting the most rows) at
+   boot once that key has a durable copy, the file kept. `mirror()` never writes a vault
    holding another key; two live keys that each decrypt data stop the boot
    (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
    Keys compare in one canonical spelling; the env variable is not counted as
@@ -262,8 +263,9 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
 5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
    `recovery.key` without `current_passphrase`, except one verified for
    another key or with a damaged payload (kept as `recovery.previous-<ts>`),
-   and one from before 0.14.3 after an explicit confirmation; imports never
-   replace it;
+   and one from before 0.14.3 or with a forgotten passphrase after an
+   explicit confirmation; imports never replace it; a lost key can be
+   abandoned for a new one, the locked rows kept in `locked-secrets-<ts>.json`;
    `recovery/restore` never swaps the key of a running instance (imported
    secrets are re-encrypted instead). The human factor (D1) is not part of
    0.14.3.
