@@ -844,7 +844,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
 /// token and provider keys (KT-1007): the copy never holds credentials, even if
 /// the credential store boot that follows fails.
-fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
     let cfg = dir.join("config.toml");
     let text = match std::fs::read_to_string(&cfg) {
         Ok(text) => text,
@@ -868,8 +868,7 @@ fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
         Err(e) => return Err(e),
     }
     let tmp = dir.join(".config.toml.backup.tmp");
-    crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
-    std::fs::rename(&tmp, backup)
+    crate::core::keyvault::write_private_atomic(&tmp, &backup, scrubbed.as_bytes())
 }
 
 /// Move `backup` to `config.toml.backup.<UTC timestamp>` (owner-only).
@@ -887,12 +886,15 @@ pub(crate) fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result
     match crate::core::credential_store::without_credentials(&existing) {
         Some(scrubbed) => {
             let tmp = dir.join(".config.toml.backup.rotate.tmp");
-            crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
-            std::fs::rename(&tmp, &target)?;
+            crate::core::keyvault::write_private_atomic(&tmp, &target, scrubbed.as_bytes())?;
             std::fs::remove_file(backup)?;
+            crate::core::keyvault::sync_dir(dir);
         }
         // Unparseable: kept as it is (it may be the only copy of a key).
-        None => std::fs::rename(backup, &target)?,
+        None => {
+            std::fs::rename(backup, &target)?;
+            crate::core::keyvault::sync_dir(dir);
+        }
     }
     #[cfg(unix)]
     {

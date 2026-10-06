@@ -245,7 +245,10 @@ pub async fn save_api_key(
     State(state): State<AppState>,
     Json(req): Json<SaveApiKeyRequest>,
 ) -> Json<ApiResponse<ApiKeyDisplay>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     if req.value.is_empty() || req.value.contains('*') {
         return Json(ApiResponse::err("Invalid key value"));
@@ -282,13 +285,16 @@ pub async fn save_api_key(
     };
 
     match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(ApiKeyDisplay {
-            id: key.id,
-            name: key.name,
-            provider: key.provider,
-            masked_value: mask_token(&key.value),
-            active: key.active,
-        })),
+        Ok(_) => {
+            *live = config;
+            Json(ApiResponse::ok(ApiKeyDisplay {
+                id: key.id,
+                name: key.name,
+                provider: key.provider,
+                masked_value: mask_token(&key.value),
+                active: key.active,
+            }))
+        }
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -299,7 +305,10 @@ pub async fn delete_api_key(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     let idx = config.tokens.keys.iter().position(|k| k.id == id);
     if let Some(i) = idx {
@@ -316,7 +325,10 @@ pub async fn delete_api_key(
             }
         }
         match config::save(&config).await {
-            Ok(_) => Json(ApiResponse::ok(())),
+            Ok(_) => {
+                *live = config;
+                Json(ApiResponse::ok(()))
+            }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
         }
     } else {
@@ -330,7 +342,10 @@ pub async fn activate_api_key(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     let provider = config
         .tokens
@@ -346,7 +361,10 @@ pub async fn activate_api_key(
             }
         }
         match config::save(&config).await {
-            Ok(_) => Json(ApiResponse::ok(())),
+            Ok(_) => {
+                *live = config;
+                Json(ApiResponse::ok(()))
+            }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
         }
     } else {
@@ -2370,12 +2388,32 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     let previous = cfg.clone();
     *cfg = config::default_config();
     cfg.encryption_secret = previous.encryption_secret;
-    cfg.server.auth_token = previous.server.auth_token;
+    cfg.server.auth_token = previous.server.auth_token.clone();
     cfg.server.auth_enabled = previous.server.auth_enabled;
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
 
+    if key_locked {
+        // Nothing encrypted is left: resolve the key and arm the store now
+        // (adopt or mint), as a fresh start would, instead of staying keyless.
+        let session = previous
+            .server
+            .auth_token
+            .clone()
+            .filter(|_| previous.server.auth_token_session_only);
+        cfg.server.auth_token = None;
+        cfg.server.auth_token_session_only = false;
+        cfg.server.auth_locked = false;
+        // The value config.toml kept is a candidate (set aside if not used).
+        cfg.encryption_secret = config::retained_disk_key(&dir);
+        if let Err(e) = crate::resolve_key_and_credentials(&mut cfg, &state.db, session).await {
+            return Json(ApiResponse::err(format!(
+                "Reset cleared everything, but a new key could not be set up ({e:#}). Restart \
+                 Kronn."
+            )));
+        }
+    }
     Json(ApiResponse::ok(()))
 }
 
@@ -2387,6 +2425,9 @@ pub struct SetRecoveryRequest {
     /// Required to replace an existing recovery passphrase.
     #[serde(default)]
     pub current_passphrase: Option<String>,
+    /// Replace a recovery passphrase from before 0.14.3 without it (kept).
+    #[serde(default)]
+    pub replace_unverified: bool,
 }
 
 #[derive(serde::Serialize, ts_rs::TS)]
@@ -2432,6 +2473,17 @@ pub struct RecoveryStatus {
     pub recovery_other_key: bool,
     /// config.toml could not be read at start and was kept aside: what and why.
     pub config_set_aside: Option<String>,
+    /// Rows this start moved from a key kept only in a file (config backup,
+    /// retired or corrupt config) to the key in use; the files are kept.
+    pub rows_moved_from_files: Vec<String>,
+    /// Encrypted rows the key in use cannot decrypt (0 when the key is locked).
+    pub undecryptable_rows: u32,
+    /// recovery.key predates 0.14.3: it can be replaced without its passphrase
+    /// after a confirmation (it is kept, a restore still tries it).
+    pub recovery_unverified: bool,
+    /// recovery.key parses but its payload is damaged: replaced without a
+    /// passphrase (kept aside).
+    pub recovery_damaged: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2447,10 +2499,13 @@ pub struct RestoreRecoveryRequest {
 pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<RecoveryStatus>> {
     let dir = config::config_dir().ok();
     let key = state.config.read().await.encryption_secret.clone();
-    Json(ApiResponse::ok(recovery_status_in(
-        dir.as_deref(),
-        key.as_deref(),
-    )))
+    let mut status = recovery_status_in(dir.as_deref(), key.as_deref());
+    if let Some(k) = key.as_deref() {
+        status.undecryptable_rows = crate::core::keystore::undecryptable_rows(&state.db, k)
+            .await
+            .unwrap_or(0) as u32;
+    }
+    Json(ApiResponse::ok(status))
 }
 
 fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> RecoveryStatus {
@@ -2465,6 +2520,10 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
     let report = dir
         .map(crate::core::keystore::boot_report)
         .unwrap_or_default();
+    let recovery_state = match (dir, key) {
+        (Some(d), Some(k)) => Some(crate::core::recovery::matches_key(d, k)),
+        _ => None,
+    };
     let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     RecoveryStatus {
         configured,
@@ -2488,6 +2547,12 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
             _ => false,
         },
         config_set_aside: dir.and_then(config::set_aside_notice),
+        rows_moved_from_files: report.rows_moved_from_files.clone(),
+        undecryptable_rows: 0,
+        recovery_unverified: recovery_state
+            == Some(crate::core::recovery::RecoveryMatch::Unverified),
+        recovery_damaged: recovery_state == Some(crate::core::recovery::RecoveryMatch::Unreadable)
+            && dir.and_then(crate::core::recovery::load_blob).is_some(),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -2516,6 +2581,7 @@ pub async fn set_recovery(
         &config,
         &req.passphrase,
         req.current_passphrase.as_deref(),
+        req.replace_unverified,
     ) {
         Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -2565,6 +2631,8 @@ pub async fn restore_recovery(
             .await
             {
                 tracing::error!("Credential store after key restore: {e:#}");
+                // The status and the locked screen then say "fix and restart".
+                crate::core::credential_store::record_boot_failure(&dir, Some(format!("{e:#}")));
                 return Json(ApiResponse::err(format!(
                     "The key was restored, but loading the stored credentials failed: {e:#}. \
                      Restart Kronn; nothing was deleted."
@@ -2634,6 +2702,10 @@ pub async fn reencrypt_imported(
                 )
                 .await
                 {
+                    crate::core::credential_store::record_boot_failure(
+                        &dir,
+                        Some(format!("{e:#}")),
+                    );
                     return Json(ApiResponse::err(format!(
                         "The secrets were re-encrypted, but reloading the stored credentials \
                          failed ({e:#}): restart Kronn to load them."

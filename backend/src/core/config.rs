@@ -112,10 +112,18 @@ pub async fn load() -> Result<Option<AppConfig>> {
             );
             record_set_aside(
                 &dir,
-                format!(
-                    "config.toml could not be read ({cause}) and was kept as {kept}; your key and \
-                     data are intact, only the settings start over"
-                ),
+                if key.is_some() {
+                    format!(
+                        "config.toml could not be read ({cause}) and was kept as {kept}. The \
+                         encryption key it held was recovered; the settings start over"
+                    )
+                } else {
+                    format!(
+                        "config.toml could not be read ({cause}) and was kept as {kept}. No \
+                         encryption key could be read from it; the settings start over, and the \
+                         key is looked for in the other key stores and backups"
+                    )
+                },
             );
             if let Some(key) = key.as_deref() {
                 retain_disk_key(&dir, key);
@@ -604,6 +612,7 @@ fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) ->
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
     let name = format!("{CONFIG_FILE}.corrupt.{stamp}");
     std::fs::rename(path, dir.join(&name)).context("move the unreadable config.toml aside")?;
+    super::keyvault::sync_dir(dir);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -613,7 +622,7 @@ fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) ->
 }
 
 /// A top-level `encryption_secret = "..."` line that parses on its own.
-fn salvage_key_line(content: &str) -> Option<String> {
+pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
     content.lines().find_map(|line| {
         let table: toml::Table = line.trim().parse().ok()?;
         table
@@ -887,6 +896,11 @@ mod tests {
             "{notice}"
         );
         assert!(notice.contains("config.toml.corrupt."), "{notice}");
+        // C5-02: no key could be salvaged, so the notice never claims one is intact.
+        assert!(
+            !notice.contains("intact") && notice.contains("No encryption key"),
+            "{notice}"
+        );
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }

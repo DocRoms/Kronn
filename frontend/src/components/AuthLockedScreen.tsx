@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { config as configApi } from '../lib/api';
+import { ApiRequestError } from '../lib/apiRequestError';
 import type { ToastFn } from '../hooks/useToast';
 import { RecoveryRestorePanel } from './RecoveryRestorePanel';
 import { KeyRound } from 'lucide-react';
@@ -15,7 +16,7 @@ interface AuthLockedScreenProps {
   onRestored: () => void;
 }
 
-type LockState = 'checking' | 'remote' | 'keyLost' | 'tokenUnreadable' | 'credentialsFailed';
+type LockState = 'checking' | 'remote' | 'unreachable' | 'keyLost' | 'tokenUnreadable' | 'credentialsFailed';
 
 export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
   const { t } = useT();
@@ -26,9 +27,12 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const toast: ToastFn = (text, type = 'info') => setMessage({ text, error: type === 'error' });
 
+  const [attempt, setAttempt] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   useEffect(() => {
     let live = true;
-    // Only a caller on this machine may read the status: a refusal means remote.
+    let timer: ReturnType<typeof setTimeout> | undefined;
     Promise.resolve()
       .then(() => configApi.getRecoveryStatus())
       .then(s => {
@@ -38,9 +42,17 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
         if (s.credentials_unavailable) { setFailure(s.credentials_unavailable); setState('credentialsFailed'); return; }
         setState(s.key_locked ? 'keyLost' : 'tokenUnreadable');
       })
-      .catch(() => { if (live) setState('remote'); });
-    return () => { live = false; };
-  }, []);
+      .catch(e => {
+        if (!live) return;
+        // Only the 423 auth_locked answer means a remote caller; anything else
+        // (backend restarting, network) is retried with backoff.
+        if (e instanceof ApiRequestError && e.code === 'auth_locked') { setState('remote'); return; }
+        setLoadError(e instanceof Error ? e.message : String(e));
+        setState('unreachable');
+        timer = setTimeout(() => setAttempt(a => a + 1), Math.min(30_000, 2_000 * 2 ** attempt));
+      });
+    return () => { live = false; if (timer) clearTimeout(timer); };
+  }, [attempt]);
 
   const replaceToken = async () => {
     if (busy) return;
@@ -60,6 +72,14 @@ export function AuthLockedScreen({ onRestored }: AuthLockedScreenProps) {
         <KeyRound size={18} /> {t('authLocked.title')}
       </h1>
       {state === 'remote' && <p data-testid="auth-locked-remote">{t('authLocked.remoteHint')}</p>}
+      {state === 'unreachable' && (
+        <div data-testid="auth-locked-unreachable">
+          <p>{t('authLocked.unreachable', loadError ?? '')}</p>
+          <button type="button" className="btn" onClick={() => setAttempt(a => a + 1)} data-testid="auth-locked-retry">
+            {t('authLocked.retry')}
+          </button>
+        </div>
+      )}
       {state === 'credentialsFailed' && (
         <div data-testid="auth-locked-restart">
           <p>{t('authLocked.restartHint', failure ?? '')}</p>

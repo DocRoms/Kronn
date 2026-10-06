@@ -1303,6 +1303,18 @@ async fn a_restore_whose_credentials_fail_to_load_reports_the_failure() {
     .await;
     assert_eq!(body["success"], false, "{body}");
     assert!(state.config.read().await.server.auth_token.is_none());
+    // C5-04: the status then says why, so the locked screen asks for a restart.
+    let (_, status) = json_of(
+        crate::build_router_with_auth(state, true),
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        status["data"]["credentials_unavailable"].is_string(),
+        "{status}"
+    );
 }
 
 /// C2-04 — a restore keeps the operator's session token and auth stays on,
@@ -1602,20 +1614,38 @@ async fn a_reset_while_locked_lets_the_next_start_mint() {
         .unwrap();
     assert!(cfg.encryption_secret.is_none());
     cfg.server.auth_enabled = false;
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
     let (_, body) = json_of(
-        crate::build_router_with_auth(state_with(cfg, &db), true),
+        router.clone(),
         "POST",
         "/api/setup/reset",
         serde_json::json!({}),
     )
     .await;
     assert_eq!(body["success"], true, "{body}");
+    // C5-06: the running instance has a key and an armed store right away.
+    let (_, status) = json_of(
+        router.clone(),
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status["data"]["key_locked"], false, "{status}");
+    let (_, saved) = json_of(
+        router,
+        "POST",
+        "/api/config/api-keys",
+        serde_json::json!({"name": "n", "provider": "openai", "value": "sk-after-reset"}),
+    )
+    .await;
+    assert_eq!(saved["success"], true, "{saved}");
     dir.restart();
     let mut next = config::default_config_without_key();
     let outcome = keystore::reconcile_with(&mut next, &db, &dir.sidecar_only(), dir.path())
         .await
         .unwrap();
-    assert_eq!(outcome, KeyOutcome::Minted);
+    assert!(!matches!(outcome, KeyOutcome::Locked { .. }), "{outcome:?}");
 }
 
 /// C3-04 — the key is in use but the credentials fail to load: the status
@@ -1936,4 +1966,37 @@ async fn an_export_of_secrets_without_recovery_warns() {
             .and_then(|v| v.to_str().ok()),
         Some("no-recovery-passphrase")
     );
+}
+
+// ── review round 6 ──────────────────────────────────────────────────────────
+
+/// C5-08 — a provider key whose save fails is not left in the live config.
+#[tokio::test]
+#[serial]
+async fn a_failed_api_key_save_leaves_the_live_config_unchanged() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    db.with_conn(|c| {
+        c.execute_batch(
+            "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+             UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
+    let (_, saved) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/api-keys",
+        serde_json::json!({"name": "never", "provider": "openai", "value": "sk-never-stored"}),
+    )
+    .await;
+    assert_eq!(saved["success"], false, "{saved}");
+    let (_, tokens) = json_of(router, "GET", "/api/config/tokens", serde_json::json!({})).await;
+    assert!(!tokens.to_string().contains("never"), "{tokens}");
 }

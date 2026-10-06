@@ -904,7 +904,11 @@ export const config = {
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
   /** Returns the recovery code the user MUST save off-machine. */
   // Replacing an existing passphrase requires the current one (KT-1007).
-  setRecovery: (passphrase: string, currentPassphrase?: string) => api<{ recovery_code: string }>('POST', '/config/recovery/set', currentPassphrase ? { passphrase, current_passphrase: currentPassphrase } : { passphrase }),
+  setRecovery: (passphrase: string, currentPassphrase?: string, replaceUnverified?: boolean) => api<{ recovery_code: string }>('POST', '/config/recovery/set', {
+    passphrase,
+    ...(currentPassphrase ? { current_passphrase: currentPassphrase } : {}),
+    ...(replaceUnverified ? { replace_unverified: true } : {}),
+  }),
   /** Restores the encryption key when the token subsystem is locked. `recoveryCode`
    *  optional — omitted, the local recovery sidecar is used. */
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>

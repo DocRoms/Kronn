@@ -6138,7 +6138,26 @@ recovery_other_key: boolean,
 /**
  * config.toml could not be read at start and was kept aside: what and why.
  */
-config_set_aside: string | null, };
+config_set_aside: string | null,
+/**
+ * Rows this start moved from a key kept only in a file (config backup,
+ * retired or corrupt config) to the key in use; the files are kept.
+ */
+rows_moved_from_files: Array<string>,
+/**
+ * Encrypted rows the key in use cannot decrypt (0 when the key is locked).
+ */
+undecryptable_rows: number,
+/**
+ * recovery.key predates 0.14.3: it can be replaced without its passphrase
+ * after a confirmation (it is kept, a restore still tries it).
+ */
+recovery_unverified: boolean,
+/**
+ * recovery.key parses but its payload is damaged: replaced without a
+ * passphrase (kept aside).
+ */
+recovery_damaged: boolean, };
 
 export type RedactedField = {
 /**

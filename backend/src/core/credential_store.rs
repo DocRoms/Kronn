@@ -633,7 +633,10 @@ fn toml_holds_credentials(text: &str) -> bool {
 
 /// Encrypt the current config.toml to [`BACKUP_FILENAME`] (0600) when it still
 /// holds secrets. An existing backup is kept: it is the oldest original.
-fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn back_up_config_if_it_holds_secrets(
+    dir: &Path,
+    key_hex: &str,
+) -> Result<Option<PathBuf>> {
     let backup = dir.join(BACKUP_FILENAME);
     if backup.exists() {
         return Ok(Some(backup));
@@ -649,9 +652,8 @@ fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Optio
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     let encrypted = crypto::encrypt(&text, &key).map_err(anyhow::Error::msg)?;
     let tmp = dir.join(format!(".{BACKUP_FILENAME}.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, &backup, encrypted.as_bytes())
         .context("write config backup")?;
-    std::fs::rename(&tmp, &backup).context("move config backup into place")?;
     Ok(Some(backup))
 }
 
@@ -665,9 +667,8 @@ pub fn reencrypt_backup(dir: &Path, from_hex: &str, to_hex: &str) -> Result<bool
     let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
     let encrypted = crypto::encrypt(&text, &to).map_err(anyhow::Error::msg)?;
     let tmp = dir.join(format!(".{BACKUP_FILENAME}.reencrypt.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, &path, encrypted.as_bytes())
         .context("write config backup")?;
-    std::fs::rename(&tmp, &path).context("move config backup into place")?;
     Ok(true)
 }
 
@@ -757,7 +758,7 @@ fn migration_backup_paths(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
+pub(crate) fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -788,9 +789,8 @@ fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = dir.join(format!(".{file}.scrub.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, content.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, path, content.as_bytes())
         .with_context(|| format!("write {file}"))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("move {file} into place"))?;
     Ok(())
 }
 

@@ -728,7 +728,9 @@ async fn start_backend(
     // they would go to config.toml in clear).
     if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
-        let mut cfg = state.config.write().await;
+        // Adopted only once saved: a failed save never leaves unsaved keys live.
+        let mut live = state.config.write().await;
+        let mut cfg = live.clone();
         let mut imported = 0u32;
         for dk in discovered {
             if !cfg.tokens.keys.iter().any(|k| k.value == dk.value) {
@@ -744,8 +746,17 @@ async fn start_backend(
             }
         }
         if imported > 0 {
-            let _ = config::save(&cfg).await;
-            tracing::info!("Auto-imported {} API key(s)", imported);
+            match config::save(&cfg).await {
+                Ok(_) => {
+                    *live = cfg;
+                    tracing::info!("Auto-imported {} API key(s)", imported);
+                }
+                Err(e) => tracing::error!(
+                    "Found {} API key(s) in agent configs but saving them FAILED: {e:#}; none \
+                     was imported",
+                    imported
+                ),
+            }
         }
     }
 

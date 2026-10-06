@@ -16,13 +16,14 @@ const { config } = vi.hoisted(() => ({
 vi.mock('../../lib/api', () => ({ config }));
 
 import { AuthLockedScreen } from '../AuthLockedScreen';
+import { ApiRequestError } from '../../lib/apiRequestError';
 
 describe('AuthLockedScreen', () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => cleanup());
 
   it('tells a remote caller to open Kronn on its machine', async () => {
-    config.getRecoveryStatus.mockRejectedValue(new Error('locked'));
+    config.getRecoveryStatus.mockRejectedValue(new ApiRequestError('locked', 'auth_locked'));
     render(<AuthLockedScreen onRestored={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId('auth-locked-remote')).toBeTruthy());
     expect(screen.queryByTestId('recovery-restore-panel')).toBeNull();
@@ -49,5 +50,21 @@ describe('AuthLockedScreen', () => {
     render(<AuthLockedScreen onRestored={vi.fn()} />);
     await waitFor(() => expect(screen.getByTestId('auth-locked-restart').textContent).toContain('disk full'));
     expect(screen.queryByTestId('auth-locked-new-token-btn')).toBeNull();
+  });
+
+  it('retries, without the remote hint, when the status cannot be read (C5-09)', async () => {
+    config.getRecoveryStatus.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ key_locked: true });
+    render(<AuthLockedScreen onRestored={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId('auth-locked-retry'));
+    expect(screen.queryByTestId('auth-locked-remote')).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy());
+    expect(config.getRecoveryStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the restart state after a restore whose credentials failed (C5-04)', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: false, credentials_unavailable: 'write config backup: disk full' });
+    render(<AuthLockedScreen onRestored={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('auth-locked-restart')).toBeTruthy());
   });
 });
