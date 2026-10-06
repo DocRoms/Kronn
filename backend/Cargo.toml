@@ -111,6 +111,10 @@ utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 # which fails inside slim Docker builders that don't ship curl.
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 
+# rooted_io reads a file's link count through its handle on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
 [dev-dependencies]
 # `test-util` only: it lets a test reach a 30-minute agent deadline on a paused
 # clock instead of waiting for it (KT-80). Dev-only, no production feature change.

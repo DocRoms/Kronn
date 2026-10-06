@@ -3,13 +3,20 @@
 //! On Unix every component below the root is opened with `openat` and
 //! `O_NOFOLLOW` from the previous directory handle, so a symlink planted (or
 //! swapped in) anywhere on the path makes the call fail instead of leaving the
-//! worktree. The opened file must be a regular file with a single link: a hard
-//! link would reach an outside file without any symlink. The root itself is
-//! trusted (a path Kronn chose) and may be reached through symlinks.
+//! worktree. The root itself is trusted (a path Kronn chose) and may be reached
+//! through symlinks.
 //!
-//! Windows: best effort only. The path is checked with `fs_guard` and then
-//! opened by name, so a swap between check and open is not excluded. The
-//! rooted primitive for every platform is KT-1055.
+//! - A read must land on a regular file with a single link, and the name must
+//!   still point at that same file after it was opened: a hard link (or one
+//!   removed right after the open) would reach an outside file.
+//! - A write never opens the existing file. It writes a fresh, exclusively
+//!   created file next to it and renames it over the name, which replaces a
+//!   planted link instead of writing through it.
+//!
+//! Windows: the same replace-by-rename write and a no-follow, single-link
+//! read through the opened handle, but the path is walked by name after an
+//! `fs_guard` check, so a directory swapped in between check and open is not
+//! excluded (best effort). The rooted primitive for every platform is KT-1055.
 
 use std::io;
 use std::path::{Component, Path};
@@ -38,6 +45,29 @@ fn components(rel: &Path) -> io::Result<Vec<&std::ffi::OsStr>> {
     Ok(parts)
 }
 
+fn refused(what: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, what.to_string())
+}
+
+#[cfg(windows)]
+fn refused_owned(what: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, what)
+}
+
+/// A sibling name no other writer uses; created exclusively.
+fn temp_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut tmp = std::ffi::OsString::from(".");
+    tmp.push(name);
+    tmp.push(format!(
+        ".kronn-tmp-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    tmp
+}
+
 #[cfg(unix)]
 mod imp {
     use std::ffi::{CStr, CString, OsStr};
@@ -45,10 +75,11 @@ mod imp {
     use std::io::{self, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
     fn cstring(bytes: &[u8]) -> io::Result<CString> {
-        CString::new(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
+        CString::new(bytes).map_err(|_| super::refused("NUL in path"))
     }
 
     fn check(fd: libc::c_int) -> io::Result<OwnedFd> {
@@ -85,8 +116,10 @@ mod imp {
     }
 
     /// The directory holding the last component, walked without following
-    /// any symlink. Missing directories are created when `create` is set.
-    fn parent_dir(root: &Path, parts: &[&OsStr], create: bool) -> io::Result<OwnedFd> {
+    /// any symlink, and that component's name. Missing directories are
+    /// created when `create` is set.
+    fn parent_dir(root: &Path, rel: &Path, create: bool) -> io::Result<(OwnedFd, CString)> {
+        let parts = super::components(rel)?;
         let mut dir = open_root(root)?;
         for part in &parts[..parts.len() - 1] {
             let name = cstring(part.as_bytes())?;
@@ -108,60 +141,91 @@ mod imp {
                 Err(error) => return Err(error),
             };
         }
-        Ok(dir)
+        let last: &OsStr = parts[parts.len() - 1];
+        Ok((dir, cstring(last.as_bytes())?))
     }
 
-    /// Refuses anything but a regular file with one link.
-    fn single_regular_file(fd: OwnedFd) -> io::Result<File> {
-        let file = File::from(fd);
-        let meta = file.metadata()?;
-        use std::os::unix::fs::MetadataExt;
-        if !meta.is_file() || meta.nlink() != 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a regular file with a single link",
-            ));
+    /// `lstat` of `name` in `dir`.
+    fn stat_at(dir: &OwnedFd, name: &CStr) -> io::Result<libc::stat> {
+        // SAFETY: zeroed stat is a valid out-buffer; arguments as in open_at.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
         }
-        Ok(file)
-    }
-
-    fn open_file(root: &Path, rel: &Path, flags: libc::c_int, create: bool) -> io::Result<File> {
-        let parts = super::components(rel)?;
-        let dir = parent_dir(root, &parts, create)?;
-        let name = cstring(parts[parts.len() - 1].as_bytes())?;
-        // O_NONBLOCK: opening a FIFO must fail or return, never hang.
-        single_regular_file(open_at(&dir, &name, flags | libc::O_NONBLOCK)?)
+        Ok(st)
     }
 
     pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
-        let mut file = open_file(root, rel, libc::O_RDONLY, false)?;
+        let (dir, name) = parent_dir(root, rel, false)?;
+        // O_NONBLOCK: opening a FIFO must fail or return, never hang.
+        let mut file = File::from(open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK)?);
+        #[cfg(test)]
+        super::tests::AFTER_OPEN.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.nlink() != 1 {
+            return Err(super::refused("not a regular file with a single link"));
+        }
+        // The name must still be this very file: a hard link unlinked right
+        // after the open would otherwise pass the link count.
+        let entry = stat_at(&dir, &name)?;
+        if entry.st_dev as u64 != meta.dev()
+            || entry.st_ino as u64 != meta.ino()
+            || entry.st_nlink as u64 != 1
+        {
+            return Err(super::refused("the file changed while it was opened"));
+        }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
 
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
-        // Truncated only once the file is known to be ours.
-        let mut file = open_file(root, rel, libc::O_WRONLY | libc::O_CREAT, true)?;
-        file.set_len(0)?;
-        file.write_all(bytes)
-    }
-
-    pub fn append(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut file = open_file(
-            root,
-            rel,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-            true,
-        )?;
-        file.write_all(bytes)
+        let (dir, name) = parent_dir(root, rel, true)?;
+        let tmp = cstring(super::temp_name(OsStr::from_bytes(name.as_bytes())).as_bytes())?;
+        let written = (|| {
+            let mut file = File::from(open_at(
+                &dir,
+                &tmp,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            )?);
+            file.write_all(bytes)?;
+            // SAFETY: as in open_at; renameat replaces the entry, never
+            // writes through what it pointed at.
+            if unsafe {
+                libc::renameat(
+                    dir.as_raw_fd(),
+                    tmp.as_ptr(),
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        })();
+        if written.is_err() {
+            // SAFETY: as in open_at.
+            unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        }
+        written
     }
 
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
-        let parts = super::components(rel)?;
-        let dir = parent_dir(root, &parts, false)?;
-        let name = cstring(parts[parts.len() - 1].as_bytes())?;
-        // SAFETY: as in open_at. Unlinking a symlink removes the link only.
+        let (dir, name) = parent_dir(root, rel, false)?;
+        // SAFETY: as in open_at. Unlinking a link removes the link only.
         if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -169,42 +233,76 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 mod imp {
-    use std::io;
-    use std::path::Path;
+    use std::fs::{File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
 
-    fn guarded(root: &Path, rel: &Path) -> io::Result<std::path::PathBuf> {
+    /// Opens a reparse point (symlink, junction) itself instead of its target.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    fn guarded(root: &Path, rel: &Path) -> io::Result<PathBuf> {
         super::components(rel)?;
         let path = root.join(rel);
         crate::core::fs_guard::assert_contained_no_symlink(root, &path)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            .map_err(super::refused_owned)?;
         Ok(path)
     }
 
+    fn link_count(file: &File) -> io::Result<u32> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+        // SAFETY: zeroed info is a valid out-buffer; the handle is open.
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info.nNumberOfLinks)
+    }
+
     pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
-        std::fs::read(guarded(root, rel)?)
+        let path = guarded(root, rel)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.file_type().is_symlink() || link_count(&file)? != 1 {
+            return Err(super::refused("not a regular file with a single link"));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
     }
 
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
         let path = guarded(root, rel)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| super::refused("no parent directory"))?;
+        std::fs::create_dir_all(parent)?;
+        guarded(root, rel)?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| super::refused("no file name"))?;
+        let tmp = parent.join(super::temp_name(name));
+        let written = (|| {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?
+                .write_all(bytes)?;
+            // Replaces the directory entry (a planted link included).
+            std::fs::rename(&tmp, &path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        std::fs::write(path, bytes)
-    }
-
-    pub fn append(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-        let path = guarded(root, rel)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?
-            .write_all(bytes)
+        written
     }
 
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
@@ -212,22 +310,31 @@ mod imp {
     }
 }
 
-/// Reads `rel` under `root` without following any symlink below the root.
+/// Reads `rel` under `root`: a regular, single-link file reached without
+/// following any link below the root.
 pub fn read(root: &Path, rel: &Path) -> io::Result<Vec<u8>> {
     imp::read(root, rel)
 }
 
-/// Replaces the content of `rel` under `root`, creating missing parents.
+/// Replaces `rel` under `root` with `bytes` (fresh file renamed over it),
+/// creating missing parents.
 pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
     imp::write(root, rel, bytes)
 }
 
-/// Appends to `rel` under `root`, creating it and missing parents.
+/// Appends by rewriting: the existing content is read with [`read`]'s checks
+/// and replaced like [`write`]. Meant for small journals.
 pub fn append(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
-    imp::append(root, rel, bytes)
+    let mut content = match imp::read(root, rel) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    content.extend_from_slice(bytes);
+    imp::write(root, rel, &content)
 }
 
-/// Removes `rel` under `root` (a symlink there is removed, not followed).
+/// Removes `rel` under `root` (a link there is removed, not followed).
 pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
     imp::remove(root, rel)
 }
@@ -236,6 +343,12 @@ pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    thread_local! {
+        /// Runs once inside the next read, right after its open.
+        pub(super) static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
         (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
@@ -267,15 +380,18 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_file_is_neither_read_nor_truncated() {
+    fn a_symlinked_file_is_not_read_and_a_write_replaces_the_link() {
         let (root, outside) = dirs();
         let target = outside.path().join("secret");
         std::fs::write(&target, b"keep").unwrap();
         symlink(&target, root.path().join("link")).unwrap();
         assert!(read(root.path(), Path::new("link")).is_err());
-        assert!(write(root.path(), Path::new("link"), b"").is_err());
-        assert!(append(root.path(), Path::new("link"), b"x").is_err());
+        write(root.path(), Path::new("link"), b"new").unwrap();
+        append(root.path(), Path::new("link"), b"+").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let replaced = std::fs::symlink_metadata(root.path().join("link")).unwrap();
+        assert!(replaced.file_type().is_file());
+        assert_eq!(read(root.path(), Path::new("link")).unwrap(), b"new+");
     }
 
     #[test]
@@ -293,17 +409,50 @@ mod tests {
         assert!(!outside.path().join("new.json").exists());
     }
 
-    #[test]
-    fn a_hard_link_to_an_outside_file_is_refused() {
-        let (root, outside) = dirs();
-        let target = outside.path().join("secret");
+    /// A hard link to an outside file, when the filesystem allows one here.
+    fn hard_link(root: &Path, outside: &Path) -> Option<std::path::PathBuf> {
+        let target = outside.join("secret");
         std::fs::write(&target, b"keep").unwrap();
-        if std::fs::hard_link(&target, root.path().join("hard")).is_err() {
+        std::fs::hard_link(&target, root.join("hard")).ok()?;
+        Some(target)
+    }
+
+    #[test]
+    fn a_hard_link_is_not_read_and_a_write_leaves_its_target_alone() {
+        let (root, outside) = dirs();
+        let Some(target) = hard_link(root.path(), outside.path()) else {
             return; // different filesystems: no hard link possible
-        }
+        };
         assert!(read(root.path(), Path::new("hard")).is_err());
-        assert!(write(root.path(), Path::new("hard"), b"").is_err());
+        write(root.path(), Path::new("hard"), b"").unwrap();
+        append(root.path(), Path::new("hard"), b"x").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_hard_link_unlinked_right_after_the_open_is_not_read() {
+        let (root, outside) = dirs();
+        let Some(target) = hard_link(root.path(), outside.path()) else {
+            return;
+        };
+        let entry = root.path().join("hard");
+        AFTER_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || std::fs::remove_file(&entry).unwrap()));
+        });
+        assert!(read(root.path(), Path::new("hard")).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let (root, _) = dirs();
+        std::fs::create_dir(root.path().join("taken")).unwrap();
+        assert!(write(root.path(), Path::new("taken"), b"x").is_err());
+        let names: Vec<_> = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["taken"]);
     }
 
     #[test]

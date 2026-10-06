@@ -2237,8 +2237,10 @@ mod tests {
             b"keep",
             "the outside file is untouched"
         );
-        assert!(
-            outcome.result.output.contains("SkippedWriteError"),
+        // The link is replaced, not written through, so the items still run.
+        assert_eq!(
+            outcome.result.status,
+            crate::models::RunStatus::Success,
             "{}",
             outcome.result.output
         );
