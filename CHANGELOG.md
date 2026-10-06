@@ -317,6 +317,13 @@ Release notes for 0.9.3 and earlier are available in the
   without a recovery passphrase warns; a `config.toml` set aside at start is
   shown in the setup wizard; every backup copy is scrubbed even when one
   fails; and key files are synced to disk with their directory (KT-1007).
+- Secrets under an older key kept only in a `config.toml` backup, a set-aside
+  value or a corrupt `config.toml` are re-encrypted under the key in use at
+  start (the file is kept) instead of stopping the start; a set-aside
+  `config.toml` and a credential load failure are shown app-wide; a reset
+  while the key is locked sets up a new key at once; a provider key whose
+  save fails no longer appears saved; and a recovery passphrase from before
+  0.14.3, or a damaged one, can be replaced from Settings (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped

@@ -238,12 +238,14 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    in-process key every consumer reads; the only copy written to
    `config.toml` is the one `config::retain_disk_key` keeps until the key
    decrypts every non-empty column and two independent copies remain without
-   it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
-   whose fingerprint matches); a different legacy value is moved to
+   it (two persisted vaults, keychain and sidecar, or one plus a
+   `recovery.key` whose fingerprint matches); a different legacy value is moved to
    `config.toml.retired-key.<ts>` and the key in use gets the file copy.
-   Config backups and retired-key files are read-only candidates of every
-   decision. `mirror()` never writes a vault holding another key; two keys that each decrypt data
-   stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
+   Config backups, retired-key and corrupt-config files are read-only
+   candidates of every decision; rows under such a file key are moved under
+   the live key at boot, the file kept. `mirror()` never writes a vault
+   holding another key; two live keys that each decrypt data stop the boot
+   (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
    Keys compare in one canonical spelling; the env variable is not counted as
    a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no
    key in memory (fail closed); a stored auth token it cannot read locks the
@@ -258,7 +260,10 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    table at boot and written back by every `config::save`. Reveal routes are
    unchanged.
 5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
-   `recovery.key` without `current_passphrase`; imports never replace it;
+   `recovery.key` without `current_passphrase`, except one verified for
+   another key or with a damaged payload (kept as `recovery.previous-<ts>`),
+   and one from before 0.14.3 after an explicit confirmation; imports never
+   replace it;
    `recovery/restore` never swaps the key of a running instance (imported
    secrets are re-encrypted instead). The human factor (D1) is not part of
    0.14.3.
