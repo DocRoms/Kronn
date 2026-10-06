@@ -2507,6 +2507,40 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     window.removeEventListener('kronn:pages-activated', activated);
   });
 
+  it('imports once when Confirm is clicked twice in the same task', async () => {
+    let resolveImport: (v: { id: string }) => void = () => {};
+    mockWorkflowsApi.importWorkflow.mockClear();
+    mockWorkflowsApi.importWorkflow.mockImplementationOnce(
+      () => new Promise<{ id: string }>((resolve) => { resolveImport = resolve; }),
+    );
+    mockWorkflowsApi.get.mockResolvedValueOnce({
+      id: 'wf-once', name: 'Once', project_id: null,
+      trigger: { type: 'Manual' }, steps: [], actions: [], variables: [], enabled: false,
+      pinned: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    });
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+    chooseAutomationAction('Importer');
+    const content = JSON.stringify({ kind: 'kronn.workflow', version: 3, workflow: { name: 'Once', steps: [] } });
+    const file = new File([content], 'workflow.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    await act(async () => {
+      fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+        target: { files: [file] },
+      });
+    });
+    const modal = screen.getByRole('heading', { name: 'Importer un workflow' }).closest('.wf-import-modal');
+    const confirm = within(modal as HTMLElement).getByRole('button', { name: 'Importer' });
+    // Both clicks land before React re-renders the disabled button.
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+    await act(async () => { resolveImport({ id: 'wf-once' }); });
+    expect(mockWorkflowsApi.importWorkflow).toHaveBeenCalledTimes(1);
+  });
+
   it('groups Quick APIs by API and sorts each group by endpoint', async () => {
     const qa = (
       id: string,
