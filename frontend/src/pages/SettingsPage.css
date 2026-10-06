@@ -1617,8 +1617,23 @@
   color: var(--kr-text-primary);
 }
 
+/* One tier per line, each select as wide as the card: model names share a
+   long provider prefix and were unreadable in a narrow control. */
+.set-agent-tier-selects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.set-agent-tier-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
 .set-agent-model-select {
-  width: 150px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 @keyframes set-model-tier-focus-pulse {
@@ -2957,7 +2972,7 @@
 .set-ext-api-conn-tiers,
 .set-ext-api-tiers {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--kr-sp-3);
 }
 

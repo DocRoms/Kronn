@@ -1283,7 +1283,7 @@ export function AgentsSection({
                   ? ` — ${t('modelCatalog.unavailable')}` : fallback ? modelCostSuffix(fallback.model_id) : '';
                 const clearLabel = `${t('config.defaultModel')}${fallback ? ` (${fallback.model_id}${fallbackDetail})` : ''}`;
                 return (
-                  <div className="flex-row gap-2">
+                  <div className="set-agent-tier-row">
                     <span className="text-2xs" style={{ color: iconColor, width: 14 }} title={field}>{icon}</span>
                     <SearchableSelect
                       className="searchable-select--compact set-agent-model-select"
@@ -1354,7 +1354,7 @@ export function AgentsSection({
                   {catalog.error && <p className="set-hint" role="alert">{t('modelCatalog.loadError')} <button type="button" className="set-icon-btn" onClick={catalog.refetch}>{t('modelCatalog.reload')}</button></p>}
                   {!catalog.loading && !catalog.error && !target?.models.length && <p className="set-hint">{t('modelCatalog.empty')}</p>}
                   {target?.stale && <p className="set-hint">{t('modelCatalog.stale')}{target.last_error_reason ? ` — ${target.last_error_reason}` : ''}</p>}
-                  <div className="flex-row gap-5">
+                  <div className="set-agent-tier-selects">
                     {agent.agent_type === 'Nvidia' && (
                       <>
                         {/* One shared datalist feeds the three tier inputs. */}

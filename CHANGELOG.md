@@ -792,6 +792,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Settings: in every agent card (agents, Ollama, external APIs) each tier's model picker now spans the card's full width, one tier per line, and its list opens taller. Model names share long provider prefixes such as "OpenCode Zen/…" and were unreadable in the narrow control.
 - Agents no longer receive the machine's GitHub token by default (KT-1006, D2):
   `GH_TOKEN`, `GITHUB_TOKEN` and `COPILOT_GITHUB_TOKEN` reach Claude and Codex
   launches only for a connected project, and are removed from the inherited
