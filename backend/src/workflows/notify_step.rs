@@ -24,8 +24,40 @@ use super::template::TemplateContext;
 /// notification endpoints should answer in seconds, not minutes.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Size of the response snippet recorded in the step output (bytes).
+/// Size of the response snippet recorded in the step output (characters).
 const RESPONSE_EXCERPT_LIMIT: usize = 512;
+/// How much of the body is scrubbed before the excerpt is cut.
+const RESPONSE_SCRUB_WINDOW: usize = 64 * 1024;
+
+/// A webhook's credentials: its header values, its query values and the
+/// path segments after the first (Slack-style tokens live there).
+fn notify_secrets(
+    url: &reqwest::Url,
+    headers: &std::collections::HashMap<String, String>,
+) -> crate::core::secret_scrub::SecretSet {
+    let mut set = crate::core::secret_scrub::SecretSet::new();
+    for (name, value) in headers {
+        if ["content-type", "accept"]
+            .iter()
+            .any(|plain| name.eq_ignore_ascii_case(plain))
+        {
+            continue;
+        }
+        set.add(value);
+        if let Some((_, token)) = value.split_once(' ') {
+            set.add(token);
+        }
+    }
+    for (_, value) in url.query_pairs() {
+        set.add(&value);
+    }
+    for segment in url.path_segments().into_iter().flatten().skip(1) {
+        if segment.len() >= crate::core::secret_scrub::MIN_ANYWHERE_LEN {
+            set.add(segment);
+        }
+    }
+    set
+}
 
 pub async fn execute_notify_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutcome {
     execute_notify_step_with_policy(step, ctx, true).await
@@ -163,10 +195,14 @@ pub async fn execute_notify_step_with_policy(
     };
 
     let status = response.status();
+    // Scrubbed before the cut, so a secret straddling the limit cannot leave
+    // a readable prefix.
+    let secrets = notify_secrets(&parsed_url, &config.headers);
     let excerpt = match response.bytes().await {
         Ok(bytes) => {
-            let take = bytes.len().min(RESPONSE_EXCERPT_LIMIT);
-            String::from_utf8_lossy(&bytes[..take]).to_string()
+            let window = bytes.len().min(RESPONSE_SCRUB_WINDOW);
+            let scrubbed = secrets.scrub(&String::from_utf8_lossy(&bytes[..window]));
+            scrubbed.chars().take(RESPONSE_EXCERPT_LIMIT).collect()
         }
         Err(_) => String::new(),
     };
@@ -734,6 +770,39 @@ mod tests {
             out.result.status,
             RunStatus::Success,
             "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_excerpt_never_echoes_a_configured_secret() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook/T0001/Bsecretpathtoken99"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(
+                    "bad token Wh7HeaderSecret for /hook/T0001/Bsecretpathtoken99",
+                ),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook/T0001/Bsecretpathtoken99", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::from([("X-Token".to_string(), "Wh7HeaderSecret".to_string())]),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert!(
+            !out.result.output.contains("Wh7HeaderSecret"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Bsecretpathtoken99"),
+            "{}",
             out.result.output
         );
     }

@@ -301,12 +301,19 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
-- The API call log no longer stores a credential in `error_message`: it gets
-  the same redaction as the excerpts plus the bare `apikey=…` shape, and every
-  URL in it loses its query string and userinfo. A transport error no longer
-  carries reqwest's full URL (with the merged auth query), and an upstream
-  error body that echoes the rejected key has it masked, in the step output
-  as well. Rows written before the fix are redacted when read (KT-1035).
+- An API call's credentials are scrubbed by value from everything it hands
+  on: the step output (successful JSON included), URL summaries, errors and
+  the call log. Each credential the call resolved (auth slots, env values
+  named as credentials, OAuth and exchanged tokens, the Basic `user:pass`) is
+  masked raw, URL-encoded, base64 and JSON-escaped, before any truncation;
+  a `${ENV.API_KEY}` placed in a harmless query parameter no longer shows in
+  the summary. Secrets under 8 characters are masked as whole tokens only.
+  Notify excerpts drop the webhook's header, query and path credentials, and
+  a token endpoint's error body loses the submitted secret; a successful
+  token response is never quoted (only its field names and content type). The
+  call log and MCP run status apply URL query/userinfo stripping and the
+  secret heuristics to stored text, which is all that can be done for rows
+  written before (KT-1035).
 - A workflow imported from a `.kronn-workflow.json` file now lands disabled,
   as ADR-005 and the Artifact import already required: a shared file's Cron or
   Tracker trigger no longer fires on the next tick. The import preview shows

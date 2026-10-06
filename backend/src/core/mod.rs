@@ -76,6 +76,7 @@ pub mod run_notify;
 pub mod run_retention;
 pub mod safe_http;
 pub mod scanner;
+pub mod secret_scrub;
 pub mod session_budget;
 pub mod skill_migration;
 pub mod skills;

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::core::safe_http::{self, ClientOptions, Redirects, SafeClient, SafeHttpPolicy};
+use crate::core::secret_scrub::SecretSet;
 use tokio::sync::Mutex;
 
 use crate::models::{ApiAuthKind, TokenExchangeBodyFormat};
@@ -52,6 +53,58 @@ const SAFETY_MARGIN: Duration = Duration::from_secs(30);
 /// only for change-detection (cache invalidation on credential rotation), not
 /// security — it stays in memory next to the token it guards. Length-prefixing
 /// avoids collisions like `("a","bc")` vs `("ab","c")`.
+/// What a successful token response looked like, without its values: a 2xx
+/// body may hold the bearer token under a field name nobody declared, which
+/// no value-based scrub can know.
+fn success_shape(content_type: &str, body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(map)) => {
+            let fields: Vec<&str> = map.keys().map(String::as_str).collect();
+            format!(
+                "response fields: [{}] (content type {content_type})",
+                fields.join(", ")
+            )
+        }
+        Ok(_) => format!("response is JSON but not an object (content type {content_type})"),
+        Err(_) => format!(
+            "response is not JSON, {} bytes (content type {content_type})",
+            body.len()
+        ),
+    }
+}
+
+/// An error body quoted in an error, scrubbed of the submitted credentials
+/// (every wire form) before it is cut.
+fn excerpt(secrets: &SecretSet, body: &str, max_chars: usize) -> String {
+    secrets.scrub(body).chars().take(max_chars).collect()
+}
+
+/// The values a token-exchange body template pulls from the env, plus the
+/// declared credential keys.
+fn exchange_secrets(
+    body_template: &serde_json::Value,
+    creds_env_keys: &[String],
+    env: &HashMap<String, String>,
+) -> SecretSet {
+    let mut secrets = SecretSet::new();
+    let template = body_template.to_string();
+    let mut rest = template.as_str();
+    while let Some(start) = rest.find("${ENV.") {
+        let after = &rest[start + 6..];
+        let Some(end) = after.find('}') else { break };
+        if let Some(value) = env.get(&after[..end]) {
+            secrets.add(value);
+        }
+        rest = &after[end..];
+    }
+    for key in creds_env_keys {
+        if let Some(value) = env.get(key) {
+            secrets.add(value);
+        }
+    }
+    secrets
+}
+
 /// The credential body must never follow a redirect to another origin, and
 /// the token endpoint is held to the same address policy as the API call.
 fn token_client(policy: SafeHttpPolicy) -> Result<SafeClient, String> {
@@ -135,6 +188,8 @@ pub async fn resolve_token(
         params.push(("scope", scope.as_str()));
     }
 
+    let mut secrets = SecretSet::new();
+    secrets.add(client_secret);
     let http = token_client(policy)?;
     let token_url =
         reqwest::Url::parse(token_url).map_err(|e| format!("token exchange URL invalid: {e}"))?;
@@ -146,13 +201,19 @@ pub async fn resolve_token(
         .map_err(|e| format!("token exchange HTTP error: {e}"))?;
 
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none")
+        .to_string();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(format!(
             "token exchange failed ({}): {}",
             status,
             // Trim the body so we don't dump kilobytes of Adobe HTML into logs.
-            body.chars().take(300).collect::<String>(),
+            excerpt(&secrets, &body, 300),
         ));
     }
 
@@ -160,9 +221,8 @@ pub async fn resolve_token(
     // drift slightly. `expires_in` is seconds — default 3600 if absent.
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
         format!(
-            "token response JSON parse error: {} — body was: {}",
-            e,
-            body.chars().take(200).collect::<String>()
+            "token response JSON parse error: {e} — {}",
+            success_shape(&content_type, &body),
         )
     })?;
 
@@ -171,8 +231,8 @@ pub async fn resolve_token(
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             format!(
-                "token response missing `access_token` field: {}",
-                body.chars().take(200).collect::<String>()
+                "token response missing `access_token` field — {}",
+                success_shape(&content_type, &body)
             )
         })?
         .to_string();
@@ -288,6 +348,7 @@ pub async fn resolve_token_exchange(
     let trimmed_endpoint = endpoint.trim_start_matches('/');
     let full_url = format!("{trimmed_base}/{trimmed_endpoint}");
 
+    let secrets = exchange_secrets(body_template, creds_env_keys, env);
     let http = token_client(policy)?;
     let full_url =
         reqwest::Url::parse(&full_url).map_err(|e| format!("token exchange URL invalid: {e}"))?;
@@ -311,20 +372,25 @@ pub async fn resolve_token_exchange(
     .map_err(|e| format!("token exchange HTTP error: {e}"))?;
 
     let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none")
+        .to_string();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(format!(
             "token exchange failed ({}): {}",
             status,
-            body.chars().take(300).collect::<String>(),
+            excerpt(&secrets, &body, 300),
         ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
         format!(
-            "token response JSON parse error: {} — body was: {}",
-            e,
-            body.chars().take(200).collect::<String>(),
+            "token response JSON parse error: {e} — {}",
+            success_shape(&content_type, &body),
         )
     })?;
 
@@ -333,8 +399,8 @@ pub async fn resolve_token_exchange(
     // there's nothing to inject downstream.
     let access_token = extract_token_jsonpath(&json, token_jsonpath).map_err(|e| {
         format!(
-            "token extraction failed: {e} — body was: {}",
-            body.chars().take(200).collect::<String>()
+            "token extraction failed: {e} — {}",
+            success_shape(&content_type, &body)
         )
     })?;
 
@@ -1062,5 +1128,89 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("Security"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_token_error_body_never_quotes_the_client_secret() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string("client_secret=Cs9ClientSecretValue rejected"),
+            )
+            .mount(&server)
+            .await;
+        let auth = ApiAuthKind::OAuth2ClientCredentials {
+            token_url: format!("{}/token", server.uri()),
+            client_id_env: "CID".into(),
+            client_secret_env: "CSECRET".into(),
+            scope: String::new(),
+            extra_headers: vec![],
+        };
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "Cs9ClientSecretValue".to_string()),
+        ]);
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let err = resolve_token(&cache, "cfg-err", &auth, &env, TEST_POLICY)
+            .await
+            .unwrap_err();
+        assert!(err.contains("token exchange failed"), "{err}");
+        assert!(!err.contains("Cs9ClientSecretValue"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_successful_token_response_is_never_quoted() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "SECRETVALUE"})),
+            )
+            .mount(&server)
+            .await;
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "client-secret-value".to_string()),
+        ]);
+        let oauth = ApiAuthKind::OAuth2ClientCredentials {
+            token_url: format!("{}/token", server.uri()),
+            client_id_env: "CID".into(),
+            client_secret_env: "CSECRET".into(),
+            scope: String::new(),
+            extra_headers: vec![],
+        };
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let err = resolve_token(&cache, "cfg-shape", &oauth, &env, TEST_POLICY)
+            .await
+            .unwrap_err();
+        assert!(!err.contains("SECRETVALUE"), "{err}");
+        assert!(err.contains("token"), "names the fields: {err}");
+
+        let exchange = ApiAuthKind::TokenExchange {
+            endpoint: "/token".into(),
+            method: "POST".into(),
+            body_template: serde_json::json!({"key": "k"}),
+            body_format: crate::models::TokenExchangeBodyFormat::Json,
+            token_jsonpath: "$.access_token".into(),
+            ttl_seconds: 0,
+            inject: crate::models::TokenInjection::BearerHeader,
+            creds_env_keys: vec![],
+        };
+        let err = resolve_token_exchange(
+            &cache,
+            "cfg-shape-tx",
+            &exchange,
+            &server.uri(),
+            &env,
+            TEST_POLICY,
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.contains("SECRETVALUE"), "{err}");
     }
 }

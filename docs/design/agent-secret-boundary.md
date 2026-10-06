@@ -797,6 +797,16 @@ keys.
 | Page `web_fetch` (`api/agent_workspace_tools.rs`) | public; redirects reported, not followed |
 | GitHub tracker (`workflows/tracker/github.rs`) | public; same-origin only |
 
+What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
+API call collects every credential it resolved (auth slots, env values
+named as credentials, OAuth and exchanged tokens, Basic `user:pass`) and
+masks it raw, URL-encoded, base64 and JSON-escaped in the step output,
+summaries and errors before truncation; secrets under 8 characters are masked
+as whole tokens only. Non-credential config is not scrubbed, because the
+output feeds later steps. A successful token response is never quoted.
+Stored text from before this (call log, MCP run status) gets URL
+query/userinfo stripping and the heuristics of `core/redact.rs` only.
+
 Deliberately left on plain reqwest, because the destination is set by the
 operator in Settings or in code, never by a request or an agent: HTTP agents
 and their probes on a configured connection (`agents/runner.rs`,

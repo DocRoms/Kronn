@@ -152,6 +152,102 @@ pub async fn execute_api_call_step_core(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
+    let secrets = call_secrets(plugin, env);
+    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &secrets).await;
+    // Every byte the step hands on (success JSON, summary, error) loses the
+    // credentials this call resolved, in every wire form.
+    outcome.result.output = secrets.scrub(&outcome.result.output);
+    outcome
+}
+
+/// Every credential value this call can send: the auth slots' env values,
+/// any env value whose name marks it as a credential, the dynamic tokens and
+/// the resolved header/query values (Basic decoded to its password).
+/// Non-credential config (a base URL part, an id) is left alone because the
+/// output feeds later steps.
+pub(crate) fn call_secrets(
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+) -> crate::core::secret_scrub::SecretSet {
+    use super::api_call_security::looks_like_secret_key;
+    let mut set = crate::core::secret_scrub::SecretSet::new();
+    let Some(spec) = plugin.api_spec.as_ref() else {
+        return set;
+    };
+    let mut slot_keys: Vec<&str> = match &spec.auth {
+        ApiAuthKind::ApiKeyQuery { env_key, .. }
+        | ApiAuthKind::ApiKeyHeader { env_key, .. }
+        | ApiAuthKind::Bearer { env_key }
+        | ApiAuthKind::BasicApiKey { env_key } => vec![env_key.as_str()],
+        ApiAuthKind::Basic {
+            user_env,
+            password_env,
+        } => {
+            if let (Some(user), Some(password)) = (env.get(user_env), env.get(password_env)) {
+                set.add_basic(user, password);
+            }
+            vec![password_env.as_str()]
+        }
+        ApiAuthKind::OAuth2ClientCredentials {
+            client_secret_env, ..
+        } => vec![client_secret_env.as_str()],
+        ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
+            creds_env_keys.iter().map(String::as_str).collect()
+        }
+        ApiAuthKind::CliToken {
+            fallback_env_key, ..
+        } => fallback_env_key.iter().map(String::as_str).collect(),
+        ApiAuthKind::None => vec![],
+    };
+    slot_keys.extend(["__access_token__", "__cli_token__"]);
+    for (key, value) in env {
+        // `__token_error__` and friends carry a diagnostic, not a credential.
+        if key.starts_with("__") && key.ends_with("_error__") {
+            continue;
+        }
+        if slot_keys.contains(&key.as_str()) || looks_like_secret_key(key) {
+            set.add(value);
+        }
+    }
+    if let Ok(auth) = resolve_auth(&spec.auth, env) {
+        add_resolved_auth(&mut set, &auth);
+    }
+    set
+}
+
+fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
+    use base64::Engine as _;
+    if let Some(bearer) = &auth.bearer {
+        set.add(bearer);
+    }
+    for value in auth.headers.values().chain(auth.query.values()) {
+        set.add(value);
+        for scheme in ["Bearer ", "Token "] {
+            if let Some(token) = value.strip_prefix(scheme) {
+                set.add(token);
+            }
+        }
+        if let Some(encoded) = value.strip_prefix("Basic ") {
+            set.add(encoded);
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            if let Some((user, password)) = decoded.as_deref().and_then(|d| d.split_once(':')) {
+                set.add_basic(user, password);
+            }
+        }
+    }
+}
+
+async fn execute_core_unscrubbed(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    secrets: &crate::core::secret_scrub::SecretSet,
+) -> StepOutcome {
     let start = Instant::now();
 
     // Validate declared fields.
@@ -324,8 +420,12 @@ pub async fn execute_api_call_step_core(
         Ok(client) => client,
         Err(e) => return fail(step, start, e),
     };
+    let mut call_secrets = secrets.clone();
+    // Default headers rendered into `auth` may hold more credentials.
+    add_resolved_auth(&mut call_secrets, &auth);
     let transport = ApiTransport {
         client,
+        secrets: call_secrets,
         pinned_base: if policy.enforce_host_match {
             Url::parse(&resolved_base_url).ok()
         } else {
@@ -1816,7 +1916,7 @@ async fn send_with_retry(
             Err(SendError::Blocked(reason)) => return Err(format!("Security: {reason}")),
             Err(error @ SendError::Transport(_)) => {
                 // SendError's Display never carries the URL.
-                let detail = scrub_auth_values(&error.to_string(), auth);
+                let detail = transport.secrets.scrub(&error.to_string());
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
                     return Err(format!(
@@ -1858,7 +1958,9 @@ async fn send_with_retry(
         let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         if !retryable || attempt >= max_retries {
             // An upstream error body may echo the credential it rejected.
-            let excerpt = scrub_auth_values(&response.text().await.unwrap_or_default(), auth);
+            let excerpt = transport
+                .secrets
+                .scrub(&response.text().await.unwrap_or_default());
             let redacted_url = redact_url_query(url);
             return Err(format!(
                 "HTTP {} on {} {} — {}",
@@ -1873,33 +1975,12 @@ async fn send_with_retry(
     }
 }
 
-/// Replaces every resolved auth value found in `text` with `***`.
-fn scrub_auth_values(text: &str, auth: &ResolvedAuth) -> String {
-    let mut out = text.to_string();
-    let values = auth
-        .bearer
-        .iter()
-        .chain(auth.headers.values())
-        .chain(auth.query.values());
-    for value in values {
-        // Very short values would mask ordinary words, not secrets.
-        if value.chars().count() >= 4 {
-            out = out.replace(value.as_str(), "***");
-        }
-        // A Basic header holds `Basic <b64>`; its encoded part may be echoed alone.
-        if let Some(encoded) = value.strip_prefix("Basic ") {
-            if encoded.len() >= 4 {
-                out = out.replace(encoded, "***");
-            }
-        }
-    }
-    out
-}
-
 /// Every request a step makes (each page, retry and hop) goes through one
 /// guarded client and, when the host is enforced, the plugin's base.
 struct ApiTransport {
     client: SafeClient,
+    /// Applied to error text before it is truncated.
+    secrets: crate::core::secret_scrub::SecretSet,
     pinned_base: Option<Url>,
 }
 
@@ -4919,6 +5000,183 @@ mod tests {
         let stored = logged_error(&state, &step, &outcome).await;
         assert!(stored.contains("HTTP 401"), "{stored}");
         assert!(!stored.contains(QUERY_KEY), "{stored}");
+    }
+
+    // ─── Value-based scrubbing (KT-1035 round 2) ───────────────────
+
+    #[tokio::test]
+    async fn a_successful_json_echoing_the_key_is_scrubbed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "echo": "Hk4SecretHeaderValue",
+                "auth": "X-Api-Key: Hk4SecretHeaderValue"
+            })))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Api-Key".into(),
+                env_key: "TOKEN_VALUE".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "TOKEN_VALUE".to_string(),
+            "Hk4SecretHeaderValue".to_string(),
+        )]);
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Hk4SecretHeaderValue"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn an_env_key_in_a_harmless_query_param_is_scrubbed_from_the_summary() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2])))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let mut step = mk_step("/items");
+        step.api_query = Some(HashMap::from([("q".to_string(), "${ENV.KEY}".to_string())]));
+        let env = HashMap::from([("KEY".to_string(), "Zq9QuerySecretValue".to_string())]);
+        let out = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Zq9QuerySecretValue"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn url_encoded_and_base64_forms_of_a_basic_credential_are_scrubbed() {
+        use base64::Engine as _;
+        let password = "p@ss/w0rd+Value=";
+        let header = base64::engine::general_purpose::STANDARD.encode(format!("bob:{password}"));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "seen_header": format!("Basic {header}"),
+                "seen_form": "p%40ss%2Fw0rd%2BValue%3D",
+                "seen_raw": password
+            })))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::Basic {
+                user_env: "USER".into(),
+                password_env: "PASS".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("USER".to_string(), "bob".to_string()),
+            ("PASS".to_string(), password.to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        for leaked in [header.as_str(), "p%40ss%2Fw0rd%2BValue%3D", "w0rd"] {
+            assert!(
+                !out.result.output.contains(leaked),
+                "{leaked}: {}",
+                out.result.output
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_misnamed_token_field_never_reaches_the_run_or_the_log() {
+        let server = MockServer::start().await;
+        Mock::given(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "SECRETVALUE"})))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: format!("{}/token", server.uri()),
+                client_id_env: "CID".into(),
+                client_secret_env: "CSECRET".into(),
+                scope: String::new(),
+                extra_headers: vec![],
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "client-secret-value".to_string()),
+        ]);
+        let state = test_app_state();
+        let step = mk_step("/items");
+        let outcome = execute_api_call_probe(
+            &step,
+            &plugin,
+            "cfg-misnamed",
+            &env,
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            !outcome.result.output.contains("SECRETVALUE"),
+            "{}",
+            outcome.result.output
+        );
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(!stored.contains("SECRETVALUE"), "{stored}");
     }
 
     #[tokio::test]

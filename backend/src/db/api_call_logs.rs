@@ -133,39 +133,11 @@ pub fn truncate_excerpt(s: Option<&str>) -> Option<String> {
 /// module so `learning_candidates` (0.10.0) can reuse it.
 pub use crate::core::redact::redact_secrets;
 
-/// Vendor/keyword patterns plus bare `apikey=…` assignments: the shape an
-/// auth query param takes once it lands in an error string.
+/// Text stored or served from the log: URL query strings and userinfo
+/// dropped, then the name and vendor heuristics. Value-based scrubbing
+/// happened at the source; rows older than it only get this.
 fn redact_stored(text: &str) -> String {
-    crate::core::redact::redact_for_audit_artifact(text).0
-}
-
-static URL_IN_TEXT: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-    regex_lite::Regex::new(r#"(?i)\bhttps?://[^\s"'<>`]+"#).expect("static URL regex")
-});
-
-/// Drops the query string and userinfo of every URL in `text`: an error
-/// message only needs the endpoint, and both parts may carry credentials.
-fn strip_url_secrets(text: &str) -> String {
-    URL_IN_TEXT
-        .replace_all(text, |caps: &regex_lite::Captures<'_>| {
-            let raw = &caps[0];
-            match reqwest::Url::parse(raw) {
-                Ok(mut url) => {
-                    url.set_query(None);
-                    let _ = url.set_username("");
-                    let _ = url.set_password(None);
-                    url.to_string()
-                }
-                // Unparseable: keep only what precedes a query or userinfo.
-                Err(_) => raw.split(['?', '@']).next().unwrap_or("").to_string(),
-            }
-        })
-        .into_owned()
-}
-
-/// What `error_message` may hold, at write and (for older rows) at read.
-fn redact_error_message(text: &str) -> String {
-    redact_stored(&strip_url_secrets(text))
+    crate::core::redact::redact_stored_text(text)
 }
 
 /// Insert one row. Never panics — on DB errors we log and swallow so an
@@ -180,7 +152,7 @@ pub fn record(conn: &Connection, log: NewApiCallLog<'_>) -> rusqlite::Result<Str
         .and_then(|s| truncate_excerpt(Some(&redact_stored(s))));
     let error_message = log
         .error_message
-        .and_then(|s| truncate_excerpt(Some(&redact_error_message(s))));
+        .and_then(|s| truncate_excerpt(Some(&redact_stored(s))));
     conn.execute(
         "INSERT INTO api_call_logs (
             id, source, project_id, run_id, disc_id, agent,
@@ -270,9 +242,7 @@ pub fn list(conn: &Connection, filter: ListFilter<'_>) -> rusqlite::Result<Vec<A
                 duration_ms: row.get(12)?,
                 request_excerpt: row.get::<_, Option<String>>(13)?.map(|s| redact_stored(&s)),
                 response_excerpt: row.get::<_, Option<String>>(14)?.map(|s| redact_stored(&s)),
-                error_message: row
-                    .get::<_, Option<String>>(15)?
-                    .map(|s| redact_error_message(&s)),
+                error_message: row.get::<_, Option<String>>(15)?.map(|s| redact_stored(&s)),
                 called_at: row.get(16)?,
             })
         })?
@@ -382,9 +352,7 @@ pub fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiCallLog>> 
                 duration_ms: row.get(12)?,
                 request_excerpt: row.get::<_, Option<String>>(13)?.map(|s| redact_stored(&s)),
                 response_excerpt: row.get::<_, Option<String>>(14)?.map(|s| redact_stored(&s)),
-                error_message: row
-                    .get::<_, Option<String>>(15)?
-                    .map(|s| redact_error_message(&s)),
+                error_message: row.get::<_, Option<String>>(15)?.map(|s| redact_stored(&s)),
                 called_at: row.get(16)?,
             })
         },
@@ -644,7 +612,7 @@ mod tests {
         conn.execute(
             "UPDATE api_call_logs SET error_message = ?1, response_excerpt = ?1 WHERE id = ?2",
             params![
-                "HTTP 401 on GET https://api.example.com/x?apikey=Qk7SecretValue9 — token=rawTokenValue42",
+                "HTTP 401 on GET https://u:pw0rdValue@api.example.com/x?credential=Qk7SecretValue9 — token=rawTokenValue42",
                 id
             ],
         )
@@ -659,6 +627,7 @@ mod tests {
                 let text = field.unwrap();
                 assert!(!text.contains("Qk7SecretValue9"), "{text}");
                 assert!(!text.contains("rawTokenValue42"), "{text}");
+                assert!(!text.contains("pw0rdValue"), "{text}");
             }
         }
     }
