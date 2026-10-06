@@ -10,6 +10,7 @@ import { withoutForeignRepositorySkills } from '../lib/discussionSkills';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { ExternalApiConnectionView } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
+import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
 import { useModelCatalogSnapshot } from '../hooks/useModelCatalogSnapshot';
@@ -239,8 +240,13 @@ export function NewDiscussionForm({
     : (newDiscAgent ? [newDiscAgent] : []);
   const promptModeReady = agentLaunchMode !== 'prompt'
     || (promptLaunchTargets.length > 0 && unavailablePromptTargets.length === 0);
+  // A native agent without its full-access setting cannot run: say so here,
+  // before launch, rather than refuse at run time.
+  const fullAccessRequiredAgents = effectiveLaunchAgents.filter(agent =>
+    requiresFullAccessToRun(agentAccess, agent));
   const launchReady = Boolean(newDiscPrompt.trim())
-    && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent));
+    && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent))
+    && fullAccessRequiredAgents.length === 0;
   const hasConfiguredMediaSlot = useMemo(
     () => externalConnections.some(connection =>
       Boolean(connection.image_model?.trim() || connection.video_model?.trim())),
@@ -248,7 +254,8 @@ export function NewDiscussionForm({
   );
 
   const isAgentRestricted = (agentType: AgentType): boolean =>
-    isAgentRestrictedUtil(agentAccess ?? undefined, agentType);
+    isAgentRestrictedUtil(agentAccess ?? undefined, agentType)
+    && !requiresFullAccessToRun(agentAccess, agentType);
 
   // ─── Effects ─────────────────────────────────────────────────────────────
 
@@ -1198,6 +1205,25 @@ export function NewDiscussionForm({
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {launchAgentNow && fullAccessRequiredAgents.length > 0 && (
+          <div className="disc-restricted-warn" role="alert" data-testid="full-access-required">
+            <AlertTriangle size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
+            <span className="disc-restricted-warn-text">
+              {t(
+                'config.fullAccessRequired',
+                fullAccessRequiredAgents.map(agent => AGENT_LABELS[agent] ?? agent).join(', '),
+              )}
+              {' — '}
+              <button
+                type="button"
+                className="disc-inline-link"
+                style={{ cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, color: 'inherit', font: 'inherit' }}
+                onClick={() => { onClose(); onNavigate('settings'); }}
+              >{t('config.fullAccessRequiredLink')}</button>
+            </span>
           </div>
         )}
 

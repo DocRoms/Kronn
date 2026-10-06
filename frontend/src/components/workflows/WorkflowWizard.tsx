@@ -15,6 +15,7 @@ import { ModelCatalogPicker } from '../ModelCatalogPicker';
 import { MarkdownEditor } from '../MarkdownComposerTools';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
+import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, ALL_AGENT_TYPES, agentTextColor, isAgentRestricted } from '../../lib/constants';
 import type {
   Project, Workflow, WorkflowTrigger,
@@ -2168,10 +2169,12 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     {renderAgentTierPicker(step, patch => updateStep(i, patch))}
                   </div>
                 )}
-                {step.step_type?.type !== 'BatchQuickPrompt' && checkAgentRestricted(agentAccess, step.agent) && (
+                {step.step_type?.type !== 'BatchQuickPrompt' && (checkAgentRestricted(agentAccess, step.agent) || requiresFullAccessToRun(agentAccess, step.agent)) && (
                   <div className="wf-restricted-warning">
                     <AlertTriangle size={12} />
-                    <span>{t('config.restrictedStep')}</span>
+                    <span>{requiresFullAccessToRun(agentAccess, step.agent)
+                      ? t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)
+                      : t('config.restrictedStep')}</span>
                     <span className="cursor-pointer" style={{ textDecoration: 'underline', marginLeft: 4 }}
                       onClick={() => window.location.hash = '#config'}
                     >{t('config.restrictedAgentLink')}</span>

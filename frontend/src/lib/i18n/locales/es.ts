@@ -3076,6 +3076,8 @@ const es: TranslationDict = {
   'config.fullAccessAcp': 'Amplía la auto-aprobación de permisos ACP en vivo: el agente deja de preguntar antes de modificar archivos o ejecutar comandos (sin flag de CLI).',
   'config.autoApply': 'Aplica automáticamente los cambios sin confirmación.',
   'config.restrictedAgent': 'El agente {0} no tiene el modo "full access" activado — no podrá modificar archivos.',
+  'config.fullAccessRequired': '{0} solo funciona con acceso completo. Actívalo en Config › Agentes › {0} › Acceso completo, o elige otro agente.',
+  'config.fullAccessRequiredLink': 'Abrir Config › Agentes',
   'config.restrictedAgentLink': 'Activar en Config > Agents',
   'config.restrictedDebate': 'Algunos agentes no tienen el modo "full access" — no podrán modificar archivos.',
   'config.restrictedStep': 'Este agente no tiene el modo "full access" — no podrá modificar archivos.',

@@ -1,3 +1,4 @@
+import { FULL_ACCESS_REQUIRED_AGENTS } from '../lib/agentFullAccess';
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
 import type {
@@ -2034,7 +2035,12 @@ export function ChatInput({
                     <div className="disc-restricted-warn" style={{ marginTop: 8, marginBottom: 0 }}>
                       <AlertTriangle size={10} className="text-warning flex-shrink-0" />
                       <span className="disc-restricted-warn-text">
-                        {t('config.restrictedDebate')}
+                        {debateAgents.some(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
+                          ? t('config.fullAccessRequired', debateAgents
+                            .filter(a => isAgentRestricted(a) && FULL_ACCESS_REQUIRED_AGENTS.includes(a))
+                            .map(a => AGENT_LABELS[a] ?? a)
+                            .join(', '))
+                          : t('config.restrictedDebate')}
                       </span>
                     </div>
                   )}

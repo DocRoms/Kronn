@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { NewDiscussionForm } from '../NewDiscussionForm';
-import type { Project, AgentDetection } from '../../types/generated';
+import type { Project, AgentDetection, AgentsConfig } from '../../types/generated';
 import { loadDraft, NEW_DISCUSSION_DRAFT_ID } from '../../lib/chat-drafts';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
@@ -1435,5 +1435,41 @@ describe('NewDiscussionForm — skill picker', () => {
       projectId: 'proj-local',
       skillIds: ['rust'],
     })));
+  });
+});
+
+describe('NewDiscussionForm — native agents need full access', () => {
+  const renderWith = (fullAccess: boolean, onNavigate = vi.fn()) => render(
+    <NewDiscussionForm
+      projects={[]}
+      agents={[OPENCODE_AGENT]}
+      configLanguage="fr"
+      agentAccess={{ open_code: { full_access: fullAccess } } as unknown as AgentsConfig}
+      onSubmit={vi.fn()}
+      onClose={vi.fn()}
+      onNavigate={onNavigate}
+      t={(key: string) => key}
+    />,
+  );
+
+  it('says OpenCode requires full access, blocks the launch and links to the setting', () => {
+    const onNavigate = vi.fn();
+    renderWith(false, onNavigate);
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Lance OpenCode.' },
+    });
+    expect(screen.getByTestId('full-access-required')).toHaveTextContent('config.fullAccessRequired');
+    expect(document.querySelector('.disc-create-btn')).toBeDisabled();
+    fireEvent.click(screen.getByText('config.fullAccessRequiredLink'));
+    expect(onNavigate).toHaveBeenCalledWith('settings');
+  });
+
+  it('launches OpenCode once its full access is on', () => {
+    renderWith(true);
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Lance OpenCode.' },
+    });
+    expect(screen.queryByTestId('full-access-required')).toBeNull();
+    expect(document.querySelector('.disc-create-btn')).not.toBeDisabled();
   });
 });

@@ -3044,6 +3044,8 @@ const zh: TranslationDict = {
   "config.fullAccessAcp": "扩大实时 ACP 权限自动批准范围：智能体在修改文件或执行命令前不再询问（不涉及 CLI 标志）。",
   "config.autoApply": "自动应用更改，无需确认。",
   "config.restrictedAgent": "智能体 {0} 未启用“完全访问”模式——它将无法修改文件。",
+  "config.fullAccessRequired": "{0} 只能在完全访问模式下运行。请在 配置 › 智能体 › {0} › 完全访问 中启用，或选择其他智能体。",
+  "config.fullAccessRequiredLink": "打开 配置 › 智能体",
   "config.restrictedAgentLink": "在配置 > 智能体中启用",
   "config.restrictedDebate": "部分智能体未启用“完全访问”模式——它们将无法修改文件。",
   "config.restrictedStep": "此智能体未启用“完全访问”模式——它将无法修改文件。",
