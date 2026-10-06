@@ -188,10 +188,42 @@ impl KeyVault for SidecarFile {
         std::fs::create_dir_all(dir).context("create data dir for sidecar")?;
         // Temp in the SAME dir so the rename stays on one filesystem (atomic).
         let tmp = dir.join(format!(".{}.tmp", SIDECAR_FILENAME));
-        write_private_temp(&tmp, secret.as_bytes()).context("write sidecar temp")?;
-        std::fs::rename(&tmp, &self.path).context("atomic rename sidecar into place")?;
+        write_private_atomic(&tmp, &self.path, secret.as_bytes())
+            .context("write sidecar temp and move it into place")?;
         Ok(())
     }
+}
+
+/// Write `bytes` to `path` atomically and durably: owner-only temp (fsynced),
+/// rename, then fsync of the directory so the rename itself survives a power
+/// loss. Every key or credential file goes through here.
+pub(crate) fn write_private_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_private_temp(tmp, bytes)?;
+    if let Err(e) = std::fs::rename(tmp, path) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(e);
+    }
+    if let Some(dir) = path.parent() {
+        sync_dir(dir);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Best-effort fsync of a directory (Unix), counted in tests.
+pub(crate) fn sync_dir(dir: &Path) {
+    #[cfg(test)]
+    DIR_SYNCS.with(|c| c.set(c.get() + 1));
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Create `tmp` owner-only from the first byte and write `bytes` to it.

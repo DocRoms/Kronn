@@ -22,6 +22,7 @@ pub async fn execute_publish_page_data_step(
     step: &WorkflowStep,
     workflow_id: &str,
     run_id: &str,
+    run_project: Option<&str>,
     state: &AppState,
     context: &TemplateContext,
 ) -> StepOutcome {
@@ -39,10 +40,25 @@ pub async fn execute_publish_page_data_step(
         None => return fail(step, started, "PublishPageData step missing `page_publish`"),
     };
 
+    let literal = step
+        .page_publish
+        .as_ref()
+        .is_some_and(|config| super::run_scope::is_literal(&config.page_id));
+    let run_project = run_project.map(str::to_owned);
     let db = state.db.clone();
     let page_for_db = page_id.clone();
     let result = match db
         .with_conn(move |conn| {
+            let projects = super::run_scope::page_projects(conn, &page_for_db)?;
+            if projects.iter().any(|project| {
+                !super::run_scope::target_allowed(
+                    project.as_deref(),
+                    run_project.as_deref(),
+                    literal,
+                )
+            }) {
+                anyhow::bail!("Page '{page_for_db}' is outside this run's project");
+            }
             crate::db::live_pages::publish_live_page(conn, &page_for_db, &request)
         })
         .await
@@ -374,6 +390,124 @@ mod tests {
         assert_eq!(
             request.writes[0].value,
             serde_json::json!({"requests": 1240, "errors": 5.0})
+        );
+    }
+
+    /// B4-01 — a rendered page id or slug outside the run's project is
+    /// refused before anything is written.
+    #[tokio::test]
+    async fn a_rendered_page_outside_the_run_s_project_is_refused() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let now = "2026-01-01T00:00:00Z";
+            for (id, project) in [("p", "p"), ("q", "q")] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO live_pages(id, project_id, title, slug, created_at, updated_at) \
+                     VALUES (?1, ?2, ?1, ?3, ?4, ?4)",
+                    rusqlite::params![format!("page-{id}"), project, format!("slug-{id}"), now],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at) \
+                 VALUES ('wf', 'wf', '{}', '[]', ?1, ?1)",
+                [now],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, status, started_at) \
+                 VALUES ('run', 'wf', 'Running', ?1)",
+                [now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(db),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut publish = step("steps.shape.data");
+        publish.page_publish.as_mut().unwrap().page_id = "{{page}}".into();
+        let mut context = TemplateContext::new();
+        context.set_step_output(
+            "shape",
+            &super::super::step_output_format::format_step_output_simple(
+                serde_json::json!({"value": 1}),
+                "OK",
+                "shaped",
+            ),
+        );
+        for page in ["page-q", "slug-q"] {
+            context.set("page", page);
+            let outcome =
+                execute_publish_page_data_step(&publish, "wf", "run", Some("p"), &state, &context)
+                    .await;
+            assert_eq!(outcome.result.status, RunStatus::Failed, "{page}");
+            assert!(
+                outcome.result.output.contains("outside this run's project"),
+                "{page}: {}",
+                outcome.result.output
+            );
+        }
+        let revision: i64 = state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT data_revision FROM live_pages WHERE id = 'page-q'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(revision, 0, "q's page is untouched");
+        // A literal page id is the workflow author's choice, whatever its
+        // project: it still publishes.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::live_pages::add_live_page_dataset(
+                    conn,
+                    "page-q",
+                    &crate::models::CreateLivePageDataset {
+                        name: "latency".into(),
+                        kind: crate::models::LivePageDatasetKind::TimeSeries,
+                        initial: None,
+                        schema: None,
+                        max_points: None,
+                        max_age_days: None,
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut literal = publish.clone();
+        literal.page_publish.as_mut().unwrap().page_id = "page-q".into();
+        let published =
+            execute_publish_page_data_step(&literal, "wf", "run", Some("p"), &state, &context)
+                .await;
+        assert_eq!(
+            published.result.status,
+            RunStatus::Success,
+            "{}",
+            published.result.output
+        );
+        context.set("page", "page-p");
+        let own =
+            execute_publish_page_data_step(&publish, "wf", "run", Some("p"), &state, &context)
+                .await;
+        assert!(
+            !own.result.output.contains("outside this run's project"),
+            "{}",
+            own.result.output
         );
     }
 }

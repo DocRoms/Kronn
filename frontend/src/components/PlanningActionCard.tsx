@@ -88,6 +88,11 @@ export function PlanningActionCard({
       <div className="planning-proposal-main">
         <span>{t('planning.agentProposal')}</span>
         <strong>{title}</strong>
+        {durable?.project_name && (
+          <small className="planning-proposal-project">
+            {t('planning.proposalProject', durable.project_name)}
+          </small>
+        )}
         {proposal.action === 'open' ? (
           <button type="button" className="planning-proposal-open" onClick={open}>
             {t('planning.proposalOpen')}

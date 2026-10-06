@@ -751,6 +751,9 @@ pub struct SetupStatus {
     pub default_scan_path: Option<String>,
     /// Paths actually scanned, exposed to diagnose empty results and missing mounts.
     pub scan_paths_explored: Vec<String>,
+    /// config.toml could not be read at this start and was kept aside: the
+    /// notice the wizard shows (where it is, key and data intact).
+    pub config_set_aside: Option<String>,
 }
 
 /// Named server-visible root offered by the setup folder browser.

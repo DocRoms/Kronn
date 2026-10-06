@@ -1534,8 +1534,8 @@ mod tests {
                 "{{issue.title}}",
             ],
             vec![
-                "-ec",
-                "printf -- '---STATE:title=%s---' \"$1\"",
+                "-c",
+                "set -e\nprintf -- '---STATE:title=%s---' \"$1\"",
                 "_",
                 "{{issue.title}}",
             ],

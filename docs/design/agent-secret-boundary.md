@@ -239,8 +239,10 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    `config.toml` is the one `config::retain_disk_key` keeps until the key
    decrypts every non-empty column and two independent copies remain without
    it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
-   whose fingerprint matches); a different legacy key is kept. `mirror()`
-   never writes a vault holding another key; two keys that each decrypt data
+   whose fingerprint matches); a different legacy value is moved to
+   `config.toml.retired-key.<ts>` and the key in use gets the file copy.
+   Config backups and retired-key files are read-only candidates of every
+   decision. `mirror()` never writes a vault holding another key; two keys that each decrypt data
    stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
    Keys compare in one canonical spelling; the env variable is not counted as
    a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no
@@ -460,24 +462,28 @@ argument or a variable named after it, and that push runs with hooks off
 repository's could receive it) and TLS verification forced. Other remotes,
 or a project not connected, push with the user's own credentials.
 
-Declared exceptions inherit the environment instead of a route's, through
-`cmd::full_env_cmd` / `full_env_sync_cmd(program, FullEnvReason)`; the test
-`full_env_cmd_sites_are_exactly_the_declared_exceptions` lists every call site
-in both crates. None receives a secret: the forbidden names, provider keys,
-GitHub variables and every secret-looking name are removed
-(`child_env::strip_inherited_secrets`), and they start in the temporary
-directory, never in a repository. They are the document sidecar
-(`core/docs_sidecar.rs::start`), model discovery
-(`model_catalog/claude_discovery.rs::discover`,
-`model_catalog/codex_discovery.rs::discover`) and version discovery
-(`core/versions.rs::probe_installed_version`, `agents/mod.rs::get_version_from`,
-and the `npx --yes <pkg> --version` runtime probe `agents/mod.rs::probe_runtime`):
-each starts a binary Kronn found. A CLI authenticated only by a provider key
-exported to Kronn therefore reports no models; its configured key reaches it
-on a real launch. The one exception that keeps its provider keys is the
-desktop relaunching itself (`desktop/src-tauri/src/main.rs::self_restart_command`,
-`SelfRestart`): it is Kronn, keeps its own working directory, loses only the
-forbidden names, and gets the operator's key override handed back.
+Probes are built from an allow-list too. Version and model discovery and the
+`npx --yes <pkg> --version` runtime probe use `cmd::discovery_cmd(program,
+family)`: the agent family's route (so a CLI still reads its own login: home,
+XDG and its config directories such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`)
+minus every credential it would inherit (provider keys, GitHub variables,
+secret-looking names), started in the temporary directory. A CLI
+authenticated only by a provider key exported to Kronn therefore reports no
+models; its configured key reaches it on a real launch. The document sidecar
+uses the Tool route plus the operator's own `KRONN_DOCS_*` and `PYTHON*`
+settings. A credential under a name no list knows (`MYSQL_PWD`,
+`DATABASE_URL` with userinfo, `*_PASSPHRASE`, `SENTRY_DSN`) reaches none of
+them.
+
+One declared exception remains, and only on the desktop: the app relaunching
+itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through
+`cmd::full_env_sync_cmd(program, FullEnvReason::SelfRestart)`). It is Kronn
+itself: it keeps its environment and working directory, loses the forbidden
+names, and gets the operator's key override handed back. The test
+`full_env_cmd_sites_are_exactly_the_declared_exceptions` checks it is the only
+call site in either crate, and `both_clippy_files_ban_the_same_spawn_entry_points`
+that every Tauri restart entry point (`AppHandle::restart`,
+`AppHandle::request_restart`, `tauri::process::restart`) is banned.
 
 The MCP probe is no longer an exception: a server's command may come from a
 repository's `.mcp.json`, so the probe starts it with a built environment (base
@@ -499,11 +505,12 @@ in memory, including a launch that owns no discussion, execution or run (that
 token reads the global catalogues and nothing else); a launch whose token cannot
 be minted does not start. The token is bound to the launch's discussions, task
 execution and workflow run, else to its declared project, and its project is
-frozen on first use: the scope's resources must all sit in one project, and a
-later change (a discussion moved, the first one deleted) kills the token. It dies
+frozen on first use. On every call, every discussion it owns (its launch's and
+the ones it created through `disc/create` or `media/generate`), its execution
+and its run are re-read: all must still exist and sit in the frozen project.
+One of them deleted, or moved to another project, kills the token. It also dies
 when the launch's process handle is dropped, when the launch is cancelled, after
-12 hours whatever happens, when its discussion or run is deleted (re-read on
-every call), and on restart. The operator token is compared in constant time on
+12 hours whatever happens, and on restart. The operator token is compared in constant time on
 the HTTP and WebSocket paths. The bridge reads `KRONN_BRIDGE_TOKEN` first and
 falls back to `KRONN_AUTH_TOKEN` for host sessions.
 
@@ -518,7 +525,18 @@ carries in `content`. *Default deny on id fields*: a key that looks like an id
 reviewed `PLAIN_ID_KEYS` (a caller's own session, idempotency keys, model and
 library ids, git refs), the own `id` of a step, option or DoD item, or inside a
 caller's own data (`OPAQUE_KEYS`: an external API body, a dataset, a schema);
-the query follows the same rule. In an import, only the resources the bundle
+the keys of a caller's own maps (`USER_KEYED_KEYS`: template variables, an
+external API's path, query and headers, per-step choices) are names, and only
+their values are walked; the query follows the same rule. A value that reaches
+Kronn through a template is checked where it is rendered: a PublishPageData
+page or an Agent step's room named through a template must, once rendered,
+belong to the run's project (or be project-less for a project-less run), on
+every run whoever triggered it. A literal page or room id is the workflow
+author's choice and is used whatever its project. On a token's workflow save,
+update or import, a step's `page_publish.page_id` and `room_id` are what the
+workflow will write into: each must belong to the token's project and to no
+other, so a token never saves a literal shared or foreign page or room. A
+page slug never looks like an id, and a page is resolved by id before slug. In an import, only the resources the bundle
 lists are internal, per kind (`workflow.id` and `referenced_workflows` for
 workflows, `referenced_quick_prompts`, `_quick_apis`, `_quick_execs`,
 `_pages`); a room, config or connection is never internal. A non-JSON body is
@@ -532,8 +550,13 @@ project) and an id that resolves to nothing is refused. A refusal names the
 kind, never the other project's id. Then:
 - *shared resources* (project-less, serving every project, or several projects)
   may be read, never written; a write needs a resource that belongs to the
-  token's project and to no other; a project-less discussion is private to its
-  own launches;
+  token's project and to no other; a project-less discussion or workflow run is
+  private to its own launch (a run's project is its own, never its workflow's
+  current home); run lists, their state filter and pages, and a workflow's
+  `last_run` only consider runs of the token's project or its own run, in SQL
+  before any limit; an
+  MCP config linked to projects and opted into General serves those projects
+  and project-less tokens, as the plugin overview shows;
 - *effects* need the token's project, or a shared resource on a route whose
   handler runs it for that project (workflow, Quick Prompt and batch triggers
   get the project added; Quick API, Quick Exec and `agent-api/call` read the
@@ -549,7 +572,9 @@ kind, never the other project's id. Then:
   peer-leave, the workspace and its history lease, link, unlink,
   transfer-session, accept-offer, find_by_session, session-status) resolves the
   room its credential or session names first and refuses one outside the
-  token's scope; a write whose session resolves to no room is refused, and a
+  token's scope (peer-join also checks every room where the named session is
+  active, since joining ends it there); a write whose session resolves to no
+  room is refused, and a
   token never forces a session reassignment. Any other route naming a joined
   session needs that session's room visible. A test lists every request type
   carrying a caller-supplied session; a new one fails until reviewed. An
@@ -558,7 +583,13 @@ kind, never the other project's id. Then:
   ones it does not bundle like a create does, and a run refuses one of another
   project; a token's learning proposal is forced into its project and never a
   preference; its media generation without a discussion creates one in its
-  project, which the token then owns.
+  project, which the token then owns;
+- *planning*: a token's planning write is recorded as an agent's, whatever
+  actor it names; a `kronn-plan-action` fence posted in a room may only touch
+  tasks of the room's project and of no other (an item naming another
+  project's task, or a task shared with one, is refused on arrival and again
+  at apply), a created task lands in the room's project, and the card
+  names that project.
 
 *Responses.* Every response is scoped, whatever the verb and its shape (an
 `ApiResponse` through its `data`, any other JSON body as a whole): an object
@@ -566,7 +597,9 @@ naming any resource outside the scope, at any depth, is dropped from its list
 (only the count paired with that list follows) or refused when it is the
 response itself; an object naming an id that resolves to nothing is hidden. A
 workflow export is all or nothing: one bundled dependency outside the scope
-refuses it. The discussion list, the task
+refuses it. The plugin overview shows a token only the configs its project
+may use, that project's customised contexts, and no server detected in
+another project; a page's feeding workflows are scoped like a workflow list. The discussion list, the task
 list and the discussion search filter in the query, so pages stay full.
 
 The WebSocket bus refuses a bridge token (403) and any credential other than the
@@ -576,9 +609,8 @@ Authorization form is refused, and the routes answered before the gate for
 remote peers (claim-by-token, fetch-file) refuse a bridge token. Any bearer
 that matches neither the operator token nor a live bridge token is refused
 outright, never downgraded to loopback trust. Not covered by an agent's
-environment any more but still inheriting the backend's: the declared exceptions
-of the spawn inventory above (CLI version and model discovery, the document
-sidecar), with every secret removed.
+environment any more but still inheriting the desktop's own: the self-restart,
+the one declared exception of the spawn inventory above.
 
 **Deferred to 0.15 — the residual path, stated plainly.** Loopback requests
 *without* a token keep today's trust. An agent on the same machine can drop its

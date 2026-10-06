@@ -26,7 +26,7 @@ as a verified copy.
 Every encrypted column is listed in one registry, `keystore::ENCRYPTED_COLUMNS`;
 a test compares it with the schema, so a new `*_encrypted` / cipher column
 cannot be added without the reconciler seeing it.
-[src: file: backend/src/core/keystore.rs:42-59]
+[src: file: backend/src/core/keystore.rs:44-61]
 
 The running process still reads `config.tokens.keys` and
 `config.server.auth_token`: the boot fills them from the table, and every
@@ -34,7 +34,7 @@ The running process still reads `config.tokens.keys` and
 writes `config.toml` without them. A failure there fails the save and leaves
 the previous file untouched.
 [src: file: backend/src/core/credential_store.rs:332-387]
-[src: file: backend/src/core/config.rs:200-224]
+[src: file: backend/src/core/config.rs:213-237]
 
 ## Boot order
 
@@ -45,7 +45,10 @@ the previous file untouched.
    ignored as candidates. A `config.toml` that cannot be parsed is moved to
    `config.toml.corrupt.<timestamp>` (`0600`, kept: it may hold the key), a
    top-level `encryption_secret` line is salvaged, and the start continues
-   as a first run.
+   as a first run. The same applies to valid TOML that is not a Kronn
+   configuration (a field of another type, a value from a newer Kronn); the
+   log names the cause, and the setup wizard (`config_set_aside` in
+   `GET /api/setup/status`) and `recovery/status` say where the file went.
 2. The database opens, then the reconciler picks the key by decrypt
    self-test across every registered column:
    - a vault that cannot be read (denied keychain prompt, locked keychain,
@@ -59,8 +62,11 @@ the previous file untouched.
      damaged keychain item (bad encoding, duplicates) is reported as such,
      naming `com.kronn.kronn` / `encryption_secret_v1` and when it may be
      deleted in Keychain Access;
-   - before locking, the `encryption_secret` of `config.toml.backup` and its
-     rotated copies are tried as read-only candidates;
+   - the `encryption_secret` of `config.toml.backup`, its rotated copies and
+     every `config.toml.retired-key.<timestamp>` are lowest-priority,
+     read-only candidates of every decision (sources `config-backup`,
+     `retired-key`): rows under such a key are found, never silently left
+     unreadable, and lead to the several-keys stop below;
    - a key is minted only when no registered column holds ciphertext;
    - two distinct keys that each decrypt some rows (say the keychain holds
      K1 and the sidecar K2) **stop the boot** with nothing written; the
@@ -73,12 +79,13 @@ the previous file untouched.
      rows (and the encrypted `config.toml` backup) are re-encrypted under the
      first other key listed, in one transaction checked by read-back and
      rolled back on any failure, then the boot continues; no key copy is
-     deleted. With three or more keys, repeat once per key to retire;
+     deleted. If moving the backup fails (disk full) the boot still
+     continues and the next start moves it. With three or more keys, repeat once per key to retire;
    - rows exist and no key decrypts them: locked state, nothing overwritten,
      and no key in memory (fail closed: nothing new is encrypted under a key
      no vault holds). Kronn keeps running so the key can be restored from
      Settings → Recovery.
-   [src: file: backend/src/core/keystore.rs:394-551]
+   [src: file: backend/src/core/keystore.rs:404-558]
 3. The resolved key is mirrored into the **empty** writable vaults; a vault
    holding another key, or whose read failed, is never written. `config.toml`
    drops its copy only when the key decrypts at least one row of every
@@ -95,15 +102,19 @@ the previous file untouched.
    decrypts nothing at that point, so it is moved to
    `config.toml.retired-key.<timestamp>` (`0600`) and the key in use gets the
    file copy it needs. Before anything is encrypted, the key in use must
-   have a durable copy: a vault reads it back, or `config.toml` is written
-   with it and read back; otherwise the boot stops ("No durable copy of the
-   encryption key could be written") with nothing encrypted.
+   have a durable copy: a vault reads it back, `config.toml` already holds
+   it, or `config.toml` is written with it and read back; otherwise the boot
+   stops ("No durable copy of the encryption key could be written") with
+   nothing encrypted. Every key, recovery and config file is written through
+   one helper: owner-only temp, fsync, rename, then fsync of the directory.
    `GET /api/config/recovery/status` reports `matches_key`, `key_locked`,
    `key_copies_kept` (the retention rule keeps the file copy),
    `config_holds_key`, `copies`, `stale_sources` (key stores holding another
-   key, never overwritten), `invalid_sources`, `locked_credentials` and
-   `kept_recovery_blobs`; Settings → Recovery shows the warnings.
-   [src: file: backend/src/core/keystore.rs:271-319]
+   key, never overwritten; also refreshed after a restore),
+   `invalid_sources`, `locked_credentials`, `kept_recovery_blobs`,
+   `credentials_unavailable`, `recovery_other_key` and `config_set_aside`;
+   Settings → Recovery shows the warnings.
+   [src: file: backend/src/core/keystore.rs:273-321]
 4. `credential_store::boot` loads the stored credentials, moves any still in
    `config.toml` into the table, and generates an auth token only when none
    exists anywhere. Locked key: the store stays off and `config.toml` is left
@@ -173,7 +184,9 @@ Safe to interrupt at any point; a rerun converges:
    `config.toml.backup.<timestamp>` (`0600`) instead of being overwritten,
    with its credentials removed and its key kept. Every credential boot also
    scrubs `config.toml.backup` and every rotated copy (copies rotated by an
-   earlier 0.14.3 start included), under the same copies rule for the key.
+   earlier 0.14.3 start included), under the same copies rule for the key;
+   a copy that cannot be scrubbed does not stop the others, and the errors
+   are reported together.
 
 `credential_store::read_backup(path, key)` decrypts the backup.
 [src: file: backend/src/core/credential_store.rs:696-699]
@@ -186,14 +199,19 @@ are kept untouched (logged as locked) and never deleted by later saves.
 `POST /api/config/recovery/set` wraps the active key under a new passphrase.
 When `recovery.key` already exists, the request must carry
 `current_passphrase`, which must unwrap it; an unreadable `recovery.key` is
-never replaced from the API (move it out of the data directory by hand). A
-replaced blob that wrapped another key is kept as
+never replaced from the API (move it out of the data directory by hand).
+The exception is a blob whose checksummed fingerprint names **another** key
+(`recovery_other_key`, after a reset or a key change): it cannot protect the
+key in use, so it is replaced without its passphrase and Settings asks for
+none. A blob that matches, or predates 0.14.3, still needs it. A replaced
+blob that wrapped another key is kept as
 `recovery.previous-<timestamp>.key`. Concurrent sets are serialized and each
 write uses its own temporary file.
 
 `POST /api/config/recovery/restore` is for a **locked** instance. On a running
 instance it is refused unless the recovered key is the one in use: restoring
-another key would split the data between two keys.
+another key would split the data between two keys. A successful restore
+clears a credential failure recorded at start.
 
 An import keeps the source machine's encrypted rows and its recovery blob (as
 `recovery.imported-<timestamp>.key`; `recovery.key` is untouched). To read
@@ -201,7 +219,8 @@ those secrets, `POST /api/config/recovery/reencrypt` (Plugins → "Re-encrypt
 imported secrets") unwraps the source key with that machine's passphrase and
 re-encrypts the rows it decrypts under this instance's key, in one
 transaction with read-back; rows already under the instance key are never
-written, and the instance key never changes. Without a pasted code it tries
+written, and the instance key never changes. Stored credentials among the
+rewritten rows are reloaded at once. Without a pasted code it tries
 every kept blob: imported ones, replaced ones and the local `recovery.key`
 (rows may sit under an older local key). The UI picks the flow itself:
 restore when the key is locked, re-encrypt otherwise, and submits nothing
@@ -212,7 +231,7 @@ all back, so local MCP secrets are never lost to a half import. GitHub
 connections are not exported; those of projects that come back by id are
 kept (the `projects` cascade no longer drops their tokens), and the report
 names the ones whose project is gone.
-[src: file: backend/src/core/keystore.rs:913-969]
+[src: file: backend/src/core/keystore.rs:961-1017]
 
 ## Reset
 
@@ -235,8 +254,10 @@ screen says to fix the cause and restart, and credential changes are
 refused with that reason. Settings → Recovery shows every computed warning
 (another or an invalid value in a key store, a single copy without a
 passphrase, stored credentials no key reads). An export bundles
-`recovery.key` only when it is verified for the key in use, and otherwise
-warns.
+`recovery.key` only when it is verified for the key in use. When it carries
+encrypted MCP secrets without a verified blob, the `X-Kronn-Export-Warning`
+header says why (`no-recovery-passphrase`, `key-locked`,
+`recovery-not-bundled`) and Settings shows it.
 
 ## Downgrading to 0.14.2
 
@@ -261,4 +282,4 @@ rebuild, so macOS would prompt on every restart). To exercise the keychain
 path, including a denied prompt, start the dev backend with
 `KRONN_USE_KEYCHAIN=1`; `KRONN_USE_KEYCHAIN=0` forces the sidecar in a release
 build. Outside macOS and Windows the default is off (no keychain backend).
-[src: file: backend/src/core/keyvault.rs:234-240]
+[src: file: backend/src/core/keyvault.rs:293-299]

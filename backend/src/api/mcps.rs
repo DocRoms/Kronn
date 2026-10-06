@@ -46,7 +46,10 @@ pub async fn list_registry(
 }
 
 /// GET /api/mcps — full overview: servers + configs (masked)
-pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<McpOverview>> {
+pub async fn overview(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<McpOverview>> {
     let secret = state.config.read().await.encryption_secret.clone();
     match state
         .db
@@ -80,9 +83,69 @@ pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<McpOver
         })
         .await
     {
-        Ok(data) => Json(ApiResponse::ok(data)),
+        Ok(mut data) => {
+            if let Some(caller) = bridge {
+                scope_overview(&mut data, caller.0.project.as_deref());
+            }
+            Json(ApiResponse::ok(data))
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+/// A bridge token's view of the overview: the configs its project may use
+/// (same rule as `agent_api::config_visible_to`), only its own project named
+/// on them, its own customised contexts, and the servers those configs or the
+/// catalogue provide (never one detected in another project).
+fn scope_overview(overview: &mut McpOverview, bound: Option<&str>) {
+    overview.configs.retain(|config| {
+        config.is_global
+            || match bound {
+                Some(project) => config.project_ids.iter().any(|id| id == project),
+                None => config.include_general,
+            }
+    });
+    for config in &mut overview.configs {
+        let kept: Vec<(String, String)> = config
+            .project_ids
+            .iter()
+            .zip(config.project_names.iter())
+            .filter(|(id, _)| Some(id.as_str()) == bound)
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect();
+        config.project_ids = kept.iter().map(|(id, _)| id.clone()).collect();
+        config.project_names = kept.into_iter().map(|(_, name)| name).collect();
+    }
+    let suffix = bound.map(|project| format!(":{project}"));
+    overview.customized_contexts.retain(|context| {
+        suffix
+            .as_deref()
+            .is_some_and(|suffix| context.ends_with(suffix))
+    });
+    let used: std::collections::HashSet<String> = overview
+        .configs
+        .iter()
+        .map(|config| config.server_id.clone())
+        .collect();
+    overview.servers.retain(|server| {
+        used.contains(&server.id) || !matches!(server.source, McpSource::Detected)
+    });
+    let servers: std::collections::HashSet<String> = overview
+        .servers
+        .iter()
+        .map(|server| server.id.clone())
+        .collect();
+    overview
+        .incompatibilities
+        .retain(|incompatibility| servers.contains(&incompatibility.server_id));
+    let configs: std::collections::HashSet<String> = overview
+        .configs
+        .iter()
+        .map(|config| config.id.clone())
+        .collect();
+    overview
+        .incomplete_configs
+        .retain(|incomplete| configs.contains(&incomplete.config_id));
 }
 
 /// GET /api/mcps/project-environment-names/{project_id}

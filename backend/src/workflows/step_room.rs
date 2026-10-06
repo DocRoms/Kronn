@@ -182,6 +182,7 @@ pub async fn activate(
     rooms: &Arc<WorkflowStepRooms>,
     db: &Arc<Database>,
     run_id: &str,
+    run_project: Option<&str>,
     step: &WorkflowStep,
     ctx: &TemplateContext,
 ) -> Result<Option<StepRoomActivation>, String> {
@@ -208,16 +209,26 @@ pub async fn activate(
     if room.is_empty() {
         return Err("room_id rendered to an empty discussion id".into());
     }
-    let exists = {
+    let found = {
         let room = room.clone();
         db.with_read_conn(move |conn| {
-            Ok(crate::db::discussions::get_discussion(conn, &room)?.is_some())
+            Ok(crate::db::discussions::get_discussion(conn, &room)?
+                .map(|discussion| discussion.project_id))
         })
         .await
         .map_err(|error| format!("room_id: {error}"))?
     };
-    if !exists {
+    let Some(room_project) = found else {
         return Err(format!("room_id: discussion `{room}` not found"));
+    };
+    if !super::run_scope::target_allowed(
+        room_project.as_deref(),
+        run_project,
+        super::run_scope::is_literal(template),
+    ) {
+        return Err(format!(
+            "room_id: discussion `{room}` is outside this run's project"
+        ));
     }
     let capability = format!(
         "kr-step-{}{}",
@@ -354,7 +365,7 @@ mod tests {
         let db = db_with_room().await;
         let rooms = Arc::new(WorkflowStepRooms::default());
         let step = agent_step(Some("{{room}}"));
-        let active = activate(&rooms, &db, "run-1", &step, &ctx_with_room("room-a"))
+        let active = activate(&rooms, &db, "run-1", None, &step, &ctx_with_room("room-a"))
             .await
             .unwrap()
             .expect("a step with a room is activated");
@@ -391,7 +402,7 @@ mod tests {
 
         // The next activation of the run (a later step, a Goto, a replay)
         // invalidates the earlier capability.
-        let next = activate(&rooms, &db, "run-1", &step, &ctx_with_room("room-a"))
+        let next = activate(&rooms, &db, "run-1", None, &step, &ctx_with_room("room-a"))
             .await
             .unwrap()
             .unwrap();
@@ -422,6 +433,7 @@ mod tests {
                 &rooms,
                 &db,
                 "run",
+                None,
                 &agent_step(None),
                 &ctx_with_room("room-a")
             )
@@ -434,6 +446,7 @@ mod tests {
             &rooms,
             &db,
             "run",
+            None,
             &agent_step(Some("{{room}}")),
             &ctx_with_room("room-z"),
         )
@@ -443,6 +456,7 @@ mod tests {
             &rooms,
             &db,
             "run",
+            None,
             &agent_step(Some("{{steps.missing.data}}")),
             &ctx_with_room("room-a"),
         )
@@ -450,8 +464,121 @@ mod tests {
         assert!(matches!(&unrendered, Err(error) if error.starts_with("room_id:")));
         let mut http_step = agent_step(Some("{{room}}"));
         http_step.agent = AgentType::Ollama;
-        let bridgeless = activate(&rooms, &db, "run", &http_step, &ctx_with_room("room-a")).await;
+        let bridgeless = activate(
+            &rooms,
+            &db,
+            "run",
+            None,
+            &http_step,
+            &ctx_with_room("room-a"),
+        )
+        .await;
         assert!(matches!(&bridgeless, Err(error) if error.contains("Claude Code or Codex")));
         assert!(rooms.live().is_empty());
+    }
+
+    /// B4-01 — a rendered room outside the run's project refuses the launch
+    /// and records no activity there.
+    #[tokio::test]
+    async fn a_rendered_room_outside_the_run_s_project_is_refused() {
+        let db = db_with_room().await;
+        db.with_conn(|conn| {
+            let now = "2026-01-01T00:00:00Z";
+            for id in ["p", "q"] {
+                conn.execute(
+                    "INSERT INTO projects(id, name, path, created_at, updated_at) \
+                     VALUES (?1, ?1, ?1, ?2, ?2)",
+                    rusqlite::params![id, now],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO discussions (id, title, project_id, created_at, updated_at) \
+                 VALUES ('room-q', 'Q', 'q', ?1, ?1), ('room-p', 'P', 'p', ?1, ?1)",
+                [now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let rooms = Arc::new(WorkflowStepRooms::default());
+        let step = agent_step(Some("{{room}}"));
+        let refused = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &step,
+            &ctx_with_room("room-q"),
+        )
+        .await;
+        assert!(
+            matches!(&refused, Err(error) if error.contains("outside this run's project")),
+            "{:?}",
+            refused.as_ref().err()
+        );
+        let shared = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &step,
+            &ctx_with_room("room-a"),
+        )
+        .await;
+        assert!(
+            shared.is_err(),
+            "a templated project-less room is not the run's"
+        );
+        let activities: i64 = db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_step_room_activities",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(activities, 0);
+        assert!(rooms.live().is_empty());
+        let own = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &step,
+            &ctx_with_room("room-p"),
+        )
+        .await
+        .unwrap();
+        assert!(own.is_some());
+        let literal = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &agent_step(Some("room-a")),
+            &TemplateContext::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            literal.is_some(),
+            "a literal shared room is the author's choice"
+        );
+        let literal_foreign = activate(
+            &rooms,
+            &db,
+            "run-1",
+            Some("p"),
+            &agent_step(Some("room-q")),
+            &TemplateContext::new(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            literal_foreign.is_some(),
+            "a literal room of another project is the author's choice"
+        );
     }
 }

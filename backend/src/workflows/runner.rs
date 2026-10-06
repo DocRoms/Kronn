@@ -1965,6 +1965,7 @@ async fn execute_run_body(
                             &state.workflow_step_rooms,
                             &state.db,
                             &run.id,
+                            run.project_id.as_deref().or(workflow.project_id.as_deref()),
                             &hydrated,
                             &ctx,
                         )
@@ -2283,6 +2284,7 @@ async fn execute_run_body(
                         step,
                         &workflow.id,
                         &run.id,
+                        run.project_id.as_deref().or(workflow.project_id.as_deref()),
                         &state,
                         &ctx,
                     )
@@ -3105,6 +3107,7 @@ async fn execute_run_body(
                         &state.workflow_step_rooms,
                         &state.db,
                         &run.id,
+                        run.project_id.as_deref().or(workflow.project_id.as_deref()),
                         rb_step,
                         &ctx,
                     )
@@ -3215,6 +3218,7 @@ async fn execute_run_body(
                         rb_step,
                         &workflow.id,
                         &run.id,
+                        run.project_id.as_deref().or(workflow.project_id.as_deref()),
                         &state,
                         &ctx,
                     )

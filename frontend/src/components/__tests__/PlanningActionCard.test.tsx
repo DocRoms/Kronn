@@ -50,6 +50,8 @@ describe('PlanningActionCard', () => {
         payload: { title: 'Upgrade PHP', priority: 'high', is_primary: true },
         state: 'pending',
       }],
+      project_id: 'p1',
+      project_name: 'Kronn',
       created_at: '2026-07-26T00:00:00Z',
       updated_at: '2026-07-26T00:00:00Z',
     });
@@ -79,6 +81,8 @@ describe('PlanningActionCard', () => {
     );
 
     expect(mocks.decideProposalItem).not.toHaveBeenCalled();
+    // The card names the project the task will land in.
+    expect(await screen.findByText('planning.proposalProject:Kronn')).toBeInTheDocument();
     fireEvent.click(await screen.findByText('planning.acceptProposal'));
     await waitFor(() => expect(mocks.decideProposalItem).toHaveBeenCalledWith(
       'proposal:message-1:0',

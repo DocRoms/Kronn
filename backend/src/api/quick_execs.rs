@@ -445,6 +445,7 @@ pub async fn run(
         exec_command: Some(item.command.clone()),
         exec_args: item.args.clone(),
         exec_timeout_secs: Some(item.timeout_secs),
+        exec_unmodelled_args_approved: item.unmodelled_args_approved,
         ..WorkflowStep::default()
     };
     let running_at = Utc::now();
@@ -825,6 +826,7 @@ mod tests {
             token_id: "t".into(),
             project: None,
             own_discussions: vec![],
+            own_run: None,
         }))
     }
 

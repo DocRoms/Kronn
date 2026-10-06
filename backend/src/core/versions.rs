@@ -434,15 +434,17 @@ pub async fn installed_version(program: &std::path::Path) -> Option<String> {
 async fn probe_installed_version(program: &std::path::Path, timeout: Duration) -> Option<String> {
     use tokio::io::AsyncReadExt;
     const MAX_OUTPUT_BYTES: usize = 8192;
-    let mut child =
-        crate::core::cmd::full_env_cmd(program, crate::core::cmd::FullEnvReason::VersionDiscovery)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
+    let mut child = crate::core::cmd::discovery_cmd(
+        program,
+        crate::core::child_env::AgentFamily::from_launch(&program.to_string_lossy(), None, ""),
+    )
+    .arg("--version")
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null())
+    .kill_on_drop(true)
+    .spawn()
+    .ok()?;
     let result = tokio::time::timeout(timeout, async {
         let mut output = Vec::new();
         child

@@ -133,16 +133,14 @@ pub async fn discover() -> DiscoveryOutcome {
     let Some(location) = crate::agents::find_binary("claude") else {
         return DiscoveryOutcome::CliMissing("Claude CLI is not installed".into());
     };
-    let mut command = crate::core::cmd::full_env_cmd(
+    let mut command = crate::core::cmd::discovery_cmd(
         &location.path,
-        crate::core::cmd::FullEnvReason::ModelDiscovery,
+        crate::core::child_env::AgentFamily::Claude,
     );
     #[cfg(target_os = "windows")]
     if location.via_wsl {
-        command = crate::core::cmd::full_env_cmd(
-            "wsl.exe",
-            crate::core::cmd::FullEnvReason::ModelDiscovery,
-        );
+        command =
+            crate::core::cmd::discovery_cmd("wsl.exe", crate::core::child_env::AgentFamily::Claude);
         command.args([
             "-e",
             "bash",

@@ -43,18 +43,22 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       .catch(() => setConfigured(null));
   }, []);
 
+  // A recovery.key for ANOTHER key can be replaced without its passphrase (the
+  // backend keeps it aside); a matching or unverifiable one needs it.
+  const needsCurrent = !!configured && !status?.recovery_other_key;
   const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving
-    && (!configured || current.length > 0);
+    && (!needsCurrent || current.length > 0);
 
   const save = async () => {
     if (!canSave) return;
     setSaving(true);
     try {
-      const res = configured
+      const res = needsCurrent
         ? await configApi.setRecovery(passphrase, current)
         : await configApi.setRecovery(passphrase);
       setRecoveryCode(res.recovery_code);
       setConfigured(true);
+      setStatus(s => (s ? { ...s, matches_key: true, recovery_other_key: false } : s));
       setPassphrase('');
       setConfirm('');
       setCurrent('');
@@ -106,7 +110,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         {status && !status.key_locked && status.configured && !status.matches_key && (
           <div className="set-expose-warn" data-testid="recovery-mismatch">
             <AlertTriangle size={13} />
-            <span>{t('settings.recovery.mismatchWarning')}</span>
+            <span>{t(status.recovery_other_key ? 'settings.recovery.otherKeyWarning' : 'settings.recovery.mismatchWarning')}</span>
           </div>
         )}
         {status && (status.stale_sources ?? []).length > 0 && (
@@ -184,7 +188,7 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                 what3words.com/échouer.insérons.labeur
               </a>
             </p>
-            {configured && (
+            {needsCurrent && (
               <input
                 type="password"
                 className="set-input"

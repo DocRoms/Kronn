@@ -227,11 +227,58 @@ fn the_positive_list_has_no_secret_class_route_and_no_duplicate() {
 /// Each listed pattern is a real route: a typo would silently refuse a call.
 #[test]
 fn every_listed_pattern_is_registered_in_the_router() {
-    let router = include_str!("../lib.rs");
+    // (method, pattern) pairs of every `.route("…", get(..).post(..))` call.
+    fn registered(source: &str) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for chunk in source.split(".route(").skip(1) {
+            let mut depth = 1usize;
+            let mut end = chunk.len();
+            for (index, c) in chunk.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let call = &chunk[..end];
+            let Some(pattern) = call.split('"').nth(1) else {
+                continue;
+            };
+            let bytes = call.as_bytes();
+            for method in ["get", "post", "put", "patch", "delete"] {
+                let needle = format!("{method}(");
+                let used = call.match_indices(&needle).any(|(at, _)| {
+                    at == 0
+                        || !(bytes[at - 1].is_ascii_alphanumeric()
+                            || bytes[at - 1] == b'_'
+                            || bytes[at - 1] == b':')
+                });
+                if used {
+                    pairs.push((method.to_ascii_uppercase(), pattern.to_owned()));
+                }
+            }
+        }
+        pairs
+    }
+    let routes = registered(include_str!("../lib.rs"));
+    assert!(
+        routes.len() > 300,
+        "the parser reads the router: {}",
+        routes.len()
+    );
     for route in BRIDGE_ROUTES {
         assert!(
-            router.contains(&format!("\"{}\"", route.pattern)),
-            "{} is not a route in lib.rs",
+            routes
+                .iter()
+                .any(|(method, pattern)| method == route.method && pattern == route.pattern),
+            "{} {} is not a route in lib.rs",
+            route.method,
             route.pattern
         );
     }
@@ -987,47 +1034,44 @@ fn every_session_keyed_request_is_reviewed() {
         ("AcceptOfferRequest", "/api/orchestration/accept-offer"),
         ("DeliverRequest", "joined session's room + ids"),
         ("ReviewRequest", "joined session's room + ids"),
+        ("PlanningActor", "planning writes: forced to an agent actor"),
+        ("WsAuthQuery", "the WebSocket refuses a bridge token"),
+        (
+            "SendMessageRequest",
+            "human message routes: not on BRIDGE_ROUTES",
+        ),
+        ("TokenOverride", "secret-class: not on BRIDGE_ROUTES"),
+        (
+            "SetProjectGithubConnectionRequest",
+            "secret-class: not on BRIDGE_ROUTES",
+        ),
+        ("DiscSourceHistoryEntry", "a stored row, never a request"),
+        ("DiscSourceBinding", "a stored row, never a request"),
+        ("DiscSearchHit", "a stored row, never a request"),
+        ("WorkspaceHistoryLease", "a stored row, never a request"),
+        ("DiscussionSession", "a stored row, never a request"),
+        ("InviteTokenIssued", "a server answer, never a request"),
+        ("JoinViaTokenResult", "a server answer, never a request"),
+        ("WorkflowAgentAttempt", "a stored row, never a request"),
+        ("PlanningTaskEvent", "a stored row, never a request"),
+        ("TaskExecutionEvent", "a stored row, never a request"),
+        ("TaskExecutionAuditEvent", "a stored row, never a request"),
+        (
+            "TaskExecutionWorkerSession",
+            "a stored row, never a request",
+        ),
     ];
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api");
-    let mut found = Vec::new();
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            for (index, chunk) in source.split("pub struct ").enumerate().skip(1) {
-                let name: String = chunk
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                let body = chunk.split("\n}").next().unwrap_or("");
-                let before = source.split("pub struct ").nth(index - 1).unwrap_or("");
-                let derive = before.rsplit("#[derive(").next().unwrap_or("");
-                let keyed = [
-                    "pub session_id:",
-                    "pub source_session_id:",
-                    "pub token:",
-                    "pub resume_token:",
-                ]
-                .iter()
-                .any(|field| body.contains(field));
-                // A response is written by the server, never read from a caller.
-                if keyed && derive.contains("Deserialize") && !name.ends_with("Response") {
-                    found.push(name);
-                }
-            }
-        }
-    }
-    for name in &found {
-        assert!(
-            REVIEWED.iter().any(|(reviewed, _)| reviewed == name),
-            "{name} carries a caller-supplied session: review it here"
-        );
-    }
+    let found = deserialized_session_keyed_types(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+    );
+    let unreviewed: Vec<&String> = found
+        .iter()
+        .filter(|name| !REVIEWED.iter().any(|(reviewed, _)| reviewed == name))
+        .collect();
+    assert!(
+        unreviewed.is_empty(),
+        "these carry a caller-supplied session or credential: review them here: {unreviewed:?}"
+    );
     for (_, how) in REVIEWED {
         if how.starts_with("/api/") {
             assert!(
@@ -1065,4 +1109,124 @@ fn a_token_cannot_force_a_session_reassignment() {
     let body = json!({"disc_id": "a-room", "source_agent": "Codex",
         "source_session_id": "s", "force_reassign": true});
     assert!(prepare_body(link, Some("p1"), Some(&body)).is_err());
+}
+
+/// Wire names that carry a caller-supplied session or credential.
+const KEYED_FIELDS: &[&str] = &[
+    "session_id",
+    "source_session_id",
+    "source_binding_session_id",
+    "actor_session_id",
+    "token",
+    "resume_token",
+    "next_resume_token",
+    "session_credential",
+    "publication_grant",
+];
+
+/// Every `Deserialize` struct or enum under `root` with a field whose wire
+/// name (its serde `rename`, `alias`, else its name, any case) is keyed.
+/// A server answer (`…Response`) is skipped.
+fn deserialized_session_keyed_types(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                let source = std::fs::read_to_string(&path).unwrap();
+                found.extend(
+                    session_keyed_types_in(&source)
+                        .unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+                );
+            }
+        }
+    }
+    found
+}
+
+fn session_keyed_types_in(source: &str) -> syn::Result<Vec<String>> {
+    use syn::visit::Visit;
+
+    fn normalized(name: &str) -> String {
+        name.chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    fn serde_names(attrs: &[syn::Attribute]) -> Vec<String> {
+        let mut names = Vec::new();
+        for attr in attrs.iter().filter(|attr| attr.path().is_ident("serde")) {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") || meta.path.is_ident("alias") {
+                    if let Ok(value) = meta.value() {
+                        if let Ok(literal) = value.parse::<syn::LitStr>() {
+                            names.push(literal.value());
+                        }
+                    }
+                } else if let Ok(value) = meta.value() {
+                    let _ = value.parse::<syn::Expr>();
+                }
+                Ok(())
+            });
+        }
+        names
+    }
+    fn derives_deserialize(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| match &attr.meta {
+            syn::Meta::List(list) if attr.path().is_ident("derive") => {
+                list.tokens.to_string().contains("Deserialize")
+            }
+            _ => false,
+        })
+    }
+    fn keyed(fields: &syn::Fields) -> bool {
+        let keyed: Vec<String> = KEYED_FIELDS.iter().map(|name| normalized(name)).collect();
+        fields.iter().any(|field| {
+            let mut names = serde_names(&field.attrs);
+            if let Some(ident) = &field.ident {
+                names.push(ident.to_string());
+            }
+            names.iter().any(|name| keyed.contains(&normalized(name)))
+        })
+    }
+    struct Scan(Vec<String>);
+    impl<'ast> Visit<'ast> for Scan {
+        fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+            if derives_deserialize(&item.attrs) && keyed(&item.fields) {
+                self.0.push(item.ident.to_string());
+            }
+            syn::visit::visit_item_struct(self, item);
+        }
+        fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+            if derives_deserialize(&item.attrs)
+                && item.variants.iter().any(|variant| keyed(&variant.fields))
+            {
+                self.0.push(item.ident.to_string());
+            }
+            syn::visit::visit_item_enum(self, item);
+        }
+    }
+    let mut scan = Scan(Vec::new());
+    scan.visit_file(&syn::parse_file(source)?);
+    scan.0.retain(|name| !name.ends_with("Response"));
+    Ok(scan.0)
+}
+
+/// B5-07 — the scan sees a renamed field, an enum variant and a derive
+/// followed by a doc comment holding `;`.
+#[test]
+fn the_session_scan_reads_serde_names_and_enums() {
+    let mut found = session_keyed_types_in(
+        "#[derive(Deserialize)]\n/// a; b\nstruct Renamed { #[serde(rename = \"session_id\")] s: String }\n\
+         #[derive(Debug, serde::Deserialize)]\nenum Req { Join { resume_token: String } }\n\
+         #[derive(Deserialize)]\nstruct Camel { #[serde(rename = \"sessionCredential\")] c: String }\n\
+         #[derive(Deserialize)]\nstruct Plain { name: String }\n\
+         #[derive(Serialize)]\nstruct Out { session_id: String }\n",
+    )
+    .unwrap();
+    found.sort();
+    assert_eq!(found, ["Camel", "Renamed", "Req"]);
 }
