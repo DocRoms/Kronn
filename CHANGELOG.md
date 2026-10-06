@@ -259,7 +259,7 @@ Release notes for 0.9.3 and earlier are available in the
   `.mcp.json`, starts it with only its own configured values. An
   operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
   start, like the admin token. On the desktop, only an allow-list (display,
-  locale, paths, proxies, toolkit and Kronn settings) stays in the process
+  locale, paths, proxies and toolkit settings) stays in the process
   environment, so the system webview's helper processes (Linux, Windows)
   never inherit a credential, whatever its name; Kronn and its agents still
   get every variable, and `KRONN_USE_KEYCHAIN=0` keeps working. npm registry credentials

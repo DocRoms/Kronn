@@ -445,7 +445,9 @@ crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
 `#[allow]`/`#[expect]` sites of both crates (the lint, its old name
 `disallowed_method`, the `style` and `all` groups, and `warnings`) and
 refuses a crate-wide override in either `Cargo.toml` `[lints]` table or in
-`.cargo/config` rustflags (`-A …`, `--cap-lints`). The system opener goes through `cmd::open_in_system`
+`.cargo/config` (rustflags `-A`, `--allow`, `--warn`, `--force-warn`,
+`--cap-lints`, an `[alias]` named `clippy`, an `[env]` key starting with
+`CLIPPY_`), with `-` read as `_` in lint names. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -494,14 +496,19 @@ the admin token and the key override). The allow-list is the base list
 toolchains, Windows essentials), display and session plumbing (`DISPLAY`,
 `WAYLAND_*`, `XAUTHORITY`, `DBUS_*`, `DESKTOP_SESSION`, AppImage's `APPDIR`
 and `LD_LIBRARY_PATH`), toolkit and runtime prefixes (`XDG_`, `GDK_`, `GTK_`,
-`GIO_`, `GST_`, `WEBKIT_`, `WEBVIEW2_`, `LIBGL_`, `MESA_`, `QT_`, `TAURI_`,
-`RUST_`, `DYLD_`…) and `KRONN_*`, never a credential-looking name, except
-Kronn's own settings that only look like one (`KRONN_USE_KEYCHAIN`,
-`KRONN_MCP_SECRET_REFERENCES`). A credential under any name, and any name
-that is not Unicode, is withheld. Every environment read in Kronn goes through
-`child_env::var` / `var_os` / `vars_os` (live value, else the withheld one):
-both clippy files refuse `std::env::var`, `var_os`, `vars` and `vars_os`
-outside `child_env`, so no read can miss a withheld variable. Child routes see
+`GIO_`, `GST_`, `WEBKIT_`, `WEBVIEW2_`, `LIBGL_`, `MESA_`, `QT_`, `SNAP_` and
+`SNAP`, `TAURI_`, `RUST_`, `DYLD_`…), never a credential-looking name. No
+`KRONN_*` setting stays live (a webhook URL is a secret whose name is not):
+Kronn reads them, `KRONN_USE_KEYCHAIN` included, from the withheld set. A
+credential under any name, and any name that is not Unicode, is withheld.
+Every environment read in Kronn goes through `child_env::var` / `var_os` /
+`vars_os` (live value, else the withheld one) and every write through
+`child_env::set_var` / `remove_var`: once the desktop withholds, a name off
+the allow-list is set into the withheld set, never live, and a removal drops
+it from both. Both clippy files refuse `std::env::var`, `var_os`, `vars`,
+`vars_os`, `set_var` and `remove_var` outside `child_env`, and libc's
+`getenv`, `secure_getenv` and `_NSGetEnviron`, so no read can miss a withheld
+variable. Child routes see
 withheld variables through the same overlay; names compare case-insensitively
 on Windows. The relaunch below gets them all back.
 
