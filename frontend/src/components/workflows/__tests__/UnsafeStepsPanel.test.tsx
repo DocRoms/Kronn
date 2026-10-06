@@ -23,6 +23,7 @@ const fixable: UnsafeExecStep = {
   reason: 'inline_code_interpolation',
   suggested_args: ['-c', 'echo "$1"', '_', '{{issue.title}}'],
   manual_fix: null,
+  agent_written: false,
 };
 const manual: UnsafeExecStep = {
   ...fixable,
@@ -55,6 +56,28 @@ describe('UnsafeStepsPanel', () => {
 
     fireEvent.click(screen.getByText('wf.unsafeApply'));
     await waitFor(() => expect(onApply).toHaveBeenCalledWith(fixable));
+  });
+
+  it('shows a line an agent wrote with its approval, and approves on click', async () => {
+    const pending: UnsafeExecStep = {
+      ...fixable,
+      step_name: 'plan',
+      args: ['-c', 'terraform plan "$1"', '_', '{{x}}'],
+      placeholder: '{{x}}',
+      reason: 'unmodelled_program',
+      suggested_args: null,
+      manual_fix: 'écrite par un agent',
+      agent_written: true,
+    };
+    unsafeSteps.mockResolvedValue([pending]);
+    const onApprove = vi.fn().mockResolvedValue(undefined);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} onApprove={onApprove} />);
+
+    expect(await screen.findByText(/wf\.unsafeAgentWritten/)).toBeDefined();
+    fireEvent.click(screen.getByText('wf.unsafeHow'));
+    expect(screen.getByText('bash ["-c","terraform plan \\"$1\\"","_","{{x}}"]')).toBeDefined();
+    fireEvent.click(screen.getByText('wf.unsafeApprove'));
+    await waitFor(() => expect(onApprove).toHaveBeenCalledWith(pending));
   });
 
   it('offers no automatic rewrite when the fix is manual', async () => {

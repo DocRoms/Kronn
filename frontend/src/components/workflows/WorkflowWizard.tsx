@@ -3094,6 +3094,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                     aria-label={t('wiz.collectQuickExecArgs')}
                                   />
                                   <small>{t('wiz.collectQuickExecArgsHint')}</small>
+                                  {/* KT-1017 — the step's one approval also covers its inline sources. */}
+                                  <UnmodelledApproval
+                                    command={quickExecDraft.command}
+                                    args={quickExecDraft.args}
+                                    agentWritten={step.exec_agent_written === true}
+                                    clearStale={false}
+                                    approved={step.exec_unmodelled_args_approved === true}
+                                    onChange={approved => updateStep(i, { exec_unmodelled_args_approved: approved || undefined })}
+                                  />
                                 </div>
                                 <label>
                                   <span className="text-2xs text-ghost">{t('wiz.collectQuickExecFormat')}</span>

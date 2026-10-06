@@ -1862,10 +1862,49 @@ pub(crate) fn mark_line_writers(
             .find(|known| known.name == step.name && exec_lines(known) == exec_lines(step))
         {
             Some(known) => known.exec_agent_written,
-            None if writer == WorkflowWriter::Agent => Some(true),
+            // Only a line whose values then need a human carries the mark.
+            None if writer == WorkflowWriter::Agent => {
+                let mut probe = step.clone();
+                probe.exec_agent_written = Some(true);
+                probe.exec_unmodelled_args_approved = None;
+                crate::core::inline_code::classify_step(&probe, false)
+                    .iter()
+                    .any(|line| line.reason == "unmodelled_program")
+                    .then_some(true)
+            }
             None => None,
         };
     }
+}
+
+/// The steps an agent wrote that wait for a human's approval, as a notice
+/// for whoever saved them (KT-1017).
+pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
+    let names: Vec<&str> = wf
+        .steps
+        .iter()
+        .chain(&wf.on_failure)
+        .filter(|step| {
+            step.exec_agent_written == Some(true)
+                && crate::core::inline_code::classify_step(step, false)
+                    .iter()
+                    .any(|line| line.agent_written && line.reason == "unmodelled_program")
+        })
+        .map(|step| step.name.as_str())
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "Étapes Exec écrites par un agent, enregistrées mais en attente de l'approbation \
+             d'un humain dans l'éditeur avant de tourner : {}. Dis à l'utilisateur de les \
+             approuver.",
+            names.join(", ")
+        )
+    })
+}
+
+fn with_awaiting_notice(response: ApiResponse<Workflow>) -> ApiResponse<Workflow> {
+    let notice = response.data.as_ref().and_then(awaiting_approval_notice);
+    response.with_notice(notice)
 }
 
 /// An approval no line of its step needs any more is dropped, so it never
@@ -1907,6 +1946,15 @@ pub async fn create(
 }
 
 pub(crate) async fn create_as(
+    state: AppState,
+    req: CreateWorkflowRequest,
+    writer: WorkflowWriter,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = create_written(state, req, writer).await;
+    Json(with_awaiting_notice(response))
+}
+
+async fn create_written(
     state: AppState,
     mut req: CreateWorkflowRequest,
     writer: WorkflowWriter,
@@ -2220,6 +2268,16 @@ pub async fn update(
 }
 
 pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    req: UpdateWorkflowRequest,
+    writer: WorkflowWriter,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = update_written(state, id, req, writer).await;
+    Json(with_awaiting_notice(response))
+}
+
+async fn update_written(
     state: AppState,
     id: String,
     mut req: UpdateWorkflowRequest,
@@ -3057,6 +3115,15 @@ pub async fn import_workflow(
     State(state): State<AppState>,
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<ImportWorkflowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = import_workflow_written(state, bridge, req).await;
+    Json(with_awaiting_notice(response))
+}
+
+async fn import_workflow_written(
+    state: AppState,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    req: ImportWorkflowRequest,
 ) -> Json<ApiResponse<Workflow>> {
     let envelope: WorkflowExportEnvelope = match serde_json::from_str(&req.content) {
         Ok(env) => env,
@@ -6786,6 +6853,85 @@ mod tests {
         AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
     }
 
+    /// An agent's Exec line with run values is saved, marked and named in the
+    /// response; the run refuses it until a human approves it in the editor.
+    #[tokio::test]
+    async fn an_agent_line_is_saved_pending_until_a_human_approves() {
+        let state = agent_state();
+        let request = || -> CreateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "plan", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": ["bash"],
+                "steps": [{"name": "plan", "step_type": {"type": "Exec"},
+                           "exec_command": "bash",
+                           "exec_args": ["-c", "echo \"$1\"", "_", "{{x}}"],
+                           "exec_unmodelled_args_approved": true}]
+            }))
+            .unwrap()
+        };
+        let bridge = Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+            own_run: None,
+        }));
+        let Json(by_bridge) = create(State(state.clone()), bridge, Json(request())).await;
+        let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
+        for response in [by_bridge, by_tools] {
+            assert!(response.success, "{:?}", response.error);
+            assert!(
+                response
+                    .notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.contains("plan")),
+                "{:?}",
+                response.notice
+            );
+            let saved = response.data.unwrap();
+            let step = &saved.steps[0];
+            assert_eq!(step.exec_agent_written, Some(true));
+            assert_eq!(
+                step.exec_unmodelled_args_approved, None,
+                "an agent never approves"
+            );
+            let refusal = crate::core::inline_code::runtime_refusal(step).expect("refused at run");
+            assert!(refusal.contains("agent"), "{refusal}");
+
+            let mut approved = saved.steps.clone();
+            approved[0].exec_unmodelled_args_approved = Some(true);
+            let Json(by_human) = update_as(
+                state.clone(),
+                saved.id.clone(),
+                serde_json::from_value(serde_json::json!({"steps": approved})).unwrap(),
+                WorkflowWriter::Human,
+            )
+            .await;
+            assert!(by_human.success, "{:?}", by_human.error);
+            assert!(by_human.notice.is_none());
+            let step = &by_human.data.unwrap().steps[0];
+            assert_eq!(
+                step.exec_agent_written,
+                Some(true),
+                "the line is still the agent's"
+            );
+            assert_eq!(crate::core::inline_code::runtime_refusal(step), None);
+        }
+        // A hard refusal stays refused at save for an agent too.
+        let mut hard = request();
+        hard.steps[0].exec_args = vec!["-c".into(), "echo {{x}}".into()];
+        let Json(refused) = create_as(state.clone(), hard, WorkflowWriter::Agent).await;
+        assert!(!refused.success);
+        // A human's line in the same shape is trusted and carries no mark.
+        let Json(human) = create_as(state.clone(), request(), WorkflowWriter::Human).await;
+        assert!(human.success && human.notice.is_none(), "{:?}", human.error);
+        let step = &human.data.unwrap().steps[0];
+        assert_eq!(step.exec_agent_written, None);
+        assert_eq!(
+            step.exec_unmodelled_args_approved, None,
+            "a stale approval is dropped"
+        );
+    }
+
     /// Only a human approves an unmodelled program: neither the bridge token
     /// nor the Kronn agent tools can set it, on create or on a changed line,
     /// while an agent's edit elsewhere keeps the stored approval.
@@ -6814,14 +6960,28 @@ mod tests {
             Json(request(vec!["plan", "{{x}}"])),
         )
         .await;
-        assert!(!by_bridge.success, "a bridge save cannot approve");
+        let pending = |response: &ApiResponse<Workflow>| {
+            response.success
+                && response.notice.is_some()
+                && response.data.as_ref().is_some_and(|wf| {
+                    wf.steps[0].exec_unmodelled_args_approved.is_none()
+                        && wf.steps[0].exec_agent_written == Some(true)
+                })
+        };
+        assert!(
+            pending(&by_bridge),
+            "a bridge save cannot approve: it waits"
+        );
         let Json(by_tools) = create_as(
             state.clone(),
             request(vec!["plan", "{{x}}"]),
             WorkflowWriter::Agent,
         )
         .await;
-        assert!(!by_tools.success, "the agent tools cannot approve");
+        assert!(
+            pending(&by_tools),
+            "the agent tools cannot approve: it waits"
+        );
         let Json(by_human) = create(
             State(state.clone()),
             None,
@@ -6858,7 +7018,10 @@ mod tests {
             Json(update(vec!["apply", "{{x}}"], "renamed")),
         )
         .await;
-        assert!(!changed.success, "a changed line loses the approval");
+        assert!(
+            pending(&changed),
+            "a changed line loses the approval and waits"
+        );
     }
 
     /// `run.*`, `time.*` and `now*` belong to Kronn: a declared variable, a
@@ -7719,6 +7882,7 @@ mod tests {
                         token_id: "t".into(),
                         project: None,
                         own_discussions: vec![],
+                        own_run: None,
                     })
                 });
                 import_workflow(
@@ -7750,8 +7914,12 @@ mod tests {
         assert_eq!(by_human.data.unwrap().steps[0].exec_agent_written, None);
         let by_agent = import(shape.clone(), true).await;
         assert!(
-            !by_agent.success,
-            "an agent's line needs a human for any value"
+            by_agent.notice.is_some(),
+            "an agent's line waits for a human"
+        );
+        assert_eq!(
+            by_agent.data.unwrap().steps[0].exec_agent_written,
+            Some(true)
         );
 
         let request = |steps: Vec<WorkflowStep>| -> CreateWorkflowRequest {
@@ -7768,9 +7936,11 @@ mod tests {
         )
         .await;
         assert!(
-            !agent.success,
-            "an agent cannot launder a value through bash -c"
+            agent.notice.is_some(),
+            "a bash -c wrap by an agent still waits for a human"
         );
+        let step = &agent.data.unwrap().steps[0];
+        assert!(crate::core::inline_code::runtime_refusal(step).is_some());
         let Json(human) = create_as(
             state.clone(),
             request(shape.steps.clone()),

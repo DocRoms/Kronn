@@ -262,7 +262,13 @@ pub fn quick_exec_validation_error(
 }
 
 fn refusal(subject: &str, cmd: &str, args: &[String], trust: &Trust) -> Option<String> {
-    match first_unsafe_placeholder_with(cmd, args, trust.clone())? {
+    let finding = first_unsafe_placeholder_with(cmd, args, trust.clone())?;
+    // A line an agent wrote is saved and waits for a human's approval; the
+    // run refuses it until then. Hard refusals stay refused for everyone.
+    if trust.agent_written && matches!(finding, InlineFinding::UnmodelledProgram(..)) {
+        return None;
+    }
+    match finding {
         InlineFinding::Malformed => Some(format!(
             "{subject} : le code inline de `{cmd}` contient un placeholder mal formé."
         )),
@@ -322,6 +328,19 @@ pub fn step_trust(step: &WorkflowStep) -> Trust {
     }
 }
 
+/// What a line waiting for a human's approval says: written by an agent, it
+/// is saved and waits; otherwise the human approves it in the editor.
+pub fn approval_message(subject: &str, program: &str, path: &str, agent_written: bool) -> String {
+    if agent_written {
+        format!(
+            "{subject} : écrite par un agent, cette ligne passe `{{{{{path}}}}}` à `{program}` ; \
+             elle attend ton approbation dans l'éditeur avant de tourner."
+        )
+    } else {
+        unmodelled_message(subject, program, path)
+    }
+}
+
 /// Every unsafe command line of a saved step (main, then setup, or each
 /// inline Quick Exec source of a CollectApiData step), with a suggested
 /// rewrite when one is provably equivalent.
@@ -345,10 +364,11 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
         let (suggested_args, manual_fix) = match (&finding, suggest_args(cmd, args)) {
             (InlineFinding::UnmodelledProgram(program, path), _) => (
                 None,
-                Some(unmodelled_message(
+                Some(approval_message(
                     &format!("Step Exec « {} »", step.name),
                     program,
                     path,
+                    trust.agent_written,
                 )),
             ),
             (_, Ok(rewritten)) => (Some(rewritten), None),
@@ -371,6 +391,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             },
             suggested_args,
             manual_fix,
+            agent_written: trust.agent_written,
         });
     };
     match step.step_type {
@@ -391,10 +412,11 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin, &trust) {
                     let unmodelled = stdin_unmodelled_program(command, &step.exec_args, &trust);
                     let manual_fix = match &unmodelled {
-                        Some(program) => unmodelled_message(
+                        Some(program) => approval_message(
                             &format!("Step Exec « {} » (stdin)", step.name),
                             program,
                             placeholder.trim_start_matches("{{").trim_end_matches("}}"),
+                            trust.agent_written,
                         ),
                         None => "correction manuelle requise : le programme lit son code sur \
                                  stdin ; donne-lui un script ou du code inline sans valeur, et \
@@ -416,6 +438,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                         },
                         suggested_args: None,
                         manual_fix: Some(manual_fix),
+                        agent_written: trust.agent_written,
                     });
                 }
             }
@@ -452,6 +475,10 @@ pub fn stdin_validation_error(
     let trust = trust.into();
     let path = stdin_finding(cmd, args, stdin, &trust)?;
     if let Some(program) = stdin_unmodelled_program(cmd, args, &trust) {
+        if trust.agent_written {
+            // Saved; it waits for a human's approval (see `refusal`).
+            return None;
+        }
         return Some(unmodelled_message(
             &format!("Step Exec « {step} » (stdin)"),
             &program,
@@ -2288,6 +2315,7 @@ mod tests {
                 "{cmd}"
             );
         }
+        // Saved waiting for a human; the run refuses it until then.
         assert!(stdin_validation_error(
             "s",
             "bash",
@@ -2295,7 +2323,8 @@ mod tests {
             "{{x}}",
             agent.clone()
         )
-        .is_some());
+        .is_none());
+        assert!(stdin_finding("bash", &args(&["-c", "psql"]), "{{x}}", &agent).is_some());
         assert!(
             stdin_validation_error("s", "bash", &args(&["-c", "psql"]), "{{x}}", false).is_none()
         );

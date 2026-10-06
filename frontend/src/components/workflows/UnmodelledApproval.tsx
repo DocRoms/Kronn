@@ -16,12 +16,15 @@ interface UnmodelledApprovalProps {
   setupArgs?: string[];
   /** An agent last wrote these lines: any value needs the approval. */
   agentWritten?: boolean;
+  /** Drop a stored approval this line does not need. Off when the step's
+   *  approval also covers other lines (CollectApiData sources). */
+  clearStale?: boolean;
   approved: boolean;
   onChange: (approved: boolean) => void;
 }
 
 export function UnmodelledApproval({
-  command, args, stdin, setupCommand, setupArgs, agentWritten, approved, onChange,
+  command, args, stdin, setupCommand, setupArgs, agentWritten, clearStale = true, approved, onChange,
 }: UnmodelledApprovalProps) {
   const { t } = useT();
   const [covered, setCovered] = useState<string[]>([]);
@@ -47,7 +50,7 @@ export function UnmodelledApproval({
           const lines = check.covered ?? [];
           setCovered(lines);
           // An approval no line needs any more never stays behind.
-          if (lines.length === 0 && approved) onChange(false);
+          if (clearStale && lines.length === 0 && approved) onChange(false);
         })
         .catch(() => { if (!cancelled) setCovered([]); });
     }, 300);
@@ -65,7 +68,10 @@ export function UnmodelledApproval({
         checked={approved}
         onChange={event => onChange(event.target.checked)}
       />
-      <span>{t('exec.unmodelledApprove', programs)}</span>
+      <span>
+        {agentWritten ? `${t('exec.agentWrittenApprove')} ` : ''}
+        {t('exec.unmodelledApprove', programs)}
+      </span>
       <small>{t('exec.unmodelledCovers', covered.join(' · '))}</small>
     </label>
   );

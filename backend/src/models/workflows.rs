@@ -1946,6 +1946,9 @@ pub struct UnsafeExecStep {
     pub reason: String,
     pub suggested_args: Option<Vec<String>>,
     pub manual_fix: Option<String>,
+    /// An agent wrote the line: it waits for a human's approval.
+    #[serde(default)]
+    pub agent_written: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

@@ -8260,7 +8260,11 @@ placeholder: string,
 /**
  * `inline_code_interpolation` or `malformed_placeholder`.
  */
-reason: string, suggested_args: Array<string> | null, manual_fix: string | null, };
+reason: string, suggested_args: Array<string> | null, manual_fix: string | null,
+/**
+ * An agent wrote the line: it waits for a human's approval.
+ */
+agent_written: boolean, };
 
 export type UpdateBatchCompareManualScoreRequest = {
 /**

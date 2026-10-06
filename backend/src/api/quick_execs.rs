@@ -49,7 +49,8 @@ pub(crate) async fn create_as(
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
     }
-    let agent_written = by_agent.then_some(true);
+    let agent_written =
+        (by_agent && needs_agent_approval(&request.command, &request.args)).then_some(true);
     drop_stale_approval(&mut request, agent_written);
     if let Some(error) = inline_code_error(&request, agent_written) {
         return Json(ApiResponse::err(error));
@@ -80,7 +81,10 @@ pub(crate) async fn create_as(
         .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &saved))
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(item)),
+        Ok(()) => {
+            let notice = awaiting_approval_notice(&item);
+            Json(ApiResponse::ok(item).with_notice(notice))
+        }
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
@@ -124,7 +128,7 @@ pub(crate) async fn update_as(
     let agent_written = if same_line {
         existing.agent_written
     } else {
-        by_agent.then_some(true)
+        (by_agent && needs_agent_approval(&request.command, &request.args)).then_some(true)
     };
     drop_stale_approval(&mut request, agent_written);
     // An unchanged stored line stays saveable (it is still refused at run
@@ -166,7 +170,10 @@ pub(crate) async fn update_as(
         .with_conn(move |conn| crate::db::quick_execs::update_quick_exec(conn, &saved))
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(updated)),
+        Ok(()) => {
+            let notice = awaiting_approval_notice(&updated);
+            Json(ApiResponse::ok(updated).with_notice(notice))
+        }
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
@@ -669,7 +676,8 @@ pub async fn import(
     // An import never carries an approval: a human approves in the editor.
     // Through an agent's bridge token, the line is the agent's (KT-1017).
     item.unmodelled_args_approved = None;
-    item.agent_written = bridge.is_some().then_some(true);
+    item.agent_written =
+        (bridge.is_some() && needs_agent_approval(&item.command, &item.args)).then_some(true);
     let validation = CreateQuickExecRequest {
         name: item.name.clone(),
         icon: Some(item.icon.clone()),
@@ -699,7 +707,10 @@ pub async fn import(
         .with_conn(move |conn| crate::db::quick_execs::insert_quick_exec(conn, &saved))
         .await
     {
-        Ok(()) => Json(ApiResponse::ok(item)),
+        Ok(()) => {
+            let notice = awaiting_approval_notice(&item);
+            Json(ApiResponse::ok(item).with_notice(notice))
+        }
         Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
     }
 }
@@ -734,6 +745,35 @@ fn drop_stale_approval(request: &mut CreateQuickExecRequest, agent_written: Opti
             request.unmodelled_args_approved = None;
         }
     }
+}
+
+/// Whether a line, written by an agent, would wait for a human's approval:
+/// only such a line carries the agent's mark (KT-1017).
+fn needs_agent_approval(command: &str, args: &[String]) -> bool {
+    matches!(
+        crate::core::inline_code::first_unsafe_placeholder_with(
+            command.trim(),
+            args,
+            crate::core::argv_roles::Trust {
+                agent_written: true,
+                ..Default::default()
+            },
+        ),
+        Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(
+            ..
+        ))
+    )
+}
+
+/// The notice for a saved Quick Exec an agent wrote that waits for a human.
+fn awaiting_approval_notice(item: &QuickExec) -> Option<String> {
+    (item.agent_written == Some(true) && item.unmodelled_args_approved != Some(true)).then(|| {
+        format!(
+            "Quick Exec « {} » écrit par un agent : enregistré, il attend l'approbation d'un \
+             humain dans l'éditeur avant de tourner. Dis à l'utilisateur de l'approuver.",
+            item.name
+        )
+    })
 }
 
 /// The [`Trust`](crate::core::argv_roles::Trust) of a saved Quick Exec: it
@@ -900,6 +940,7 @@ mod tests {
                         token_id: "t".into(),
                         project: None,
                         own_discussions: vec![],
+                        own_run: None,
                     })
                 });
                 import(
@@ -918,10 +959,12 @@ mod tests {
             import_as(item.clone(), false).await.success,
             "a human's shape is trusted"
         );
+        let by_agent = import_as(item.clone(), true).await;
         assert!(
-            !import_as(item.clone(), true).await.success,
-            "an agent's line needs a human"
+            by_agent.notice.is_some(),
+            "an agent's line waits for a human"
         );
+        assert_eq!(by_agent.data.unwrap().agent_written, Some(true));
         item.command = "aws".into();
         item.args = vec!["s3".into(), "ls".into(), "{{x}}".into()];
         item.unmodelled_args_approved = Some(true);
@@ -936,12 +979,8 @@ mod tests {
             "import sys; print(sys.argv[1])".into(),
             "{{x}}".into(),
         ];
-        assert!(
-            !create_as(state.clone(), shape.clone(), true)
-                .await
-                .0
-                .success
-        );
+        let by_agent = create_as(state.clone(), shape.clone(), true).await.0;
+        assert_eq!(by_agent.data.unwrap().agent_written, Some(true));
         let human = create_as(state.clone(), shape, false).await.0;
         assert!(human.success, "{:?}", human.error);
         assert_eq!(human.data.unwrap().agent_written, None);
@@ -980,10 +1019,19 @@ mod tests {
             }))
             .unwrap()
         };
+        // An agent's save goes through, unapproved and named as waiting.
         let Json(by_bridge) = create(State(state.clone()), bridge(), Json(clone(&approved))).await;
-        assert!(!by_bridge.success, "a bridge save cannot approve");
         let Json(by_tools) = create_as(state.clone(), clone(&approved), true).await;
-        assert!(!by_tools.success, "the agent tools cannot approve");
+        for saved in [by_bridge, by_tools] {
+            assert!(saved.success, "{:?}", saved.error);
+            assert!(saved.notice.is_some(), "the agent is told it waits");
+            let item = saved.data.unwrap();
+            assert_eq!(
+                item.unmodelled_args_approved, None,
+                "an agent cannot approve"
+            );
+            assert_eq!(item.agent_written, Some(true));
+        }
         let Json(by_human) = create(State(state.clone()), None, Json(clone(&approved))).await;
         assert!(by_human.success, "{:?}", by_human.error);
         let id = by_human.data.unwrap().id;
@@ -997,7 +1045,12 @@ mod tests {
         let mut changed = clone(&approved);
         changed.args = vec!["s3".into(), "rm".into(), "{{bucket}}".into()];
         let Json(dropped) = update(State(state.clone()), Path(id), bridge(), Json(changed)).await;
-        assert!(!dropped.success, "a changed line loses the approval");
+        let dropped = dropped.data.expect("saved, waiting for a human");
+        assert_eq!(
+            dropped.unmodelled_args_approved, None,
+            "a changed line loses the approval"
+        );
+        assert_eq!(dropped.agent_written, Some(true));
     }
 
     #[test]

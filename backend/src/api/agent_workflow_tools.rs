@@ -171,7 +171,7 @@ impl KronnToolExecutor {
                     crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
-                unwrap_api(call, response.success, response.data, response.error)
+                unwrap_api_noticed(call, response)
             }
             "workflow_get" | "workflow_update" => {
                 let Some(id) = call.arguments["workflow_id"].as_str() else {
@@ -215,7 +215,7 @@ impl KronnToolExecutor {
                     crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
-                unwrap_api(call, response.success, response.data, response.error)
+                unwrap_api_noticed(call, response)
             }
             _ => fail(call, "Unknown workflow tool"),
         }

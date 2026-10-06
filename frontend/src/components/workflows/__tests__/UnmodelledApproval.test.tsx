@@ -49,7 +49,7 @@ describe('UnmodelledApproval', () => {
       command: 'aws', args: ['s3', 'ls', '{{b}}'],
       setup_command: 'terraform', setup_args: ['init', '{{x}}'], agent_written: true,
     }));
-    expect(await screen.findByText('exec.unmodelledApprove:aws, terraform')).toBeDefined();
+    expect(await screen.findByText(/exec\.agentWrittenApprove:? exec\.unmodelledApprove:aws, terraform/)).toBeDefined();
     expect(screen.getByText('exec.unmodelledCovers:main: aws · setup: terraform')).toBeDefined();
   });
 

@@ -12,6 +12,8 @@ import type { UnsafeExecStep, Workflow } from '../../types/generated';
 interface UnsafeStepsPanelProps {
   workflow: Workflow;
   onApply: (issue: UnsafeExecStep) => Promise<void>;
+  /** KT-1017 — a human approves a step whose line needs it. */
+  onApprove?: (issue: UnsafeExecStep) => Promise<void>;
 }
 
 const issueKey = (issue: UnsafeExecStep) =>
@@ -24,7 +26,7 @@ const phaseLabel = (issue: UnsafeExecStep, t: (key: string, ...args: (string | n
   return '';
 };
 
-export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
+export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPanelProps) {
   const { t } = useT();
   const [issues, setIssues] = useState<UnsafeExecStep[]>([]);
   const [open, setOpen] = useState<string | null>(null);
@@ -82,6 +84,17 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
     }
   };
 
+  const approve = async (issue: UnsafeExecStep) => {
+    if (applying || !onApprove) return;
+    setApplying(issueKey(issue));
+    try {
+      await onApprove(issue);
+      setOpen(null);
+    } finally {
+      setApplying(null);
+    }
+  };
+
   return (
     <section className="wf-unsafe-panel" role="alert" aria-label={t('wf.unsafeTitle')}>
       <h4 className="wf-unsafe-title">
@@ -100,7 +113,9 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
                   {phaseLabel(issue, t)}
                   {' — '}
                   <code>{issue.placeholder || issue.reason}</code>
-                  {issue.reason === 'unmodelled_program' ? ` — ${t('wf.unsafeUnmodelled', issue.command)}` : ''}
+                  {issue.reason === 'unmodelled_program'
+                    ? ` — ${issue.agent_written ? t('wf.unsafeAgentWritten') : t('wf.unsafeUnmodelled', issue.command)}`
+                    : ''}
                 </span>
                 <button
                   type="button"
@@ -132,6 +147,19 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
                   <div className="wf-unsafe-fix">
                     <p className="wf-unsafe-manual">{t('wf.unsafeManual')}</p>
                     <p className="wf-unsafe-manual-reason">{issue.manual_fix}</p>
+                    {issue.reason === 'unmodelled_program' && onApprove && (
+                      <>
+                        <pre className="wf-unsafe-diff">{`${issue.command} ${JSON.stringify(issue.args)}`}</pre>
+                        <button
+                          type="button"
+                          className="wf-btn-secondary wf-unsafe-apply"
+                          disabled={applying !== null}
+                          onClick={() => { void approve(issue); }}
+                        >
+                          {t('wf.unsafeApprove')}
+                        </button>
+                      </>
+                    )}
                   </div>
                 )
               )}

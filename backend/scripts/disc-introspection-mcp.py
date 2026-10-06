@@ -4280,7 +4280,13 @@ def _unwrap(envelope):
         raise RuntimeError(f"unexpected response shape: {envelope!r}")
     if not envelope.get("success", False):
         raise RuntimeError(envelope.get("error") or "backend reported success=false")
-    return envelope.get("data")
+    data = envelope.get("data")
+    # A write that leaves something to a human (Exec lines awaiting approval)
+    # says so; the agent must relay it to the user.
+    notice = envelope.get("notice")
+    if notice and isinstance(data, dict):
+        data = {**data, "kronn_notice": notice}
+    return data
 
 
 def _reject_unknown_args(tool_name, args, hint=None):

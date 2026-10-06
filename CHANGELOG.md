@@ -659,7 +659,12 @@ Release notes for 0.9.3 and earlier are available in the
 - An Exec line or Quick Exec an agent writes (bridge token or Kronn's agent
   tools) needs a human's approval for any run value, whatever its shape
   (KT-1017): the server records who last wrote each line, and an agent can
-  neither approve nor launder a value through a `bash -c` script. A script
+  neither approve nor launder a value through a `bash -c` script. Such a line
+  is saved and the run refuses it until a human approves it; the save result
+  names the waiting steps (`notice`, `kronn_notice` for agents), and the
+  workflow page and step editor show "written by an agent: needs your
+  approval" with the line and an approve action. Inline CollectApiData
+  sources get the approval box in the editor. A script
   shape (`python3 tool.py …`) needs its script pinned in `exec_script_files`,
   checked at run time to be a regular file; a shell script given to `-c`
   never starts with `-` or `+`; shells are not trusted shapes on Windows.
