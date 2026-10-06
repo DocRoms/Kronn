@@ -135,6 +135,13 @@ pub fn is_trusted_template_path(path: &str) -> bool {
     path == "run.id" || path.starts_with("time.now")
 }
 
+/// Values Kronn sets itself for the run (`run.id`, `run.artifacts_dir`,
+/// `time.now…`): never outside data, so a data position takes them freely.
+/// Program text still accepts only [`is_trusted_template_path`].
+pub fn is_kronn_value(path: &str) -> bool {
+    is_trusted_template_path(path) || path == "run.artifacts_dir"
+}
+
 /// Why an inline script is unsafe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InlineFinding {
@@ -196,7 +203,9 @@ pub fn first_unsafe_placeholder_with(
         }
     }
     if !trust.approved {
-        if let Some(index) = (0..args.len()).find(|&i| tainted[i] && roles[i] == Role::Unmodelled) {
+        if let Some(index) = (0..args.len())
+            .find(|&i| roles[i] == Role::Unmodelled && carries_outside_value(&args[i]))
+        {
             let program = crate::core::argv_roles::owning_program(cmd, args, &roles, index);
             return Some(match untrusted_in(&args[index]).flatten() {
                 Some(path) => InlineFinding::UnmodelledProgram(program, path),
@@ -205,6 +214,15 @@ pub fn first_unsafe_placeholder_with(
         }
     }
     None
+}
+
+/// Whether `arg` carries a value from outside Kronn, Kronn's own run values
+/// ([`is_kronn_value`]) excepted.
+fn carries_outside_value(arg: &str) -> bool {
+    match crate::workflows::template::placeholder_paths(arg) {
+        Ok(paths) => paths.iter().any(|path| !is_kronn_value(path)),
+        Err(_) => true,
+    }
 }
 
 /// `Some(Some(path))` for the first untrusted placeholder in `text`,
@@ -1044,7 +1062,8 @@ pub fn first_tainted_option_position(
     args: &[String],
     tainted: &[bool],
 ) -> Option<usize> {
-    first_tainted_position_with(cmd, args, tainted, &Trust::default())
+    let outside: Vec<bool> = args.iter().map(|arg| carries_outside_value(arg)).collect();
+    first_tainted_position_with(cmd, args, tainted, &outside, &Trust::default())
 }
 
 /// [`first_tainted_option_position`]; with `approved`, a value given to an
@@ -1053,6 +1072,7 @@ fn first_tainted_position_with(
     cmd: &str,
     args: &[String],
     tainted: &[bool],
+    outside: &[bool],
     trust: &Trust,
 ) -> Option<usize> {
     use crate::core::argv_roles::Role;
@@ -1060,7 +1080,8 @@ fn first_tainted_position_with(
     (0..args.len()).find(|&i| {
         tainted.get(i).copied().unwrap_or(false)
             && !matches!(roles[i], Role::Data | Role::RuntimeOption)
-            && !(trust.approved && roles[i] == Role::Unmodelled)
+            && !(roles[i] == Role::Unmodelled
+                && (trust.approved || !outside.get(i).copied().unwrap_or(true)))
     })
 }
 
@@ -1129,8 +1150,10 @@ pub fn rendered_refusal(
             }
         })
         .collect();
-    let index = first_tainted_position_with(cmd, &parsed, &tainted, &trust)
-        .or_else(|| first_tainted_position_with(cmd, templates, &tainted, &trust))
+    // Judged on the templates: a rendered value no longer shows where it came from.
+    let outside: Vec<bool> = templates.iter().map(|t| carries_outside_value(t)).collect();
+    let index = first_tainted_position_with(cmd, &parsed, &tainted, &outside, &trust)
+        .or_else(|| first_tainted_position_with(cmd, templates, &tainted, &outside, &trust))
         .or(option_like)
         .or(emptied)?;
     Some(format!(
@@ -1776,6 +1799,22 @@ mod tests {
     ];
 
     const HOSTILE: &str = "a'b\"c $(touch pwned) ; touch pwned2 `touch pwned3` \\ é🦀";
+
+    /// Kronn's own run values (`run.artifacts_dir`) are data anywhere a value
+    /// is data, with no approval; program text still refuses them.
+    #[test]
+    fn kronn_run_values_need_no_approval_in_data_positions() {
+        let copy = args(&["shot.png", "{{run.artifacts_dir}}/S1.png"]);
+        assert!(validation_error("s", "cp", &copy, false).is_none());
+        let outsider = args(&["shot.png", "{{steps.x.output}}/S1.png"]);
+        assert!(validation_error("s", "cp", &outsider, false).is_some());
+        let code = args(&["-c", "ls {{run.artifacts_dir}}"]);
+        assert!(validation_error("s", "bash", &code, false).is_some());
+        // At run time, origin is judged on the templates, never the rendered text.
+        let rendered = args(&["shot.png", "/data/run-artifacts/r1/S1.png"]);
+        assert!(rendered_refusal("s", "cp", &copy, &rendered, false).is_none());
+        assert!(rendered_refusal("s", "cp", &outsider, &rendered, false).is_some());
+    }
 
     #[test]
     fn shell_values_move_to_positional_arguments_in_order() {
@@ -2546,7 +2585,7 @@ mod tests {
             let line = args(&line);
             let tainted = tainted_templates(&line);
             assert_eq!(
-                first_tainted_position_with(cmd, &line, &tainted, &Trust::from(true)),
+                first_tainted_position_with(cmd, &line, &tainted, &tainted, &Trust::from(true)),
                 None,
                 "{cmd} {line:?}"
             );
