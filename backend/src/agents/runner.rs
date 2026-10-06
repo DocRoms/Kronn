@@ -4612,6 +4612,12 @@ async fn start_native_acp(
         project_root,
         request.discussion_id.unwrap_or("unbound-discussion"),
     );
+    // The same declaration `run_acp_session` negotiates: Copilot's launch
+    // grant for the bridge follows the broker's decision on it.
+    let mcp_candidates = declared_mcp_servers(
+        acp_project_mcp_servers(request.project_path, false),
+        request.step_tools,
+    );
     let transport: Arc<dyn AcpTransport> = Arc::new(
         AcpJsonRpcTransport::spawn_native(
             acp_agent_kind,
@@ -4619,6 +4625,7 @@ async fn start_native_acp(
             full_access,
             native_env,
             scope,
+            mcp_candidates,
         )
         .await
         .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,

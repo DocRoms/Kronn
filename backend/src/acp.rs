@@ -572,6 +572,9 @@ pub struct AcpJsonRpcTransport {
     session_setup: Mutex<Option<AcpSessionSetup>>,
     config_options: Mutex<Vec<AcpConfigOption>>,
     broker: Arc<AcpPermissionBroker>,
+    /// Candidates and authorized MCP servers computed at launch, so the launch
+    /// grant (Copilot) and the `session/new` declaration come from one decision.
+    launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
 }
 
 /// How long `shutdown` waits for the stdout dispatcher after the child is
@@ -837,6 +840,7 @@ impl AcpJsonRpcTransport {
         full_access: bool,
         launch: NativeLaunchEnv,
         scope: AcpSessionScope,
+        mcp_candidates: Vec<AcpMcpServer>,
     ) -> Result<Self, AcpError> {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
@@ -844,9 +848,20 @@ impl AcpJsonRpcTransport {
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
-        let command =
+        let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
-        Self::spawn_scoped(agent, command, full_access, Some(scope)).await
+        // The servers are authorized once, by the session's own broker: the
+        // launch grant never names a server `session/new` does not declare.
+        let broker = session_broker(agent, full_access, Some(scope));
+        let servers = native_session_mcp_servers(
+            &broker,
+            mcp_candidates.clone(),
+            crate::agents::runner::disc_introspection_mcp_command(),
+        );
+        command.args(native_mcp_launch_grants(agent, &servers));
+        let transport = Self::spawn_with_broker(agent, command, broker).await?;
+        *transport.launch_mcp_servers.lock().await = Some((mcp_candidates, servers));
+        Ok(transport)
     }
 
     pub async fn spawn(
@@ -859,9 +874,17 @@ impl AcpJsonRpcTransport {
 
     async fn spawn_scoped(
         agent: AcpAgent,
-        mut command: tokio::process::Command,
+        command: tokio::process::Command,
         full_access: bool,
         scope: Option<AcpSessionScope>,
+    ) -> Result<Self, AcpError> {
+        Self::spawn_with_broker(agent, command, session_broker(agent, full_access, scope)).await
+    }
+
+    async fn spawn_with_broker(
+        agent: AcpAgent,
+        mut command: tokio::process::Command,
+        broker: AcpPermissionBroker,
     ) -> Result<Self, AcpError> {
         command
             .stdin(std::process::Stdio::piped())
@@ -887,10 +910,7 @@ impl AcpJsonRpcTransport {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(256);
-        let broker = Arc::new(match scope {
-            Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
-            None => AcpPermissionBroker::new(full_access),
-        });
+        let broker = Arc::new(broker);
         let dispatcher = Self::start_dispatcher(
             BufReader::new(stdout),
             stdin.clone(),
@@ -912,6 +932,7 @@ impl AcpJsonRpcTransport {
             session_setup: Mutex::new(None),
             config_options: Mutex::new(Vec::new()),
             broker,
+            launch_mcp_servers: Mutex::new(None),
         })
     }
 
@@ -988,16 +1009,7 @@ impl AcpJsonRpcTransport {
                         let _ = request.sender.send(result);
                     }
                 } else {
-                    if tracing::enabled!(tracing::Level::TRACE)
-                        && message
-                            .pointer("/params/update/toolCallId")
-                            .is_some()
-                    {
-                        tracing::trace!(
-                            shape = %permission_broker::value_shape(&message["params"]["update"], 0),
-                            "ACP tool-call update shape"
-                        );
-                    }
+                    observe_notification(&broker, &message);
                     let _ = notifications.send(message);
                 }
             }
@@ -1112,6 +1124,67 @@ async fn fail_pending(pending: &PendingRequests, error: AcpError) {
             .sender
             .send(Err(AcpError::Transport(error.to_string())));
     }
+}
+
+/// A tool call announced before its permission request: the broker may need
+/// the harness tool name it carries (Vibe).
+fn observe_notification(broker: &AcpPermissionBroker, message: &Value) {
+    if message.get("method").and_then(Value::as_str) != Some("session/update")
+        || message.pointer("/params/update/toolCallId").is_none()
+    {
+        return;
+    }
+    tracing::trace!(
+        shape = %permission_broker::value_shape(&message["params"]["update"], 0),
+        "ACP tool-call update shape"
+    );
+    broker.observe_tool_call_update(&message["params"]);
+}
+
+/// The broker of one native session. Vibe's permission request names no tool:
+/// its broker identifies MCP calls by the tool the harness announced.
+fn session_broker(
+    agent: AcpAgent,
+    full_access: bool,
+    scope: Option<AcpSessionScope>,
+) -> AcpPermissionBroker {
+    let broker = match scope {
+        Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
+        None => AcpPermissionBroker::new(full_access),
+    };
+    if agent == AcpAgent::Vibe {
+        broker.identify_tools_by_harness_name();
+    }
+    broker
+}
+
+/// Launch arguments that pre-authorize Kronn's bridge when this session
+/// authorized it, so the runtime never asks about it. Copilot asks for every
+/// MCP tool and its permission request names the tool but not its server, so
+/// the broker cannot tell the bridge's tools from another server's. Copilot
+/// rejects the stdio servers a client declares and loads the bridge from
+/// `~/.copilot/mcp-config.json` (Kronn's host sync): a project server name is
+/// never granted, as nothing ties that config's entry to the project's one.
+pub(crate) fn native_mcp_launch_grants(agent: AcpAgent, servers: &[AcpMcpServer]) -> Vec<String> {
+    if agent != AcpAgent::CopilotCli {
+        return Vec::new();
+    }
+    let Some(bridge) = servers.iter().find(|server| server.id == "kronn-internal") else {
+        return Vec::new();
+    };
+    if bridge.allowed_tools.is_empty() {
+        return vec!["--allow-tool=kronn-internal".to_owned()];
+    }
+    bridge
+        .allowed_tools
+        .iter()
+        .filter(|tool| {
+            !tool.is_empty()
+                && tool.len() <= 128
+                && tool.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        })
+        .map(|tool| format!("--allow-tool=kronn-internal({tool})"))
+        .collect()
 }
 
 /// Route one incoming agent->client JSON-RPC request through the broker.
@@ -1349,11 +1422,16 @@ impl AcpTransport for AcpJsonRpcTransport {
         &self,
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-        let servers: Vec<Value> = native_session_mcp_servers(
-            &self.broker,
-            request.mcp_servers,
-            crate::agents::runner::disc_introspection_mcp_command(),
-        )
+        let prepared = self.launch_mcp_servers.lock().await.take();
+        let servers = match prepared {
+            Some((candidates, servers)) if candidates == request.mcp_servers => servers,
+            _ => native_session_mcp_servers(
+                &self.broker,
+                request.mcp_servers,
+                crate::agents::runner::disc_introspection_mcp_command(),
+            ),
+        };
+        let servers: Vec<Value> = servers
         .into_iter()
         .map(|server| {
             json!({
@@ -1862,6 +1940,85 @@ mod tests {
             native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
             "catalogue probes that do not request MCP must remain tool-free"
         );
+    }
+
+    #[test]
+    fn copilot_is_launched_with_a_grant_for_the_kronn_bridge_only() {
+        let server = |id: &str, tools: &[&str]| AcpMcpServer {
+            id: id.into(),
+            command: "cmd".into(),
+            args: vec![],
+            allowed_tools: tools.iter().map(|tool| tool.to_string()).collect(),
+        };
+        let authorized = [server("kronn-internal", &[]), server("github-tools", &[])];
+        assert_eq!(
+            native_mcp_launch_grants(AcpAgent::CopilotCli, &authorized),
+            vec!["--allow-tool=kronn-internal"],
+            "a project server is never granted, an authorized one included"
+        );
+        assert_eq!(
+            native_mcp_launch_grants(
+                AcpAgent::CopilotCli,
+                &[server("kronn-internal", &["disc_meta", "disc_append", "x(y)", "a,b"])]
+            ),
+            vec![
+                "--allow-tool=kronn-internal(disc_meta)",
+                "--allow-tool=kronn-internal(disc_append)"
+            ],
+            "a step's tool list is granted tool by tool, a name outside the pattern syntax never"
+        );
+        assert!(
+            native_mcp_launch_grants(AcpAgent::CopilotCli, &[server("github-tools", &[])])
+                .is_empty(),
+            "no bridge authorized (audit, step without Kronn tools): no grant"
+        );
+        for agent in [AcpAgent::Vibe, AcpAgent::GeminiCli, AcpAgent::Kiro, AcpAgent::OpenCode] {
+            assert!(native_mcp_launch_grants(agent, &authorized).is_empty(), "{agent:?}");
+        }
+    }
+
+    /// Vibe's `tool_call` announcement reaches its broker through the
+    /// dispatcher, ahead of the permission request that names only the id.
+    #[test]
+    fn the_dispatcher_hands_vibe_s_announcement_to_its_broker_only() {
+        let announcement = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "_meta": {"effect_kind": "tool", "tool_name": "mcp_kronn_internal.disc_meta"},
+                    "kind": "other", "rawInput": {}, "sessionUpdate": "tool_call",
+                    "status": "in_progress", "title": "mcp_kronn_internal.disc_meta",
+                    "toolCallId": "effect-1"
+                }
+            }
+        });
+        let request = json!({
+            "sessionId": "s1",
+            "toolCall": {"toolCallId": "effect-1"},
+            "options": [
+                {"optionId": "allow_once", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
+            ]
+        });
+        let decide = |agent: AcpAgent| {
+            let broker = session_broker(agent, false, Some(AcpSessionScope::new(None, "disc")));
+            broker.bind_protocol_session("s1").unwrap();
+            broker.register_trusted_mcp_server(&AcpMcpServer {
+                id: "kronn-internal".into(),
+                command: "owned-kronn-mcp".into(),
+                args: vec![],
+                allowed_tools: Vec::new(),
+            });
+            observe_notification(&broker, &announcement);
+            handle_client_request(&broker, "session/request_permission", &request).unwrap()
+                ["outcome"]["optionId"]
+                .clone()
+        };
+        assert_eq!(decide(AcpAgent::Vibe), "allow_once");
+        assert_eq!(decide(AcpAgent::CopilotCli), "reject_once");
+        assert_eq!(decide(AcpAgent::OpenCode), "reject_once");
     }
 
     #[test]

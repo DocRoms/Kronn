@@ -44,6 +44,7 @@ pub async fn discover_in(agent_type: &AgentType, dir: &Path) -> DiscoveryOutcome
         false,
         Default::default(),
         scope,
+        Vec::new(),
     )
     .await
     {
