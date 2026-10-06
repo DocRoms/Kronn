@@ -205,6 +205,35 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Audit quick wins:
+  - Translations with a repeated placeholder (for example "2 dossiers
+    sélectionnés") no longer show a literal `{1}` (KT-1053).
+  - Two quick clicks on Confirm in the automation import dialog import once,
+    not twice (KT-1052).
+  - In Docker, the gateway now accepts config and discussion imports up to
+    512 MiB, like the backend, instead of answering 413 above 64 MiB; CI
+    checks that every backend body limit fits under the gateway's (KT-1064).
+  - CI runs `git diff --check` on each pull request, and `make check-diff`
+    runs it locally (KT-1063).
+  - `make test-backend` runs the whole suite CI runs, integration tests
+    included; `make test-backend-lib` keeps the quick library loop (KT-1054).
+  - A sub-workflow child respects its own workflow's concurrency limit: a
+    refused child fails the step with the reason, a refused foreach item is
+    skipped and counted as failed (KT-1045).
+  - Run retention and a bridge token's workflow list read indexes instead of
+    whole tables (migrations 221 and 222, KT-1048, KT-1050).
+  - A SubWorkflow foreach file must be a relative path inside the worktree:
+    absolute paths, `..` and symlinks leading out are refused on save and at
+    run time (KT-1038).
+  - The pre-migration backup now includes the writes still in the
+    write-ahead log; when another connection blocks that, the upgrade stops
+    and says why instead of saving a stale backup (KT-1049).
+  - The CORS allowlist has router-level tests, with and without a domain
+    (KT-1058).
+  - `docs/stack.md`, `docs/repo-map.md` and `SECURITY.md` match the code
+    again, and the tech-debt registry lists open items only, each with its
+    detail file, checked in CI (KT-1060, KT-1061).
+
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"
