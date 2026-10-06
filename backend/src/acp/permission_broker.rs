@@ -370,6 +370,7 @@ impl AcpPermissionBroker {
     /// offered a matching option, `{"outcome": {"outcome": "cancelled"}}`
     /// otherwise — never Kronn's own ad hoc shape.
     pub fn decide_tool_call_permission(&self, method: &str, params: &Value) -> Value {
+        tracing::trace!(shape = %value_shape(params, 0), "ACP permission request shape");
         let tool_call = params.get("toolCall");
         let kind = tool_call
             .and_then(|tool_call| tool_call.get("kind"))
@@ -632,6 +633,42 @@ fn tool_identity(tool_call: Option<&Value>) -> (Option<String>, Option<String>) 
         pick(&["server", "serverName", "mcpServer"]),
         pick(&["tool", "toolName"]),
     )
+}
+
+/// Field names of an ACP frame with short harness labels, to capture each
+/// runtime's request shape. Argument values are never rendered: only `kind`,
+/// `status`, `title`, `toolCallId`, `optionId` and `sessionUpdate`, truncated.
+pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
+    const LABELS: &[&str] = &["kind", "status", "title", "toolCallId", "optionId", "sessionUpdate"];
+    match value {
+        Value::Object(map) if depth < 4 => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(key, value)| match value {
+                    Value::String(text) if LABELS.contains(&key.as_str()) => {
+                        format!("{key}={:?}", text.chars().take(48).collect::<String>())
+                    }
+                    // Argument payloads: names only.
+                    Value::Object(inner) if key == "rawInput" || key == "arguments" => format!(
+                        "{key}{{{}}}",
+                        inner.keys().cloned().collect::<Vec<_>>().join(",")
+                    ),
+                    _ => format!("{key}:{}", value_shape(value, depth + 1)),
+                })
+                .collect();
+            format!("{{{}}}", fields.join(" "))
+        }
+        Value::Array(items) if depth < 4 => format!(
+            "[{}]",
+            items.iter().take(4).map(|item| value_shape(item, depth + 1)).collect::<Vec<_>>().join(",")
+        ),
+        Value::Object(_) => "{..}".into(),
+        Value::Array(_) => "[..]".into(),
+        Value::String(_) => "str".into(),
+        Value::Number(_) => "num".into(),
+        Value::Bool(_) => "bool".into(),
+        Value::Null => "null".into(),
+    }
 }
 
 /// Parse ACP tool-call locations without silently discarding malformed

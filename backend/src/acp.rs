@@ -988,6 +988,16 @@ impl AcpJsonRpcTransport {
                         let _ = request.sender.send(result);
                     }
                 } else {
+                    if tracing::enabled!(tracing::Level::TRACE)
+                        && message
+                            .pointer("/params/update/toolCallId")
+                            .is_some()
+                    {
+                        tracing::trace!(
+                            shape = %permission_broker::value_shape(&message["params"]["update"], 0),
+                            "ACP tool-call update shape"
+                        );
+                    }
                     let _ = notifications.send(message);
                 }
             }
