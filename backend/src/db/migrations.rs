@@ -1072,7 +1072,8 @@ pub(crate) fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {
-    if std::env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0") {
+    if crate::core::child_env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0")
+    {
         tracing::warn!("KRONN_MIGRATION_BACKUP=0: migrating without a database backup");
         return Ok(());
     }

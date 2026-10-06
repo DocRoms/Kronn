@@ -201,7 +201,7 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
 /// strict boolean interpretation: only `1`/`true` enable, including whitespace
 /// and case normalization. Empty, malformed and false values keep direct CLI.
 fn env_flag_enabled(var: &str) -> bool {
-    match std::env::var(var) {
+    match crate::core::child_env::var(var) {
         Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"),
         Err(std::env::VarError::NotPresent) => true,
         Err(std::env::VarError::NotUnicode(_)) => false,
@@ -784,7 +784,8 @@ fn native_command(
     };
     // Native runtimes are refused inside WSL, so the backend URL is the plain one.
     let backend_url = launch.discussion_id.is_some().then(|| {
-        std::env::var("KRONN_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3140".into())
+        crate::core::child_env::var("KRONN_BACKEND_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3140".into())
     });
     child_env::apply_agent_launch(
         command.as_std_mut(),
@@ -810,7 +811,7 @@ fn native_command(
 /// alone.
 fn apply_opencode_policy(command: &mut tokio::process::Command) {
     const VARIABLE: &str = "OPENCODE_CONFIG_CONTENT";
-    if std::env::var_os(VARIABLE).is_some() {
+    if crate::core::child_env::var_os(VARIABLE).is_some() {
         tracing::info!("{VARIABLE} is already set; Kronn's OpenCode read policy is not applied");
         return;
     }

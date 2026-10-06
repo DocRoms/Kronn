@@ -3628,8 +3628,8 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        let previous_ctx_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+        let previous_host = crate::core::child_env::var("OLLAMA_HOST").ok();
+        let previous_ctx_cap = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
         std::env::set_var("OLLAMA_HOST", server.uri());
         std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
         let calls = Arc::new(Mutex::new(Vec::new()));

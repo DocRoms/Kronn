@@ -24,7 +24,7 @@ const BACKUP_EXT: &str = "db";
 /// (same place as the manual backup — in-volume, logged as a warning). Returns
 /// `(dir, is_external)`.
 pub fn resolve_backup_dir(data_dir: &Path) -> (PathBuf, bool) {
-    match std::env::var("KRONN_BACKUP_DIR")
+    match crate::core::child_env::var("KRONN_BACKUP_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
     {
@@ -276,7 +276,7 @@ async fn perform_backup_with(
 /// Parse an env var, falling back to `default` when unset. A SET but
 /// unparseable value warns instead of silently defaulting.
 fn env_or_default<T: std::str::FromStr + std::fmt::Display>(var: &str, default: T) -> T {
-    match std::env::var(var) {
+    match crate::core::child_env::var(var) {
         Ok(s) => s.trim().parse().unwrap_or_else(|_| {
             tracing::warn!(target: "backup", "{var}={s:?} is not a valid number — using default {default}");
             default

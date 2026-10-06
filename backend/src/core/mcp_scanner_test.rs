@@ -3021,8 +3021,8 @@ args = ["@example/old-mcp"]
         // where the HOST CLI runs, not in the backend's PATH.
         use crate::core::mcp_scanner::host_mcp_command_available;
         let tmp = tempfile::TempDir::new().unwrap();
-        let prev_docker = std::env::var("KRONN_IN_DOCKER").ok();
-        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+        let prev_docker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
+        let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
 
         // Native: delegates to the backend-PATH check.
         std::env::remove_var("KRONN_IN_DOCKER");
@@ -3075,7 +3075,7 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("host-sync-secrets");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
-        let prev_home = std::env::var("KRONN_HOST_HOME").ok();
+        let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -3190,9 +3190,9 @@ args = ["@example/old-mcp"]
         std::fs::create_dir_all(&hostbin).unwrap();
         std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", hostbin.join("uvx")).unwrap();
 
-        let prev_home = std::env::var("KRONN_HOST_HOME").ok();
-        let prev_docker = std::env::var("KRONN_IN_DOCKER").ok();
-        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+        let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
+        let prev_docker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
+        let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
         std::env::set_var("KRONN_IN_DOCKER", "1");
         std::env::set_var("KRONN_HOST_BIN", hostbin.to_string_lossy().to_string());
@@ -3264,7 +3264,7 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("host-sync-unavailable-cmd");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
-        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3349,7 +3349,7 @@ args = ["@example/old-mcp"]
         // test so we don't leak state to other tests in the same
         // process. See feedback_windows_crossplatform.md re env-var
         // testing.
-        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         // Empty in-memory DB — no user MCPs configured. The kronn-
@@ -3396,7 +3396,7 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("codex-global-approval");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
-        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3471,7 +3471,7 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("copilot-global-inject");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
-        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        let prev = crate::core::child_env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3757,7 +3757,7 @@ args = ["@example/old-mcp"]
         std::fs::create_dir_all(&repo).unwrap();
         let bridge = tmp.join("bridge.py");
         std::fs::write(&bridge, "# stub bridge").unwrap();
-        let previous_data = std::env::var("KRONN_DATA_DIR").ok();
+        let previous_data = crate::core::child_env::var("KRONN_DATA_DIR").ok();
         std::env::set_var("KRONN_DATA_DIR", &data);
         std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &bridge);
         std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &bridge);

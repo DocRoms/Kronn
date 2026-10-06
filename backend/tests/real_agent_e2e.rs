@@ -48,7 +48,11 @@ use std::env;
 /// reminder. Tests are `#[ignore]` AND opt-in — belt and braces so
 /// nobody runs them by accident.
 fn require_opt_in() {
-    if env::var("KRONN_E2E_REAL_AGENT").ok().as_deref() != Some("1") {
+    if kronn::core::child_env::var("KRONN_E2E_REAL_AGENT")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
         panic!(
             "Real-agent E2E tests are opt-in: set KRONN_E2E_REAL_AGENT=1 to run. \
              Expect ~30-80k tokens per test (real LLM cost). \
@@ -159,7 +163,7 @@ fn opt_in_panic_message_is_actionable() {
     //
     // This test always runs in CI (not `#[ignore]`) and verifies the
     // safety rail itself, NOT any agent behavior — so it's free.
-    let prev = env::var("KRONN_E2E_REAL_AGENT").ok();
+    let prev = kronn::core::child_env::var("KRONN_E2E_REAL_AGENT").ok();
     // SAFETY: env::remove_var can be unsafe in multi-threaded test
     // environments. Tests in this file are #[ignore]'d so they only
     // run when explicitly requested — never in parallel CI.

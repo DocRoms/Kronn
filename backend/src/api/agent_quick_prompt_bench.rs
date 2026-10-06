@@ -7,8 +7,11 @@ async fn bench_native_three_step_workflow() {
     use crate::agents::runner::{
         parse_http_turn_telemetry, start_agent_with_config, AgentStartConfig,
     };
-    assert_eq!(std::env::var("KRONN_WORKFLOW_BENCH").as_deref(), Ok("1"));
-    let model = std::env::var("KRONN_BENCH_MODEL").expect("explicit model");
+    assert_eq!(
+        crate::core::child_env::var("KRONN_WORKFLOW_BENCH").as_deref(),
+        Ok("1")
+    );
+    let model = crate::core::child_env::var("KRONN_BENCH_MODEL").expect("explicit model");
     let state = super::quick_prompt_tests::state_with_prompts().await;
     let directory = tempfile::tempdir().unwrap();
     let executor = KronnToolExecutor::arc(
@@ -102,7 +105,7 @@ async fn bench_native_three_step_workflow() {
         "total_prompt_tokens":turns.iter().map(|t|t.prompt_tokens).sum::<u64>(),"turns":turns.len(),"seconds":started.elapsed().as_secs_f64(),
         "calls":calls,"emitted_text":output,"workflow":workflow,"executed_steps":executed,"final_value":final_value});
     println!("{report}");
-    if let Ok(path) = std::env::var("KRONN_BENCH_REPORT") {
+    if let Ok(path) = crate::core::child_env::var("KRONN_BENCH_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
     assert!(
@@ -269,42 +272,47 @@ async fn bench_quick_prompt_native_catalogue() {
     use crate::agents::runner::{
         parse_http_turn_telemetry, start_agent_with_config, AgentStartConfig,
     };
-    assert_eq!(std::env::var("KRONN_QP_BENCH").as_deref(), Ok("1"));
-    let model = std::env::var("KRONN_BENCH_MODEL").expect("explicit model required");
+    assert_eq!(
+        crate::core::child_env::var("KRONN_QP_BENCH").as_deref(),
+        Ok("1")
+    );
+    let model = crate::core::child_env::var("KRONN_BENCH_MODEL").expect("explicit model required");
     // Read-only: config::load can migrate and save a config as a side effect.
-    let config: crate::models::AppConfig = match std::env::var("KRONN_BENCH_CONFIG") {
+    let config: crate::models::AppConfig = match crate::core::child_env::var("KRONN_BENCH_CONFIG") {
         Ok(path) => toml::from_str(&std::fs::read_to_string(path).expect("read config"))
             .expect("parse config"),
         Err(_) => crate::core::config::default_config(),
     };
-    let agent = if std::env::var("KRONN_BENCH_CONFIG").is_ok() {
+    let agent = if crate::core::child_env::var("KRONN_BENCH_CONFIG").is_ok() {
         AgentType::LiteLlm
     } else {
         AgentType::Ollama
     };
     let endpoints = crate::models::setup::HttpEndpoints::from_agents(&config.agents);
     let directory = tempfile::tempdir().unwrap();
-    let previous_tiering = std::env::var("KRONN_TIERED_TOOLS").ok();
+    let previous_tiering = crate::core::child_env::var("KRONN_TIERED_TOOLS").ok();
     let mut reports = Vec::new();
-    let scenario_filter = std::env::var("KRONN_BENCH_SCENARIO").ok();
+    let scenario_filter = crate::core::child_env::var("KRONN_BENCH_SCENARIO").ok();
     assert!(
         scenario_filter
             .as_deref()
             .is_none_or(|value| value == "media"),
         "the only supported focused scenario is media"
     );
-    let media_without_id = std::env::var("KRONN_BENCH_MEDIA_WITHOUT_ID").as_deref() == Ok("1");
+    let media_without_id =
+        crate::core::child_env::var("KRONN_BENCH_MEDIA_WITHOUT_ID").as_deref() == Ok("1");
     let media_prompt = if media_without_id {
         "Lance la génération d'une image de phare au lever du jour. Confirme seulement son lancement, sans attendre le résultat."
     } else {
         "Lance la génération d'une image de phare au lever du jour avec la connexion enregistrée saved-provider, configurée pour les images. Confirme seulement son lancement, sans attendre le résultat."
     };
     // A follow-up catalogue growth check can replay only the shipping default.
-    let modes: &[bool] = if std::env::var("KRONN_BENCH_FULL_ONLY").as_deref() == Ok("1") {
-        &[false]
-    } else {
-        &[false, true]
-    };
+    let modes: &[bool] =
+        if crate::core::child_env::var("KRONN_BENCH_FULL_ONLY").as_deref() == Ok("1") {
+            &[false]
+        } else {
+            &[false, true]
+        };
     for (scenario, prompt) in [
         ("list", "Quels Quick Prompts enregistrés sont accessibles dans cette discussion et quelles variables obligatoires attendent-ils ?"),
         ("run", "Lance une fois le Quick Prompt enregistré « Résumé » sur le sujet « été ». Confirme son lancement sans attendre la réponse."),
@@ -351,12 +359,12 @@ async fn bench_quick_prompt_native_catalogue() {
             let report = json!({"model":model,"scenario":scenario,"prompt":prompt,"tiered":tiered_mode,"ok":exit_success && reached && persisted,"exit_success":exit_success,"reached":reached,"persisted":persisted,"catalogue_bytes":catalogue_bytes,"first_prompt_tokens":turns.first().map(|t|t.prompt_tokens),"total_prompt_tokens":turns.iter().map(|t|t.prompt_tokens).sum::<u64>(),"turns":turns.len(),"seconds":started.elapsed().as_secs_f64(),"calls":calls,"emitted_text":output});
             println!("{}",report);
             reports.push(report);
-            if let Ok(path) = std::env::var("KRONN_BENCH_REPORT") {
+            if let Ok(path) = crate::core::child_env::var("KRONN_BENCH_REPORT") {
                 std::fs::write(path,serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
             }
         }
     }
-    if let Ok(path) = std::env::var("KRONN_BENCH_REPORT") {
+    if let Ok(path) = crate::core::child_env::var("KRONN_BENCH_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
     }
     match previous_tiering {

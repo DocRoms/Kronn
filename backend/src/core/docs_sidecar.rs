@@ -82,7 +82,7 @@ impl DocsSidecar {
         }
 
         let program = resolve_sidecar_program(
-            std::env::var_os(BUNDLED_SIDECAR_ENV),
+            crate::core::child_env::var_os(BUNDLED_SIDECAR_ENV),
             &source_bundle_path(),
             &venv_python_path(),
         );

@@ -149,7 +149,7 @@ fn resolve_base_url(stored: Option<&str>) -> String {
     if let Some(url) = stored.map(str::trim).filter(|u| !u.is_empty()) {
         return normalize_url(url);
     }
-    if let Ok(env) = std::env::var("LITELLM_BASE_URL") {
+    if let Ok(env) = crate::core::child_env::var("LITELLM_BASE_URL") {
         let env = env.trim();
         if !env.is_empty() && env != "0.0.0.0" {
             return normalize_url(env);
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     #[serial]
     fn blank_stored_endpoint_falls_through_to_the_default_port() {
-        let prev = std::env::var("LITELLM_BASE_URL").ok();
+        let prev = crate::core::child_env::var("LITELLM_BASE_URL").ok();
         std::env::remove_var("LITELLM_BASE_URL");
         for stored in [None, Some(""), Some("   ")] {
             assert!(

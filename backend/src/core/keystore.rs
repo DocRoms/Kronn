@@ -209,7 +209,7 @@ pub const ENV_REENCRYPT_FROM: &str = "KRONN_REENCRYPT_FROM";
 /// keys: its rows go to the highest-priority other one. With more than two
 /// keys, one key is retired per start.
 fn reencrypt_request(found: &[(String, &'static str, String, usize)]) -> Option<(String, String)> {
-    let wanted = std::env::var(ENV_REENCRYPT_FROM).ok()?;
+    let wanted = crate::core::child_env::var(ENV_REENCRYPT_FROM).ok()?;
     let wanted = wanted.trim();
     if found.len() < 2 || wanted.is_empty() {
         return None;

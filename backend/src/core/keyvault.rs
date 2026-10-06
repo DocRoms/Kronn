@@ -30,7 +30,7 @@ pub const ENV_KEK: &str = "KRONN_ENCRYPTION_KEK";
 static TAKEN_ENV_KEK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 fn read_env_kek() -> Option<String> {
-    std::env::var(ENV_KEK)
+    crate::core::child_env::var(ENV_KEK)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -290,8 +290,11 @@ pub struct KeyStore {
 /// the authorization DOES persist. `KRONN_USE_KEYCHAIN=1|0` overrides both ways
 /// (e.g. testing the keychain path from a dev build). Elsewhere than macOS and
 /// Windows the crate has no backend, so the default is off there.
-fn use_os_keychain() -> bool {
-    match std::env::var("KRONN_USE_KEYCHAIN").ok().as_deref() {
+pub(crate) fn use_os_keychain() -> bool {
+    match crate::core::child_env::var("KRONN_USE_KEYCHAIN")
+        .ok()
+        .as_deref()
+    {
         Some("1") | Some("true") => true,
         Some("0") | Some("false") => false,
         _ => !cfg!(debug_assertions) && cfg!(any(target_os = "macos", target_os = "windows")),
@@ -516,8 +519,8 @@ mod tests {
         std::env::set_var(ENV_KEK, " envkey \n");
         std::env::set_var("KRONN_KEK", "legacy");
         assert_eq!(take_env_kek_from_process(), Some("envkey".to_string()));
-        assert!(std::env::var_os(ENV_KEK).is_none());
-        assert!(std::env::var_os("KRONN_KEK").is_none());
+        assert!(crate::core::child_env::var_os(ENV_KEK).is_none());
+        assert!(crate::core::child_env::var_os("KRONN_KEK").is_none());
     }
 
     /// Both entry points take the key out before any thread starts.

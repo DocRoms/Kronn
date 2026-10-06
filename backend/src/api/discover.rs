@@ -364,7 +364,7 @@ fn gitlab_token_from_process_env() -> Option<String> {
 fn gitlab_host_from_process_env() -> Option<String> {
     ["GITLAB_HOST", "GL_HOST", "GITLAB_API_URL"]
         .iter()
-        .find_map(|key| std::env::var(key).ok())
+        .find_map(|key| crate::core::child_env::var(key).ok())
         .filter(|value| !value.trim().is_empty())
 }
 

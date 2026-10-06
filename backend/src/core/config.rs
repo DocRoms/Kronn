@@ -13,7 +13,7 @@ const DEFAULT_PORT: u16 = 3140;
 /// Resolve the config directory: ~/.config/kronn/
 pub fn config_dir() -> Result<PathBuf> {
     // Check env override first (Docker)
-    if let Ok(dir) = std::env::var("KRONN_DATA_DIR") {
+    if let Ok(dir) = crate::core::child_env::var("KRONN_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
 
@@ -259,11 +259,11 @@ async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<
     // every cargo test/bench binary, never for `cargo run` or installed
     // binaries. Reads stay free; only the destructive act is fenced.
     #[cfg(test)]
-    if std::env::var("KRONN_DATA_DIR").is_err() {
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
         panic!("test attempted to WRITE the real config.toml — set KRONN_DATA_DIR (tempdir) in this test");
     }
     #[cfg(not(test))]
-    if std::env::var("KRONN_DATA_DIR").is_err()
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_err()
         && std::env::current_exe()
             .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
             .unwrap_or(false)
@@ -442,7 +442,7 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 /// Read an operator-set `KRONN_AUTH_TOKEN` and remove it from this process's
 /// environment, so no child can inherit the admin token (KT-1006).
 pub fn take_env_auth_token() -> Option<String> {
-    let token = std::env::var("KRONN_AUTH_TOKEN").ok();
+    let token = crate::core::child_env::var("KRONN_AUTH_TOKEN").ok();
     std::env::remove_var("KRONN_AUTH_TOKEN");
     token
         .map(|t| t.trim().to_string())
@@ -1020,7 +1020,7 @@ mod tests {
     #[serial]
     fn data_dir_lock_resolves_the_configured_data_directory() {
         let dir = scratch_dir("configured-lock");
-        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = acquire_data_dir_lock().expect("configured data-dir lock must succeed");
@@ -1110,7 +1110,7 @@ mod tests {
     async fn ollama_context_overrides_round_trip_through_the_real_config_file() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("ollama-ctx-overrides");
-        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
+        let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
@@ -1201,7 +1201,7 @@ mod tests {
     async fn desktop_runtime_port_is_not_saved_for_the_next_cli_start() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        let previous_dir = std::env::var_os("KRONN_DATA_DIR");
+        let previous_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", tmp.path());
 
         for saved_port in [3140, 4242] {

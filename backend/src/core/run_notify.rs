@@ -50,7 +50,7 @@ fn resolve_url(cfg_url: Option<String>) -> Option<String> {
         (!u.is_empty()).then_some(u)
     };
     cfg_url.and_then(non_empty).or_else(|| {
-        std::env::var("KRONN_FAILURE_NOTIFY_URL")
+        crate::core::child_env::var("KRONN_FAILURE_NOTIFY_URL")
             .ok()
             .and_then(non_empty)
     })

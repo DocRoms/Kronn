@@ -294,13 +294,13 @@ mod tests {
     ///   KRONN_MEDIA_PROBE_EXPECT=864x496x5042 cargo test --lib media_probe
     #[test]
     fn matches_a_real_provider_file_when_one_is_supplied() {
-        let Ok(path) = std::env::var("KRONN_MEDIA_PROBE_MP4") else {
+        let Ok(path) = crate::core::child_env::var("KRONN_MEDIA_PROBE_MP4") else {
             return; // no fixture supplied: nothing to assert
         };
         let bytes = std::fs::read(&path).expect("fixture readable");
         let probed = probe_mp4(&bytes);
 
-        if let Ok(expected) = std::env::var("KRONN_MEDIA_PROBE_EXPECT") {
+        if let Ok(expected) = crate::core::child_env::var("KRONN_MEDIA_PROBE_EXPECT") {
             let parts: Vec<u64> = expected
                 .split('x')
                 .map(|p| p.parse().expect("WxHxDURATION_MS"))

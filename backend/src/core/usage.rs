@@ -202,9 +202,9 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn user_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    crate::core::child_env::var_os("HOME")
         .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .or_else(|| crate::core::child_env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
 }
 
@@ -214,11 +214,13 @@ fn user_home_dir() -> Option<PathBuf> {
 fn conventional_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(value) = std::env::var_os("PNPM_HOME").filter(|value| !value.is_empty()) {
+    if let Some(value) =
+        crate::core::child_env::var_os("PNPM_HOME").filter(|value| !value.is_empty())
+    {
         push_unique(&mut dirs, PathBuf::from(value));
     }
-    if let Some(value) = std::env::var_os("NPM_CONFIG_PREFIX")
-        .or_else(|| std::env::var_os("npm_config_prefix"))
+    if let Some(value) = crate::core::child_env::var_os("NPM_CONFIG_PREFIX")
+        .or_else(|| crate::core::child_env::var_os("npm_config_prefix"))
         .filter(|value| !value.is_empty())
     {
         let prefix = PathBuf::from(value);
@@ -252,10 +254,14 @@ fn conventional_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(value) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+        if let Some(value) =
+            crate::core::child_env::var_os("APPDATA").filter(|value| !value.is_empty())
+        {
             push_unique(&mut dirs, PathBuf::from(value).join("npm"));
         }
-        if let Some(value) = std::env::var_os("ProgramFiles").filter(|value| !value.is_empty()) {
+        if let Some(value) =
+            crate::core::child_env::var_os("ProgramFiles").filter(|value| !value.is_empty())
+        {
             push_unique(&mut dirs, PathBuf::from(value).join("nodejs"));
         }
     }
@@ -367,13 +373,15 @@ fn find_cached_ccusage(root: &Path) -> Option<PathBuf> {
 
 fn package_runner_cache_roots(home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(cache) = std::env::var_os("NPM_CONFIG_CACHE")
-        .or_else(|| std::env::var_os("npm_config_cache"))
+    if let Some(cache) = crate::core::child_env::var_os("NPM_CONFIG_CACHE")
+        .or_else(|| crate::core::child_env::var_os("npm_config_cache"))
         .filter(|value| !value.is_empty())
     {
         push_unique(&mut roots, PathBuf::from(cache).join("_npx"));
     }
-    if let Some(cache) = std::env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+    if let Some(cache) =
+        crate::core::child_env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty())
+    {
         push_unique(&mut roots, PathBuf::from(cache).join("pnpm/dlx"));
     }
     if let Some(home) = home {
@@ -390,7 +398,7 @@ fn package_runner_cache_roots(home: Option<&Path>) -> Vec<PathBuf> {
 }
 
 fn resolve_ccusage_program() -> Result<PathBuf, String> {
-    if let Some(explicit) = std::env::var_os("KRONN_CCUSAGE_BIN")
+    if let Some(explicit) = crate::core::child_env::var_os("KRONN_CCUSAGE_BIN")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     {
@@ -526,7 +534,7 @@ fn ccusage_command(program: &std::path::Path, period_kind: &str) -> tokio::proce
         command.env("CLAUDE_CONFIG_DIR", dir);
     }
     if let Some(home) = usage_home_for_command(
-        std::env::var_os("KRONN_USAGE_HOME"),
+        crate::core::child_env::var_os("KRONN_USAGE_HOME"),
         crate::core::env::is_docker(),
     ) {
         command.env("HOME", home);

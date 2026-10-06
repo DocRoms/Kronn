@@ -421,7 +421,7 @@ mod tests {
     #[serial]
     fn update_preserves_the_original_id_and_is_atomic() {
         let dir = scratch_config_dir("directives-update");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         let id = save_custom_directive(
@@ -473,7 +473,7 @@ mod tests {
     #[serial]
     fn update_of_unknown_id_is_rejected() {
         let dir = scratch_config_dir("directives-update-missing");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         let result = update_custom_directive(
@@ -497,7 +497,7 @@ mod tests {
     #[serial]
     fn colliding_slugs_do_not_overwrite_each_other() {
         let dir = scratch_config_dir("directives-collision");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = save_custom_directive(
@@ -533,7 +533,7 @@ mod tests {
     #[serial]
     fn update_and_delete_reject_a_path_traversal_id() {
         let dir = scratch_config_dir("directives-traversal");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         // Lives one level above the directives/ dir the traversal id targets.
@@ -574,7 +574,7 @@ mod tests {
     #[serial]
     fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
         let dir = scratch_config_dir("directives-snapshot");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &dir);
 
         let id = save_custom_directive(

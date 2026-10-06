@@ -882,7 +882,7 @@ mod tests {
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = Restore(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         let target = "docs/inconsistencies-tech-debt.md";
         let (_tmp, project) = fixture(target, 0, 512);
         let project = project.as_path();
@@ -1065,7 +1065,7 @@ mod tests {
         // the size ratio is 100% but the placeholders remain.
         std::fs::write(project.join("docs/decisions.md"), &template_body).unwrap();
         // Also overwrite the template (the fixture wrote `y`-bytes).
-        let tpl_dir = std::env::var("KRONN_TEMPLATES_DIR").unwrap();
+        let tpl_dir = crate::core::child_env::var("KRONN_TEMPLATES_DIR").unwrap();
         std::fs::write(
             std::path::PathBuf::from(tpl_dir).join("docs/decisions.md"),
             &template_body,
@@ -1134,11 +1134,11 @@ mod tests {
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = Restore(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         let target = "docs/AGENTS.md";
         let (_tmp, project) = fixture(target, 0, 0);
         let template = format!("# Doc\n{{{{ONE}}}}\n{{{{TWO}}}}\n{}", "padding ".repeat(40));
-        let templates = std::env::var_os("KRONN_TEMPLATES_DIR").unwrap();
+        let templates = crate::core::child_env::var_os("KRONN_TEMPLATES_DIR").unwrap();
         std::fs::write(std::path::Path::new(&templates).join(target), &template).unwrap();
 
         std::fs::write(project.join(target), template.replace("{{ONE}}", "written")).unwrap();

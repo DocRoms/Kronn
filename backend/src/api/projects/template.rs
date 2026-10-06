@@ -173,7 +173,7 @@ pub async fn install_template(
 
 /// Resolve the templates directory (Docker mount or local)
 pub(crate) fn resolve_templates_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("KRONN_TEMPLATES_DIR") {
+    if let Ok(dir) = crate::core::child_env::var("KRONN_TEMPLATES_DIR") {
         return std::path::PathBuf::from(dir);
     }
     // Docker default
@@ -597,7 +597,7 @@ mod tests {
                 }
             }
         }
-        let _restore = RestoreTemplatesEnv(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = RestoreTemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         // This checkout's own templates, whatever another test left in the env.
         std::env::set_var(
             "KRONN_TEMPLATES_DIR",

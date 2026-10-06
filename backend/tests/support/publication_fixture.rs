@@ -11,7 +11,7 @@ impl PublicationFixture {
         let root = tempfile::tempdir().unwrap();
         let previous = ["KRONN_DATA_DIR", "KRONN_HOST_HOME"]
             .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
+            .map(|key| (key, kronn::core::child_env::var_os(key)))
             .collect();
         let host = root.path().join("host-home");
         std::fs::create_dir(&host).unwrap();
@@ -39,18 +39,18 @@ impl Drop for PublicationFixture {
 #[serial_test::serial]
 fn fixture_owns_both_roots_and_restores_the_inherited_environment() {
     let keys = ["KRONN_DATA_DIR", "KRONN_HOST_HOME"];
-    let before = keys.map(std::env::var_os);
+    let before = keys.map(kronn::core::child_env::var_os::<&str>);
     {
         let _fixture = PublicationFixture::new();
-        let data = std::path::PathBuf::from(std::env::var_os(keys[0]).unwrap());
-        let host = std::path::PathBuf::from(std::env::var_os(keys[1]).unwrap());
+        let data = std::path::PathBuf::from(kronn::core::child_env::var_os(keys[0]).unwrap());
+        let host = std::path::PathBuf::from(kronn::core::child_env::var_os(keys[1]).unwrap());
         assert!(data.is_dir());
         assert!(host.is_dir());
         assert_eq!(host.parent(), Some(data.as_path()));
         assert_eq!(
-            keys.map(std::env::var_os),
+            keys.map(kronn::core::child_env::var_os::<&str>),
             [Some(data.into()), Some(host.into())]
         );
     }
-    assert_eq!(keys.map(std::env::var_os), before);
+    assert_eq!(keys.map(kronn::core::child_env::var_os::<&str>), before);
 }

@@ -2851,7 +2851,7 @@ async fn execute_run_body(
                     let run_id_for_timer = run.id.clone();
                     let workflow_id_for_timer = workflow.id.clone();
                     let gate_name_for_timer = step.name.clone();
-                    let port = std::env::var("KRONN_BACKEND_PORT")
+                    let port = crate::core::child_env::var("KRONN_BACKEND_PORT")
                         .ok()
                         .and_then(|s| s.parse::<u16>().ok())
                         .unwrap_or(3140);

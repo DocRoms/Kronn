@@ -38,11 +38,11 @@ use std::path::{Path, PathBuf};
 /// Overridable via the `KRONN_USER_CONTEXT_DIR` env var (used in tests
 /// and Docker mounts that point elsewhere).
 pub fn user_context_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KRONN_USER_CONTEXT_DIR") {
+    if let Ok(dir) = crate::core::child_env::var("KRONN_USER_CONTEXT_DIR") {
         return PathBuf::from(dir);
     }
     // Resolve $HOME — falls back to /home/kronn (Docker default) if unset.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kronn".to_string());
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/home/kronn".to_string());
     PathBuf::from(home).join(".kronn/user-context")
 }
 

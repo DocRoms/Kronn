@@ -36,8 +36,8 @@ pub async fn scan_paths_with_depth(
     // dump — together they make "why is this macOS install broken"
     // questions answerable from a single `make logs | grep kronn::` sweep.
     tracing::info!(target: "kronn::scanner",
-        host_os = %std::env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
-        host_home = %std::env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
+        host_os = %crate::core::child_env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
+        host_home = %crate::core::child_env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
         host_home_aliases = ?host_home_aliases(),
         depth = depth,
         paths = ?paths,
@@ -285,7 +285,7 @@ async fn read_git_branch(path: &Path) -> Result<String> {
 pub(crate) fn restore_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(relative) = s.strip_prefix("/host-home") {
-        if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
             return format!("{}{}", host_home, relative);
         }
     }
@@ -366,7 +366,7 @@ pub fn diagnose_project_write_access(path: &str) -> ProjectWriteAccess {
     }
 
     let roots = writable_repo_roots();
-    let in_docker = std::env::var("KRONN_IN_DOCKER").as_deref() == Ok("1");
+    let in_docker = crate::core::child_env::var("KRONN_IN_DOCKER").as_deref() == Ok("1");
     if in_docker && !roots.is_empty() {
         let writable = roots.iter().any(|root| {
             Path::new(path).starts_with(root) || resolved.starts_with(resolve_host_path(root))
@@ -411,13 +411,13 @@ pub fn diagnose_project_write_access(path: &str) -> ProjectWriteAccess {
 /// already consumed by Makefile's generated override.
 pub fn writable_repo_roots() -> Vec<String> {
     let mut roots = Vec::new();
-    if let Ok(root) = std::env::var("KRONN_REPOS_DIR") {
+    if let Ok(root) = crate::core::child_env::var("KRONN_REPOS_DIR") {
         let root = root.trim();
         if !root.is_empty() {
             roots.push(root.trim_end_matches('/').to_string());
         }
     }
-    if let Ok(extra) = std::env::var("KRONN_EXTRA_REPOS") {
+    if let Ok(extra) = crate::core::child_env::var("KRONN_EXTRA_REPOS") {
         for root in extra
             .split(':')
             .map(str::trim)
@@ -439,7 +439,7 @@ pub fn writable_repo_roots() -> Vec<String> {
 /// Exposed as `pub(crate)` so the scanner tests can sanity-check the
 /// alias expansion logic in isolation.
 pub(crate) fn host_home_aliases() -> Vec<String> {
-    let Ok(host_home) = std::env::var("KRONN_HOST_HOME") else {
+    let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") else {
         return Vec::new();
     };
     if host_home.is_empty() {
@@ -883,8 +883,8 @@ fn shellexpand(path: &str) -> String {
 }
 
 fn dirs_home() -> Option<String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
+    crate::core::child_env::var("HOME")
+        .or_else(|_| crate::core::child_env::var("USERPROFILE"))
         .ok()
 }
 
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     #[serial]
     fn shellexpand_tilde() {
-        let prev = std::env::var("HOME").ok();
+        let prev = crate::core::child_env::var("HOME").ok();
         std::env::set_var("HOME", "/home/testuser");
         assert_eq!(shellexpand("~/repos"), "/home/testuser/repos");
         if let Some(p) = prev {
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     #[serial]
     fn shellexpand_windows_backslash() {
-        let prev = std::env::var("HOME").ok();
+        let prev = crate::core::child_env::var("HOME").ok();
         std::env::set_var("HOME", r"C:\Users\testuser");
         assert_eq!(shellexpand(r"~\repos"), r"C:\Users\testuser\repos");
         if let Some(p) = prev {

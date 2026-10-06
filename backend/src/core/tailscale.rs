@@ -51,7 +51,7 @@ pub async fn detect_ip() -> Option<String> {
 
 /// Extract Tailscale IP from `KRONN_HOST_IPS` env var (Docker scenario).
 fn detect_via_host_env() -> Option<String> {
-    let val = std::env::var("KRONN_HOST_IPS").ok()?;
+    let val = crate::core::child_env::var("KRONN_HOST_IPS").ok()?;
     for entry in val.split(',') {
         let parts: Vec<&str> = entry.splitn(2, ':').collect();
         if parts.len() == 2 && is_tailscale_ip(parts[1]) {
@@ -222,7 +222,7 @@ pub fn primary_lan_ipv4() -> Option<String> {
 /// Parse `KRONN_HOST_IPS` env var: `iface:ip,iface:ip,...`
 /// Each entry is classified by `classify_ip`.
 fn parse_host_ips_env() -> Option<Vec<DetectedIp>> {
-    let val = std::env::var("KRONN_HOST_IPS").ok()?;
+    let val = crate::core::child_env::var("KRONN_HOST_IPS").ok()?;
     if val.is_empty() {
         return None;
     }

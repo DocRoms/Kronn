@@ -381,7 +381,11 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
 /// Use full declarations by default. Native-model measurements in docs/research/
 /// showed lower success with tiering; keep it opt-in via KRONN_TIERED_TOOLS=1.
 pub(crate) fn tiered_tools_enabled() -> bool {
-    explicit_tiering(std::env::var("KRONN_TIERED_TOOLS").ok().as_deref())
+    explicit_tiering(
+        crate::core::child_env::var("KRONN_TIERED_TOOLS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 fn explicit_tiering(raw: Option<&str>) -> bool {
@@ -5086,7 +5090,8 @@ mod tests {
         catalogue.extend(workspace_tool_catalogue());
         catalogue.extend(orchestration_tool_catalogue());
         catalogue.extend(agent_resume_tool_catalogue());
-        let out = std::env::var("KRONN_CATALOGUE_DUMP").expect("KRONN_CATALOGUE_DUMP");
+        let out =
+            crate::core::child_env::var("KRONN_CATALOGUE_DUMP").expect("KRONN_CATALOGUE_DUMP");
         std::fs::write(&out, serde_json::to_string_pretty(&catalogue).unwrap()).unwrap();
         eprintln!("wrote {} tools to {out}", catalogue.len());
     }

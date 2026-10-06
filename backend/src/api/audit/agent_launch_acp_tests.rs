@@ -468,10 +468,10 @@ impl ScriptedOpenCodeOnPath {
     fn install(bin: &Path, out: &Path) -> Self {
         let saved: Vec<_> = ["PATH", "OPENCODE_FIXTURE_OUT", "OPENCODE_CONFIG_CONTENT"]
             .into_iter()
-            .map(|name| (name, std::env::var_os(name)))
+            .map(|name| (name, crate::core::child_env::var_os(name)))
             .collect();
         let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+            std::env::split_paths(&crate::core::child_env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
         std::env::set_var("PATH", path);

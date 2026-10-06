@@ -1011,7 +1011,7 @@ mod tests {
     async fn an_image_generation_persists_its_cost_and_anchors_its_asset() {
         let scratch = std::env::temp_dir().join(format!("kronn-media-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&scratch).expect("scratch dir");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
         std::env::set_var("KRONN_DATA_DIR", &scratch);
 
         let now = at("2026-09-01T10:00:00Z");

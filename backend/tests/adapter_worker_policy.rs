@@ -10,7 +10,7 @@ struct Environment(Vec<(&'static str, Option<OsString>)>);
 impl Environment {
     fn change(&mut self, name: &'static str, value: Option<OsString>) {
         if !self.0.iter().any(|(key, _)| *key == name) {
-            self.0.push((name, std::env::var_os(name)));
+            self.0.push((name, kronn::core::child_env::var_os(name)));
         }
         // This integration binary deliberately has one current-thread test.
         unsafe {

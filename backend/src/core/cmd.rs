@@ -145,8 +145,8 @@ pub fn full_env_sync_cmd<S: AsRef<OsStr>>(
 ) -> std::process::Command {
     let FullEnvReason::SelfRestart = reason;
     let mut cmd = raw_sync(program.as_ref());
-    // Kronn relaunched gets back the credentials the desktop withheld.
-    cmd.envs(crate::core::child_env::withheld_credentials());
+    // Kronn relaunched gets back what the desktop withheld.
+    cmd.envs(crate::core::child_env::withheld_variables());
     for name in crate::core::child_env::FORBIDDEN {
         cmd.env_remove(name);
     }
@@ -364,6 +364,8 @@ mod tests {
         let expected: std::collections::BTreeMap<String, usize> = [
             // raw_async, raw_sync, open_in_system (open::commands, isolated)
             ("backend/src/core/cmd.rs", 3),
+            // var, var_os, vars_os, take_process_environment_where: the live reads
+            ("backend/src/core/child_env.rs", 4),
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
             ("backend/tests/api_tests.rs", 1),
@@ -382,9 +384,11 @@ mod tests {
             let text = std::fs::read_to_string(&manifest).unwrap();
             assert!(!manifest_lowers_lints(&text), "{}", manifest.display());
         }
+        // Cargo reads `.cargo/config` from every parent of the crate.
         for dir in [
             backend.join(".."),
             backend.to_path_buf(),
+            backend.join("../desktop"),
             backend.join("../desktop/src-tauri"),
         ] {
             for name in ["config.toml", "config"] {
@@ -439,6 +443,8 @@ mod tests {
 
     /// A `[lints]` / `[workspace.lints]` table lowering one of the lints.
     fn manifest_lowers_lints(text: &str) -> bool {
+        // rustc reads `-` in a lint name as `_`.
+        let text = text.replace('-', "_");
         let mut table = String::new();
         for line in text.lines() {
             let line = line.split('#').next().unwrap().trim();
@@ -478,11 +484,24 @@ mod tests {
         if compact.contains("--cap-lints") {
             return true;
         }
+        // rustc reads `-` in a lint name as `_` (flags themselves keep theirs).
+        let compact = compact
+            .replace("--allow", "\u{1}")
+            .replace("-A", "\u{2}")
+            .replace("-W", "\u{3}")
+            .replace('-', "_")
+            .replace('\u{1}', "--allow")
+            .replace('\u{2}', "-A")
+            .replace('\u{3}', "-W");
+        if compact.contains("__cap_lints") {
+            return true;
+        }
         SPAWN_BAN_LINTS.iter().any(|lint| {
             [
                 format!("-A{lint}"),
                 format!("\"-A\",\"{lint}\""),
                 format!("--allow={lint}"),
+                format!("--allow{lint}"),
                 format!("\"--allow\",\"{lint}\""),
                 format!("-W{lint}"),
             ]
@@ -515,6 +534,7 @@ mod tests {
             "[lints.rust]\nwarnings = \"allow\"\n",
             "[workspace.lints.clippy]\nall = \"warn\"\n",
             "[lints]\nclippy.disallowed_methods = \"allow\"\n",
+            "[lints.clippy]\ndisallowed-methods = \"allow\"\n",
         ] {
             assert!(manifest_lowers_lints(manifest), "{manifest}");
         }
@@ -526,6 +546,9 @@ mod tests {
             "[build]\nrustflags = [\"-Awarnings\"]\n",
             "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"--cap-lints\", \"allow\"]\n",
             "[build]\nrustflags = [\"--allow=clippy::all\"]\n",
+            "[build]\nrustflags = [\"-Aclippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = \"--allow clippy::all\"\n",
+            "[build]\nrustflags = [\"--allow=clippy::disallowed-methods\"]\n",
         ] {
             assert!(rustflags_lower_lints(config), "{config}");
         }
@@ -585,6 +608,23 @@ mod tests {
             "libc::fexecve",
             "libc::posix_spawn",
             "libc::posix_spawnp",
+            "libc::execlpe",
+            "libc::wexecl",
+            "libc::wexecle",
+            "libc::wexeclp",
+            "libc::wexeclpe",
+            "libc::wexecv",
+            "libc::wexecve",
+            "libc::wexecvp",
+            "libc::wexecvpe",
+            "libc::exect",
+            "libc::pdfork",
+            "libc::daemon",
+            "tauri_plugin_shell::open::open",
+            "std::env::var",
+            "std::env::var_os",
+            "std::env::vars",
+            "std::env::vars_os",
         ];
         for entry in required {
             assert!(desktop_paths.contains(entry), "{entry} is not banned");

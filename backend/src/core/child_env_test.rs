@@ -628,91 +628,145 @@ fn an_approved_script_step_gets_its_launch_values_on_the_built_environment() {
     });
 }
 
-/// On the desktop, credentials leave the process environment (the system
-/// webview helpers inherit it) but still reach the builder (B6-07).
+/// What the desktop keeps live for the webview helpers: an allow-list, so a
+/// credential under any name, and a name that is not Unicode, is withheld
+/// (B7-01), while Kronn's own settings stay (B7-02).
+#[test]
+fn the_webview_keeps_an_allow_list_only() {
+    for kept in [
+        "PATH",
+        "HOME",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "GDK_BACKEND",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+        "WEBVIEW2_USER_DATA_FOLDER",
+        "RUST_LOG",
+        "KRONN_DATA_DIR",
+        "KRONN_USE_KEYCHAIN",
+        "KRONN_MCP_SECRET_REFERENCES",
+    ] {
+        assert!(webview_keeps(OsStr::new(kept)), "{kept}");
+    }
+    for withheld in [
+        "MYSQL_PWD",
+        "DEPLOY_PASSPHRASE",
+        "SENTRY_DSN",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "BW_SESSION",
+        "OP_SESSION_acme",
+        "ANTHROPIC_API_KEY",
+        "GH_TOKEN",
+        "KRONN_BRIDGE_TOKEN",
+        "KRONN_AUTH_TOKEN",
+        "OLLAMA_HOST",
+    ] {
+        assert!(!webview_keeps(OsStr::new(withheld)), "{withheld}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!webview_keeps(OsStr::from_bytes(b"X_TOKEN\xff")));
+    }
+}
+
+/// Withheld variables leave the process environment but still reach the
+/// builder and Kronn's own reads (B7-01, B7-02).
 #[test]
 #[serial_test::serial]
-fn withheld_credentials_leave_the_process_but_reach_the_builder() {
-    std::env::set_var("KRONN_WITHHOLD_SENTINEL_API_KEY", "sentinel");
-    std::env::set_var("KRONN_WITHHOLD_SENTINEL_PLAIN", "plain");
-    let held = take_process_credentials();
-    assert!(std::env::var_os("KRONN_WITHHOLD_SENTINEL_API_KEY").is_none());
-    assert_eq!(
-        std::env::var_os("KRONN_WITHHOLD_SENTINEL_PLAIN").as_deref(),
-        Some(OsStr::new("plain"))
-    );
-    std::env::remove_var("KRONN_WITHHOLD_SENTINEL_PLAIN");
-    for (name, value) in &held {
-        std::env::set_var(name, value); // give the test process its own back
+fn withheld_variables_leave_the_process_but_reach_kronn() {
+    let sentinels = [
+        ("MYSQL_PWD", "sentinel-mysql"),
+        ("DEPLOY_PASSPHRASE", "sentinel-passphrase"),
+        ("SENTRY_DSN", "https://key@sentry.example/1"),
+        ("KRONN_WITHHOLD_SENTINEL_API_KEY", "sentinel"),
+        ("KRONN_USE_KEYCHAIN", "1"),
+    ];
+    for (name, value) in sentinels {
+        std::env::set_var(name, value);
     }
-    assert!(held
-        .iter()
-        .any(|(name, _)| name == "KRONN_WITHHOLD_SENTINEL_API_KEY"));
-    std::env::remove_var("KRONN_WITHHOLD_SENTINEL_API_KEY");
+    let names: Vec<&str> = sentinels.iter().map(|(name, _)| *name).collect();
+    let held = take_process_environment_where(|name| {
+        !names.iter().any(|sentinel| name == *sentinel) || webview_keeps(name)
+    });
+    for (name, value) in sentinels {
+        let live = std::env::var_os(name);
+        if name == "KRONN_USE_KEYCHAIN" {
+            assert_eq!(live.as_deref(), Some(OsStr::new(value)), "{name}");
+        } else {
+            assert!(live.is_none(), "{name} stayed live");
+            let value_held = held
+                .iter()
+                .find_map(|(key, held)| (key == name).then_some(held));
+            assert_eq!(value_held.map(|v| v.to_str().unwrap()), Some(value));
+        }
+    }
+    // The keychain switch the error message recommends still works.
+    assert!(crate::core::keyvault::use_os_keychain());
+    for (name, _) in sentinels {
+        std::env::remove_var(name);
+    }
 
     let live = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
-    let withheld = vec![(
-        OsString::from("ANTHROPIC_API_KEY"),
-        OsString::from("sk-ant"),
-    )];
+    let withheld = vec![
+        (
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("sk-ant"),
+        ),
+        (OsString::from("MYSQL_PWD"), OsString::from("pw")),
+    ];
     let parent = with_withheld(live, &withheld);
-    let claude = names(&inherited_from(
+    let claude = names_of_vars(&inherited_from(
         ChildRoute::Agent(AgentFamily::Claude),
         parent.clone(),
     ));
     assert!(claude.contains(&"ANTHROPIC_API_KEY".to_string()));
-    let tool = names(&inherited_from(ChildRoute::Tool, parent));
+    assert!(!claude.contains(&"MYSQL_PWD".to_string()));
+    let tool = names_of_vars(&inherited_from(ChildRoute::Tool, parent));
     assert!(!tool.contains(&"ANTHROPIC_API_KEY".to_string()));
 }
 
-/// The desktop withholds credentials before Tauri starts its webview.
+fn names_of_vars(vars: &[(OsString, OsString)]) -> Vec<String> {
+    names(vars)
+}
+
+/// Windows compares environment names without case: a key exported in
+/// another case is still found (B7-04).
 #[test]
-fn the_desktop_withholds_credentials_before_the_webview_starts() {
+fn environment_names_compare_like_the_platform() {
+    let parent = with_withheld(
+        vec![(OsString::from("PATH"), OsString::from("/usr/bin"))],
+        &[(OsString::from("Gh_Token"), OsString::from("x"))],
+    );
+    let found = with_parent_env(&[("Gh_Token", "x")], || parent_var_string("GH_TOKEN"));
+    if cfg!(windows) {
+        assert_eq!(found.as_deref(), Some("x"));
+        assert!(same_name(OsStr::new("Gh_Token"), OsStr::new("GH_TOKEN")));
+        // No duplicate when the live environment has another case.
+        let merged = with_withheld(
+            vec![(OsString::from("gh_token"), OsString::from("live"))],
+            &[(OsString::from("GH_TOKEN"), OsString::from("held"))],
+        );
+        assert_eq!(merged.len(), 1);
+    } else {
+        assert_eq!(found, None);
+        assert!(!same_name(OsStr::new("Gh_Token"), OsStr::new("GH_TOKEN")));
+    }
+    assert_eq!(parent.len(), 2);
+}
+
+/// The desktop withholds its environment before Tauri starts its webview.
+#[test]
+fn the_desktop_withholds_its_environment_before_the_webview_starts() {
     let main = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/src-tauri/src/main.rs"),
     )
     .unwrap();
     let withhold = main
-        .find("child_env::withhold_process_credentials()")
-        .expect("the desktop never withholds credentials");
+        .find("child_env::withhold_process_environment()")
+        .expect("the desktop never withholds its environment");
     assert!(withhold < main.find("tauri::Builder::default()").unwrap());
     assert!(withhold < main.find("tracing_subscriber::").unwrap());
-}
-
-/// Kronn reads a credential-looking variable through `child_env`, never
-/// from the live process environment the desktop has emptied of them.
-#[test]
-fn kronn_reads_credentials_through_child_env() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut offenders = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if !name.ends_with(".rs") || name.ends_with("_test.rs") || name.ends_with("_tests.rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            let production = text.split("#[cfg(test)]").next().unwrap();
-            for opener in ["env::var(\"", "env::var_os(\""] {
-                for (at, _) in production.match_indices(opener) {
-                    let rest = &production[at + opener.len()..];
-                    let var = &rest[..rest.find('"').unwrap()];
-                    // Taken out of the environment before anything else runs.
-                    if var == "KRONN_AUTH_TOKEN" {
-                        continue;
-                    }
-                    if is_credential(var) {
-                        offenders.push(format!("{}: {var}", path.display()));
-                    }
-                }
-            }
-        }
-    }
-    assert!(offenders.is_empty(), "{offenders:?}");
 }

@@ -24,7 +24,7 @@ impl Drop for Scratch {
 
 fn scratch() -> Scratch {
     let dir = tempfile::tempdir().unwrap();
-    let previous = std::env::var_os("KRONN_DATA_DIR");
+    let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
     std::env::set_var("KRONN_DATA_DIR", dir.path());
     Scratch { dir, previous }
 }
@@ -32,13 +32,16 @@ fn scratch() -> Scratch {
 #[test]
 #[serial]
 fn scratch_restores_the_environment_even_after_a_test_changes_its_path() {
-    let before = std::env::var_os("KRONN_DATA_DIR");
+    let before = crate::core::child_env::var_os("KRONN_DATA_DIR");
     {
         let dir = scratch();
-        assert_eq!(std::env::var_os("KRONN_DATA_DIR").unwrap(), dir.path());
+        assert_eq!(
+            crate::core::child_env::var_os("KRONN_DATA_DIR").unwrap(),
+            dir.path()
+        );
         std::env::set_var("KRONN_DATA_DIR", dir.path().join("blocked"));
     }
-    assert_eq!(std::env::var_os("KRONN_DATA_DIR"), before);
+    assert_eq!(crate::core::child_env::var_os("KRONN_DATA_DIR"), before);
 }
 
 fn database() -> rusqlite::Connection {

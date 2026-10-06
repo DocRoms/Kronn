@@ -20,7 +20,7 @@ struct Environment(Vec<(&'static str, Option<OsString>)>);
 impl Environment {
     fn set(&mut self, name: &'static str, value: impl AsRef<std::ffi::OsStr>) {
         if !self.0.iter().any(|(key, _)| *key == name) {
-            self.0.push((name, std::env::var_os(name)));
+            self.0.push((name, kronn::core::child_env::var_os(name)));
         }
         // This binary holds one current-thread test: nothing else reads the
         // environment it changes.

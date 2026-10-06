@@ -23,7 +23,7 @@ struct DataDir {
 impl DataDir {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var("KRONN_DATA_DIR").ok();
+        let previous = crate::core::child_env::var("KRONN_DATA_DIR").ok();
         std::env::set_var("KRONN_DATA_DIR", dir.path());
         std::env::remove_var(crate::core::keyvault::ENV_KEK);
         Self { dir, previous }
@@ -594,7 +594,7 @@ async fn an_env_auth_token_is_stored_encrypted_and_leaves_the_environment() {
     let env_token = config::take_env_auth_token();
     assert_eq!(env_token.as_deref(), Some("operator-env-token-0007"));
     assert!(
-        std::env::var("KRONN_AUTH_TOKEN").is_err(),
+        crate::core::child_env::var("KRONN_AUTH_TOKEN").is_err(),
         "removed from the env"
     );
 

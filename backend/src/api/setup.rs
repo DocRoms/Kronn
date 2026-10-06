@@ -17,7 +17,7 @@ use chrono::Utc;
 /// On Linux/macOS: user home.
 fn default_scan_path() -> Option<String> {
     // Docker: mounted host home
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         return Some(host_home);
     }
 
@@ -1095,7 +1095,7 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
 fn sync_codex_auth(key: Option<&str>) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/root".into());
     let codex_auth_path = std::path::PathBuf::from(home)
         .join(".codex")
         .join("auth.json");
@@ -2830,7 +2830,7 @@ pub fn browse_roots(configured: &[String]) -> Vec<BrowseRoot> {
     if let Some(home) = directories::UserDirs::new() {
         push("Dossier personnel", home.home_dir().to_path_buf());
     }
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         push(
             "Dossier personnel (hôte)",
             crate::core::scanner::resolve_host_path(&host_home),
@@ -3837,7 +3837,7 @@ mod tests {
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var("KRONN_DATA_DIR").ok();
+        let previous = crate::core::child_env::var("KRONN_DATA_DIR").ok();
         std::env::set_var("KRONN_DATA_DIR", dir.path());
         f(dir.path().to_path_buf()).await;
         match previous {

@@ -29,7 +29,7 @@ pub fn resolve_base_url_pub(explicit: Option<&str>) -> String {
 /// Resolve the Ollama API base URL.
 /// Priority: OLLAMA_HOST env var > Docker heuristic > localhost.
 fn ollama_base_url() -> String {
-    if let Ok(host) = std::env::var("OLLAMA_HOST") {
+    if let Ok(host) = crate::core::child_env::var("OLLAMA_HOST") {
         if !host.is_empty() && host != "0.0.0.0" {
             if host.starts_with("http://") || host.starts_with("https://") {
                 return host;
@@ -50,7 +50,7 @@ fn detect_context() -> &'static str {
         return "native";
     }
     // Inside Docker: check KRONN_HOST_OS to distinguish WSL/macOS/Linux
-    match std::env::var("KRONN_HOST_OS").as_deref() {
+    match crate::core::child_env::var("KRONN_HOST_OS").as_deref() {
         Ok("WSL") => "docker_wsl",
         Ok("macOS") => "docker_macos",
         _ => "docker_linux",
@@ -224,7 +224,7 @@ pub async fn models(State(state): State<AppState>) -> Json<ApiResponse<OllamaMod
                 .into_iter()
                 .map(|tag| (tag.name, tag.size, tag.modified_at))
                 .collect();
-            let env_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+            let env_cap = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
             let machine = crate::agents::ollama_memory::MachineFacts::read();
             let overrides = state
                 .config

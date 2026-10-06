@@ -189,7 +189,7 @@ pub fn detect_host_label_public() -> String {
 /// Native: uses compile-time detection + env var override.
 fn detect_host_label() -> String {
     // 1. Trust the environment variable first (set by Makefile → .env → docker-compose)
-    if let Ok(host_os) = std::env::var("KRONN_HOST_OS") {
+    if let Ok(host_os) = crate::core::child_env::var("KRONN_HOST_OS") {
         if !host_os.is_empty() && host_os != "host" {
             return host_os;
         }
@@ -198,7 +198,7 @@ fn detect_host_label() -> String {
     #[cfg(target_os = "linux")]
     {
         // WSL2 always sets WSL_DISTRO_NAME — check it first (more reliable than /proc/version)
-        if std::env::var("WSL_DISTRO_NAME").is_ok() {
+        if crate::core::child_env::var("WSL_DISTRO_NAME").is_ok() {
             return "WSL".into();
         }
         if let Ok(version) = std::fs::read_to_string("/proc/version") {
@@ -225,7 +225,7 @@ fn detect_host_label() -> String {
 }
 
 pub(crate) fn host_is_macos() -> bool {
-    if let Ok(os) = std::env::var("KRONN_HOST_OS") {
+    if let Ok(os) = crate::core::child_env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }
     cfg!(target_os = "macos") || detect_host_label() == "macOS"
@@ -240,9 +240,9 @@ pub async fn detect_all() -> Vec<AgentDetection> {
     // Makefile/.env/docker-compose/entrypoint is the usual culprit.
     tracing::info!(
         target: "kronn::agent_detect",
-        host_os = %std::env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
-        host_home = %std::env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
-        host_bin = %std::env::var("KRONN_HOST_BIN").unwrap_or_else(|_| "<unset>".into()),
+        host_os = %crate::core::child_env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
+        host_home = %crate::core::child_env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
+        host_bin = %crate::core::child_env::var("KRONN_HOST_BIN").unwrap_or_else(|_| "<unset>".into()),
         host_label = %detect_host_label(),
         "starting agent detection sweep",
     );
@@ -552,7 +552,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
                     def.binary,
                     &loc.path,
                     resolved_version,
-                    std::env::var_os("PATH"),
+                    crate::core::child_env::var_os("PATH"),
                     SHADOW_PROBE_TIMEOUT,
                 )
                 .await
@@ -675,9 +675,9 @@ fn gemini_auth_signals(config: &AppConfig) -> GeminiAuthSignals {
         .iter()
         .any(|provider| provider == "google")
         && config.tokens.has_active_key_for("google");
-    let home = std::env::var_os("KRONN_HOST_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let home = crate::core::child_env::var_os("KRONN_HOST_HOME")
+        .or_else(|| crate::core::child_env::var_os("HOME"))
+        .or_else(|| crate::core::child_env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from);
     let application_default_credentials = application_default_credentials_exist(
         crate::core::child_env::parent_var("GOOGLE_APPLICATION_CREDENTIALS"),
@@ -823,17 +823,17 @@ fn opencode_auth_file_ready(path: &std::path::Path) -> bool {
 /// This mirrors Vibe, whose CLI-owned keyring Kronn also declines to
 /// second-guess.
 fn opencode_auth_ready() -> Option<bool> {
-    let home = std::env::var_os("KRONN_HOST_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let home = crate::core::child_env::var_os("KRONN_HOST_HOME")
+        .or_else(|| crate::core::child_env::var_os("HOME"))
+        .or_else(|| crate::core::child_env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from)?;
     opencode_auth_file_ready(&home.join(".local/share/opencode/auth.json")).then_some(true)
 }
 
 fn gemini_auth_ready(config: &AppConfig) -> bool {
-    let home = std::env::var_os("KRONN_HOST_HOME")
-        .or_else(|| std::env::var_os("HOME"))
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    let home = crate::core::child_env::var_os("KRONN_HOST_HOME")
+        .or_else(|| crate::core::child_env::var_os("HOME"))
+        .or_else(|| crate::core::child_env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from);
     let Some(home) = home else { return false };
     gemini_config_and_auth_ready(
@@ -944,8 +944,8 @@ fn detect_runtime_warning(agent_type: &AgentType) -> Option<String> {
     // Mirror of vibe-runner.py:_sdk_sentinel_path. Per-uid suffix +
     // XDG_RUNTIME_DIR / TMPDIR / /tmp fallback. Auto-clears on
     // machine reboot, so this warning is self-healing.
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
+    let base = crate::core::child_env::var("XDG_RUNTIME_DIR")
+        .or_else(|_| crate::core::child_env::var("TMPDIR"))
         .unwrap_or_else(|_| "/tmp".into());
     let uid_suffix = if cfg!(unix) {
         // Pull libc::getuid via a tiny detour: read /proc/self/status. Avoids
@@ -1052,7 +1052,7 @@ pub struct BinaryLocation {
 pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     // Collect host-bin directories once (used to check if a PATH-resolved binary
     // actually lives on a host mount and should be flagged as host_managed).
-    let host_dirs: Vec<std::path::PathBuf> = std::env::var("KRONN_HOST_BIN")
+    let host_dirs: Vec<std::path::PathBuf> = crate::core::child_env::var("KRONN_HOST_BIN")
         .ok()
         .map(|v| std::env::split_paths(&v).collect())
         .unwrap_or_default();
@@ -1061,7 +1061,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         target: "kronn::agent_detect",
         "find_binary('{}'): PATH={:?}, host_dirs={:?}",
         name,
-        std::env::var("PATH").ok(),
+        crate::core::child_env::var("PATH").ok(),
         host_dirs,
     );
 
@@ -1146,7 +1146,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             std::path::PathBuf::from("/var/lib/flatpak/exports/bin"),
             std::path::PathBuf::from("/run/current-system/sw/bin"),
         ];
-        if let Ok(home) = std::env::var("HOME") {
+        if let Ok(home) = crate::core::child_env::var("HOME") {
             linux_dirs.push(std::path::PathBuf::from(format!(
                 "{}/.local/share/flatpak/exports/bin",
                 home
@@ -1483,8 +1483,8 @@ mod tests {
             "GEMINI_CLI_USE_COMPUTE_ADC",
         ];
         let temp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var_os("KRONN_HOST_HOME");
-        let original_auth = AUTH_ENV.map(std::env::var_os);
+        let original_home = crate::core::child_env::var_os("KRONN_HOST_HOME");
+        let original_auth = AUTH_ENV.map(crate::core::child_env::var_os::<&str>);
         std::env::set_var("KRONN_HOST_HOME", temp.path());
         for name in AUTH_ENV {
             std::env::remove_var(name);
@@ -1542,7 +1542,7 @@ mod tests {
     #[serial]
     fn opencode_missing_auth_file_is_unknown_not_blocked() {
         let temp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_home = crate::core::child_env::var_os("KRONN_HOST_HOME");
         std::env::set_var("KRONN_HOST_HOME", temp.path());
 
         let config = crate::core::config::default_config();
@@ -1572,7 +1572,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let opencode_dir = temp.path().join(".local/share/opencode");
         std::fs::create_dir_all(&opencode_dir).unwrap();
-        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_home = crate::core::child_env::var_os("KRONN_HOST_HOME");
         std::env::set_var("KRONN_HOST_HOME", temp.path());
         let config = crate::core::config::default_config();
 
@@ -1599,8 +1599,8 @@ mod tests {
     #[serial]
     fn opencode_env_or_local_provider_credentials_are_not_second_guessed() {
         let temp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var_os("KRONN_HOST_HOME");
-        let original_key = std::env::var_os("ANTHROPIC_API_KEY");
+        let original_home = crate::core::child_env::var_os("KRONN_HOST_HOME");
+        let original_key = crate::core::child_env::var_os("ANTHROPIC_API_KEY");
         std::env::set_var("KRONN_HOST_HOME", temp.path());
         std::env::set_var("ANTHROPIC_API_KEY", "sk-env-configured");
 
@@ -1635,7 +1635,7 @@ mod tests {
             r#"{"opencode":{"type":"api","key":"sk-zen"}}"#,
         )
         .unwrap();
-        let original_home = std::env::var_os("KRONN_HOST_HOME");
+        let original_home = crate::core::child_env::var_os("KRONN_HOST_HOME");
         std::env::set_var("KRONN_HOST_HOME", temp.path());
 
         let config = crate::core::config::default_config();

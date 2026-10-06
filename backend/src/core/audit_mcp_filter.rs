@@ -144,7 +144,12 @@ pub fn is_allowed(name: &str, allowlist: &HashSet<String>) -> bool {
 /// Servers without a `mcpServers` root key are passed through unchanged
 /// (no servers to filter — the audit will run with 0 MCPs).
 pub fn filter_mcp_json(raw: &str) -> Result<(Value, AuditMcpFilterReport), serde_json::Error> {
-    filter_mcp_json_with_extra(raw, std::env::var(AUDIT_MCP_EXTRA_ENV).ok().as_deref())
+    filter_mcp_json_with_extra(
+        raw,
+        crate::core::child_env::var(AUDIT_MCP_EXTRA_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// Apply the audit allowlist with an explicitly supplied extra-server value.

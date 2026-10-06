@@ -64,7 +64,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     } else {
         "kronn=info,tower_http=info"
     };
-    let filter_src = std::env::var("RUST_LOG")
+    let filter_src = kronn::core::child_env::var("RUST_LOG")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| default_filter.to_string());
@@ -117,7 +117,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     //   2. A real container → 0.0.0.0 so nginx can reach us.
     //   3. `config.server.host` (default 127.0.0.1 — localhost only).
     let host = kronn::core::net_expose::resolve_bind_host(
-        std::env::var("KRONN_HOST").ok().as_deref(),
+        kronn::core::child_env::var("KRONN_HOST").ok().as_deref(),
         kronn::core::env::is_docker(),
         &app_config.server.host,
     );
@@ -132,7 +132,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // backend ran on any other port (sandbox tests, custom configs).
     // We only set it when the operator hasn't already pinned a value
     // (Docker compose may inject the cluster-internal hostname).
-    if std::env::var("KRONN_BACKEND_URL").is_err() {
+    if kronn::core::child_env::var("KRONN_BACKEND_URL").is_err() {
         // Loopback is correct for both native and Docker: agents run
         // inside the same container/process tree as the backend, so
         // 127.0.0.1:<port> always reaches us. Nginx + cross-container
@@ -180,8 +180,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // silently switch the guard to docker mode (where an unset KRONN_BIND
     // reads as "not exposed" even when the actual bind host is 0.0.0.0).
     let is_docker = kronn::core::env::is_docker();
-    let kronn_bind = std::env::var("KRONN_BIND").ok();
-    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
+    let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
     let exposed = kronn::core::net_expose::lan_exposed(is_docker, kronn_bind.as_deref(), &host);
@@ -827,7 +827,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // point at the UI. Without the override — Docker (the gateway serves the UI
     // on this port) or a bare backend — it shows the backend address as before.
     let backend_url = format!("http://{}:{}", host, port);
-    let dev_ui = std::env::var("KRONN_DEV_UI_URL")
+    let dev_ui = kronn::core::child_env::var("KRONN_DEV_UI_URL")
         .ok()
         .filter(|s| !s.is_empty());
     let entry = banner_entry_url(&backend_url, dev_ui.as_deref());

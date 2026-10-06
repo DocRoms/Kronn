@@ -287,7 +287,7 @@ const SHELL_PATH_TIMEOUT_SECS: u64 = 5;
 /// - Empty SHELL var
 #[cfg(unix)]
 fn shell_path_from_user_shell() -> Option<String> {
-    let shell = std::env::var("SHELL")
+    let shell = kronn::core::child_env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty() && s != "/bin/false" && std::path::Path::new(s).exists())
         .unwrap_or_else(|| "/bin/bash".to_string());
@@ -392,8 +392,8 @@ fn enrich_path() {
     // Step 0: ensure HOME is set BEFORE we start building paths from $HOME.
     // Some Tauri macOS launches strip HOME — recover it from $USER if missing.
     #[cfg(unix)]
-    if std::env::var("HOME").is_err() {
-        if let Ok(user) = std::env::var("USER") {
+    if kronn::core::child_env::var("HOME").is_err() {
+        if let Ok(user) = kronn::core::child_env::var("USER") {
             #[cfg(target_os = "macos")]
             let home_guess = format!("/Users/{}", user);
             #[cfg(not(target_os = "macos"))]
@@ -410,7 +410,7 @@ fn enrich_path() {
     #[cfg(not(target_os = "windows"))]
     let separator = ":";
 
-    let current_path = std::env::var("PATH").unwrap_or_default();
+    let current_path = kronn::core::child_env::var("PATH").unwrap_or_default();
     let mut paths: Vec<String> = current_path.split(separator).map(String::from).collect();
 
     // Step 1: try to load the full PATH from the user's shell (Unix only).
@@ -431,7 +431,7 @@ fn enrich_path() {
 
     #[cfg(unix)]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let home = kronn::core::child_env::var("HOME").unwrap_or_else(|_| "/root".to_string());
         extra_dirs.extend([
             // npm global (macOS/Linux)
             format!("{}/.local/bin", home),
@@ -485,7 +485,7 @@ fn enrich_path() {
     {
         // Windows GUI apps also inherit a minimal PATH. Add the standard
         // npm-global, cargo, python, scoop, chocolatey locations.
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        if let Ok(userprofile) = kronn::core::child_env::var("USERPROFILE") {
             extra_dirs.extend([
                 format!("{}\\AppData\\Roaming\\npm", userprofile),
                 format!("{}\\AppData\\Local\\npm", userprofile),
@@ -509,7 +509,7 @@ fn enrich_path() {
                 format!("{}\\.volta\\bin", userprofile),
             ]);
         }
-        if let Ok(programdata) = std::env::var("ProgramData") {
+        if let Ok(programdata) = kronn::core::child_env::var("ProgramData") {
             extra_dirs.push(format!("{}\\chocolatey\\bin", programdata));
         }
         extra_dirs.push("C:\\Program Files\\nodejs".to_string());
@@ -602,7 +602,7 @@ async fn start_backend(
 
     // Same LAN guard as the standalone backend: never serve the network with
     // an unauthenticated API.
-    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+    let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
     if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
@@ -979,8 +979,8 @@ fn main() {
     let env_token = kronn::core::config::take_env_auth_token();
     kronn::core::keyvault::take_env_kek();
     // The system webview starts its own helpers (WebKitGTK, WebView2) with
-    // this process's environment: credentials stay in memory instead.
-    kronn::core::child_env::withhold_process_credentials();
+    // this process's environment: only an allow-list stays live.
+    kronn::core::child_env::withhold_process_environment();
     // Initialize tracing
     // stdout plus the data directory's kronn.log, the log the user can read.
     {
@@ -1431,7 +1431,7 @@ mod enrich_path_tests {
     fn shell_path_from_user_shell_returns_none_for_invalid_shell() {
         // /bin/false is the canonical "shell that always exits 1" — must
         // gracefully return None instead of hanging or panicking.
-        let prev = std::env::var("SHELL").ok();
+        let prev = kronn::core::child_env::var("SHELL").ok();
         std::env::set_var("SHELL", "/bin/false");
         let result = shell_path_from_user_shell();
         // Either None (false rejected) or some PATH from the bash fallback —

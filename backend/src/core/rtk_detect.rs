@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// host-aware agent detection.
 pub fn rtk_binary_available() -> bool {
     if crate::core::env::is_docker() {
-        return std::env::var("KRONN_HOST_BIN")
+        return crate::core::child_env::var("KRONN_HOST_BIN")
             .map(|hb| {
                 std::env::split_paths(&hb).any(|dir| {
                     let p = dir.join("rtk");
@@ -148,7 +148,7 @@ fn config_mentions_rtk(path: &Path) -> bool {
 /// agent-config dirs via docker-compose. Tauri's HOME is the native user
 /// home. Either way, trust HOME.
 fn resolve_home() -> Option<PathBuf> {
-    std::env::var("HOME")
+    crate::core::child_env::var("HOME")
         .ok()
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
@@ -174,7 +174,7 @@ mod tests {
     fn with_home<F: FnOnce(&Path)>(f: F) {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
-        let prev = std::env::var("HOME").ok();
+        let prev = crate::core::child_env::var("HOME").ok();
         std::env::set_var("HOME", tmp.path());
         f(tmp.path());
         match prev {
@@ -199,8 +199,8 @@ mod tests {
     fn rtk_binary_available_in_docker_checks_host_bins() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
-        let prev_data = std::env::var("KRONN_IN_DOCKER").ok();
-        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+        let prev_data = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
+        let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
         std::env::set_var("KRONN_IN_DOCKER", "1"); // → is_docker() == true
         std::env::set_var("KRONN_HOST_BIN", tmp.path());
 

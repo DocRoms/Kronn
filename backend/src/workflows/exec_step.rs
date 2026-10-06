@@ -268,7 +268,7 @@ async fn execute_exec_step_inner(
     // calls resolve volumes correctly. Falls through to the original path
     // when the env var is unset (non-Docker dev setups) or the host path
     // isn't reachable (self-mount not configured).
-    let host_workdir: String = match std::env::var("KRONN_HOST_HOME") {
+    let host_workdir: String = match crate::core::child_env::var("KRONN_HOST_HOME") {
         Ok(host_home) if work_dir.starts_with("/host-home") && !host_home.is_empty() => {
             let candidate = work_dir.replacen("/host-home", host_home.trim_end_matches('/'), 1);
             if std::path::Path::new(&candidate).exists() {

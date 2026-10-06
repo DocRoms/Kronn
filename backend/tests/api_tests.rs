@@ -14402,7 +14402,7 @@ async fn ollama_pull_route_proxies_fragmented_ndjson_bounds_failures_and_cancels
         .with_state(mock_state);
     let (upstream_url, upstream_task) = spawn(upstream).await;
 
-    let previous_host = std::env::var("OLLAMA_HOST").ok();
+    let previous_host = kronn::core::child_env::var("OLLAMA_HOST").ok();
     struct RestoreEnv(Option<String>);
     impl Drop for RestoreEnv {
         fn drop(&mut self) {
@@ -14509,8 +14509,8 @@ async fn ollama_context_override_route_set_reset_and_model_projection() {
         .mount(&server)
         .await;
 
-    let previous_host = std::env::var("OLLAMA_HOST").ok();
-    let previous_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+    let previous_host = kronn::core::child_env::var("OLLAMA_HOST").ok();
+    let previous_cap = kronn::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
     std::env::set_var("OLLAMA_HOST", server.uri());
     std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
 
@@ -16369,12 +16369,12 @@ fn test_state_without_fixture() -> AppState {
 #[tokio::test]
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
-    if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
+    if kronn::core::child_env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
         // Ordinary non-serial router tests can initialize this OnceLock too.
         // Snapshot only after its process-wide environment setup has settled.
         isolate_config_dir();
-        let parent_data_dir = std::env::var_os("KRONN_DATA_DIR");
-        let parent_host_home = std::env::var_os("KRONN_HOST_HOME");
+        let parent_data_dir = kronn::core::child_env::var_os("KRONN_DATA_DIR");
+        let parent_host_home = kronn::core::child_env::var_os("KRONN_HOST_HOME");
         for mode in ["red", "green", "blocked"] {
             let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
             let data_dir = sentinel_root.path().join("data");
@@ -16437,24 +16437,32 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                     );
                 }
             }
-            assert_eq!(std::env::var_os("KRONN_DATA_DIR"), parent_data_dir);
-            assert_eq!(std::env::var_os("KRONN_HOST_HOME"), parent_host_home);
+            assert_eq!(
+                kronn::core::child_env::var_os("KRONN_DATA_DIR"),
+                parent_data_dir
+            );
+            assert_eq!(
+                kronn::core::child_env::var_os("KRONN_HOST_HOME"),
+                parent_host_home
+            );
         }
         return;
     }
 
-    let sentinel =
-        std::path::PathBuf::from(std::env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"));
-    let red = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
+    let sentinel = std::path::PathBuf::from(
+        kronn::core::child_env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"),
+    );
+    let red = kronn::core::child_env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
     let state = if red {
         test_state_without_fixture()
     } else {
         test_state()
     };
-    let blocked = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
+    let blocked = kronn::core::child_env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
     let host_fixture = (!red).then(|| {
         std::path::PathBuf::from(
-            std::env::var_os("KRONN_HOST_HOME").expect("normal test harness host fixture"),
+            kronn::core::child_env::var_os("KRONN_HOST_HOME")
+                .expect("normal test harness host fixture"),
         )
     });
     if let Some(host_fixture) = &host_fixture {

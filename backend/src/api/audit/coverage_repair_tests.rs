@@ -53,7 +53,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
             "Template baseline.\n".repeat(100),
         )
         .unwrap();
-        let _restore = TemplatesEnv(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = TemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         std::env::set_var("KRONN_TEMPLATES_DIR", templates.path());
         let project = tempfile::tempdir().unwrap();
         let initialized = crate::core::cmd::git_cmd()

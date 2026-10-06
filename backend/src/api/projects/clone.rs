@@ -107,7 +107,7 @@ async fn candidate_clone_urls(url: &str, state: &AppState) -> Vec<String> {
     } else {
         Vec::new()
     };
-    let has_ssh_keys = std::env::var("HOME")
+    let has_ssh_keys = crate::core::child_env::var("HOME")
         .ok()
         .map(|h| std::path::PathBuf::from(h).join(".ssh"))
         .map(|d| d.join("id_rsa").exists() || d.join("id_ed25519").exists())
@@ -394,7 +394,7 @@ async fn resolve_existing_clone_parent(
     if let Some(common) = find_common_parent(&on_disk) {
         candidates.push(common);
     }
-    if let Ok(repos_dir) = std::env::var("KRONN_REPOS_DIR") {
+    if let Ok(repos_dir) = crate::core::child_env::var("KRONN_REPOS_DIR") {
         candidates.push(repos_dir);
     }
     {

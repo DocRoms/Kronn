@@ -187,8 +187,8 @@ pub async fn activate(
             "rtk binary not found on PATH. Install RTK first.".to_string(),
         ));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".into());
-    let host_home = std::env::var_os("KRONN_HOST_HOME").map(PathBuf::from);
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "<unset>".into());
+    let host_home = crate::core::child_env::var_os("KRONN_HOST_HOME").map(PathBuf::from);
 
     // Pre-create `$HOME/.config/rtk` — RTK uses this for its own state
     // (config.toml, telemetry). If the dir chain has to be created and
@@ -307,7 +307,7 @@ pub async fn deactivate(
             "rtk binary not found on PATH.".to_string(),
         ));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "<unset>".into());
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "<unset>".into());
 
     let mut per_agent: Vec<RtkAgentActivation> = Vec::new();
     let mut combined_stdout = String::new();
