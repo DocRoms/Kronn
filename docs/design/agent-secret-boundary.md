@@ -486,15 +486,24 @@ them.
 
 *Desktop webview helpers.* On Linux (WebKitGTK) and Windows (WebView2) the
 system webview starts its own helper processes with the desktop's process
-environment, outside `core::cmd`. The desktop therefore moves every credential
-(provider keys, GitHub variables, secret-looking names) out of its process
-environment at start, before any thread or window
-(`child_env::withhold_process_credentials`, after the admin token and the key
-override). The builder and Kronn's own readers still see them through
-`child_env::parent_var`, so a configured route keeps its key; the test
-`kronn_reads_credentials_through_child_env` refuses a direct
-`std::env::var` of a credential-looking name. The helpers get the desktop's
-environment without any credential; the relaunch below gets them back.
+environment, outside `core::cmd`. The desktop therefore keeps only a reviewed
+allow-list in its process environment and withholds everything else at start,
+before any thread or window (`child_env::withhold_process_environment`, after
+the admin token and the key override). The allow-list is the base list
+(PATH, HOME, locale, temp dirs, proxies, TLS stores, XDG directories,
+toolchains, Windows essentials), display and session plumbing (`DISPLAY`,
+`WAYLAND_*`, `XAUTHORITY`, `DBUS_*`, `DESKTOP_SESSION`, AppImage's `APPDIR`
+and `LD_LIBRARY_PATH`), toolkit and runtime prefixes (`XDG_`, `GDK_`, `GTK_`,
+`GIO_`, `GST_`, `WEBKIT_`, `WEBVIEW2_`, `LIBGL_`, `MESA_`, `QT_`, `TAURI_`,
+`RUST_`, `DYLD_`…) and `KRONN_*`, never a credential-looking name, except
+Kronn's own settings that only look like one (`KRONN_USE_KEYCHAIN`,
+`KRONN_MCP_SECRET_REFERENCES`). A credential under any name, and any name
+that is not Unicode, is withheld. Every environment read in Kronn goes through
+`child_env::var` / `var_os` / `vars_os` (live value, else the withheld one):
+both clippy files refuse `std::env::var`, `var_os`, `vars` and `vars_os`
+outside `child_env`, so no read can miss a withheld variable. Child routes see
+withheld variables through the same overlay; names compare case-insensitively
+on Windows. The relaunch below gets them all back.
 
 One declared exception remains, and only on the desktop: the app relaunching
 itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through

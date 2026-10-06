@@ -258,10 +258,11 @@ Release notes for 0.9.3 and earlier are available in the
   an MCP server, which may come from a repository's
   `.mcp.json`, starts it with only its own configured values. An
   operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
-  start, like the admin token. On the desktop, provider keys, GitHub
-  tokens and other credentials also leave the process environment at start,
-  so the system webview's helper processes (Linux, Windows) never inherit
-  them; Kronn and its agents still get them. npm registry credentials
+  start, like the admin token. On the desktop, only an allow-list (display,
+  locale, paths, proxies, toolkit and Kronn settings) stays in the process
+  environment, so the system webview's helper processes (Linux, Windows)
+  never inherit a credential, whatever its name; Kronn and its agents still
+  get every variable, and `KRONN_USE_KEYCHAIN=0` keeps working. npm registry credentials
   (`npm_config__auth` and its registry-scoped forms) are dropped like any
   other secret.
 - `git push` and `gh` PR creation use the project's own GitHub connection,
