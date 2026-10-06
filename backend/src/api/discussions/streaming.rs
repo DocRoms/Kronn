@@ -7158,14 +7158,15 @@ mod resume_delta_tests {
         impl Drop for RestoreAdapterEnv {
             fn drop(&mut self) {
                 if let Some(value) = self.0.as_ref() {
-                    std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", value);
+                    crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", value);
                 } else {
-                    std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+                    crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
                 }
             }
         }
-        let _restore = RestoreAdapterEnv(std::env::var_os("KRONN_ACP_ADAPTER_CLAUDE"));
-        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "1");
+        let _restore =
+            RestoreAdapterEnv(crate::core::child_env::var_os("KRONN_ACP_ADAPTER_CLAUDE"));
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "1");
 
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         let store = AcpSessionStore::new(db.clone(), "adapted-claude-disc");

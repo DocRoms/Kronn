@@ -159,13 +159,13 @@ async fn wal_disabled_skips_the_reader_and_falls_back() {
     // shared lock can BLOCK the writer — the companion must not exist
     // there. Observable: a write through with_read_conn SUCCEEDS (it's
     // the write connection, no query_only guard).
-    let prev_wal = std::env::var("KRONN_DB_WAL").ok();
-    std::env::set_var("KRONN_DB_WAL", "0");
+    let prev_wal = crate::core::child_env::var("KRONN_DB_WAL").ok();
+    crate::core::child_env::set_var("KRONN_DB_WAL", "0");
     let tmp = tempfile::TempDir::new().unwrap();
     let db = crate::db::Database::open_path(&tmp.path().join("nowal.db"));
     match prev_wal {
-        Some(v) => std::env::set_var("KRONN_DB_WAL", v),
-        None => std::env::remove_var("KRONN_DB_WAL"),
+        Some(v) => crate::core::child_env::set_var("KRONN_DB_WAL", v),
+        None => crate::core::child_env::remove_var("KRONN_DB_WAL"),
     }
     let db = db.unwrap();
 
@@ -1232,6 +1232,7 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
                     description: "x".into(),
                 }],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         // User never created a config for this one — sync must NOT
@@ -1259,6 +1260,7 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
                 config_keys: vec![],
                 endpoints: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
     ];
@@ -1921,6 +1923,8 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }],
         actions: vec![],
@@ -5432,6 +5436,8 @@ fn workflow_multi_step_roundtrip() {
                 read_only_repos: vec![],
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
+                exec_agent_written: None,
+                exec_agent_lines: vec![],
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
@@ -5503,6 +5509,8 @@ fn workflow_multi_step_roundtrip() {
                 read_only_repos: vec![],
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
+                exec_agent_written: None,
+                exec_agent_lines: vec![],
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
             WorkflowStep {
@@ -5571,6 +5579,8 @@ fn workflow_multi_step_roundtrip() {
                 read_only_repos: vec![],
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
+                exec_agent_written: None,
+                exec_agent_lines: vec![],
                 sub_workflow_variables: std::collections::HashMap::new(),
             },
         ],
@@ -5694,6 +5704,8 @@ fn workflow_update_steps_count() {
         read_only_repos: vec![],
         exec_script_files: vec![],
         exec_unmodelled_args_approved: None,
+        exec_agent_written: None,
+        exec_agent_lines: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();

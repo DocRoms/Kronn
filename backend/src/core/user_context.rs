@@ -38,11 +38,11 @@ use std::path::{Path, PathBuf};
 /// Overridable via the `KRONN_USER_CONTEXT_DIR` env var (used in tests
 /// and Docker mounts that point elsewhere).
 pub fn user_context_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("KRONN_USER_CONTEXT_DIR") {
+    if let Ok(dir) = crate::core::child_env::var("KRONN_USER_CONTEXT_DIR") {
         return PathBuf::from(dir);
     }
     // Resolve $HOME — falls back to /home/kronn (Docker default) if unset.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/kronn".to_string());
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/home/kronn".to_string());
     PathBuf::from(home).join(".kronn/user-context")
 }
 
@@ -185,9 +185,9 @@ mod tests {
 
     fn with_temp_dir<F: FnOnce(&Path)>(f: F) {
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("KRONN_USER_CONTEXT_DIR", tmp.path());
+        crate::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", tmp.path());
         f(tmp.path());
-        std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+        crate::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     }
 
     #[test]
@@ -195,7 +195,7 @@ mod tests {
     fn read_returns_empty_when_dir_missing_and_bootstraps_readme() {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("nonexistent");
-        std::env::set_var("KRONN_USER_CONTEXT_DIR", &dir);
+        crate::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", &dir);
         let result = read_user_context();
         assert!(result.is_empty(), "no files yet → empty");
         assert!(dir.exists(), "bootstrap created the directory");
@@ -203,7 +203,7 @@ mod tests {
             dir.join("README.md").is_file(),
             "bootstrap created README.md"
         );
-        std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+        crate::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     }
 
     #[test]
@@ -279,9 +279,9 @@ mod tests {
     #[test]
     #[serial]
     fn user_context_dir_respects_env_var() {
-        std::env::set_var("KRONN_USER_CONTEXT_DIR", "/custom/path");
+        crate::core::child_env::set_var("KRONN_USER_CONTEXT_DIR", "/custom/path");
         assert_eq!(user_context_dir(), PathBuf::from("/custom/path"));
-        std::env::remove_var("KRONN_USER_CONTEXT_DIR");
+        crate::core::child_env::remove_var("KRONN_USER_CONTEXT_DIR");
     }
 
     // ─── memory prelude (T6) ──────────────────────────────────────────

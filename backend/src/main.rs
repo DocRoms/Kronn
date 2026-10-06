@@ -64,7 +64,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     } else {
         "kronn=info,tower_http=info"
     };
-    let filter_src = std::env::var("RUST_LOG")
+    let filter_src = kronn::core::child_env::var("RUST_LOG")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| default_filter.to_string());
@@ -97,6 +97,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .init();
 
     tracing::info!("tracing initialized — filter: {}", filter_src);
+    kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {
@@ -117,7 +118,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     //   2. A real container → 0.0.0.0 so nginx can reach us.
     //   3. `config.server.host` (default 127.0.0.1 — localhost only).
     let host = kronn::core::net_expose::resolve_bind_host(
-        std::env::var("KRONN_HOST").ok().as_deref(),
+        kronn::core::child_env::var("KRONN_HOST").ok().as_deref(),
         kronn::core::env::is_docker(),
         &app_config.server.host,
     );
@@ -132,12 +133,16 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // backend ran on any other port (sandbox tests, custom configs).
     // We only set it when the operator hasn't already pinned a value
     // (Docker compose may inject the cluster-internal hostname).
-    if std::env::var("KRONN_BACKEND_URL").is_err() {
+    if kronn::core::child_env::var("KRONN_BACKEND_URL").is_err() {
         // Loopback is correct for both native and Docker: agents run
         // inside the same container/process tree as the backend, so
         // 127.0.0.1:<port> always reaches us. Nginx + cross-container
         // setups override this via the env.
-        std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
+        // The runtime runs: the overlay, never a live write.
+        kronn::core::child_env::set_overlay_var(
+            "KRONN_BACKEND_URL",
+            format!("http://127.0.0.1:{}", port),
+        );
     }
 
     // Open database
@@ -180,8 +185,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // silently switch the guard to docker mode (where an unset KRONN_BIND
     // reads as "not exposed" even when the actual bind host is 0.0.0.0).
     let is_docker = kronn::core::env::is_docker();
-    let kronn_bind = std::env::var("KRONN_BIND").ok();
-    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+    let kronn_bind = kronn::core::child_env::var("KRONN_BIND").ok();
+    let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
     let exposed = kronn::core::net_expose::lan_exposed(is_docker, kronn_bind.as_deref(), &host);
@@ -647,7 +652,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // Skipped while the credential store is locked: they would go to config.toml in clear.
     if kronn::core::credential_store::refuse_credential_change().is_ok() {
         let discovered = kronn::core::key_discovery::discover_keys().await;
-        let mut config = state.config.write().await;
+        // Adopted only once saved: a failed save never leaves unsaved keys live.
+        let mut live = state.config.write().await;
+        let mut config = live.clone();
         let mut imported = 0u32;
         for dk in discovered {
             if !config.tokens.keys.iter().any(|k| k.value == dk.value) {
@@ -664,12 +671,13 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         }
         if imported > 0 {
             match config::save(&config).await {
-                Ok(_) => tracing::info!("Auto-imported {} API key(s) from agent configs", imported),
-                // Don't log success over a failed persist: the keys exist only
-                // in memory and silently vanish (with any user edits layered
-                // on them) at the next restart.
+                Ok(_) => {
+                    *live = config;
+                    tracing::info!("Auto-imported {} API key(s) from agent configs", imported)
+                }
                 Err(e) => tracing::error!(
-                    "Auto-imported {} API key(s) but saving config.toml FAILED: {e} — keys are in-memory only until the next successful save",
+                    "Found {} API key(s) in agent configs but saving them FAILED: {e:#}; none \
+                     was imported",
                     imported
                 ),
             }
@@ -827,7 +835,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     // point at the UI. Without the override — Docker (the gateway serves the UI
     // on this port) or a bare backend — it shows the backend address as before.
     let backend_url = format!("http://{}:{}", host, port);
-    let dev_ui = std::env::var("KRONN_DEV_UI_URL")
+    let dev_ui = kronn::core::child_env::var("KRONN_DEV_UI_URL")
         .ok()
         .filter(|s| !s.is_empty());
     let entry = banner_entry_url(&backend_url, dev_ui.as_deref());

@@ -677,7 +677,7 @@ mod tests {
         // KRONN_TEMPLATES_DIR is consumed by resolve_templates_dir
         // when set; the function honors it as the override so tests
         // can point at our fake templates root.
-        std::env::set_var("KRONN_TEMPLATES_DIR", &templates);
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", &templates);
         (tmp, project)
     }
 
@@ -877,12 +877,12 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 match &self.0 {
-                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = Restore(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         let target = "docs/inconsistencies-tech-debt.md";
         let (_tmp, project) = fixture(target, 0, 512);
         let project = project.as_path();
@@ -1065,7 +1065,7 @@ mod tests {
         // the size ratio is 100% but the placeholders remain.
         std::fs::write(project.join("docs/decisions.md"), &template_body).unwrap();
         // Also overwrite the template (the fixture wrote `y`-bytes).
-        let tpl_dir = std::env::var("KRONN_TEMPLATES_DIR").unwrap();
+        let tpl_dir = crate::core::child_env::var("KRONN_TEMPLATES_DIR").unwrap();
         std::fs::write(
             std::path::PathBuf::from(tpl_dir).join("docs/decisions.md"),
             &template_body,
@@ -1129,16 +1129,16 @@ mod tests {
         impl Drop for Restore {
             fn drop(&mut self) {
                 match &self.0 {
-                    Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-                    None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+                    Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+                    None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("KRONN_TEMPLATES_DIR"));
+        let _restore = Restore(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
         let target = "docs/AGENTS.md";
         let (_tmp, project) = fixture(target, 0, 0);
         let template = format!("# Doc\n{{{{ONE}}}}\n{{{{TWO}}}}\n{}", "padding ".repeat(40));
-        let templates = std::env::var_os("KRONN_TEMPLATES_DIR").unwrap();
+        let templates = crate::core::child_env::var_os("KRONN_TEMPLATES_DIR").unwrap();
         std::fs::write(std::path::Path::new(&templates).join(target), &template).unwrap();
 
         std::fs::write(project.join(target), template.replace("{{ONE}}", "written")).unwrap();
@@ -1268,7 +1268,7 @@ mod tests {
         std::fs::create_dir_all(project.join("docs")).unwrap();
         std::fs::write(project.join("docs/inconsistencies-security.md"), "").unwrap();
         // Force resolver away from real templates dir.
-        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
         let (success, warn) =
             validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);
@@ -1296,7 +1296,7 @@ mod tests {
         std::fs::create_dir_all(project.join("docs")).unwrap();
         let dest = project.join("docs/inconsistencies-security.md");
         std::fs::write(&dest, "partial agent output").unwrap();
-        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
         let (success, warn) =
             validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);

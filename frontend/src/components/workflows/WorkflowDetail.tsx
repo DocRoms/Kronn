@@ -206,6 +206,8 @@ export interface WorkflowDetailProps {
   onChangeStepAgent?: (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => Promise<void>;
   /** KT-1017 — apply the suggested rewrite of an unsafe Exec command line. */
   onApplyUnsafeFix?: (issue: UnsafeExecStep) => Promise<void>;
+  /** KT-1017 — a human approves a step that waits for it. */
+  onApproveUnsafeStep?: (issue: UnsafeExecStep) => Promise<void>;
   totalRuns?: number;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
@@ -1578,7 +1580,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1866,7 +1868,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
       </div>
 
       {onApplyUnsafeFix && (
-        <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} />
+        <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} onApprove={onApproveUnsafeStep} />
       )}
 
       {/* Trigger info */}

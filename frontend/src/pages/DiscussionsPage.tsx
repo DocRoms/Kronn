@@ -1,4 +1,5 @@
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
+import { workflowExecLines } from '../lib/agentExecLines';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -4862,11 +4863,21 @@ export function DiscussionsPage({
                 const qaCount = Array.isArray(payload.quick_apis) ? payload.quick_apis.length : 0;
                 const caCount = Array.isArray(payload.custom_apis) ? payload.custom_apis.length : 0;
                 const extras = qpCount + qaCount + caCount;
+                const execLines = [
+                  ...workflowExecLines(payload.workflow),
+                  ...(Array.isArray(payload.child_workflows) ? payload.child_workflows : []).flatMap(workflowExecLines),
+                ];
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
                     <p className="disc-cta-text" data-variant="accent">
                       <Zap size={14} /> {t('wf.aiBundleReady', qpCount, qaCount, caCount)}
                     </p>
+                    {execLines.length > 0 && (
+                      <div className="disc-cta-exec-lines">
+                        <p className="text-xs">{t('wf.aiExecLines')}</p>
+                        <pre className="text-xs">{execLines.join('\n')}</pre>
+                      </div>
+                    )}
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
                       try {
                         await workflowsApi.createBundle(payload);
@@ -4904,14 +4915,21 @@ export function DiscussionsPage({
                 if (!payload.project_id && activeDiscussion.project_id) {
                   payload.project_id = activeDiscussion.project_id;
                 }
+                const execLines = workflowExecLines(payload);
                 return (
                   <div className="disc-cta-banner" data-variant="accent">
                     <p className="disc-cta-text" data-variant="accent">
                       <Zap size={14} /> {t('wf.aiWorkflowReady')}
                     </p>
+                    {execLines.length > 0 && (
+                      <div className="disc-cta-exec-lines">
+                        <p className="text-xs">{t('wf.aiExecLines')}</p>
+                        <pre className="text-xs">{execLines.join('\n')}</pre>
+                      </div>
+                    )}
                     <button className="disc-cta-btn" data-variant="accent" onClick={async () => {
                       try {
-                        await workflowsApi.create(payload as unknown as Parameters<typeof workflowsApi.create>[0]);
+                        await workflowsApi.createAgentProposal(payload);
                         onNavigate('workflows');
                       } catch (e) {
                         console.warn('Failed to create workflow:', e);

@@ -248,7 +248,7 @@ pub(super) async fn determine_parent_dir(state: &AppState) -> Result<String, Str
         .unwrap_or_default();
     if let Some(common) = find_common_parent(&existing) {
         Ok(common)
-    } else if let Ok(repos_dir) = std::env::var("KRONN_REPOS_DIR") {
+    } else if let Ok(repos_dir) = crate::core::child_env::var("KRONN_REPOS_DIR") {
         Ok(repos_dir)
     } else {
         let config = state.config.read().await;

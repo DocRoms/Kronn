@@ -32,9 +32,29 @@ use crate::models::*;
 use crate::AppState;
 
 /// POST /api/workflows/bundle
+/// `POST /api/workflows/bundle` — an agent's `KRONN:BUNDLE_READY` proposal,
+/// accepted by a human click: its lines are the agent's (KT-1017), so any run
+/// value waits for a human's approval in the editor.
 pub async fn create_bundle(
     State(state): State<AppState>,
-    Json(mut req): Json<BundleRequest>,
+    Json(req): Json<BundleRequest>,
+) -> Json<ApiResponse<BundleResponse>> {
+    create_bundle_as(state, req, crate::api::workflows::WorkflowWriter::Agent).await
+}
+
+/// `POST /api/workflows/bundle/human` — the wizard's own decomposed preset,
+/// saved by the human who filled it: its approvals stand.
+pub async fn create_human_bundle(
+    State(state): State<AppState>,
+    Json(req): Json<BundleRequest>,
+) -> Json<ApiResponse<BundleResponse>> {
+    create_bundle_as(state, req, crate::api::workflows::WorkflowWriter::Human).await
+}
+
+async fn create_bundle_as(
+    state: AppState,
+    mut req: BundleRequest,
+    writer: crate::api::workflows::WorkflowWriter,
 ) -> Json<ApiResponse<BundleResponse>> {
     // ── 1. Validate bundle_id uniqueness ──────────────────────
     // We treat all three sections as one namespace because a
@@ -246,10 +266,10 @@ pub async fn create_bundle(
     // Workflow needs the same fields the regular `create` endpoint
     // composes; reuse `Workflow` directly so we don't drift from the
     // canonical shape.
-    // A bundle comes from an agent's chat signal: it never carries a human's
-    // approval of unmodelled programs (KT-1017).
-    crate::api::workflows::clear_human_approvals(&mut req.workflow.steps);
-    crate::api::workflows::clear_human_approvals(&mut req.workflow.on_failure);
+    // An agent's bundle never carries an approval and its lines are the
+    // agent's; the wizard's keeps what its human ticked (KT-1017).
+    mark_bundle_lines(&mut req.workflow.steps, writer);
+    mark_bundle_lines(&mut req.workflow.on_failure, writer);
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
         project_scope: req.workflow.project_scope.clone(),
@@ -344,8 +364,8 @@ pub async fn create_bundle(
     }
 
     for child in &mut prepared_children {
-        crate::api::workflows::clear_human_approvals(&mut child.steps);
-        crate::api::workflows::clear_human_approvals(&mut child.on_failure);
+        mark_bundle_lines(&mut child.steps, writer);
+        mark_bundle_lines(&mut child.on_failure, writer);
     }
     // Exec lines get the same save-time rules as the editor (allowlist,
     // inline-code interpolation), for the parent and every child.
@@ -547,10 +567,108 @@ fn substitute_bundle_refs(v: &mut serde_json::Value, id_map: &HashMap<String, St
     }
 }
 
+/// The writer marks of a new bundle's lines, read from who sent it, never
+/// from the payload.
+fn mark_bundle_lines(
+    steps: &mut [crate::models::WorkflowStep],
+    writer: crate::api::workflows::WorkflowWriter,
+) {
+    crate::api::workflows::drop_foreign_fields(steps);
+    if writer == crate::api::workflows::WorkflowWriter::Agent {
+        crate::api::workflows::clear_human_approvals(steps);
+        crate::api::workflows::blank_unpinned_hashes(steps, &[]);
+    }
+    crate::api::workflows::mark_line_writers(steps, &[], writer);
+    crate::api::workflows::clear_stale_approvals(steps);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn bundle_state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn bundle_with(command: &str, args: serde_json::Value) -> BundleRequest {
+        serde_json::from_value(json!({
+            "workflow": {
+                "name": "bundle", "project_id": null, "trigger": {"type": "Manual"},
+                "exec_allowlist": [command],
+                "steps": [{"name": "run", "step_type": {"type": "Exec"}, "exec_command": command,
+                           "exec_args": args, "exec_unmodelled_args_approved": true}]
+            }
+        }))
+        .unwrap()
+    }
+
+    async fn stored_step(state: &AppState) -> crate::models::WorkflowStep {
+        state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap()
+            .remove(0)
+            .steps
+            .remove(0)
+    }
+
+    /// R6-02: an agent's `KRONN:BUNDLE_READY` bundle is agent-written: its
+    /// lines wait for a human, whatever the payload claims.
+    #[tokio::test]
+    async fn an_agent_bundle_waits_for_a_human() {
+        let state = bundle_state();
+        let Json(created) = create_bundle(
+            State(state.clone()),
+            Json(bundle_with(
+                "bash",
+                json!(["-c", "terraform plan \"$1\"", "_", "{{issue.title}}"]),
+            )),
+        )
+        .await;
+        assert!(created.success, "{:?}", created.error);
+        let step = stored_step(&state).await;
+        assert_eq!(step.exec_unmodelled_args_approved, None);
+        assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
+        assert!(crate::core::inline_code::runtime_refusal(&step).is_some());
+    }
+
+    /// F-04: an agent bundle never brings a script hash.
+    #[tokio::test]
+    async fn an_agent_bundle_blanks_its_script_hashes() {
+        let state = bundle_state();
+        let mut request = bundle_with("python3", json!(["tool.py"]));
+        request.workflow.steps[0].exec_unmodelled_args_approved = None;
+        request.workflow.steps[0].exec_script_files = vec![crate::models::ExecScriptFile {
+            path: "tool.py".into(),
+            sha256: "a".repeat(64),
+        }];
+        let Json(created) = create_bundle(State(state.clone()), Json(request)).await;
+        assert!(created.success, "{:?}", created.error);
+        assert_eq!(stored_step(&state).await.exec_script_files[0].sha256, "");
+    }
+
+    /// R6-12: the wizard's own decomposed preset keeps the approval its human
+    /// ticked.
+    #[tokio::test]
+    async fn the_wizard_bundle_keeps_its_human_approval() {
+        let state = bundle_state();
+        let Json(created) = create_human_bundle(
+            State(state.clone()),
+            Json(bundle_with("aws", json!(["s3", "ls", "{{b}}"]))),
+        )
+        .await;
+        assert!(created.success, "{:?}", created.error);
+        let step = stored_step(&state).await;
+        assert_eq!(step.exec_unmodelled_args_approved, Some(true));
+        assert!(step.exec_agent_lines.is_empty());
+        assert_eq!(crate::core::inline_code::runtime_refusal(&step), None);
+    }
 
     #[test]
     fn validate_bundle_id_accepts_kebab_and_snake() {

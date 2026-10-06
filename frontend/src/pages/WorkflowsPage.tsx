@@ -1031,6 +1031,27 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
+  // KT-1017 — the step's one approval covers every line that needs it; a
+  // human's save sets it (an agent's never does).
+  const approveUnsafeStep = async (issue: UnsafeExecStep) => {
+    const workflow = detailWorkflow;
+    if (!workflow) return;
+    const approve = (chain: WorkflowStep[]) => chain.map(step => (
+      step.name === issue.step_name ? { ...step, exec_unmodelled_args_approved: true } : step
+    ));
+    try {
+      const updated = await workflowsApi.update(
+        workflow.id,
+        issue.on_failure ? { on_failure: approve(workflow.on_failure ?? []) } : { steps: approve(workflow.steps) },
+      );
+      setDetailWorkflow(current => current?.id === workflow.id ? updated : current);
+      void refetch();
+      toastProp?.(t('wf.unsafeApproved', issue.step_name), 'success');
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+    }
+  };
+
   const changeStepAgent = async (stepIndex: number, agent: AgentType, tier: ModelTier, connectionId?: string | null) => {
     const workflow = detailWorkflow;
     const step = workflow?.steps[stepIndex];
@@ -2823,6 +2844,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 availableAgentTypes={installedAgentTypes}
                 onChangeStepAgent={changeStepAgent}
                 onApplyUnsafeFix={applyUnsafeFix}
+                onApproveUnsafeStep={approveUnsafeStep}
                 agentChoices={compareAgentChoices}
                 totalRuns={detailRunTotal}
                 hasMoreRuns={hasMoreDetailRuns}

@@ -116,6 +116,20 @@ def _load_module(isolate=True, isolate_http=None, isolate_telemetry=True):
     return module
 
 
+class WriteNoticeTests(unittest.TestCase):
+    """KT-1017: a write that leaves Exec lines to a human says so."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_a_notice_reaches_the_agent_with_the_data(self):
+        envelope = {"success": True, "data": {"id": "w"}, "notice": "approve plan"}
+        self.assertEqual(
+            self.mod._unwrap(envelope), {"id": "w", "kronn_notice": "approve plan"}
+        )
+        self.assertEqual(self.mod._unwrap({"success": True, "data": {"id": "w"}}), {"id": "w"})
+
+
 class DeclaredStepToolsTests(unittest.TestCase):
     """KT-908: a workflow step's `--step-tools=` list is the whole surface."""
 

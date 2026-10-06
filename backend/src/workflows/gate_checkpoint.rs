@@ -442,7 +442,7 @@ mod tests {
         // simulated inherited Git context. Keeping that environment mutation
         // in the child avoids redirecting Git commands from concurrently
         // running tests in this test binary.
-        if let Some(target) = std::env::var_os(INHERITED_CONTEXT_TARGET_ENV) {
+        if let Some(target) = crate::core::child_env::var_os(INHERITED_CONTEXT_TARGET_ENV) {
             let target = PathBuf::from(target);
             let out = commit_checkpoint(&target, "pre-merge", "run-abc");
             assert!(

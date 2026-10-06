@@ -190,6 +190,10 @@ pub struct ApiResponse<T: Serialize> {
     /// when unset so legacy clients + untouched handlers are unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// Something a successful write leaves to a human (KT-1017: Exec lines an
+    /// agent wrote that wait for an approval). Omitted when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 impl<T: Serialize> ApiResponse<T> {
@@ -199,6 +203,7 @@ impl<T: Serialize> ApiResponse<T> {
             data: Some(data),
             error: None,
             error_code: None,
+            notice: None,
         }
     }
 
@@ -208,6 +213,7 @@ impl<T: Serialize> ApiResponse<T> {
             data: None,
             error: Some(msg.into()),
             error_code: None,
+            notice: None,
         }
     }
 
@@ -219,7 +225,14 @@ impl<T: Serialize> ApiResponse<T> {
             data: None,
             error: Some(msg.into()),
             error_code: Some(code.as_str().to_string()),
+            notice: None,
         }
+    }
+
+    /// The same response with a notice for whoever made the write.
+    pub fn with_notice(mut self, notice: Option<String>) -> Self {
+        self.notice = notice;
+        self
     }
 }
 

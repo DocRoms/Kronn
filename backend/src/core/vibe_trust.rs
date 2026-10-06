@@ -37,13 +37,13 @@ pub struct TrustStore {
 /// Vibe honours `VIBE_HOME` above `~/.vibe`; `KRONN_HOST_HOME` covers the
 /// Docker case where the container's `HOME` is not the user's.
 pub fn vibe_home() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("VIBE_HOME") {
+    if let Ok(explicit) = crate::core::child_env::var("VIBE_HOME") {
         if !explicit.trim().is_empty() {
             return Some(PathBuf::from(explicit));
         }
     }
     for key in ["KRONN_HOST_HOME", "HOME", "USERPROFILE"] {
-        if let Ok(home) = std::env::var(key) {
+        if let Ok(home) = crate::core::child_env::var(key) {
             if !home.trim().is_empty() {
                 return Some(PathBuf::from(home).join(".vibe"));
             }

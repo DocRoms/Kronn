@@ -627,3 +627,349 @@ fn an_approved_script_step_gets_its_launch_values_on_the_built_environment() {
         }
     });
 }
+
+/// What the desktop keeps live for the webview helpers: an allow-list, so a
+/// credential under any name, and a name that is not Unicode, is withheld
+/// (B7-01), while Kronn's own settings stay (B7-02).
+#[test]
+fn the_webview_keeps_an_allow_list_only() {
+    for kept in [
+        "PATH",
+        "HOME",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "GDK_BACKEND",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+        "WEBVIEW2_USER_DATA_FOLDER",
+        "RUST_LOG",
+        "SNAP",
+        "SNAP_NAME",
+    ] {
+        assert!(webview_keeps(OsStr::new(kept)), "{kept}");
+    }
+    for withheld in [
+        "MYSQL_PWD",
+        "DEPLOY_PASSPHRASE",
+        "SENTRY_DSN",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "BW_SESSION",
+        "OP_SESSION_acme",
+        "ANTHROPIC_API_KEY",
+        "GH_TOKEN",
+        "KRONN_BRIDGE_TOKEN",
+        "KRONN_AUTH_TOKEN",
+        "OLLAMA_HOST",
+        "KRONN_FAILURE_NOTIFY_URL",
+        "KRONN_DATA_DIR",
+        "KRONN_USE_KEYCHAIN",
+        "SNAPLET_TARGET_DATABASE_URL",
+    ] {
+        assert!(!webview_keeps(OsStr::new(withheld)), "{withheld}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(!webview_keeps(OsStr::from_bytes(b"X_TOKEN\xff")));
+    }
+}
+
+/// Withheld variables leave the process environment but still reach the
+/// builder and Kronn's own reads (B7-01, B7-02).
+#[test]
+#[serial_test::serial]
+fn withheld_variables_leave_the_process_but_reach_kronn() {
+    let sentinels = [
+        ("MYSQL_PWD", "sentinel-mysql"),
+        ("DEPLOY_PASSPHRASE", "sentinel-passphrase"),
+        ("SENTRY_DSN", "https://key@sentry.example/1"),
+        ("KRONN_WITHHOLD_SENTINEL_API_KEY", "sentinel"),
+    ];
+    for (name, value) in sentinels {
+        crate::core::child_env::set_var(name, value);
+    }
+    let names: Vec<&str> = sentinels.iter().map(|(name, _)| *name).collect();
+    let held = take_process_environment_where(|name| {
+        !names.iter().any(|sentinel| name == *sentinel) || webview_keeps(name)
+    });
+    for (name, value) in sentinels {
+        assert!(std::env::var_os(name).is_none(), "{name} stayed live");
+        let value_held = held
+            .iter()
+            .find_map(|(key, held)| (key == name).then_some(held));
+        assert_eq!(value_held.map(|v| v.to_str().unwrap()), Some(value));
+    }
+    for (name, _) in sentinels {
+        crate::core::child_env::remove_var(name);
+    }
+
+    let live = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+    let withheld = vec![
+        (
+            OsString::from("ANTHROPIC_API_KEY"),
+            OsString::from("sk-ant"),
+        ),
+        (OsString::from("MYSQL_PWD"), OsString::from("pw")),
+    ];
+    let parent = with_withheld(live, &withheld);
+    let claude = names_of_vars(&inherited_from(
+        ChildRoute::Agent(AgentFamily::Claude),
+        parent.clone(),
+    ));
+    assert!(claude.contains(&"ANTHROPIC_API_KEY".to_string()));
+    assert!(!claude.contains(&"MYSQL_PWD".to_string()));
+    let tool = names_of_vars(&inherited_from(ChildRoute::Tool, parent));
+    assert!(!tool.contains(&"ANTHROPIC_API_KEY".to_string()));
+}
+
+fn names_of_vars(vars: &[(OsString, OsString)]) -> Vec<String> {
+    names(vars)
+}
+
+/// Windows compares environment names without case: a key exported in
+/// another case is still found (B7-04).
+#[test]
+fn environment_names_compare_like_the_platform() {
+    let parent = with_withheld(
+        vec![(OsString::from("PATH"), OsString::from("/usr/bin"))],
+        &[(OsString::from("Gh_Token"), OsString::from("x"))],
+    );
+    let found = with_parent_env(&[("Gh_Token", "x")], || parent_var_string("GH_TOKEN"));
+    if cfg!(windows) {
+        assert_eq!(found.as_deref(), Some("x"));
+        assert!(same_name(OsStr::new("Gh_Token"), OsStr::new("GH_TOKEN")));
+        // No duplicate when the live environment has another case.
+        let merged = with_withheld(
+            vec![(OsString::from("gh_token"), OsString::from("live"))],
+            &[(OsString::from("GH_TOKEN"), OsString::from("held"))],
+        );
+        assert_eq!(merged.len(), 1);
+    } else {
+        assert_eq!(found, None);
+        assert!(!same_name(OsStr::new("Gh_Token"), OsStr::new("GH_TOKEN")));
+    }
+    assert_eq!(parent.len(), 2);
+}
+
+/// The desktop withholds its environment before Tauri starts its webview.
+#[test]
+fn the_desktop_withholds_its_environment_before_the_webview_starts() {
+    let main = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/src-tauri/src/main.rs"),
+    )
+    .unwrap();
+    let withhold = main
+        .find("child_env::withhold_process_environment()")
+        .expect("the desktop never withholds its environment");
+    assert!(withhold < main.find("tauri::Builder::default()").unwrap());
+    assert!(withhold < main.find("tracing_subscriber::").unwrap());
+}
+
+/// Kronn's reads fall back to the withheld set: a variable the desktop
+/// withheld still resolves, without duplicates (B8-05, B8-01).
+#[test]
+fn reads_fall_back_to_withheld_variables() {
+    let names = [
+        "KRONN_R8_SENTINEL_HOST",
+        "KRONN_FAILURE_NOTIFY_URL",
+        "KRONN_USE_KEYCHAIN",
+        "Kronn_R8_Mixed_Token",
+    ];
+    for name in names {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "{name} is set in the test env"
+        );
+    }
+    with_withheld_env(
+        &[
+            ("KRONN_R8_SENTINEL_HOST", "h"),
+            ("KRONN_FAILURE_NOTIFY_URL", "https://hooks.example/secret"),
+            ("KRONN_USE_KEYCHAIN", "1"),
+            ("Kronn_R8_Mixed_Token", "x"),
+            ("PATH", "withheld-duplicate"),
+        ],
+        || {
+            assert_eq!(var("KRONN_R8_SENTINEL_HOST").as_deref(), Ok("h"));
+            assert_eq!(
+                var_os("KRONN_R8_SENTINEL_HOST").as_deref(),
+                Some(OsStr::new("h"))
+            );
+            assert_eq!(
+                var("KRONN_FAILURE_NOTIFY_URL").as_deref(),
+                Ok("https://hooks.example/secret")
+            );
+            // The keychain switch the error message recommends works through
+            // the overlay, though the desktop withholds it (B7-02).
+            assert!(crate::core::keyvault::use_os_keychain());
+            let all = vars_os();
+            assert!(all
+                .iter()
+                .any(|(key, value)| key == "KRONN_R8_SENTINEL_HOST" && value == "h"));
+            // A live variable wins and is listed once.
+            assert_eq!(all.iter().filter(|(key, _)| key == "PATH").count(), 1);
+            assert_ne!(var("PATH").as_deref(), Ok("withheld-duplicate"));
+            if cfg!(windows) {
+                assert_eq!(var("KRONN_R8_MIXED_TOKEN").as_deref(), Ok("x"));
+            }
+        },
+    );
+    assert!(var("KRONN_R8_SENTINEL_HOST").is_err());
+}
+
+/// Writes keep the overlay consistent: a removed variable is gone from the
+/// withheld set too, and once the desktop withholds, a name off the webview
+/// allow-list is never set live (B8-04).
+#[test]
+#[serial_test::serial]
+fn writes_keep_the_withheld_set_consistent() {
+    with_withheld_env(&[("KRONN_R8_X_TOKEN", "v")], || {
+        assert_eq!(var("KRONN_R8_X_TOKEN").as_deref(), Ok("v"));
+        remove_var("KRONN_R8_X_TOKEN");
+        assert_eq!(var("KRONN_R8_X_TOKEN"), Err(std::env::VarError::NotPresent));
+
+        set_var("KRONN_R8_MYSQL_PWD", "pw");
+        assert!(std::env::var_os("KRONN_R8_MYSQL_PWD").is_none());
+        assert_eq!(var("KRONN_R8_MYSQL_PWD").as_deref(), Ok("pw"));
+        remove_var("KRONN_R8_MYSQL_PWD");
+
+        // An allow-listed name is set live.
+        set_var("WEBKIT_R8_SENTINEL", "1");
+        assert_eq!(
+            std::env::var_os("WEBKIT_R8_SENTINEL").as_deref(),
+            Some(OsStr::new("1"))
+        );
+        remove_var("WEBKIT_R8_SENTINEL");
+        assert!(std::env::var_os("WEBKIT_R8_SENTINEL").is_none());
+    });
+    // Outside the desktop policy, writes are plain.
+    set_var("KRONN_R8_PLAIN_TOKEN", "t");
+    assert_eq!(
+        std::env::var_os("KRONN_R8_PLAIN_TOKEN").as_deref(),
+        Some(OsStr::new("t"))
+    );
+    remove_var("KRONN_R8_PLAIN_TOKEN");
+}
+
+/// After the desktop withholds, a write of a name off the allow-list never
+/// touches the live environment (B9-01).
+#[test]
+fn live_writes_follow_the_withholding_policy() {
+    let active = Withheld {
+        active: true,
+        vars: Vec::new(),
+    };
+    assert_eq!(
+        live_write(&active, OsStr::new("KRONN_BACKEND_URL")),
+        LiveWrite::None
+    );
+    assert_eq!(
+        live_write(&active, OsStr::new("MYSQL_PWD")),
+        LiveWrite::None
+    );
+    assert_eq!(live_write(&active, OsStr::new("PATH")), LiveWrite::Set);
+    let inactive = Withheld::default();
+    assert_eq!(
+        live_write(&inactive, OsStr::new("KRONN_BACKEND_URL")),
+        LiveWrite::Set
+    );
+}
+
+/// A value set once threads run lives in the overlay only (B9-01).
+#[test]
+fn overlay_values_are_read_but_never_live() {
+    with_withheld_state(false, &[], || {
+        set_overlay_var("KRONN_R9_OVERLAY_URL", "http://127.0.0.1:1");
+        assert!(std::env::var_os("KRONN_R9_OVERLAY_URL").is_none());
+        assert_eq!(
+            var("KRONN_R9_OVERLAY_URL").as_deref(),
+            Ok("http://127.0.0.1:1")
+        );
+        assert!(vars_os()
+            .iter()
+            .any(|(key, _)| key == "KRONN_R9_OVERLAY_URL"));
+    });
+}
+
+/// Withholding activates the policy and merges into the withheld set: a
+/// second call keeps what the first one and `set_var` put there (B9-02).
+#[test]
+#[serial_test::serial]
+fn withholding_merges_and_activates() {
+    with_withheld_state(false, &[], || {
+        std::env::set_var("KRONN_R9_SENTINEL_TOKEN", "first");
+        withhold_where(|name| name != "KRONN_R9_SENTINEL_TOKEN");
+        assert!(std::env::var_os("KRONN_R9_SENTINEL_TOKEN").is_none());
+        assert_eq!(var("KRONN_R9_SENTINEL_TOKEN").as_deref(), Ok("first"));
+        assert!(withheld_variables()
+            .iter()
+            .any(|(key, _)| key == "KRONN_R9_SENTINEL_TOKEN"));
+
+        set_var("KRONN_R9_LATER", "x");
+        assert!(
+            std::env::var_os("KRONN_R9_LATER").is_none(),
+            "an active policy keeps a later write off the live environment"
+        );
+
+        std::env::set_var("KRONN_R9_SECOND_TOKEN", "second");
+        withhold_where(|name| name != "KRONN_R9_SECOND_TOKEN");
+        let held = withheld_variables();
+        for name in [
+            "KRONN_R9_SENTINEL_TOKEN",
+            "KRONN_R9_LATER",
+            "KRONN_R9_SECOND_TOKEN",
+        ] {
+            assert!(held.iter().any(|(key, _)| key == name), "{name} lost");
+        }
+    });
+}
+
+/// Live writes happen before any thread: the desktop enriches PATH in `main`
+/// before withholding, and both binaries keep the backend URL in the overlay
+/// (B9-01).
+#[test]
+fn live_environment_writes_happen_before_threads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let desktop = std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
+    let main_fn = &desktop[desktop.find("fn main() {").unwrap()..];
+    let enrich = main_fn.find("enrich_path()").expect("main enriches PATH");
+    let withhold = main_fn
+        .find("child_env::withhold_process_environment()")
+        .unwrap();
+    assert!(enrich < withhold);
+    let backend_start = &desktop[desktop.find("async fn start_backend(").unwrap()..];
+    let backend_start = &backend_start[..backend_start.find("\n}\n").unwrap()];
+    assert!(
+        !backend_start.contains("enrich_path()"),
+        "not after threads start"
+    );
+    let backend = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    for text in [&desktop, &backend] {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("child_env::set_var(\"KRONN_BACKEND_URL\""));
+        assert!(compact.contains("child_env::set_overlay_var(\"KRONN_BACKEND_URL\""));
+    }
+}
+
+/// §2 and §9 state the exec-time environment block residual (B9-05).
+#[test]
+fn the_design_note_states_the_environment_block_residual() {
+    let note = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/design/agent-secret-boundary.md"),
+    )
+    .unwrap();
+    let section = |start: &str, end: &str| -> String {
+        let from = note.find(start).unwrap();
+        let to = from + note[from..].find(end).unwrap();
+        note[from..to].replace('\n', " ")
+    };
+    assert!(section("## 2. ", "## 3. ").contains("exec-time environment block"));
+    assert!(section("## 9. ", "**Layer B").contains("exec-time environment block"));
+    // The relaunch hands back both forbidden names it re-adds.
+    let relaunch = section("One declared exception remains", "The MCP probe");
+    assert!(relaunch.contains("key override") && relaunch.contains("KRONN_AUTH_TOKEN"));
+    let residual = section("relaunch re-creates", "Kronn warns");
+    assert!(residual.contains("KRONN_AUTH_TOKEN"));
+}

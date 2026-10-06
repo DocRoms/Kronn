@@ -312,6 +312,23 @@ fn armed_for(dir: &Path) -> Option<Arc<Armed>> {
     armed_map().get(dir).cloned()
 }
 
+/// Keep these rows (just put back, not yet loaded) out of any save's deletes
+/// until the next successful boot replaces the store.
+pub fn preserve_rows(dir: &Path, rows: &[(String, String)]) {
+    if let Some(armed) = armed_for(dir) {
+        armed
+            .preserve
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(rows.iter().cloned());
+    }
+}
+
+/// Test seam: data directories whose next credential boot fails.
+#[cfg(test)]
+pub(crate) static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(Default::default);
+
 /// Whether credentials of `dir` live in the encrypted store.
 pub fn is_armed(dir: &Path) -> bool {
     armed_for(dir).is_some()
@@ -457,6 +474,14 @@ pub async fn boot(
     env_auth_token: Option<&str>,
     mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
+    #[cfg(test)]
+    if FAIL_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(dir)
+    {
+        anyhow::bail!("credential boot failure (test)");
+    }
     // Until armed below, saves may only keep what config.toml holds now.
     note_file_credentials(dir, config);
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {
@@ -529,9 +554,11 @@ pub async fn boot(
         merged.push(PlainCredential::auth_token(
             uuid::Uuid::new_v4().to_string(),
         ));
-        // A restore never changes whether auth is on.
+        // A restore never changes whether auth is on, and a start never
+        // turns off an auth already on (a token row lost after a kill).
         if mode == BootMode::Startup {
-            config.server.auth_enabled = crate::core::env::auth_on_by_default();
+            config.server.auth_enabled =
+                config.server.auth_enabled || crate::core::env::auth_on_by_default();
         }
         generated_auth_token = true;
         tracing::info!(
@@ -600,7 +627,7 @@ fn toml_holds_secrets(text: &str) -> bool {
 
 /// Whether a config.toml text carries a token or credential value (the key
 /// itself aside: a backup encrypted under that key would protect nothing).
-fn toml_holds_credentials(text: &str) -> bool {
+pub(crate) fn toml_holds_credentials(text: &str) -> bool {
     let Ok(table) = text.parse::<toml::Table>() else {
         // Unparseable: treat as sensitive rather than skip the backup.
         return true;
@@ -633,7 +660,10 @@ fn toml_holds_credentials(text: &str) -> bool {
 
 /// Encrypt the current config.toml to [`BACKUP_FILENAME`] (0600) when it still
 /// holds secrets. An existing backup is kept: it is the oldest original.
-fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn back_up_config_if_it_holds_secrets(
+    dir: &Path,
+    key_hex: &str,
+) -> Result<Option<PathBuf>> {
     let backup = dir.join(BACKUP_FILENAME);
     if backup.exists() {
         return Ok(Some(backup));
@@ -649,9 +679,8 @@ fn back_up_config_if_it_holds_secrets(dir: &Path, key_hex: &str) -> Result<Optio
     let key = crypto::parse_secret(key_hex).map_err(anyhow::Error::msg)?;
     let encrypted = crypto::encrypt(&text, &key).map_err(anyhow::Error::msg)?;
     let tmp = dir.join(format!(".{BACKUP_FILENAME}.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, &backup, encrypted.as_bytes())
         .context("write config backup")?;
-    std::fs::rename(&tmp, &backup).context("move config backup into place")?;
     Ok(Some(backup))
 }
 
@@ -665,9 +694,8 @@ pub fn reencrypt_backup(dir: &Path, from_hex: &str, to_hex: &str) -> Result<bool
     let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
     let encrypted = crypto::encrypt(&text, &to).map_err(anyhow::Error::msg)?;
     let tmp = dir.join(format!(".{BACKUP_FILENAME}.reencrypt.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, encrypted.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, &path, encrypted.as_bytes())
         .context("write config backup")?;
-    std::fs::rename(&tmp, &path).context("move config backup into place")?;
     Ok(true)
 }
 
@@ -757,7 +785,7 @@ fn migration_backup_paths(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
+pub(crate) fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -788,9 +816,8 @@ fn scrub_one_backup(dir: &Path, path: &Path, key_hex: &str) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let tmp = dir.join(format!(".{file}.scrub.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, content.as_bytes())
+    crate::core::keyvault::write_private_atomic(&tmp, path, content.as_bytes())
         .with_context(|| format!("write {file}"))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("move {file} into place"))?;
     Ok(())
 }
 

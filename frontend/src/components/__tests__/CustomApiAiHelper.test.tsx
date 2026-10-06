@@ -199,6 +199,12 @@ describe('applyToCustomForm', () => {
     ]);
   });
 
+  it('extracts a trimmed test endpoint and ignores blank or non-string values', () => {
+    expect(applyToCustomForm({ test_endpoint: ' /users/me ' }).test_endpoint).toBe('/users/me');
+    expect(applyToCustomForm({ test_endpoint: '  ' }).test_endpoint).toBeUndefined();
+    expect(applyToCustomForm({ test_endpoint: 42 }).test_endpoint).toBeUndefined();
+  });
+
   it('omits default headers when none survive or the payload is not an array', () => {
     expect(applyToCustomForm({ default_headers: [] }).default_headers).toBeUndefined();
     expect(applyToCustomForm({ default_headers: [{ name: 'Authorization', value: 'x' }] }).default_headers).toBeUndefined();
@@ -233,6 +239,14 @@ describe('buildSystemPrompt', () => {
     expect(prompt).toContain('"default_headers": [');
     expect(prompt).toContain('Notion-Version');
     expect(prompt).toContain('NEVER put Authorization or a secret there');
+  });
+
+  it('asks the agent for a side-effect-free test endpoint', () => {
+    const translate = (key: string) => en[key] ?? key;
+    const prompt = buildSystemPrompt(translate);
+
+    expect(prompt).toContain('"test_endpoint": "/sobjects/Account"');
+    expect(prompt).toContain('a GET without `{param}` that changes nothing');
   });
 });
 

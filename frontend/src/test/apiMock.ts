@@ -481,7 +481,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),
-      execLineCheck: resolve({ unmodelled_program: null }),
+      execLineCheck: resolve({ unmodelled_program: null, covered: [] }),
       execScriptStatus: resolve([]),
       create: resolve({}),
       update: resolve({}),

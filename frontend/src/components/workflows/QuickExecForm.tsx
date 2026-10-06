@@ -136,6 +136,9 @@ export function QuickExecForm({ editExec, projects, onSave, onCancel }: QuickExe
           <UnmodelledApproval
             command={command}
             args={args.split('\n').filter(argument => argument.length > 0)}
+            agentWritten={editExec?.agent_written === true
+              && command === editExec.command
+              && args === editExec.args.join('\n')}
             approved={unmodelledApproved}
             onChange={setUnmodelledApproved}
           />

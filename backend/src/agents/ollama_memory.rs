@@ -319,7 +319,7 @@ pub(crate) fn ceiling_for_model(inputs: &CeilingInputs) -> ModelCeiling {
 /// launchd environment where the Ollama app reads it from.
 fn server_env(name: &str) -> Option<String> {
     let set = |raw: String| Some(raw.trim().to_string()).filter(|value| !value.is_empty());
-    if let Some(value) = std::env::var(name).ok().and_then(set) {
+    if let Some(value) = crate::core::child_env::var(name).ok().and_then(set) {
         return Some(value);
     }
     #[cfg(target_os = "macos")]
@@ -404,7 +404,8 @@ fn model_stores() -> Vec<PathBuf> {
         add(PathBuf::from(dir));
     }
     for variable in ["HOME", "KRONN_HOST_HOME"] {
-        if let Some(home) = std::env::var_os(variable).filter(|home| !home.is_empty()) {
+        if let Some(home) = crate::core::child_env::var_os(variable).filter(|home| !home.is_empty())
+        {
             add(PathBuf::from(home).join(".ollama").join("models"));
         }
     }

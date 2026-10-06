@@ -20,4 +20,11 @@ describe('exportAndDownload', () => {
     await exportAndDownload(async () => ({ blob: new Blob(['z']), warning: null }), toast, t);
     expect(toast).not.toHaveBeenCalled();
   });
+
+  it('shows one toast per warning, locked-secrets files included (CF-09)', async () => {
+    const toast = vi.fn();
+    await exportAndDownload(async () => ({ blob: new Blob(['z']), warning: 'no-recovery-passphrase,locked-secrets-not-exported' }), toast, t);
+    expect(toast).toHaveBeenCalledWith('config.exportNoRecoveryWarning', 'error');
+    expect(toast).toHaveBeenCalledWith('config.exportLockedSecretsWarning', 'error');
+  });
 });

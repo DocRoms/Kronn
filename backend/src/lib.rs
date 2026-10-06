@@ -44,6 +44,23 @@ pub async fn resolve_key_and_credentials(
     database: &Arc<Database>,
     env_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
+    resolve_key_and_credentials_in_mode(
+        config,
+        database,
+        env_auth_token,
+        crate::core::credential_store::BootMode::Startup,
+    )
+    .await
+}
+
+/// As [`resolve_key_and_credentials`]; `BootMode::Restore` (a running instance
+/// setting up a key again) never changes whether auth is enabled.
+pub async fn resolve_key_and_credentials_in_mode(
+    config: &mut AppConfig,
+    database: &Arc<Database>,
+    env_auth_token: Option<String>,
+    mode: crate::core::credential_store::BootMode,
+) -> anyhow::Result<()> {
     let key_outcome = match crate::core::keystore::reconcile(config, database).await {
         Ok(outcome) => {
             tracing::info!("Encryption key reconciled: {outcome:?}");
@@ -61,7 +78,7 @@ pub async fn resolve_key_and_credentials(
         &dir,
         &key_outcome,
         env_auth_token.as_deref(),
-        crate::core::credential_store::BootMode::Startup,
+        mode,
     )
     .await
     {
@@ -88,6 +105,10 @@ pub async fn resolve_key_and_credentials(
             {
                 config.server.auth_locked = true;
                 config.server.auth_enabled = true;
+            }
+            // Auth on with no token loaded is never "open": fail closed.
+            if config.server.auth_enabled && config.server.auth_token.is_none() {
+                config.server.auth_locked = true;
             }
         }
     }
@@ -657,10 +678,15 @@ const AUTH_LOCKED_ROUTES: &[&str] = &[
 /// also set a new token: the explicit replacement of that row.
 const AUTH_LOCKED_ROUTES_WITH_KEY: &[&str] = &["/api/config/auth-token/regenerate"];
 
+/// With the key lost, a local caller may set the locked secrets aside and
+/// start a new key (non-secret data stays).
+const AUTH_LOCKED_ROUTES_WITHOUT_KEY: &[&str] = &["/api/config/recovery/start-new-key"];
+
 fn auth_locked_allows(path: &str, local_caller: bool, key_in_use: bool) -> bool {
     local_caller
         && (AUTH_LOCKED_ROUTES.contains(&path)
-            || (key_in_use && AUTH_LOCKED_ROUTES_WITH_KEY.contains(&path)))
+            || (key_in_use && AUTH_LOCKED_ROUTES_WITH_KEY.contains(&path))
+            || (!key_in_use && AUTH_LOCKED_ROUTES_WITHOUT_KEY.contains(&path)))
 }
 
 fn auth_locked_refusal() -> axum::response::Response {
@@ -1053,6 +1079,7 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/config/recovery/set",
     "/api/config/recovery/restore",
     "/api/config/recovery/reencrypt",
+    "/api/config/recovery/start-new-key",
     "/api/audit-runs/cleanup",
     "/api/api-call-logs/purge",
     "/api/debug/logs/clear",
@@ -1374,6 +1401,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/config/recovery/reencrypt",
             post(api::setup::reencrypt_imported),
+        )
+        .route(
+            "/api/config/recovery/start-new-key",
+            post(api::setup::start_new_key),
         )
         .route(
             "/api/config/scan-paths",
@@ -2040,6 +2071,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // See `api::bundle` for the wire shape + ref-resolution
         // protocol (`@bundle:<id>` placeholders).
         .route("/api/workflows/bundle", post(api::bundle::create_bundle))
+        .route(
+            "/api/workflows/bundle/human",
+            post(api::bundle::create_human_bundle),
+        )
+        .route(
+            "/api/workflows/agent-proposal",
+            post(api::workflows::create_agent_proposal),
+        )
         // 0.8.3 — Feasibility-Gated traceability surface. Read-only
         // for now; mutation (override / mark resolved) lands once the
         // frontend Decision-log page does.
@@ -3159,6 +3198,11 @@ mod auth_tests {
             "no key: no new token"
         );
         assert!(!auth_locked_allows(regen, false, true));
+        // Starting a new key: local, and only while the key is locked.
+        let fresh = "/api/config/recovery/start-new-key";
+        assert!(auth_locked_allows(fresh, true, false));
+        assert!(!auth_locked_allows(fresh, false, false));
+        assert!(!auth_locked_allows(fresh, true, true));
     }
 
     // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────

@@ -355,6 +355,8 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         read_only_repos: vec![],
         exec_script_files: vec![],
         exec_unmodelled_args_approved: None,
+        exec_agent_written: None,
+        exec_agent_lines: vec![],
         sub_workflow_variables: std::collections::HashMap::new(),
     }
 }

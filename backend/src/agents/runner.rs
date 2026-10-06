@@ -1500,7 +1500,7 @@ fn is_wsl() -> bool {
     #[cfg(target_os = "linux")]
     {
         // WSL2 always sets WSL_DISTRO_NAME — most reliable check
-        if std::env::var("WSL_DISTRO_NAME").is_ok() {
+        if crate::core::child_env::var("WSL_DISTRO_NAME").is_ok() {
             return true;
         }
         std::fs::read_to_string("/proc/version")
@@ -2485,8 +2485,8 @@ pub fn fix_file_ownership(work_dir: &Path) {
     if !crate::core::env::is_docker() {
         return;
     }
-    let uid = std::env::var("KRONN_HOST_UID").unwrap_or_default();
-    let gid = std::env::var("KRONN_HOST_GID").unwrap_or_default();
+    let uid = crate::core::child_env::var("KRONN_HOST_UID").unwrap_or_default();
+    let gid = crate::core::child_env::var("KRONN_HOST_GID").unwrap_or_default();
     if uid.is_empty() || gid.is_empty() {
         return;
     }
@@ -5340,7 +5340,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
 /// Searches: env override → Docker bundle → next to executable → Tauri resource → cargo manifest (dev).
 fn vibe_runner_path() -> String {
     // 0. Explicit override (allows custom deployments)
-    if let Ok(custom) = std::env::var("KRONN_VIBE_RUNNER") {
+    if let Ok(custom) = crate::core::child_env::var("KRONN_VIBE_RUNNER") {
         if std::path::Path::new(&custom).exists() {
             return custom;
         }
@@ -5390,7 +5390,7 @@ fn vibe_runner_path() -> String {
 /// invocation. Use [`disc_introspection_mcp_path_for_shared_config`] in
 /// any code path that writes to a file the host CLI may read.
 pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
-    if let Ok(custom) = std::env::var("KRONN_DISC_INTROSPECTION_MCP") {
+    if let Ok(custom) = crate::core::child_env::var("KRONN_DISC_INTROSPECTION_MCP") {
         if std::path::Path::new(&custom).exists() {
             return Some(custom);
         }
@@ -5456,7 +5456,7 @@ fn resolve_internal_mcp_command(
             command: path.to_string_lossy().into_owned(),
             args: Vec::new(),
             // Host CLIs read the generated config outside Kronn's process tree.
-            env: std::env::var("KRONN_BACKEND_URL")
+            env: crate::core::child_env::var("KRONN_BACKEND_URL")
                 .ok()
                 .map(|url| ("KRONN_BACKEND_URL".into(), url))
                 .into_iter()
@@ -5468,7 +5468,7 @@ fn resolve_internal_mcp_command(
 
 pub(crate) fn disc_introspection_mcp_command() -> Option<InternalMcpCommand> {
     resolve_internal_mcp_command(
-        std::env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"),
+        crate::core::child_env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"),
         disc_introspection_mcp_path,
     )
 }
@@ -5476,7 +5476,7 @@ pub(crate) fn disc_introspection_mcp_command() -> Option<InternalMcpCommand> {
 pub(crate) fn disc_introspection_mcp_command_for_shared_config() -> Option<InternalMcpCommand> {
     // Container commands must never leak into the host's project configuration.
     let bundled = (!Path::new("/.dockerenv").exists())
-        .then(|| std::env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"))
+        .then(|| crate::core::child_env::var_os("KRONN_INTERNAL_MCP_EXECUTABLE"))
         .flatten();
     resolve_internal_mcp_command(bundled, disc_introspection_mcp_path_for_shared_config)
 }
@@ -5505,7 +5505,7 @@ pub(crate) fn disc_introspection_mcp_command_for_shared_config() -> Option<Inter
 /// 2026-05-10 (`kronn-internal Broken pipe (os error 32)` from
 /// `kiro-cli` on the host).
 pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> {
-    if let Ok(public) = std::env::var("KRONN_INTROSPECTION_PUBLIC_PATH") {
+    if let Ok(public) = crate::core::child_env::var("KRONN_INTROSPECTION_PUBLIC_PATH") {
         if std::path::Path::new(&public).exists() {
             return Some(public);
         }
@@ -6230,7 +6230,10 @@ fn default_num_predict(num_ctx: u64) -> i64 {
 }
 
 pub(crate) fn ollama_num_predict(num_ctx: u64) -> Option<i64> {
-    num_predict_for(num_ctx, std::env::var("KRONN_OLLAMA_NUM_PREDICT").ok())
+    num_predict_for(
+        num_ctx,
+        crate::core::child_env::var("KRONN_OLLAMA_NUM_PREDICT").ok(),
+    )
 }
 
 /// Most names a shape lists per level. A wider record is cut with a count, and
@@ -7056,7 +7059,7 @@ pub(crate) fn doc_section_index(doc: &str) -> String {
 /// Put the whole project doc back in every request, for a model that will not
 /// go and open it. `KRONN_INLINE_PROJECT_DOC=1`.
 pub(crate) fn inline_project_doc_forced() -> bool {
-    std::env::var("KRONN_INLINE_PROJECT_DOC")
+    crate::core::child_env::var("KRONN_INLINE_PROJECT_DOC")
         .as_deref()
         .map(str::trim)
         == Ok("1")
@@ -7084,7 +7087,7 @@ pub(crate) fn ollama_disables_thinking(model: &str) -> bool {
 /// (`"30m"`, `"1h"`) or seconds (`"1800"`, `"-1"` = forever, `"0"` = unload
 /// now). Unset/blank ⇒ omit the field ⇒ Ollama uses its own default.
 pub(crate) fn ollama_keep_alive() -> Option<serde_json::Value> {
-    parse_keep_alive(std::env::var("KRONN_OLLAMA_KEEP_ALIVE").ok())
+    parse_keep_alive(crate::core::child_env::var("KRONN_OLLAMA_KEEP_ALIVE").ok())
 }
 
 /// Pure parse of the keep_alive override (split out for unit tests without
@@ -7987,7 +7990,7 @@ async fn send_http_agent_request(
     // Anthropic caches only the prefixes a request marks. Measured at about a
     // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
     let hinted = (backend == "LiteLLM"
-        && std::env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() != Ok("0"))
+        && crate::core::child_env::var("KRONN_LITELLM_PROMPT_CACHE").as_deref() != Ok("0"))
     .then(|| crate::agents::chat_codec::with_prompt_cache_hints(body))
     .flatten();
     let body = hinted.as_ref().unwrap_or(body);
@@ -8277,14 +8280,14 @@ async fn start_ollama_http_with_idle(
             .await;
             let cap = match ollama_context_overrides {
                 Some(overrides) => resolve_ctx_cap_for_model(
-                    std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
+                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
                     model,
                     overrides,
                     model_limit,
                     machine_ceiling,
                 ),
                 None => resolve_ctx_cap_within(
-                    std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
+                    crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(),
                     model_limit,
                     machine_ceiling,
                 ),
@@ -8523,14 +8526,16 @@ async fn start_ollama_http_with_idle(
     let pressure_ctx_cap = if is_openai_wire {
         hosted_step_context_budget(
             remote_window,
-            std::env::var("KRONN_HTTP_STEP_CTX_BUDGET").ok(),
+            crate::core::child_env::var("KRONN_HTTP_STEP_CTX_BUDGET").ok(),
         )
     } else {
         ctx_cap
     };
     let audit_input_budget =
         (is_openai_wire && tool_run_mode == crate::agents::tools::ToolRunMode::Audit).then(|| {
-            hosted_audit_step_input_budget(std::env::var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET").ok())
+            hosted_audit_step_input_budget(
+                crate::core::child_env::var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET").ok(),
+            )
         });
     let mut step_input_tokens: u64 = 0;
     // A turn that declares tools will grow by whatever they return, and Ollama
@@ -12096,7 +12101,7 @@ fn agent_command_with_task_worker_policy(
                 args.push("--ignore-user-config".into());
                 args.push("--ignore-rules".into());
                 args.push("--sandbox=workspace-write".into());
-            } else if std::env::var("KRONN_HOST_HOME").is_ok() || full_access {
+            } else if crate::core::child_env::var("KRONN_HOST_HOME").is_ok() || full_access {
                 // Inside the Docker container, Codex's bwrap sandbox can NEVER
                 // initialize: unprivileged user namespaces are blocked
                 // (`bwrap: No permissions to create new namespace`, verified
@@ -12450,7 +12455,7 @@ fn command_invocation_size_receipt(
 ) -> InvocationSizeReceipt {
     let command = command.as_std();
     let mut environment: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
-        std::env::vars_os().collect();
+        crate::core::child_env::vars_os().into_iter().collect();
     for (key, value) in command.get_envs() {
         if let Some(value) = value {
             environment.insert(key.to_os_string(), value.to_os_string());
@@ -12694,7 +12699,7 @@ fn looks_secret(value: &str) -> bool {
 /// notes) into every session, ~8.8k tokens re-read on each call. `=1` keeps it
 /// for a native discussion turn; nothing else Kronn launches ever gets it.
 pub(crate) fn claude_auto_memory_opted_in() -> bool {
-    std::env::var("KRONN_CLAUDE_AUTO_MEMORY")
+    crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY")
         .as_deref()
         .map(str::trim)
         == Ok("1")
@@ -12800,7 +12805,7 @@ pub(crate) fn try_spawn(
     let is_codex = binary == "codex" || npx_package == Some("@openai/codex");
     if is_codex {
         if let Some(exec_idx) = cmd_args.iter().position(|a| a == "exec") {
-            let host_home = std::env::var("KRONN_HOST_HOME").ok();
+            let host_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
             cmd_args.splice(
                 exec_idx + 1..exec_idx + 1,
                 [
@@ -12889,13 +12894,15 @@ pub(crate) fn try_spawn(
     // Same host as the backend, except an agent in WSL2 NAT mode, whose
     // loopback is the Linux VM: the operator's WSL override then applies.
     let backend_url = (discussion_id.is_some() || runs_in_wsl).then(|| {
-        let wsl_override = std::env::var(super::wsl::WSL_BACKEND_URL_ENV).ok();
+        let wsl_override = crate::core::child_env::var(super::wsl::WSL_BACKEND_URL_ENV).ok();
         if runs_in_wsl {
             super::wsl::warn_once_if_backend_unreachable(wsl_override.is_some());
         }
         super::wsl::agent_backend_url(
             runs_in_wsl,
-            std::env::var("KRONN_BACKEND_URL").ok().as_deref(),
+            crate::core::child_env::var("KRONN_BACKEND_URL")
+                .ok()
+                .as_deref(),
             wsl_override.as_deref(),
         )
     });
@@ -12928,13 +12935,15 @@ pub(crate) fn try_spawn(
     // a few lines down. Ollama doesn't read $HOME (uses HTTP API).
     // Unknown binaries keep the override — they may legitimately need
     // a host-rooted HOME (e.g. arbitrary user-installed tools).
-    let real_home = std::env::var("KRONN_HOST_HOME").ok().filter(|rh| {
-        let exists = std::path::Path::new(rh).is_dir();
-        if !exists {
-            tracing::warn!("KRONN_HOST_HOME={} does not exist, ignoring", rh);
-        }
-        exists
-    });
+    let real_home = crate::core::child_env::var("KRONN_HOST_HOME")
+        .ok()
+        .filter(|rh| {
+            let exists = std::path::Path::new(rh).is_dir();
+            if !exists {
+                tracing::warn!("KRONN_HOST_HOME={} does not exist, ignoring", rh);
+            }
+            exists
+        });
     let skip_home_override = should_skip_home_override(binary, npx_package);
     if let Some(ref rh) = real_home {
         if !skip_home_override {
@@ -12946,13 +12955,13 @@ pub(crate) fn try_spawn(
     // Resolve the effective home for agent config lookups (cross-platform).
     let effective_home = real_home
         .clone()
-        .or_else(|| std::env::var("HOME").ok())
-        .or_else(|| std::env::var("USERPROFILE").ok());
+        .or_else(|| crate::core::child_env::var("HOME").ok())
+        .or_else(|| crate::core::child_env::var("USERPROFILE").ok());
 
     // Copilot CLI supports COPILOT_HOME to override config location.
     // Set it explicitly as a safety net (works on all platforms).
     if (binary == "copilot" || npx_package == Some("@github/copilot"))
-        && std::env::var("COPILOT_HOME").is_err()
+        && crate::core::child_env::var("COPILOT_HOME").is_err()
     {
         if let Some(ref home) = effective_home {
             let copilot_dir = std::path::Path::new(home).join(".copilot");
@@ -13505,7 +13514,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         "OPENAI_API_KEY" => "openai",
         "GEMINI_API_KEY" => "google",
         "MISTRAL_API_KEY" => "mistral",
-        "OLLAMA_HOST" => return std::env::var(env_key).ok(), // Ollama: no API key, just host URL
+        "OLLAMA_HOST" => return crate::core::child_env::parent_var_string(env_key), // Ollama: no API key, just host URL
         _ => return None,
     };
 
@@ -13513,7 +13522,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     if tokens.disabled_overrides.iter().any(|d| d == provider) {
         // For Google specifically, also try the gemini-cli settings.json
         // fallback before giving up — see comment in the main return below.
-        return std::env::var(env_key).ok().or_else(|| {
+        return crate::core::child_env::parent_var_string(env_key).or_else(|| {
             if provider == "google" {
                 read_gemini_settings_api_key()
             } else {
@@ -13538,7 +13547,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     tokens
         .active_key_for(provider)
         .map(|s| s.to_string())
-        .or_else(|| std::env::var(env_key).ok())
+        .or_else(|| crate::core::child_env::parent_var_string(env_key))
         .or_else(|| {
             if provider == "google" {
                 read_gemini_settings_api_key()
@@ -13553,7 +13562,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
 /// missing/empty `apiKey` field — caller handles None as "no key
 /// available" the same way as before this fallback existed.
 fn read_gemini_settings_api_key() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
+    let home = crate::core::child_env::var("HOME").ok()?;
     let path = std::path::Path::new(&home)
         .join(".gemini")
         .join("settings.json");
@@ -13768,9 +13777,9 @@ mod acp_resume_tests {
             fn drop(&mut self) {
                 for (name, previous) in &self.0 {
                     if let Some(value) = previous {
-                        std::env::set_var(name, value);
+                        crate::core::child_env::set_var(name, value);
                     } else {
-                        std::env::remove_var(name);
+                        crate::core::child_env::remove_var(name);
                     }
                 }
             }
@@ -13778,15 +13787,15 @@ mod acp_resume_tests {
         let restore = RestoreAdapters([
             (
                 "KRONN_ACP_ADAPTER_CLAUDE",
-                std::env::var_os("KRONN_ACP_ADAPTER_CLAUDE"),
+                crate::core::child_env::var_os("KRONN_ACP_ADAPTER_CLAUDE"),
             ),
             (
                 "KRONN_ACP_ADAPTER_CODEX",
-                std::env::var_os("KRONN_ACP_ADAPTER_CODEX"),
+                crate::core::child_env::var_os("KRONN_ACP_ADAPTER_CODEX"),
             ),
         ]);
         for (name, _) in &restore.0 {
-            std::env::set_var(name, "1");
+            crate::core::child_env::set_var(name, "1");
         }
         let project = tempfile::tempdir().unwrap();
         let tokens = TokensConfig {

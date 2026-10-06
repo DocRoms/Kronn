@@ -325,6 +325,19 @@ pub fn list_quick_prompt_version_metrics(
     conn: &Connection,
     qp_id: &str,
 ) -> Result<Vec<QuickPromptVersionMetrics>> {
+    list_quick_prompt_version_metrics_in(conn, qp_id, None)
+}
+
+/// The metrics over the launches a caller may see: with `Some(project)`,
+/// only launches whose discussion is in that project (`Some(None)` matches
+/// none, since project-less discussions are private to their launch).
+pub fn list_quick_prompt_version_metrics_in(
+    conn: &Connection,
+    qp_id: &str,
+    project: Option<Option<&str>>,
+) -> Result<Vec<QuickPromptVersionMetrics>> {
+    let scoped = project.is_some();
+    let project = project.flatten();
     // Inner query: pick the first Agent message per discussion (by
     // sort_order, falling back to timestamp). Aggregate the chosen
     // rows grouped by `originating_qp_version` on the parent disc.
@@ -337,6 +350,7 @@ pub fn list_quick_prompt_version_metrics(
          FROM discussions d
          JOIN messages m ON m.discussion_id = d.id
          WHERE d.originating_qp_id = ?1
+           AND (?3 = 0 OR d.project_id = ?2)
            AND d.originating_qp_version IS NOT NULL
            AND m.role = 'Agent'
            AND m.id = (
@@ -348,7 +362,7 @@ pub fn list_quick_prompt_version_metrics(
          GROUP BY d.originating_qp_version
          ORDER BY d.originating_qp_version DESC",
     )?;
-    let rows = stmt.query_map(params![qp_id], |row| {
+    let rows = stmt.query_map(params![qp_id, project, scoped], |row| {
         Ok(QuickPromptVersionMetrics {
             version_index: row.get::<_, i64>(0)? as u32,
             launches: row.get::<_, i64>(1)? as u32,

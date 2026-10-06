@@ -145,6 +145,8 @@ pub fn full_env_sync_cmd<S: AsRef<OsStr>>(
 ) -> std::process::Command {
     let FullEnvReason::SelfRestart = reason;
     let mut cmd = raw_sync(program.as_ref());
+    // Kronn relaunched gets back what the desktop withheld.
+    cmd.envs(crate::core::child_env::withheld_variables());
     for name in crate::core::child_env::FORBIDDEN {
         cmd.env_remove(name);
     }
@@ -203,7 +205,7 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         // Also in the real process environment: without the policy, git would
         // inherit it from there. A name nothing else in the suite reads.
-        std::env::set_var("KRONN_HOOK_SENTINEL_API_KEY", "sentinel-real-env");
+        crate::core::child_env::set_var("KRONN_HOOK_SENTINEL_API_KEY", "sentinel-real-env");
         let git = |args: &[&str]| {
             let output = crate::core::child_env::with_parent_env(
                 &[
@@ -239,7 +241,7 @@ mod tests {
         std::fs::write(repo.path().join("f.txt"), "x").unwrap();
         git(&["add", "f.txt"]);
         git(&["commit", "-q", "-m", "fixture"]);
-        std::env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
+        crate::core::child_env::remove_var("KRONN_HOOK_SENTINEL_API_KEY");
     }
 
     /// A program Kronn runs for itself gets the base allow-list only.
@@ -351,43 +353,10 @@ mod tests {
     /// The places allowed to bypass clippy's spawn ban are exactly these.
     #[test]
     fn clippy_spawn_ban_bypasses_are_exactly_these() {
-        // Any `allow`/`expect` list (plain, inner, combined or under
-        // `cfg_attr`) naming the lint or a group that holds it.
-        let lints = [
-            concat!("clippy::", "disallowed_methods"),
-            concat!("clippy::", "style"),
-            concat!("clippy::", "all"),
-        ];
-        let bypasses = |text: &str| -> usize {
-            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            let mut count = 0;
-            for opener in [concat!("allow", "("), concat!("expect", "(")] {
-                for (start, _) in compact.match_indices(opener) {
-                    let rest = &compact[start + opener.len()..];
-                    let mut depth = 1usize;
-                    let end = rest
-                        .char_indices()
-                        .find(|(_, c)| {
-                            match c {
-                                '(' => depth += 1,
-                                ')' => depth -= 1,
-                                _ => {}
-                            }
-                            depth == 0
-                        })
-                        .map_or(rest.len(), |(index, _)| index);
-                    let list = &rest[..end];
-                    if list.split(',').any(|item| lints.contains(&item)) {
-                        count += 1;
-                    }
-                }
-            }
-            count
-        };
         let found: std::collections::BTreeMap<String, usize> = rust_sources()
             .into_iter()
             .map(|(rel, text)| {
-                let count = bypasses(&text);
+                let count = source_bypasses(&text);
                 (rel, count)
             })
             .filter(|(_, n)| *n > 0)
@@ -395,6 +364,9 @@ mod tests {
         let expected: std::collections::BTreeMap<String, usize> = [
             // raw_async, raw_sync, open_in_system (open::commands, isolated)
             ("backend/src/core/cmd.rs", 3),
+            // var, var_os, vars_os, set_var, remove_var,
+            // take_process_environment_where: the live reads and writes
+            ("backend/src/core/child_env.rs", 6),
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
             ("backend/tests/api_tests.rs", 1),
@@ -403,6 +375,289 @@ mod tests {
         .map(|(file, n)| (file.to_string(), n))
         .collect();
         assert_eq!(found, expected);
+
+        // Crate-wide overrides: manifests and Cargo configurations.
+        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for manifest in [
+            backend.join("Cargo.toml"),
+            backend.join("../desktop/src-tauri/Cargo.toml"),
+        ] {
+            let text = std::fs::read_to_string(&manifest).unwrap();
+            for manifest in [
+                "[lints]\nclippy = { all = \"allow\" }\n",
+                "[ lints.clippy ]\nall = \"allow\"\n",
+                "lints.clippy.all = \"allow\"\n[package]\nname = \"x\"\n",
+                "[lints.clippy]\nall = { level = \"allow\", priority = -1 }\n",
+                "[lints.clippy]\nstyle = \"force-warn\"\n",
+            ] {
+                assert!(manifest_lowers_lints(manifest), "{manifest}");
+            }
+            assert!(!manifest_lowers_lints(&text), "{}", manifest.display());
+        }
+        // Cargo reads `.cargo/config` from every parent of the crate.
+        for dir in [
+            backend.join(".."),
+            backend.to_path_buf(),
+            backend.join("../desktop"),
+            backend.join("../desktop/src-tauri"),
+        ] {
+            for name in ["config.toml", "config"] {
+                let file = dir.join(".cargo").join(name);
+                if let Ok(text) = std::fs::read_to_string(&file) {
+                    assert!(!config_lowers_lints(&text), "{}", file.display());
+                }
+            }
+        }
+    }
+
+    /// Lints whose `allow` would silence the spawn ban: the lint, its old
+    /// name, the groups holding it, and every warning.
+    const SPAWN_BAN_LINTS: &[&str] = &[
+        concat!("clippy::", "disallowed_methods"),
+        concat!("clippy::", "disallowed_method"),
+        concat!("clippy::", "style"),
+        concat!("clippy::", "all"),
+        "warnings",
+    ];
+
+    /// `allow`/`expect` lists (plain, inner, combined or under `cfg_attr`)
+    /// naming one of [`SPAWN_BAN_LINTS`].
+    fn source_bypasses(text: &str) -> usize {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut count = 0;
+        for opener in [concat!("allow", "("), concat!("expect", "(")] {
+            for (start, _) in compact.match_indices(opener) {
+                let rest = &compact[start + opener.len()..];
+                let mut depth = 1usize;
+                let end = rest
+                    .char_indices()
+                    .find(|(_, c)| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth == 0
+                    })
+                    .map_or(rest.len(), |(index, _)| index);
+                if rest[..end]
+                    .split(',')
+                    .any(|item| SPAWN_BAN_LINTS.contains(&item))
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// A `[lints]` / `[workspace.lints]` table lowering one of the lints.
+    fn manifest_lowers_lints(text: &str) -> bool {
+        // Parsed like Cargo does; a file that does not parse is refused.
+        let Ok(manifest) = toml::from_str::<toml::Table>(text) else {
+            return true;
+        };
+        let mut tables = Vec::new();
+        if let Some(lints) = manifest.get("lints") {
+            tables.push(lints);
+        }
+        if let Some(lints) = manifest.get("workspace").and_then(|w| w.get("lints")) {
+            tables.push(lints);
+        }
+        tables.into_iter().any(|lints| {
+            lints.as_table().is_some_and(|tools| {
+                tools.iter().any(|(tool, entries)| {
+                    entries.as_table().is_some_and(|entries| {
+                        entries.iter().any(|(lint, level)| {
+                            let lint = lint.replace('-', "_");
+                            let name = if tool == "rust" {
+                                lint
+                            } else {
+                                format!("{tool}::{lint}")
+                            };
+                            let level = level
+                                .as_str()
+                                .or_else(|| level.get("level").and_then(toml::Value::as_str))
+                                .unwrap_or_default()
+                                .replace('-', "_");
+                            SPAWN_BAN_LINTS.contains(&name.as_str())
+                                && matches!(level.as_str(), "allow" | "warn" | "force_warn")
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    /// Rustflags allowing one of the lints, or capping every lint.
+    fn rustflags_lower_lints(text: &str) -> bool {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains("--cap-lints") {
+            return true;
+        }
+        // rustc reads `-` in a lint name as `_` (flags themselves keep theirs).
+        let compact = compact
+            .replace("--force-warn", "\u{4}")
+            .replace("--allow", "\u{1}")
+            .replace("--warn", "\u{5}")
+            .replace("-A", "\u{2}")
+            .replace("-W", "\u{3}")
+            .replace('-', "_")
+            .replace('\u{4}', "--force-warn")
+            .replace('\u{1}', "--allow")
+            .replace('\u{5}', "--warn")
+            .replace('\u{2}', "-A")
+            .replace('\u{3}', "-W");
+        if compact.contains("__cap_lints") {
+            return true;
+        }
+        SPAWN_BAN_LINTS.iter().any(|lint| {
+            [
+                format!("-A{lint}"),
+                format!("\"-A\",\"{lint}\""),
+                format!("--allow={lint}"),
+                format!("--allow{lint}"),
+                format!("\"--allow\",\"{lint}\""),
+                format!("-W{lint}"),
+                format!("--warn={lint}"),
+                format!("--warn{lint}"),
+                format!("\"--warn\",\"{lint}\""),
+                format!("--force-warn={lint}"),
+                format!("--force-warn{lint}"),
+                format!("\"--force-warn\",\"{lint}\""),
+            ]
+            .iter()
+            .any(|form| compact.contains(form.as_str()))
+        })
+    }
+
+    /// A Cargo configuration that lowers the ban: rustflags, an alias that
+    /// shadows `cargo clippy`, an `[env]` value clippy-driver reads, or a rustc
+    /// wrapper that can run rustc instead of clippy-driver.
+    fn config_lowers_lints(text: &str) -> bool {
+        if rustflags_lower_lints(text) {
+            return true;
+        }
+        // Parsed like Cargo does; a file that does not parse is refused.
+        let Ok(config) = toml::from_str::<toml::Table>(text) else {
+            return true;
+        };
+        let flags_lower = |flags: &toml::Value| match flags {
+            toml::Value::String(flags) => rustflags_lower_lints(flags),
+            toml::Value::Array(items) => {
+                let joined: Vec<String> = items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(|item| format!("\"{item}\""))
+                    .collect();
+                rustflags_lower_lints(&format!("[{}]", joined.join(",")))
+                    || rustflags_lower_lints(&joined.join(" ").replace('"', ""))
+            }
+            _ => false,
+        };
+        if config
+            .get("alias")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|aliases| aliases.contains_key("clippy"))
+        {
+            return true;
+        }
+        if config
+            .get("env")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|env| {
+                env.keys()
+                    .any(|key| key.to_ascii_uppercase().starts_with("CLIPPY_"))
+            })
+        {
+            return true;
+        }
+        if let Some(build) = config.get("build").and_then(toml::Value::as_table) {
+            if build.contains_key("rustc-wrapper") || build.contains_key("rustc-workspace-wrapper")
+            {
+                return true;
+            }
+            if build.get("rustflags").is_some_and(flags_lower) {
+                return true;
+            }
+        }
+        config
+            .get("target")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|targets| {
+                targets
+                    .values()
+                    .any(|target| target.get("rustflags").is_some_and(flags_lower))
+            })
+    }
+
+    /// Every way to lower the spawn ban is caught (B6-05).
+    #[test]
+    fn each_form_of_spawn_ban_bypass_is_caught() {
+        // Built at run time so this file's own text holds no bypass.
+        let (allow, expect) = (concat!("allow", "("), concat!("expect", "("));
+        for source in [
+            format!("#[{allow}warnings)] fn f() {{}}"),
+            format!("#![{allow}unused, warnings)]"),
+            format!("#[{allow}renamed_and_removed_lints, clippy::disallowed_method)] fn f() {{}}"),
+            format!("#[cfg_attr(test, {expect}clippy::style))] fn f() {{}}"),
+            format!("#[{allow} clippy :: all )] fn f() {{}}"),
+        ] {
+            assert_eq!(source_bypasses(&source), 1, "{source}");
+        }
+        assert_eq!(
+            source_bypasses(&format!("#[{allow}dead_code)] fn f() {{}}")),
+            0
+        );
+        for manifest in [
+            "[lints.clippy]\nstyle = \"allow\"\n",
+            "[lints.clippy]\ndisallowed_methods = { level = \"allow\", priority = 1 }\n",
+            "[lints.rust]\nwarnings = \"allow\"\n",
+            "[workspace.lints.clippy]\nall = \"warn\"\n",
+            "[lints]\nclippy.disallowed_methods = \"allow\"\n",
+            "[lints.clippy]\ndisallowed-methods = \"allow\"\n",
+        ] {
+            assert!(manifest_lowers_lints(manifest), "{manifest}");
+        }
+        assert!(!manifest_lowers_lints(
+            "[lints.clippy]\npedantic = \"warn\"\n[dependencies]\nstyle = \"1\"\n"
+        ));
+        for config in [
+            "[build]\nrustflags = [\"-A\", \"clippy::disallowed_methods\"]\n",
+            "[build]\nrustflags = [\"-Awarnings\"]\n",
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"--cap-lints\", \"allow\"]\n",
+            "[build]\nrustflags = [\"--allow=clippy::all\"]\n",
+            "[build]\nrustflags = [\"-Aclippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = \"--allow clippy::all\"\n",
+            "[build]\nrustflags = [\"--allow=clippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = [\"--force-warn\", \"clippy::disallowed-methods\"]\n",
+            "[build]\nrustflags = \"--force-warn=clippy::all\"\n",
+            "[build]\nrustflags = [\"--warn\", \"clippy::style\"]\n",
+            "[alias]\nclippy = \"check\"\n",
+            "[alias]\nclippy = [\"check\", \"--all-targets\"]\n",
+            "[env]\nCLIPPY_CONF_DIR = \"x\"\n",
+            "[env]\nCLIPPY_ARGS = { value = \"\", force = true }\n",
+        ] {
+            assert!(config_lowers_lints(config), "{config}");
+        }
+        for config in [
+            "alias.clippy = \"check\"\n",
+            "alias = { clippy = \"check\" }\n",
+            "[alias]\n'clippy' = \"check\"\n",
+            "env.CLIPPY_CONF_DIR = \"x\"\n",
+            "env = { CLIPPY_ARGS = \"\" }\n",
+            "[env]\nclippy_conf_dir = \"x\"\n",
+            "[build]\nrustc-wrapper = \"w\"\n",
+            "build.rustc-workspace-wrapper = \"w\"\n",
+            "[target.'cfg(unix)']\nrustflags = [\"-A\", \"clippy::all\"]\n",
+            "[build\n",
+        ] {
+            assert!(config_lowers_lints(config), "{config}");
+        }
+        assert!(!config_lowers_lints(
+            "[alias]\nc = \"check\"\n[env]\nRUST_LOG = \"info\"\n"
+        ));
+        assert!(!rustflags_lower_lints("[build]\ntarget-dir = \"target\"\n"));
     }
 
     /// Both clippy files ban the same entry points, every way Tauri can
@@ -418,15 +673,89 @@ mod tests {
                 .map(|rest| rest.split('"').next().unwrap().to_string())
                 .collect()
         };
+        // Clippy reads `.clippy.toml` before `clippy.toml` in each directory:
+        // one there would replace the banned list unseen.
+        for dir in [
+            backend.to_path_buf(),
+            backend.join(".."),
+            backend.join("../desktop"),
+            backend.join("../desktop/src-tauri"),
+        ] {
+            assert!(
+                !dir.join(".clippy.toml").exists(),
+                "{} would override clippy.toml",
+                dir.join(".clippy.toml").display()
+            );
+        }
         let backend_paths = paths(backend.join("clippy.toml"));
         let desktop_paths = paths(backend.join("../desktop/src-tauri/clippy.toml"));
         assert_eq!(backend_paths, desktop_paths);
-        for restart in [
+        let required = [
+            "std::process::Command::new",
+            "tokio::process::Command::new",
+            "open::that",
+            "open::that_detached",
+            "open::that_in_background",
+            "open::with",
+            "open::with_detached",
+            "open::with_in_background",
+            "open::commands",
+            "open::with_command",
+            "tauri_plugin_shell::Shell::command",
+            "tauri_plugin_shell::Shell::sidecar",
+            "tauri_plugin_shell::Shell::open",
             "tauri::AppHandle::restart",
             "tauri::AppHandle::request_restart",
             "tauri::process::restart",
-        ] {
-            assert!(desktop_paths.contains(restart), "{restart} is not banned");
+            "libc::fork",
+            "libc::vfork",
+            "libc::forkpty",
+            "libc::rfork",
+            "libc::clone",
+            "libc::syscall",
+            "libc::system",
+            "libc::popen",
+            "libc::execv",
+            "libc::execve",
+            "libc::execvp",
+            "libc::execvpe",
+            "libc::execveat",
+            "libc::execvP",
+            "libc::execl",
+            "libc::execle",
+            "libc::execlp",
+            "libc::fexecve",
+            "libc::posix_spawn",
+            "libc::posix_spawnp",
+            "libc::execlpe",
+            "libc::wexecl",
+            "libc::wexecle",
+            "libc::wexeclp",
+            "libc::wexeclpe",
+            "libc::wexecv",
+            "libc::wexecve",
+            "libc::wexecvp",
+            "libc::wexecvpe",
+            "libc::exect",
+            "libc::pdfork",
+            "libc::daemon",
+            "tauri_plugin_shell::open::open",
+            "std::env::var",
+            "std::env::var_os",
+            "std::env::vars",
+            "std::env::vars_os",
+            "std::env::set_var",
+            "std::env::remove_var",
+            "libc::getenv",
+            "libc::secure_getenv",
+            "libc::_NSGetEnviron",
+            "libc::setenv",
+            "libc::unsetenv",
+            "libc::putenv",
+            "libc::clearenv",
+        ];
+        for entry in required {
+            assert!(desktop_paths.contains(entry), "{entry} is not banned");
         }
     }
 

@@ -45,6 +45,15 @@ in 0.14.3 is in §9.
 | Docker (Linux host) | Sidecar in `/data`, `0700` to the backend UID | Same; the container spawn path uses the same env builder | Agents run under a second UID without access to `/data` (KT-969) | Second UID for every agent-influenced execution | Repositories writable by agents; SSH agent socket usable while an agent runs |
 | Docker on macOS | Same as Docker | Same | Same, plus masks over the native data directory | Same | Same; the native install is no longer readable from the container |
 
+Every native line also carries the exec-time environment block residual: a
+`KRONN_AUTH_TOKEN` or `KRONN_ENCRYPTION_KEK` pinned through the environment
+leaves the variable list at start, but the original environment block stays in
+the process image, readable by any same-user process for the process lifetime
+(`/proc/<pid>/environ` on Linux and WSL, `ps eww <pid>` on macOS). Pinning the
+key that way defeats the Keychain on macOS. The keychain, the data-directory
+key file and `config.toml` avoid it; Kronn logs a warning at start when either
+came from the environment.
+
 Only the Docker lines give a boundary against an agent that reads files or runs
 code. The native lines close the API and environment paths and, on macOS, the
 key itself; the advisory states the rest plainly, and the UI shows the current
@@ -238,12 +247,15 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    in-process key every consumer reads; the only copy written to
    `config.toml` is the one `config::retain_disk_key` keeps until the key
    decrypts every non-empty column and two independent copies remain without
-   it (two tiers among env/keychain/sidecar, or one plus a `recovery.key`
-   whose fingerprint matches); a different legacy value is moved to
+   it (two persisted vaults, keychain and sidecar, or one plus a
+   `recovery.key` whose fingerprint matches); a different legacy value is moved to
    `config.toml.retired-key.<ts>` and the key in use gets the file copy.
-   Config backups and retired-key files are read-only candidates of every
-   decision. `mirror()` never writes a vault holding another key; two keys that each decrypt data
-   stop the boot (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
+   Config backups, retired-key and corrupt-config files are read-only
+   candidates of every decision; rows under such a file key are moved under
+   the live key (or, with none, the file key decrypting the most rows) at
+   boot once that key has a durable copy, the file kept. `mirror()` never writes a vault
+   holding another key; two live keys that each decrypt data stop the boot
+   (resolved by `KRONN_REENCRYPT_FROM`, one key per start).
    Keys compare in one canonical spelling; the env variable is not counted as
    a persisted copy; recovery blobs carry a checksummed fingerprint. A locked boot keeps no
    key in memory (fail closed); a stored auth token it cannot read locks the
@@ -258,7 +270,11 @@ Operator view: [`operations/key-management.md`](../operations/key-management.md)
    table at boot and written back by every `config::save`. Reveal routes are
    unchanged.
 5. **Done (passphrase proof).** `recovery/set` refuses to replace an existing
-   `recovery.key` without `current_passphrase`; imports never replace it;
+   `recovery.key` without `current_passphrase`, except one verified for
+   another key or with a damaged payload (kept as `recovery.previous-<ts>`),
+   and one from before 0.14.3 or with a forgotten passphrase after an
+   explicit confirmation; imports never replace it; a lost key can be
+   abandoned for a new one, the locked rows kept in `locked-secrets-<ts>.json`;
    `recovery/restore` never swaps the key of a running instance (imported
    secrets are re-encrypted instead). The human factor (D1) is not part of
    0.14.3.
@@ -431,12 +447,19 @@ spawn without a route does not compile. `backend/clippy.toml` refuses
 crate's functions (`open::commands`/`with_command` included) and libc's
 `fork`/`clone`/`exec*`/`fexecve`/`posix_spawn*`/`popen`/`system`/`syscall`
 outside `core/cmd.rs` (test code excepted), which also covers aliases and
-function pointers; `desktop/src-tauri/clippy.toml` holds the desktop crate to
+function pointers (`forkpty`, `rfork`, `execveat` and `execvP` included,
+platform-specific ones marked `allow-invalid`); `desktop/src-tauri/clippy.toml` holds the desktop crate to
 the same rule, plus `tauri_plugin_shell::Shell::{command,sidecar,open}`,
 `AppHandle::restart` and `tauri::process::restart` (its `caffeinate` and
 login-shell PATH probe use the Tool route), and CI runs clippy on both
 crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
-`#[allow]` sites of both crates. The system opener goes through `cmd::open_in_system`
+`#[allow]`/`#[expect]` sites of both crates (the lint, its old name
+`disallowed_method`, the `style` and `all` groups, and `warnings`) and
+refuses a crate-wide override in either `Cargo.toml` `[lints]` table or in
+`.cargo/config` (rustflags `-A`, `--allow`, `--warn`, `--force-warn`,
+`--cap-lints`, an `[alias]` named `clippy`, an `[env]` key starting with
+`CLIPPY_`, a `build.rustc-wrapper`), parsing both files as TOML the way Cargo
+does, with `-` read as `_` in lint names. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -475,11 +498,44 @@ settings. A credential under a name no list knows (`MYSQL_PWD`,
 `DATABASE_URL` with userinfo, `*_PASSPHRASE`, `SENTRY_DSN`) reaches none of
 them.
 
+*Desktop webview helpers.* On Linux (WebKitGTK) and Windows (WebView2) the
+system webview starts its own helper processes with the desktop's process
+environment, outside `core::cmd`. The desktop therefore keeps only a reviewed
+allow-list in its process environment and withholds everything else at start,
+before any thread or window (`child_env::withhold_process_environment`, after
+the admin token and the key override). The allow-list is the base list
+(PATH, HOME, locale, temp dirs, proxies, TLS stores, XDG directories,
+toolchains, Windows essentials), display and session plumbing (`DISPLAY`,
+`WAYLAND_*`, `XAUTHORITY`, `DBUS_*`, `DESKTOP_SESSION`, AppImage's `APPDIR`
+and `LD_LIBRARY_PATH`), toolkit and runtime prefixes (`XDG_`, `GDK_`, `GTK_`,
+`GIO_`, `GST_`, `WEBKIT_`, `WEBVIEW2_`, `LIBGL_`, `MESA_`, `QT_`, `SNAP_` and
+`SNAP`, `TAURI_`, `RUST_`, `DYLD_`…), never a credential-looking name. No
+`KRONN_*` setting stays live (a webhook URL is a secret whose name is not):
+Kronn reads them, `KRONN_USE_KEYCHAIN` included, from the withheld set. A
+credential under any name, and any name that is not Unicode, is withheld.
+Every environment read in Kronn goes through `child_env::var` / `var_os` /
+`vars_os` (live value, else the withheld one) and every write through
+`child_env::set_var` / `remove_var`: once the desktop withholds, a name off
+the allow-list is set into the withheld set, never live, and a removal drops
+it from both. A live write is allowed only before any thread exists (`setenv`
+races C readers such as glib and `getaddrinfo`): the desktop enriches `PATH`
+in `main` before withholding, and values set once threads run
+(`KRONN_BACKEND_URL`, the sidecar paths) go through `child_env::set_overlay_var`,
+which never writes the live environment. Both clippy files refuse `std::env::var`, `var_os`, `vars`,
+`vars_os`, `set_var` and `remove_var` outside `child_env`, and libc's
+`getenv`, `secure_getenv`, `_NSGetEnviron`, `setenv`, `unsetenv`, `putenv`
+and `clearenv`, so no read can miss a withheld
+variable. Child routes see
+withheld variables through the same overlay; names compare case-insensitively
+on Windows. The relaunch below gets them all back.
+
 One declared exception remains, and only on the desktop: the app relaunching
 itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through
 `cmd::full_env_sync_cmd(program, FullEnvReason::SelfRestart)`). It is Kronn
-itself: it keeps its environment and working directory, loses the forbidden
-names, and gets the operator's key override handed back. The test
+itself: it keeps its environment and working directory (withheld credentials
+included), loses the forbidden names, and gets two of them handed back: the
+operator's key override and the operator's `KRONN_AUTH_TOKEN` (with the key
+locked, that environment value may be the session's only token). The test
 `full_env_cmd_sites_are_exactly_the_declared_exceptions` checks it is the only
 call site in either crate, and `both_clippy_files_ban_the_same_spawn_entry_points`
 that every Tauri restart entry point (`AppHandle::restart`,
@@ -490,7 +546,15 @@ repository's `.mcp.json`, so the probe starts it with a built environment (base
 allow-list plus that server's configured values, `api/mcps.rs::mcp_probe_command`).
 An operator-set `KRONN_ENCRYPTION_KEK` (and the legacy `KRONN_KEK`) leaves the
 process environment at start, like `KRONN_AUTH_TOKEN`; the key is kept in
-memory (`keyvault::take_env_kek`).
+memory (`keyvault::take_env_kek`). Residual: removing a variable edits only the
+variable list, not the exec-time environment block, which keeps both values
+readable by same-user processes for the process lifetime (see §2); the desktop
+relaunch re-creates the key override and the operator's `KRONN_AUTH_TOKEN` in
+the new process's block. Kronn warns at
+start when either came from the environment (`config::warn_secrets_taken_from_env`).
+Scrubbing the block in place was not done: it needs a raw pointer write into
+memory libc owns, and it can only be proven on Linux, which this release's
+tests do not run on a Linux host.
 
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
@@ -554,7 +618,10 @@ kind, never the other project's id. Then:
   private to its own launch (a run's project is its own, never its workflow's
   current home); run lists, their state filter and pages, and a workflow's
   `last_run` only consider runs of the token's project or its own run, in SQL
-  before any limit; an
+  before any limit, and so do the duration estimates of workflow trigger, run
+  status and wait; a Quick Prompt's estimate counts only launches in the
+  caller's project (a bridge token's, or an in-process agent's); an in-process agent's workflow list takes its `last_run`
+  from its own project's runs; an
   MCP config linked to projects and opted into General serves those projects
   and project-less tokens, as the plugin overview shows;
 - *effects* need the token's project, or a shared resource on a route whose

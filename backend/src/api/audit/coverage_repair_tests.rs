@@ -34,8 +34,8 @@ struct TemplatesEnv(Option<std::ffi::OsString>);
 impl Drop for TemplatesEnv {
     fn drop(&mut self) {
         match &self.0 {
-            Some(value) => std::env::set_var("KRONN_TEMPLATES_DIR", value),
-            None => std::env::remove_var("KRONN_TEMPLATES_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_TEMPLATES_DIR"),
         }
     }
 }
@@ -53,8 +53,8 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
             "Template baseline.\n".repeat(100),
         )
         .unwrap();
-        let _restore = TemplatesEnv(std::env::var_os("KRONN_TEMPLATES_DIR"));
-        std::env::set_var("KRONN_TEMPLATES_DIR", templates.path());
+        let _restore = TemplatesEnv(crate::core::child_env::var_os("KRONN_TEMPLATES_DIR"));
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", templates.path());
         let project = tempfile::tempdir().unwrap();
         let initialized = crate::core::cmd::git_cmd()
             .args(["init", "--quiet"])

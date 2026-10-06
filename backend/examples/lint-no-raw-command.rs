@@ -219,7 +219,7 @@ fn main() -> std::io::Result<()> {
     }
 
     let mut total_violations = 0usize;
-    let is_gh = std::env::var("GITHUB_ACTIONS").is_ok();
+    let is_gh = kronn::core::child_env::var("GITHUB_ACTIONS").is_ok();
 
     for entry in WalkDir::new(&root).follow_links(false) {
         let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;

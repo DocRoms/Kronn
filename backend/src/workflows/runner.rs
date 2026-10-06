@@ -2851,7 +2851,7 @@ async fn execute_run_body(
                     let run_id_for_timer = run.id.clone();
                     let workflow_id_for_timer = workflow.id.clone();
                     let gate_name_for_timer = step.name.clone();
-                    let port = std::env::var("KRONN_BACKEND_PORT")
+                    let port = crate::core::child_env::var("KRONN_BACKEND_PORT")
                         .ok()
                         .and_then(|s| s.parse::<u16>().ok())
                         .unwrap_or(3140);
@@ -4323,6 +4323,8 @@ mod tests {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -4670,6 +4672,8 @@ mod tests {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -6651,6 +6655,7 @@ mod tests {
             loop {
                 let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
                     axum::extract::State(state.clone()),
+                    None,
                     axum::extract::Path("run-activity".to_string()),
                 )
                 .await;

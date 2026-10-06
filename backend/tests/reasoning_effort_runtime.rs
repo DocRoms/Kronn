@@ -15,20 +15,20 @@ struct Environment(Vec<(&'static str, Option<OsString>)>);
 impl Environment {
     fn set(&mut self, name: &'static str, value: impl AsRef<std::ffi::OsStr>) {
         if !self.0.iter().any(|(key, _)| *key == name) {
-            self.0.push((name, std::env::var_os(name)));
+            self.0.push((name, kronn::core::child_env::var_os(name)));
         }
         // This binary contains one current-thread test. No other test can
         // observe its temporary PATH or transport switches.
-        unsafe { std::env::set_var(name, value) };
+        kronn::core::child_env::set_var(name, value);
     }
 }
 impl Drop for Environment {
     fn drop(&mut self) {
         for (name, value) in self.0.iter().rev() {
-            unsafe {
+            {
                 match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => kronn::core::child_env::set_var(name, value),
+                    None => kronn::core::child_env::remove_var(name),
                 }
             }
         }

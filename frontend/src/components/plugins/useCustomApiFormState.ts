@@ -31,6 +31,8 @@ export function useCustomApiFormState() {
   const [customEndpoints, setCustomEndpoints] = useState<ApiEndpoint[]>([]);
   // Headers sent on every call (e.g. Notion's mandatory `Notion-Version`).
   const [customHeaders, setCustomHeaders] = useState<ApiDefaultHeader[]>([]);
+  // Endpoint the "Test" button calls; null = the automatic default.
+  const [customTestEndpoint, setCustomTestEndpoint] = useState<string | null>(null);
   // 0.8.6 — Edit-existing-Custom-plugin flow. When non-null, the form
   // is in edit mode: pre-filled from the existing plugin's spec, submit
   // goes to PUT instead of POST. Cleared on reset / form-close.
@@ -126,7 +128,7 @@ export function useCustomApiFormState() {
     customName, setCustomName, customBaseUrl, setCustomBaseUrl,
     customDescription, setCustomDescription, customDocsUrl, setCustomDocsUrl,
     customFields, setCustomFields, customEndpoints, setCustomEndpoints,
-    customHeaders, setCustomHeaders,
+    customHeaders, setCustomHeaders, customTestEndpoint, setCustomTestEndpoint,
     editingCustomServerId, setEditingCustomServerId, editingCustomConfigId, setEditingCustomConfigId,
     editingCustomOriginalScope, setEditingCustomOriginalScope,
     replacingFields, setReplacingFields, customAuth, setCustomAuth,

@@ -661,6 +661,18 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exec_unmodelled_args_approved: Option<bool>,
+    /// KT-1017 — an agent last wrote this step's command lines: any value
+    /// they carry needs a human's approval. Set by the server on save, never
+    /// read from the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub exec_agent_written: Option<bool>,
+    /// KT-1017 — which of the step's lines an agent last wrote: `main`,
+    /// `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human
+    /// edit re-attributes only the line it changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub exec_agent_lines: Vec<String>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
@@ -1940,6 +1952,9 @@ pub struct UnsafeExecStep {
     pub reason: String,
     pub suggested_args: Option<Vec<String>>,
     pub manual_fix: Option<String>,
+    /// An agent wrote the line: it waits for a human's approval.
+    #[serde(default)]
+    pub agent_written: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -2272,6 +2287,18 @@ pub struct ExecLineCheckRequest {
     /// The step's `exec_stdin` template, when it has one.
     #[serde(default)]
     pub stdin: Option<String>,
+    /// The step's setup line, which the same approval covers.
+    #[serde(default)]
+    pub setup_command: Option<String>,
+    #[serde(default)]
+    pub setup_args: Vec<String>,
+    /// An agent last wrote these lines: any value needs the approval.
+    #[serde(default)]
+    pub agent_written: bool,
+    /// The step's pinned scripts (`exec_script_files` paths): a script shape
+    /// on one of them needs no approval.
+    #[serde(default)]
+    pub declared_scripts: Vec<String>,
 }
 
 /// What the editors need to know about one command line.
@@ -2281,4 +2308,7 @@ pub struct ExecLineCheck {
     /// The unmodelled program that receives a value from the run, when the
     /// line needs a human's approval to be saved (KT-1017).
     pub unmodelled_program: Option<String>,
+    /// Every line the approval covers, as `phase: program` (`main: aws`,
+    /// `setup: terraform`, `stdin: duckdb`); empty when none needs it.
+    pub covered: Vec<String>,
 }

@@ -387,6 +387,7 @@ mod broker_tests {
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         };
         let env = HashMap::from([

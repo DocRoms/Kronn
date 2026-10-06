@@ -32,6 +32,9 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
   const [confirm, setConfirm] = useState('');
   // Replacing an existing passphrase must prove the current one (backend refuses otherwise).
   const [current, setCurrent] = useState('');
+  // A recovery.key from before 0.14.3 may be replaced without its passphrase
+  // once the user confirms (the backend keeps it; a restore still tries it).
+  const [replaceUnverified, setReplaceUnverified] = useState(false);
   const [saving, setSaving] = useState(false);
   // The code is returned ONCE by /recovery/set — held only in component state,
   // never persisted UI-side.
@@ -43,9 +46,14 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
       .catch(() => setConfigured(null));
   }, []);
 
-  // A recovery.key for ANOTHER key can be replaced without its passphrase (the
-  // backend keeps it aside); a matching or unverifiable one needs it.
-  const needsCurrent = !!configured && !status?.recovery_other_key;
+  // A recovery.key for ANOTHER key, or a damaged one, is replaced without its
+  // passphrase (the backend keeps it aside); a matching one needs it, and one
+  // from before 0.14.3 needs it unless the user confirms.
+  // Also a matching one whose passphrase is forgotten, once confirmed.
+  const confirmable = !!status?.recovery_unverified || (!!configured && !!status?.matches_key);
+  const confirmedUnverified = confirmable && replaceUnverified;
+  const needsCurrent = !!configured && !status?.recovery_other_key && !status?.recovery_damaged
+    && !confirmedUnverified;
   const canSave = passphrase.length >= MIN_PASSPHRASE_LEN && passphrase === confirm && !saving
     && (!needsCurrent || current.length > 0);
 
@@ -55,10 +63,13 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
     try {
       const res = needsCurrent
         ? await configApi.setRecovery(passphrase, current)
-        : await configApi.setRecovery(passphrase);
+        : confirmedUnverified
+          ? await configApi.setRecovery(passphrase, undefined, true)
+          : await configApi.setRecovery(passphrase);
       setRecoveryCode(res.recovery_code);
       setConfigured(true);
-      setStatus(s => (s ? { ...s, matches_key: true, recovery_other_key: false } : s));
+      setStatus(s => (s ? { ...s, matches_key: true, recovery_other_key: false, recovery_unverified: false, recovery_damaged: false } : s));
+      setReplaceUnverified(false);
       setPassphrase('');
       setConfirm('');
       setCurrent('');
@@ -137,8 +148,39 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
             <span>{t('settings.recovery.lockedCredentialsWarning', status.locked_credentials)}</span>
           </div>
         )}
-        {status && !status.key_locked && (status.kept_recovery_blobs ?? 0) > 0 && (
-          <RecoveryRestorePanel toast={toast} t={t} onRestored={() => window.location.reload()} />
+        {status && !status.key_locked && status.credentials_unavailable && (
+          <div className="set-expose-warn" data-testid="recovery-credentials-unavailable">
+            <AlertTriangle size={13} />
+            <span>{t('keyLocked.credentialsUnavailable', status.credentials_unavailable)}</span>
+          </div>
+        )}
+        {status?.config_set_aside && (
+          <div className="set-expose-warn" data-testid="recovery-config-set-aside">
+            <AlertTriangle size={13} />
+            <span>{status.config_set_aside}</span>
+          </div>
+        )}
+        {status && (status.rows_moved_from_files ?? []).length > 0 && (
+          <div className="set-hint" data-testid="recovery-rows-moved">
+            {t('settings.recovery.rowsMoved', (status.rows_moved_from_files ?? []).join('; '))}
+          </div>
+        )}
+        {status && (status.file_key_moves_pending ?? []).length > 0 && (
+          <div className="set-hint" data-testid="recovery-moves-pending">
+            {t('settings.recovery.movesPending', (status.file_key_moves_pending ?? []).join('; '))}
+          </div>
+        )}
+        {/* Rows a passphrase or code can bring back: undecryptable ones the next
+            start does not move by itself, or rows kept in a locked-secrets file. */}
+        {status && !status.key_locked
+          && ((status.undecryptable_rows ?? 0) > (status.file_key_rows_pending ?? 0)
+            || (status.locked_file_rows ?? 0) > 0) && (
+          <RecoveryRestorePanel
+            toast={toast}
+            t={t}
+            onRestored={() => window.location.reload()}
+            lockedFileRows={status.locked_file_rows ?? 0}
+          />
         )}
 
         {configured === false && !recoveryCode && (
@@ -188,6 +230,17 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
                 what3words.com/échouer.insérons.labeur
               </a>
             </p>
+            {configured && confirmable && (
+              <label className="set-hint-xs flex-row gap-3">
+                <input
+                  type="checkbox"
+                  checked={replaceUnverified}
+                  onChange={e => setReplaceUnverified(e.target.checked)}
+                  data-testid="recovery-replace-unverified"
+                />
+                {t(status?.recovery_unverified ? 'settings.recovery.replaceUnverified' : 'settings.recovery.forgotCurrent')}
+              </label>
+            )}
             {needsCurrent && (
               <input
                 type="password"

@@ -268,7 +268,7 @@ async fn execute_exec_step_inner(
     // calls resolve volumes correctly. Falls through to the original path
     // when the env var is unset (non-Docker dev setups) or the host path
     // isn't reachable (self-mount not configured).
-    let host_workdir: String = match std::env::var("KRONN_HOST_HOME") {
+    let host_workdir: String = match crate::core::child_env::var("KRONN_HOST_HOME") {
         Ok(host_home) if work_dir.starts_with("/host-home") && !host_home.is_empty() => {
             let candidate = work_dir.replacen("/host-home", host_home.trim_end_matches('/'), 1);
             if std::path::Path::new(&candidate).exists() {
@@ -335,7 +335,7 @@ async fn execute_exec_step_inner(
         raw_command,
         &step.exec_args,
         &rendered_args,
-        step.exec_unmodelled_args_approved == Some(true),
+        crate::core::inline_code::line_trust(step, "main"),
     ) {
         return fail(step, start, refusal);
     }
@@ -416,7 +416,7 @@ async fn execute_exec_step_inner(
             setup_cmd,
             &step.exec_setup_args,
             &setup_args,
-            step.exec_unmodelled_args_approved == Some(true),
+            crate::core::inline_code::line_trust(step, "setup"),
         ) {
             return fail(step, start, format!("{refusal} (setup)"));
         }
@@ -540,6 +540,31 @@ async fn execute_exec_step_inner(
         _ => None,
     };
 
+    // A script shape is trusted for its script path: it must name a regular
+    // file, never a device or a link to one (`tool.py -> /dev/stdin`).
+    let stdin_script = step.exec_stdin.as_deref().and_then(|stdin| {
+        crate::core::inline_code::stdin_fed_script(raw_command, &step.exec_args, stdin)
+    });
+    if let Some(script) =
+        crate::core::inline_code::trusted_script(raw_command, &step.exec_args).or(stdin_script)
+    {
+        let base = approved_copy.as_deref().unwrap_or(Path::new(work_dir));
+        let regular = std::fs::canonicalize(base.join(&script)).is_ok_and(|real| {
+            real.is_file() && !real.starts_with("/dev") && !real.starts_with("/proc")
+        });
+        if !regular {
+            return fail(
+                step,
+                start,
+                format!(
+                    "Exec step `{}`: le script `{script}` n'est pas un fichier ordinaire \
+                     (introuvable, périphérique ou lien vers un périphérique) ; refusé avant \
+                     exécution.",
+                    step.name
+                ),
+            );
+        }
+    }
     let mut cmd = match approved_copy.as_deref() {
         Some(copy) => approved_script_child(raw_command, github_env, work_dir, copy),
         None => exec_child(raw_command, github_env),
@@ -973,6 +998,8 @@ mod tests {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -1496,10 +1523,103 @@ mod tests {
         );
     }
 
+    /// R5-04: a trusted script shape runs only a regular file, never a link
+    /// to a device such as stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_script_linked_to_a_device_is_refused_at_run_time() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/stdin", dir.path().join("tool.py")).unwrap();
+        let mut step = exec_step("linked", Some("python3"), vec!["tool.py", "{{x}}"], None);
+        step.exec_unmodelled_args_approved = Some(true);
+        step.exec_stdin = Some("print('stdin ran')".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set("x", "a");
+        let outcome = execute_exec_step(
+            &step,
+            &["python3".into()],
+            &dir.path().to_string_lossy(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Failed,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("fichier ordinaire"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    /// R6-08: an approved line whose stdin feeds a script runs only a regular
+    /// file, never a link to stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_approved_stdin_fed_script_linked_to_stdin_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/stdin", dir.path().join("x.py")).unwrap();
+        let mut step = exec_step("linked", Some("python3"), vec!["-X", "dev", "x.py"], None);
+        step.exec_unmodelled_args_approved = Some(true);
+        step.exec_stdin = Some("{{x}}".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set("x", "print('stdin ran')");
+        let outcome = execute_exec_step(
+            &step,
+            &["python3".into()],
+            &dir.path().to_string_lossy(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Failed,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("fichier ordinaire"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    /// F-03: a program file read by `awk -f` while a templated stdin feeds
+    /// it must be a regular file too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_awk_program_file_linked_to_stdin_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/stdin", dir.path().join("p.awk")).unwrap();
+        let mut step = exec_step("linked", Some("awk"), vec!["-f", "p.awk"], None);
+        step.exec_unmodelled_args_approved = Some(true);
+        step.exec_stdin = Some("{{x}}".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set("x", "BEGIN { print \"stdin ran\" }");
+        let outcome =
+            execute_exec_step(&step, &["awk".into()], &dir.path().to_string_lossy(), &ctx).await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Failed,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("fichier ordinaire"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
     #[tokio::test]
     async fn stdin_is_templated_before_piping() {
         let mut step = exec_step("pipe", Some("cat"), vec![], None);
         step.exec_stdin = Some("{{steps.fetch.output}}".into());
+        // `cat` reads paths, so a human approves the value it receives.
+        step.exec_unmodelled_args_approved = Some(true);
         let mut ctx = TemplateContext::new();
         ctx.set_step_output("fetch", "RENDERED-PAYLOAD-FROM-PREVIOUS-STEP");
         let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;

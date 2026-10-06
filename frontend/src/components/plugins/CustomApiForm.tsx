@@ -5,6 +5,7 @@ import { Dropdown } from '../Dropdown';
 import { SecretField } from '../SecretField';
 import { Trash2, Plus, X, Check } from 'lucide-react';
 import { PluginScopeEditor } from './PluginScopeEditor';
+import { effectiveTestEndpoint, isTestableEndpoint } from './testEndpoint';
 import type { McpPageState } from './useMcpPageState';
 
 /**
@@ -25,6 +26,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
     customFields, setCustomFields,
     customEndpoints, setCustomEndpoints,
     customHeaders, setCustomHeaders,
+    customTestEndpoint, setCustomTestEndpoint,
     editingCustomServerId, editingCustomConfigId,
     replacingFields, setReplacingFields,
     customAuth, setCustomAuth,
@@ -38,6 +40,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
   // the config exists: creation always starts it at the backend default
   // (`true`), there is nothing to PATCH before the row is even inserted.
   const isEditing = !!editingCustomServerId;
+  const testEndpoint = effectiveTestEndpoint(customEndpoints, customTestEndpoint);
 
   return (
     <>
@@ -162,8 +165,25 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
             ? t('mcp.custom.endpoints.emptyHint')
             : t('mcp.custom.endpoints.populatedHint', customEndpoints.length)}
         </p>
+        {customEndpoints.length > 0 && (
+          <p className="mcp-env-key-desc mb-3" data-testid="mcp-custom-test-endpoint-hint">
+            {testEndpoint
+              ? t('mcp.custom.endpoints.testHint', testEndpoint)
+              : t('mcp.custom.endpoints.noTestable')}
+          </p>
+        )}
         {customEndpoints.map((e, idx) => (
           <div key={idx} className="mcp-custom-field-row mb-2">
+            <input
+              type="radio"
+              name="mcp-custom-test-endpoint"
+              checked={testEndpoint !== null && testEndpoint === e.path.trim()}
+              disabled={!e.path.trim() || !isTestableEndpoint(e)}
+              onChange={() => setCustomTestEndpoint(e.path.trim())}
+              aria-label={t('mcp.custom.endpoints.testLabel', e.path || '…')}
+              title={isTestableEndpoint(e) ? t('mcp.custom.endpoints.testLabel', e.path || '…') : t('mcp.custom.endpoints.notTestable')}
+              data-testid="mcp-custom-test-endpoint"
+            />
             <select
               className="input mcp-custom-field-label"
               value={e.method || 'GET'}
@@ -455,6 +475,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
               fields: customFields,
               endpoints: customEndpoints,
               default_headers: customHeaders,
+              test_endpoint: testEndpoint,
             }}
             onApply={(updates: Partial<CustomApiPayload>) => {
               if (typeof updates.name === 'string') setCustomName(updates.name);
@@ -492,6 +513,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
                 ];
                 setCustomEndpoints(merged);
               }
+              if (typeof updates.test_endpoint === 'string') setCustomTestEndpoint(updates.test_endpoint);
               // Same no-wipe merge, keyed by case-insensitive header name.
               if (Array.isArray(updates.default_headers) && updates.default_headers.length > 0) {
                 const existing = customHeaders.filter(h => h.name.trim() !== '');

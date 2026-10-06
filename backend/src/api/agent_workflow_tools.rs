@@ -135,8 +135,14 @@ impl KronnToolExecutor {
                 Err(error) => fail(call, error),
             },
             "workflow_list" => {
+                // An in-process principal sees only its project's last runs.
+                let visibility = crate::db::workflows::RunVisibility {
+                    project: project_id.clone(),
+                    own_run: None,
+                };
                 let Json(response) =
-                    crate::api::workflows::list(State(self.state.clone()), None).await;
+                    crate::api::workflows::list_with_visibility(&self.state, Some(visibility))
+                        .await;
                 match (response.success, response.data) {
                     (true, Some(items)) => ok(
                         call,
@@ -171,7 +177,7 @@ impl KronnToolExecutor {
                     crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
-                unwrap_api(call, response.success, response.data, response.error)
+                unwrap_api_noticed(call, response)
             }
             "workflow_get" | "workflow_update" => {
                 let Some(id) = call.arguments["workflow_id"].as_str() else {
@@ -215,7 +221,7 @@ impl KronnToolExecutor {
                     crate::api::workflows::WorkflowWriter::Agent,
                 )
                 .await;
-                unwrap_api(call, response.success, response.data, response.error)
+                unwrap_api_noticed(call, response)
             }
             _ => fail(call, "Unknown workflow tool"),
         }

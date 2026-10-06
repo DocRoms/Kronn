@@ -2448,6 +2448,8 @@ mod tests {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -3627,10 +3629,10 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
             .mount(&server)
             .await;
 
-        let previous_host = std::env::var("OLLAMA_HOST").ok();
-        let previous_ctx_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
-        std::env::set_var("OLLAMA_HOST", server.uri());
-        std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
+        let previous_host = crate::core::child_env::var("OLLAMA_HOST").ok();
+        let previous_ctx_cap = crate::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+        crate::core::child_env::set_var("OLLAMA_HOST", server.uri());
+        crate::core::child_env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
         let calls = Arc::new(Mutex::new(Vec::new()));
         let tools: Arc<dyn ToolExecutor> = Arc::new(ReadOnlyTools {
             calls: calls.clone(),
@@ -3680,12 +3682,12 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"usage":{"i
         )
         .await;
         match previous_host {
-            Some(value) => std::env::set_var("OLLAMA_HOST", value),
-            None => std::env::remove_var("OLLAMA_HOST"),
+            Some(value) => crate::core::child_env::set_var("OLLAMA_HOST", value),
+            None => crate::core::child_env::remove_var("OLLAMA_HOST"),
         }
         match previous_ctx_cap {
-            Some(value) => std::env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
-            None => std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
+            Some(value) => crate::core::child_env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
+            None => crate::core::child_env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
         }
 
         assert_eq!(outcome.result.status, RunStatus::Success);

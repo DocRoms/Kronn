@@ -1845,7 +1845,10 @@ pub async fn create(
         ));
     }
 
-    let mut cfg = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a key that was not stored
+    // never shows as saved.
+    let mut live = state.config.write().await;
+    let mut cfg = live.clone();
     let runtime_changed = store::sync_runtime_config(&connection, &mut cfg);
     if let Some(token) = req.api_key.as_deref() {
         set_credential(&mut cfg, &credential_slug, &display_name, token);
@@ -1853,9 +1856,14 @@ pub async fn create(
     if runtime_changed || req.api_key.is_some() {
         if let Err(e) = config::save(&cfg).await {
             tracing::warn!("external API connection runtime configuration save failed: {e}");
+            return Json(ApiResponse::err(format!(
+                "The connection was saved, but its key and settings could not be stored ({e:#}). \
+                 Save it again."
+            )));
         }
     }
-    Json(ApiResponse::ok(view(connection, &cfg)))
+    *live = cfg;
+    Json(ApiResponse::ok(view(connection, &live)))
 }
 
 /// PUT /api/external-api/connections/:id
@@ -1994,7 +2002,10 @@ pub async fn update(
         tracing::warn!("external API connection saved, model catalog cache not reloaded");
     }
 
-    let mut cfg = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a key that was not stored
+    // never shows as saved.
+    let mut live = state.config.write().await;
+    let mut cfg = live.clone();
     let runtime_changed = store::sync_runtime_config(&updated, &mut cfg);
     if let Some(token) = req.api_key.as_deref() {
         set_credential(&mut cfg, &credential_slug, &display_name, token);
@@ -2002,9 +2013,14 @@ pub async fn update(
     if runtime_changed || req.api_key.is_some() {
         if let Err(e) = config::save(&cfg).await {
             tracing::warn!("external API connection runtime configuration save failed: {e}");
+            return Json(ApiResponse::err(format!(
+                "The connection was saved, but its key and settings could not be stored ({e:#}). \
+                 Save it again."
+            )));
         }
     }
-    Json(ApiResponse::ok(view(updated, &cfg)))
+    *live = cfg;
+    Json(ApiResponse::ok(view(updated, &live)))
 }
 
 /// DELETE /api/external-api/connections/:id — removes the row and its stored
@@ -2039,14 +2055,20 @@ pub async fn delete(
         return Json(ApiResponse::err(format!("{e}")));
     }
 
-    let mut cfg = state.config.write().await;
+    let mut live = state.config.write().await;
+    let mut cfg = live.clone();
     let before = cfg.tokens.keys.len();
     cfg.tokens.keys.retain(|k| k.provider != slug);
     if cfg.tokens.keys.len() != before {
         if let Err(e) = config::save(&cfg).await {
             tracing::warn!("external API connection credential cleanup failed: {e}");
+            return Json(ApiResponse::err(format!(
+                "The connection was removed, but its stored key could not be removed ({e:#}); \
+                 delete it from the API keys."
+            )));
         }
     }
+    *live = cfg;
     Json(ApiResponse::ok(()))
 }
 

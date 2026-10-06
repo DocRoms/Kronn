@@ -30,7 +30,7 @@ const {
   createMock, updateMock, previewTransformMock, testCollectMock, qpListMock, qaListMock,
   pageListMock,
   skillsListMock, profilesListMock, directivesListMock,
-  suggestionsMock, overviewMock, catalogListMock,
+  suggestionsMock, overviewMock, catalogListMock, execLineCheckMock,
 } = vi.hoisted(() => ({
   createMock: vi.fn(),
   updateMock: vi.fn(),
@@ -45,6 +45,7 @@ const {
   suggestionsMock: vi.fn(),
   overviewMock: vi.fn(),
   catalogListMock: vi.fn(),
+  execLineCheckMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
@@ -54,6 +55,7 @@ vi.mock('../../../lib/api', () => buildApiMock({
     previewTransformData: previewTransformMock as never,
     testCollectApiData: testCollectMock as never,
     suggestions: suggestionsMock as never,
+    execLineCheck: execLineCheckMock as never,
   },
   quickPrompts: { list: qpListMock as never },
   quickApis: { list: qaListMock as never },
@@ -667,6 +669,39 @@ describe('WorkflowWizard — data pipeline forms', () => {
           })],
         }),
       }),
+    })));
+  });
+
+  it('asks a human to approve an inline CLI source that receives run values', async () => {
+    execLineCheckMock.mockImplementation(async (req: { command: string }) => (
+      req.command === 'aws'
+        ? { unmodelled_program: 'aws', covered: ['main: aws'] }
+        : { unmodelled_program: null, covered: [] }
+    ));
+    toSteps([
+      mkStep({
+        name: 'collect',
+        step_type: { type: 'CollectApiData' },
+        collect_api_data: { sources: [], concurrent_limit: 5 },
+      }),
+      mkStep({ name: 'next' }),
+    ]);
+
+    fireEvent.click(screen.getByText('wiz.collectApiAdd'));
+    fireEvent.change(screen.getByLabelText('wiz.collectSourceType'), { target: { value: 'quick_exec_inline' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectApiAlias'), { target: { value: 'logs' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectQuickExecCommand'), { target: { value: 'aws' } });
+    fireEvent.change(screen.getByLabelText('wiz.collectQuickExecArgs'), {
+      target: { value: 'logs\nget-query-results\n{{query_id}}' },
+    });
+    await waitFor(() => expect(execLineCheckMock).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'aws', args: ['logs', 'get-query-results', '{{query_id}}'],
+    })));
+    const box = await screen.findByRole('checkbox', { name: /exec.unmodelledApprove:aws/ });
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.collectApiTest' }));
+    await waitFor(() => expect(testCollectMock).toHaveBeenCalledWith(expect.objectContaining({
+      step: expect.objectContaining({ exec_unmodelled_args_approved: true }),
     })));
   });
 

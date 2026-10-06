@@ -13,7 +13,7 @@ const DEFAULT_PORT: u16 = 3140;
 /// Resolve the config directory: ~/.config/kronn/
 pub fn config_dir() -> Result<PathBuf> {
     // Check env override first (Docker)
-    if let Ok(dir) = std::env::var("KRONN_DATA_DIR") {
+    if let Ok(dir) = crate::core::child_env::var("KRONN_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
 
@@ -101,26 +101,47 @@ pub async fn load() -> Result<Option<AppConfig>> {
             };
             let kept = set_aside_unreadable_config(&dir, &path)?;
             let key = salvage_key_line(&content);
+            // Only a real 32-byte key counts as recovered.
+            let key_ok = key
+                .as_deref()
+                .is_some_and(|k| crate::core::crypto::canonical_secret(k).is_ok());
+            let mut config = default_config_without_key();
+            // Credentials of a parseable file join the credential boot (the
+            // file wins, as in the migration).
+            let salvaged = salvage_credentials(&content, &mut config);
+            let parseable = content.parse::<toml::Table>().is_ok();
+            let mentions_credentials =
+                salvaged > 0 || crate::core::credential_store::toml_holds_credentials(&content);
             tracing::error!(
                 "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn starts as \
-                 a first run{}",
-                if key.is_some() {
-                    " with the key it held"
+                 a first run{}; {salvaged} credential(s) recovered from it",
+                if key_ok { " with the key it held" } else { "" }
+            );
+            let mut notice = format!(
+                "config.toml could not be read ({cause}) and was kept as {kept}. {} The \
+                 settings start over.",
+                if key_ok {
+                    "The encryption key it held was recovered."
                 } else {
-                    ""
+                    "No valid encryption key could be read from it; the key is looked for in the \
+                     other key stores and backups."
                 }
             );
-            record_set_aside(
-                &dir,
-                format!(
-                    "config.toml could not be read ({cause}) and was kept as {kept}; your key and \
-                     data are intact, only the settings start over"
-                ),
-            );
+            if salvaged > 0 {
+                notice.push_str(&format!(
+                    " {salvaged} credential(s) were recovered from it."
+                ));
+            }
+            if mentions_credentials {
+                notice.push_str(&format!(
+                    " {kept} {} credentials in clear: delete it once you have checked them.",
+                    if parseable { "holds" } else { "may hold" }
+                ));
+            }
+            record_set_aside(&dir, notice);
             if let Some(key) = key.as_deref() {
                 retain_disk_key(&dir, key);
             }
-            let mut config = default_config_without_key();
             config.encryption_secret = key;
             return Ok(Some(config));
         }
@@ -251,11 +272,11 @@ async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<
     // every cargo test/bench binary, never for `cargo run` or installed
     // binaries. Reads stay free; only the destructive act is fenced.
     #[cfg(test)]
-    if std::env::var("KRONN_DATA_DIR").is_err() {
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
         panic!("test attempted to WRITE the real config.toml — set KRONN_DATA_DIR (tempdir) in this test");
     }
     #[cfg(not(test))]
-    if std::env::var("KRONN_DATA_DIR").is_err()
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_err()
         && std::env::current_exe()
             .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
             .unwrap_or(false)
@@ -434,11 +455,54 @@ async fn restrict_permissions(path: &std::path::Path, is_dir: bool) {
 /// Read an operator-set `KRONN_AUTH_TOKEN` and remove it from this process's
 /// environment, so no child can inherit the admin token (KT-1006).
 pub fn take_env_auth_token() -> Option<String> {
-    let token = std::env::var("KRONN_AUTH_TOKEN").ok();
-    std::env::remove_var("KRONN_AUTH_TOKEN");
-    token
+    let token = crate::core::child_env::var("KRONN_AUTH_TOKEN").ok();
+    crate::core::child_env::remove_var("KRONN_AUTH_TOKEN");
+    let token = token
         .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty());
+    *TAKEN_ENV_AUTH_TOKEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = token.clone();
+    token
+}
+
+/// The token taken by [`take_env_auth_token`], kept in memory only so the
+/// desktop self-restart can hand it back (it may be the session's only token).
+static TAKEN_ENV_AUTH_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn taken_env_auth_token() -> Option<String> {
+    TAKEN_ENV_AUTH_TOKEN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// The warnings to log once tracing runs when the admin token or the key
+/// was pinned through the environment: the exec-time environment block
+/// keeps the value readable by same-user processes for the process lifetime.
+pub fn env_secret_warnings(token_from_env: bool, key_from_env: bool) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if token_from_env {
+        warnings.push(
+            "KRONN_AUTH_TOKEN came from the environment: the process's original environment block keeps it readable by same-user processes (/proc/<pid>/environ, ps eww). Prefer config.toml.",
+        );
+    }
+    if key_from_env {
+        warnings.push(
+            "KRONN_ENCRYPTION_KEK came from the environment: the process's original environment block keeps it readable by same-user processes (/proc/<pid>/environ, ps eww). Prefer the keychain or the data-directory key file.",
+        );
+    }
+    warnings
+}
+
+/// Log [`env_secret_warnings`] for this process.
+pub fn warn_secrets_taken_from_env(token_from_env: bool) {
+    for warning in env_secret_warnings(
+        token_from_env,
+        crate::core::keyvault::key_override_taken_from_env(),
+    ) {
+        tracing::warn!("{warning}");
+    }
 }
 
 pub fn adopt_env_auth_token(server: &mut ServerConfig, env_token: Option<String>) {
@@ -579,6 +643,65 @@ pub fn default_config() -> AppConfig {
     }
 }
 
+/// Copy `[server].auth_token` and the `[[tokens.keys]]` entries of a
+/// parseable but schema-invalid config into `config`. Returns how many.
+fn salvage_credentials(content: &str, config: &mut AppConfig) -> usize {
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return 0;
+    };
+    let mut n = 0;
+    if let Some(token) = table
+        .get("server")
+        .and_then(|s| s.get("auth_token"))
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+    {
+        config.server.auth_token = Some(token.to_string());
+        n += 1;
+    }
+    // The saved auth choice comes with the token.
+    if let Some(enabled) = table
+        .get("server")
+        .and_then(|s| s.get("auth_enabled"))
+        .and_then(|v| v.as_bool())
+    {
+        config.server.auth_enabled = enabled;
+    }
+    if let Some(keys) = table
+        .get("tokens")
+        .and_then(|t| t.get("keys"))
+        .and_then(|k| k.as_array())
+    {
+        for key in keys {
+            if let Ok(k) = key.clone().try_into::<crate::models::ApiKey>() {
+                config.tokens.keys.push(k);
+                n += 1;
+            }
+        }
+    }
+    // Legacy single-key fields, migrated as `load` does.
+    if config.tokens.keys.is_empty() {
+        for provider in ["anthropic", "openai", "google"] {
+            if let Some(val) = table
+                .get("tokens")
+                .and_then(|t| t.get(provider))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            {
+                config.tokens.keys.push(ApiKey {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "Personal API Key".into(),
+                    provider: provider.into(),
+                    value: val.to_string(),
+                    active: true,
+                });
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// Per data directory, the notice about a config.toml kept aside at start.
 static SET_ASIDE: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
@@ -605,6 +728,7 @@ fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) ->
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
     let name = format!("{CONFIG_FILE}.corrupt.{stamp}");
     std::fs::rename(path, dir.join(&name)).context("move the unreadable config.toml aside")?;
+    super::keyvault::sync_dir(dir);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -614,7 +738,7 @@ fn set_aside_unreadable_config(dir: &std::path::Path, path: &std::path::Path) ->
 }
 
 /// A top-level `encryption_secret = "..."` line that parses on its own.
-fn salvage_key_line(content: &str) -> Option<String> {
+pub(crate) fn salvage_key_line(content: &str) -> Option<String> {
     content.lines().find_map(|line| {
         let table: toml::Table = line.trim().parse().ok()?;
         table
@@ -838,7 +962,7 @@ mod tests {
     async fn an_unparseable_config_is_kept_aside_and_its_key_salvaged() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("corrupt");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
         let key = crate::core::crypto::generate_secret();
         std::fs::write(
             tmp.join(CONFIG_FILE),
@@ -867,7 +991,7 @@ mod tests {
             .contains("x = [broken"));
         assert!(is_first_run().await.unwrap());
         release_disk_key(&tmp);
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -878,7 +1002,7 @@ mod tests {
     async fn a_schema_invalid_config_is_set_aside_with_a_notice() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("schema");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
         std::fs::write(tmp.join(CONFIG_FILE), "[server]\nport = \"not a number\"\n").unwrap();
         let loaded = load().await.unwrap().expect("first run");
         assert!(loaded.encryption_secret.is_none());
@@ -888,7 +1012,73 @@ mod tests {
             "{notice}"
         );
         assert!(notice.contains("config.toml.corrupt."), "{notice}");
-        std::env::remove_var("KRONN_DATA_DIR");
+        // C5-02: no key could be salvaged, so the notice never claims one is intact.
+        assert!(
+            !notice.contains("intact") && notice.contains("No valid encryption key"),
+            "{notice}"
+        );
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C6-07 — a value that is not a key is never announced as recovered.
+    #[tokio::test]
+    #[serial]
+    async fn a_garbage_key_in_a_set_aside_config_is_not_announced() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("garbage-key");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(
+            tmp.join(CONFIG_FILE),
+            "encryption_secret = \"garbage\"\n[server]\nport = \"x\"\n",
+        )
+        .unwrap();
+        load().await.unwrap().expect("first run");
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(!notice.contains("recovered"), "{notice}");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        release_disk_key(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// C6-10 — the taken auth token is kept for the desktop self-restart,
+    /// which hands it back.
+    #[test]
+    #[serial]
+    fn the_taken_auth_token_is_handed_to_the_self_restart() {
+        crate::core::child_env::set_var("KRONN_AUTH_TOKEN", "operator-token");
+        assert_eq!(take_env_auth_token().as_deref(), Some("operator-token"));
+        assert_eq!(taken_env_auth_token().as_deref(), Some("operator-token"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let desktop =
+            std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
+        let start = desktop.find("fn self_restart_command()").unwrap();
+        let body = &desktop[start..start + desktop[start..].find("\n}\n").unwrap()];
+        assert!(
+            body.contains("taken_env_auth_token()") && body.contains("\"KRONN_AUTH_TOKEN\""),
+            "{body}"
+        );
+        assert_eq!(take_env_auth_token(), None);
+    }
+
+    /// C7-08 — legacy single keys of a schema-invalid file are recovered and
+    /// the notice says the kept file holds credentials in clear.
+    #[tokio::test]
+    #[serial]
+    async fn legacy_keys_of_a_schema_invalid_config_are_recovered() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("legacy-salvage");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(
+            tmp.join(CONFIG_FILE),
+            "[server]\nport = \"x\"\n[tokens]\nanthropic = \"sk-legacy-x\"\n",
+        )
+        .unwrap();
+        let loaded = load().await.unwrap().expect("first run");
+        assert!(loaded.tokens.keys.iter().any(|k| k.value == "sk-legacy-x"));
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(notice.contains("credentials in clear"), "{notice}");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1007,8 +1197,8 @@ mod tests {
     #[serial]
     fn data_dir_lock_resolves_the_configured_data_directory() {
         let dir = scratch_dir("configured-lock");
-        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = acquire_data_dir_lock().expect("configured data-dir lock must succeed");
         assert!(
@@ -1018,8 +1208,8 @@ mod tests {
         drop(first);
 
         match previous_data_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1032,7 +1222,7 @@ mod tests {
     async fn load_does_not_regenerate_a_missing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("noregen");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.auth_token = Some("tok".into()); // avoid the auth-gen re-save path
@@ -1045,7 +1235,7 @@ mod tests {
             "load() MUST NOT generate a key when the field is missing (I1)"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1054,7 +1244,7 @@ mod tests {
     async fn load_keeps_an_existing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("keepsecret");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         // A 0.14.2 file carries the key; the struct never writes it.
         let mut cfg = default_config();
@@ -1084,7 +1274,7 @@ mod tests {
         assert!(!text.contains("encryption_secret"), "{text}");
         assert!(!text.contains(&secret));
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1097,8 +1287,8 @@ mod tests {
     async fn ollama_context_overrides_round_trip_through_the_real_config_file() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("ollama-ctx-overrides");
-        let previous_data_dir = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        let previous_data_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server
@@ -1140,8 +1330,8 @@ mod tests {
         assert!(reloaded.server.ollama_context_overrides.is_empty());
 
         match previous_data_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1153,7 +1343,7 @@ mod tests {
     async fn load_migrates_legacy_single_keys_to_multikey() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("legacymig");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         // The legacy fields are `skip_serializing`, so we can't round-trip them
         // through save(); write a raw config.toml with the legacy line injected
@@ -1179,7 +1369,7 @@ mod tests {
             "legacy field must be cleared"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1188,8 +1378,8 @@ mod tests {
     async fn desktop_runtime_port_is_not_saved_for_the_next_cli_start() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
-        let previous_dir = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", tmp.path());
+        let previous_dir = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.path());
 
         for saved_port in [3140, 4242] {
             let mut desktop = default_config();
@@ -1211,8 +1401,8 @@ mod tests {
         }
 
         match previous_dir {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -1223,7 +1413,7 @@ mod tests {
     async fn concurrent_saves_never_produce_a_torn_config() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("concurrent");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let base = default_config();
         let mut handles = Vec::new();
@@ -1246,7 +1436,7 @@ mod tests {
             "a complete config must be readable after concurrent saves"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1266,7 +1456,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.unlocked_profiles.push("batman".into());
@@ -1287,7 +1477,7 @@ mod tests {
             reloaded.secret_themes
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1299,7 +1489,7 @@ mod tests {
     async fn load_does_not_generate_an_auth_token_nor_touch_auth_enabled() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("noauthgen");
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.auth_token = None;
@@ -1310,7 +1500,7 @@ mod tests {
         assert!(loaded.server.auth_token.is_none());
         assert!(loaded.server.auth_enabled, "the saved choice is kept");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1352,7 +1542,7 @@ mod tests {
 
         let tmp = std::env::temp_dir().join(format!("kronn-config-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let cfg = default_config();
         save(&cfg).await.expect("save must succeed");
@@ -1373,7 +1563,7 @@ mod tests {
             file_mode
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1390,7 +1580,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let loaded = load().await.expect("load must succeed even with no file");
         assert!(
@@ -1398,7 +1588,7 @@ mod tests {
             "absent config file must return None, got {loaded:?}"
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1415,7 +1605,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let first = is_first_run().await.expect("first_run check");
         assert!(first, "with no config file, is_first_run must be true");
@@ -1426,7 +1616,7 @@ mod tests {
         let still_first = is_first_run().await.expect("first_run after save");
         assert!(!still_first, "after a save, is_first_run must be false");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1443,7 +1633,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let cfg = default_config();
         save(&cfg).await.expect("save");
@@ -1468,7 +1658,7 @@ mod tests {
         }
         assert_eq!(loaded.scan.scan_depth, 4, "scan_depth must default to 4");
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1486,7 +1676,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let mut cfg = default_config();
         cfg.server.anti_hallucination_mode = "strict".into();
@@ -1501,7 +1691,7 @@ mod tests {
             loaded.server.default_model_tier
         );
 
-        std::env::remove_var("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1526,6 +1716,22 @@ mod tests {
         adopt_env_auth_token(&mut untouched, None);
         assert_eq!(untouched.auth_token, before);
         assert!(!untouched.auth_enabled);
+    }
+
+    /// A secret pinned through the environment is flagged at start: its
+    /// original environment block stays readable by same-user processes.
+    #[test]
+    fn env_pinned_secrets_are_warned_about() {
+        assert!(env_secret_warnings(false, false).is_empty());
+        let both = env_secret_warnings(true, true);
+        assert_eq!(both.len(), 2);
+        assert!(both[0].contains("KRONN_AUTH_TOKEN") && both[1].contains("KRONN_ENCRYPTION_KEK"));
+        for main in [
+            include_str!("../main.rs"),
+            include_str!("../../../desktop/src-tauri/src/main.rs"),
+        ] {
+            assert!(main.contains("warn_secrets_taken_from_env("));
+        }
     }
 
     /// The backend no longer puts its admin token into its own environment,

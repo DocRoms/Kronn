@@ -84,6 +84,65 @@ pub struct ApiSpec {
     /// call itself overrides the default of the same name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_headers: Vec<ApiDefaultHeader>,
+    /// Path of the declared endpoint the "Test" button calls to check the
+    /// credentials. Only a `GET` without path parameters qualifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub test_endpoint: Option<String>,
+}
+
+/// Last path segments that answer "who am I" or check the token without side
+/// effects: `/me` (Microsoft Graph, Spotify, SCIM `/Me`), `/users/@me`
+/// (Discord), `/users/me.json` (Zendesk), `/userinfo` (OpenID Connect),
+/// `/myself` (Jira), `/whoami` (Airtable), `/tokens/verify` (Cloudflare),
+/// `/validate` (Datadog). `ping`/`health` are left out: often public, they
+/// would pass with a wrong token.
+const IDENTITY_SEGMENTS: &[&str] = &[
+    "me", "whoami", "self", "myself", "user", "userinfo", "viewer", "account", "profile",
+    "current", "verify", "validate",
+];
+
+/// Last path segment, lower-cased, without a leading `@` or a `.json`/`.xml`.
+fn identity_segment(path: &str) -> String {
+    let last = path
+        .trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let last = last.trim_start_matches('@').to_ascii_lowercase();
+    last.strip_suffix(".json")
+        .or_else(|| last.strip_suffix(".xml"))
+        .unwrap_or(&last)
+        .to_string()
+}
+
+impl ApiEndpoint {
+    /// A `GET` the probe can call as-is: no `{param}` left to fill.
+    pub fn is_testable(&self) -> bool {
+        self.method.trim().eq_ignore_ascii_case("GET") && !self.path.contains('{')
+    }
+}
+
+impl ApiSpec {
+    /// Endpoint the readiness probe calls: the selected one when it still
+    /// qualifies, otherwise the most identity-like testable endpoint, then
+    /// the first testable one. Keep in lockstep with the form's default
+    /// (`frontend/src/components/plugins/testEndpoint.ts`).
+    pub fn probe_endpoint(&self) -> Option<&str> {
+        let testable = || self.endpoints.iter().filter(|e| e.is_testable());
+        if let Some(chosen) = self.test_endpoint.as_deref() {
+            if let Some(endpoint) = testable().find(|e| e.path == chosen) {
+                return Some(endpoint.path.as_str());
+            }
+        }
+        let identity =
+            |e: &&ApiEndpoint| IDENTITY_SEGMENTS.contains(&identity_segment(&e.path).as_str());
+        testable()
+            .find(identity)
+            .or_else(|| testable().next())
+            .map(|e| e.path.as_str())
+    }
 }
 
 /// Fixed request header declared on an API plugin. `value` is a literal
@@ -678,6 +737,10 @@ pub struct CustomApiPayload {
     /// Headers sent on every call (see `ApiSpec::default_headers`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_headers: Vec<ApiDefaultHeader>,
+    /// Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub test_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

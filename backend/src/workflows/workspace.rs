@@ -84,7 +84,11 @@ pub fn main_tree_wait() -> std::time::Duration {
     if let Ok(wait) = MAIN_TREE_WAIT_FOR_TESTS.try_with(|wait| *wait) {
         return wait;
     }
-    main_tree_wait_from(std::env::var(MAIN_TREE_WAIT_ENV).ok().as_deref())
+    main_tree_wait_from(
+        crate::core::child_env::var(MAIN_TREE_WAIT_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 type MainTreeLocks = std::sync::Mutex<std::collections::HashMap<String, MainTreeSlot>>;

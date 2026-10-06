@@ -255,7 +255,7 @@ pub(crate) fn apply_wslenv(command: &mut tokio::process::Command, forward: impl 
             _ => {}
         }
     }
-    let existing = existing.or_else(|| std::env::var("WSLENV").ok());
+    let existing = existing.or_else(|| crate::core::child_env::var("WSLENV").ok());
     if let Some(value) = wslenv_value(existing.as_deref(), set.iter().map(String::as_str)) {
         command.env("WSLENV", value);
     }
@@ -318,7 +318,7 @@ pub(crate) fn backend_unreachable_warning_needed(
 pub(crate) fn warn_once_if_backend_unreachable(override_set: bool) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
-        let mode = std::env::var_os("USERPROFILE")
+        let mode = crate::core::child_env::var_os("USERPROFILE")
             .map(|home| Path::new(&home).join(".wslconfig"))
             .and_then(|path| std::fs::read_to_string(path).ok())
             .and_then(|content| wslconfig_networking_mode(&content));

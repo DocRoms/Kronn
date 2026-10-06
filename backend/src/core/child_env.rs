@@ -496,14 +496,324 @@ fn parent_env() -> Vec<(OsString, OsString)> {
     if let Some(parent) = PARENT_OVERRIDE.with(|cell| cell.borrow().clone()) {
         return parent;
     }
-    std::env::vars_os().collect()
+    vars_os()
 }
 
-/// One variable of the backend's environment, as the builder sees it.
+/// One variable of the backend's environment, as the builder sees it
+/// (variables withheld from the process environment included).
 pub fn parent_var(name: &str) -> Option<OsString> {
     parent_env()
         .into_iter()
-        .find_map(|(key, value)| (key == name).then_some(value))
+        .find_map(|(key, value)| same_name(&key, OsStr::new(name)).then_some(value))
+}
+
+/// [`parent_var`] as a string, `None` when absent or not Unicode.
+pub fn parent_var_string(name: &str) -> Option<String> {
+    parent_var(name).and_then(|value| value.into_string().ok())
+}
+
+/// Environment names compare like the platform does: case-insensitively on
+/// Windows.
+fn same_name(left: &OsStr, right: &OsStr) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+/// The desktop's withheld variables and whether it withholds at all.
+#[derive(Default, Clone)]
+struct Withheld {
+    /// Set once the desktop withholds its environment.
+    active: bool,
+    vars: Vec<(OsString, OsString)>,
+}
+
+/// Variables moved out of the process environment, kept for the builder
+/// and for Kronn's own reads (see [`withhold_process_environment`]).
+static WITHHELD: std::sync::Mutex<Withheld> = std::sync::Mutex::new(Withheld {
+    active: false,
+    vars: Vec::new(),
+});
+
+#[cfg(test)]
+thread_local! {
+    static WITHHELD_OVERRIDE: std::cell::RefCell<Option<Withheld>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `body` as if the desktop had withheld `vars` (this thread only).
+#[cfg(test)]
+pub(crate) fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    with_withheld_state(true, vars, body)
+}
+
+/// [`with_withheld_env`] with the withholding switched on or not yet.
+#[cfg(test)]
+pub(crate) fn with_withheld_state<T>(
+    active: bool,
+    vars: &[(&str, &str)],
+    body: impl FnOnce() -> T,
+) -> T {
+    let state = Withheld {
+        active,
+        vars: vars
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect(),
+    };
+    WITHHELD_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(state));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WITHHELD_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    body()
+}
+
+/// Run `f` on the withheld state (the test override on this thread, if any).
+fn with_state<T>(f: impl FnOnce(&mut Withheld) -> T) -> T {
+    #[cfg(test)]
+    {
+        let mut f = Some(f);
+        let overridden = WITHHELD_OVERRIDE.with(|cell| {
+            cell.borrow_mut()
+                .as_mut()
+                .map(|state| (f.take().unwrap())(state))
+        });
+        if let Some(result) = overridden {
+            return result;
+        }
+        let f = f.take().unwrap();
+        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut state)
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = WITHHELD.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut state)
+    }
+}
+
+fn withheld() -> Vec<(OsString, OsString)> {
+    with_state(|state| state.vars.clone())
+}
+
+/// The live environment plus the withheld variables it no longer holds.
+fn with_withheld(
+    mut live: Vec<(OsString, OsString)>,
+    withheld: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    for (name, value) in withheld {
+        if !live.iter().any(|(key, _)| same_name(key, name)) {
+            live.push((name.clone(), value.clone()));
+        }
+    }
+    live
+}
+
+fn withheld_value(name: &OsStr) -> Option<OsString> {
+    with_state(|state| {
+        state
+            .vars
+            .iter()
+            .find_map(|(key, value)| same_name(key, name).then(|| value.clone()))
+    })
+}
+
+/// Kronn's own read of one environment variable: the live value, else the
+/// one the desktop withheld. Every read in Kronn goes through here (clippy
+/// refuses `std::env::var`).
+#[allow(clippy::disallowed_methods)] // the one live read
+pub fn var<K: AsRef<OsStr>>(name: K) -> Result<String, std::env::VarError> {
+    match std::env::var(name.as_ref()) {
+        Err(std::env::VarError::NotPresent) => match withheld_value(name.as_ref()) {
+            Some(value) => value.into_string().map_err(std::env::VarError::NotUnicode),
+            None => Err(std::env::VarError::NotPresent),
+        },
+        other => other,
+    }
+}
+
+/// [`var`] for an `OsString`.
+#[allow(clippy::disallowed_methods)] // the one live read
+pub fn var_os<K: AsRef<OsStr>>(name: K) -> Option<OsString> {
+    std::env::var_os(name.as_ref()).or_else(|| withheld_value(name.as_ref()))
+}
+
+/// The whole environment as Kronn sees it: live plus withheld.
+#[allow(clippy::disallowed_methods)] // the one live read
+pub fn vars_os() -> Vec<(OsString, OsString)> {
+    with_withheld(std::env::vars_os().collect(), &withheld())
+}
+
+/// What a write does to the live process environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveWrite {
+    /// Only the withheld set changes.
+    None,
+    Set,
+}
+
+/// Once the desktop withholds, a name off the webview allow-list is never
+/// live: a write only updates the withheld set.
+fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
+    if state.active && !webview_keeps(name) {
+        LiveWrite::None
+    } else {
+        LiveWrite::Set
+    }
+}
+
+/// Kronn's only way to set a variable. Once the desktop withholds its
+/// environment, a name off the webview allow-list goes to the withheld set,
+/// never live (where the webview helpers would inherit it).
+///
+/// A live write is allowed only before any thread exists: `setenv` races C
+/// code reading the environment (glib, WebKitGTK, `getaddrinfo`) without
+/// Rust's lock. After start, use [`set_overlay_var`].
+#[allow(clippy::disallowed_methods)] // the one live write
+pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(name: K, value: V) {
+    let (name, value) = (name.as_ref(), value.as_ref());
+    let write = with_state(|state| {
+        state.vars.retain(|(key, _)| !same_name(key, name));
+        let write = live_write(state, name);
+        if write == LiveWrite::None {
+            state.vars.push((name.to_os_string(), value.to_os_string()));
+        }
+        write
+    });
+    if write == LiveWrite::Set {
+        std::env::set_var(name, value);
+    }
+}
+
+/// A value for Kronn's own reads and for child routes, never written to the
+/// live environment: safe once threads run (`KRONN_BACKEND_URL`).
+pub fn set_overlay_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(name: K, value: V) {
+    let (name, value) = (name.as_ref(), value.as_ref());
+    with_state(|state| {
+        state.vars.retain(|(key, _)| !same_name(key, name));
+        state.vars.push((name.to_os_string(), value.to_os_string()));
+    });
+}
+
+/// Kronn's only way to remove a variable: live and withheld alike. The live
+/// removal happens only when the name is live; the same before-threads
+/// contract as [`set_var`] applies to it.
+#[allow(clippy::disallowed_methods)] // the one live write
+pub fn remove_var<K: AsRef<OsStr>>(name: K) {
+    let name = name.as_ref();
+    with_state(|state| state.vars.retain(|(key, _)| !same_name(key, name)));
+    if std::env::var_os(name).is_some() {
+        std::env::remove_var(name);
+    }
+}
+
+/// Whether a process-environment name is a credential.
+fn is_credential(name: &str) -> bool {
+    name_in(name, FORBIDDEN)
+        || name_in(name, PROVIDER_KEYS)
+        || name_in(name, GITHUB_ENV)
+        || looks_secret(name)
+}
+
+/// What the desktop process keeps in its live environment, and so what the
+/// system webview helpers (WebKitGTK, WebView2) inherit: the base allow-list,
+/// display and session plumbing, toolkit and runtime settings. Never a
+/// credential, never a Kronn setting (Kronn reads those through [`var`]).
+const WEBVIEW_NAMES: &[&str] = &[
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "WAYLAND_SOCKET",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+    "DESKTOP_SESSION",
+    "SESSION_MANAGER",
+    "XMODIFIERS",
+    "NO_AT_BRIDGE",
+    "LD_LIBRARY_PATH",
+    "APPDIR",
+    "APPIMAGE",
+    "ARGV0",
+    "OWD",
+    "SNAP",
+];
+const WEBVIEW_PREFIXES: &[&str] = &[
+    "XDG_",
+    "GDK_",
+    "GTK_",
+    "GIO_",
+    "GSETTINGS_",
+    "GST_",
+    "WEBKIT_",
+    "WEBVIEW2_",
+    "LIBGL_",
+    "MESA_",
+    "__GL",
+    "__EGL",
+    "QT_",
+    "AT_SPI_",
+    "PULSE_",
+    "SNAP_",
+    "FLATPAK_",
+    "TAURI_",
+    "RUST_",
+    "DYLD_",
+];
+
+/// Whether the desktop keeps `name` in its live environment.
+fn webview_keeps(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false; // not valid Unicode: withheld like a credential
+    };
+    let listed =
+        is_base(name) || name_in(name, WEBVIEW_NAMES) || has_prefix(name, WEBVIEW_PREFIXES);
+    listed && !is_credential(name)
+}
+
+/// Remove from this process's environment every variable `keep` refuses.
+#[allow(clippy::disallowed_methods)] // reads the live environment it empties
+fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
+    let held: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(name, _)| !keep(name))
+        .collect();
+    for (name, _) in &held {
+        std::env::remove_var(name);
+    }
+    held
+}
+
+/// The variables [`withhold_process_environment`] moved out (none elsewhere).
+pub fn withheld_variables() -> Vec<(OsString, OsString)> {
+    withheld()
+}
+
+/// Desktop: keep only the webview allow-list in the process environment, so
+/// processes the system starts for the app (WebKitGTK and WebView2 helpers)
+/// never inherit a credential, whatever its name. Child routes and Kronn's
+/// own reads ([`var`], [`parent_var`]) still see every withheld variable.
+/// Call before any thread exists: removing a variable is not thread-safe.
+pub fn withhold_process_environment() {
+    withhold_where(webview_keeps);
+}
+
+/// Withhold every live variable `keep` refuses, merged into the withheld set
+/// (a later call never drops what an earlier one, or [`set_var`], put there),
+/// and route later writes of such names to the set.
+fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
+    let held = take_process_environment_where(keep);
+    with_state(|state| {
+        state.active = true;
+        for (name, value) in held {
+            state.vars.retain(|(key, _)| !same_name(key, &name));
+            state.vars.push((name, value));
+        }
+    });
 }
 
 /// Remove from a built command every credential it carries: provider keys,
@@ -513,14 +823,7 @@ pub fn drop_credentials(command: &mut std::process::Command) {
         .get_envs()
         .filter(|(_, value)| value.is_some())
         .map(|(name, _)| name.to_os_string())
-        .filter(|name| {
-            name.to_str().is_none_or(|name| {
-                name_in(name, FORBIDDEN)
-                    || name_in(name, PROVIDER_KEYS)
-                    || name_in(name, GITHUB_ENV)
-                    || looks_secret(name)
-            })
-        })
+        .filter(|name| name.to_str().is_none_or(is_credential))
         .collect();
     for name in names {
         command.env_remove(name);

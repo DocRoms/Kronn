@@ -1,7 +1,8 @@
 import { quickApis, quickExecs, quickPrompts, workflows } from './api';
+import { workflowExecLines } from './agentExecLines';
 import type { ProjectRepositoryResourceKind, Workflow } from '../types/generated';
 
-export type ExecutionField = 'binary' | 'arguments' | 'folder' | 'triggers' | 'network' | 'steps' | 'agent' | 'prompt';
+export type ExecutionField = 'binary' | 'arguments' | 'folder' | 'triggers' | 'network' | 'steps' | 'exec' | 'agent' | 'prompt';
 
 export interface ExecutionSummary {
   fields: Array<{ field: ExecutionField; values: string[] }>;
@@ -31,6 +32,10 @@ function workflowSummary(workflow: Workflow): ExecutionSummary {
         field: 'steps',
         values: workflow.steps.map(step => `${step.name} · ${step.step_type.type}${step.step_type.type === 'Agent' ? ` · ${step.agent}` : ''}`),
       },
+      // KT-1017 — every command line the definition runs; a new or changed
+      // one is the repository's (an agent can write it) and waits for an
+      // approval in the editor.
+      { field: 'exec', values: workflowExecLines(workflow) },
       // Without isolation the run happens in the project's own checkout.
       { field: 'folder', values: [workflow.workspace_config?.require_isolation ? 'worktree' : 'project'] },
       { field: 'network', values: network },

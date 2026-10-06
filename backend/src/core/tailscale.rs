@@ -51,7 +51,7 @@ pub async fn detect_ip() -> Option<String> {
 
 /// Extract Tailscale IP from `KRONN_HOST_IPS` env var (Docker scenario).
 fn detect_via_host_env() -> Option<String> {
-    let val = std::env::var("KRONN_HOST_IPS").ok()?;
+    let val = crate::core::child_env::var("KRONN_HOST_IPS").ok()?;
     for entry in val.split(',') {
         let parts: Vec<&str> = entry.splitn(2, ':').collect();
         if parts.len() == 2 && is_tailscale_ip(parts[1]) {
@@ -222,7 +222,7 @@ pub fn primary_lan_ipv4() -> Option<String> {
 /// Parse `KRONN_HOST_IPS` env var: `iface:ip,iface:ip,...`
 /// Each entry is classified by `classify_ip`.
 fn parse_host_ips_env() -> Option<Vec<DetectedIp>> {
-    let val = std::env::var("KRONN_HOST_IPS").ok()?;
+    let val = crate::core::child_env::var("KRONN_HOST_IPS").ok()?;
     if val.is_empty() {
         return None;
     }
@@ -458,7 +458,7 @@ mod tests {
     #[serial]
     fn parse_host_ips_env_valid() {
         let _env = env_guard();
-        std::env::set_var(
+        crate::core::child_env::set_var(
             "KRONN_HOST_IPS",
             "eth0:192.168.1.50,tailscale0:100.100.50.1,tun0:10.8.0.5",
         );
@@ -470,23 +470,23 @@ mod tests {
         assert_eq!(ips[1].kind, "tailscale");
         assert_eq!(ips[2].ip, "10.8.0.5");
         assert_eq!(ips[2].kind, "vpn");
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]
     #[serial]
     fn parse_host_ips_env_empty() {
         let _env = env_guard();
-        std::env::set_var("KRONN_HOST_IPS", "");
+        crate::core::child_env::set_var("KRONN_HOST_IPS", "");
         assert!(parse_host_ips_env().is_none());
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]
     #[serial]
     fn parse_host_ips_env_unset() {
         let _env = env_guard();
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
         assert!(parse_host_ips_env().is_none());
     }
 
@@ -494,14 +494,14 @@ mod tests {
     #[serial]
     fn parse_host_ips_env_skips_localhost_and_docker() {
         let _env = env_guard();
-        std::env::set_var(
+        crate::core::child_env::set_var(
             "KRONN_HOST_IPS",
             "lo:127.0.0.1,docker0:172.17.0.1,eth0:192.168.1.10",
         );
         let ips = parse_host_ips_env().unwrap();
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0].ip, "192.168.1.10");
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]
@@ -579,29 +579,29 @@ mod tests {
     #[serial]
     fn detect_via_host_env_returns_tailscale_when_present() {
         let _env = env_guard();
-        std::env::set_var(
+        crate::core::child_env::set_var(
             "KRONN_HOST_IPS",
             "eth0:192.168.1.10,tailscale0:100.100.5.5,docker0:172.17.0.1",
         );
         let ip = detect_via_host_env().expect("tailscale entry should be detected");
         assert_eq!(ip, "100.100.5.5");
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]
     #[serial]
     fn detect_via_host_env_returns_none_when_no_tailscale_entry() {
         let _env = env_guard();
-        std::env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.10,docker0:172.17.0.1");
+        crate::core::child_env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.10,docker0:172.17.0.1");
         assert!(detect_via_host_env().is_none());
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]
     #[serial]
     fn detect_via_host_env_returns_none_when_unset() {
         let _env = env_guard();
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
         assert!(detect_via_host_env().is_none());
     }
 
@@ -610,14 +610,14 @@ mod tests {
     fn parse_host_ips_env_malformed_entries_are_skipped() {
         let _env = env_guard();
         // No colon, trailing comma, only one part — all skipped silently.
-        std::env::set_var(
+        crate::core::child_env::set_var(
             "KRONN_HOST_IPS",
             "garbage,eth0:192.168.1.5,broken,more-garbage,",
         );
         let ips = parse_host_ips_env().expect("should still parse the good entry");
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0].ip, "192.168.1.5");
-        std::env::remove_var("KRONN_HOST_IPS");
+        crate::core::child_env::remove_var("KRONN_HOST_IPS");
     }
 
     #[test]

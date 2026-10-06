@@ -24,7 +24,7 @@ const BACKUP_EXT: &str = "db";
 /// (same place as the manual backup — in-volume, logged as a warning). Returns
 /// `(dir, is_external)`.
 pub fn resolve_backup_dir(data_dir: &Path) -> (PathBuf, bool) {
-    match std::env::var("KRONN_BACKUP_DIR")
+    match crate::core::child_env::var("KRONN_BACKUP_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
     {
@@ -276,7 +276,7 @@ async fn perform_backup_with(
 /// Parse an env var, falling back to `default` when unset. A SET but
 /// unparseable value warns instead of silently defaulting.
 fn env_or_default<T: std::str::FromStr + std::fmt::Display>(var: &str, default: T) -> T {
-    match std::env::var(var) {
+    match crate::core::child_env::var(var) {
         Ok(s) => s.trim().parse().unwrap_or_else(|_| {
             tracing::warn!(target: "backup", "{var}={s:?} is not a valid number — using default {default}");
             default
@@ -627,16 +627,16 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_backup_dir_defaults_in_volume_then_env_external() {
-        std::env::remove_var("KRONN_BACKUP_DIR");
+        crate::core::child_env::remove_var("KRONN_BACKUP_DIR");
         let (dir, ext) = resolve_backup_dir(Path::new("/data"));
         assert_eq!(dir, PathBuf::from("/data/backups"));
         assert!(!ext, "default is in-volume");
 
-        std::env::set_var("KRONN_BACKUP_DIR", "/host/backups");
+        crate::core::child_env::set_var("KRONN_BACKUP_DIR", "/host/backups");
         let (dir, ext) = resolve_backup_dir(Path::new("/data"));
         assert_eq!(dir, PathBuf::from("/host/backups"));
         assert!(ext, "env-provided dir is external");
-        std::env::remove_var("KRONN_BACKUP_DIR");
+        crate::core::child_env::remove_var("KRONN_BACKUP_DIR");
     }
 
     #[test]

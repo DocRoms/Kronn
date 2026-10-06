@@ -2790,3 +2790,100 @@ async fn imported_and_saved_targets_stay_in_the_token_s_project() {
     .await;
     assert_eq!(status, 403, "another project's room: {response}");
 }
+
+// ─── Layer B round 7 (review-layer-b7) ──────────────────────────────────────
+
+/// B7-05 — a token's duration estimate uses only runs it may see.
+#[tokio::test]
+async fn workflow_duration_estimates_use_only_visible_runs() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, status, started_at, finished_at) VALUES \
+             ('run-p2-a', 'wf-global', 'p2', 'Success', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z'), \
+             ('run-p2-b', 'wf-global', 'p2', 'Success', '2026-01-02T00:00:00Z', '2026-01-02T00:01:00Z'), \
+             ('run-p1-live', 'wf-global', 'p1', 'Running', '2026-01-03T00:00:00Z', NULL)",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, human) = call(
+        &app,
+        "GET",
+        "/api/mcp/workflow-run-status/run-p1-live",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(human["data"]["samples"], 2, "{human}");
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/mcp/workflow-run-status/run-p1-live",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["data"]["samples"], 0, "{response}");
+    assert!(
+        response["data"]["expected_duration_ms"].is_null(),
+        "{response}"
+    );
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(&token),
+        Some(json!({"workflow_id": "wf-global"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["data"]["samples"], 0, "{response}");
+    assert!(
+        response["data"]["expected_duration_ms"].is_null(),
+        "{response}"
+    );
+}
+
+/// B7-06 — a token's Quick Prompt estimate counts only its project's launches.
+#[tokio::test]
+async fn quick_prompt_estimates_count_only_the_token_s_launches() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        for n in 0..3 {
+            let disc = format!("qp-launch-{n}");
+            conn.execute(
+                "INSERT INTO discussions(id, title, project_id, originating_qp_id, \
+                 originating_qp_version, created_at, updated_at) \
+                 VALUES (?1, ?1, 'p2', 'qp-global', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [&disc],
+            )?;
+            conn.execute(
+                "INSERT INTO messages(id, discussion_id, role, content, timestamp, sort_order, \
+                 duration_ms) VALUES (?1, ?2, 'Agent', 'done', '2026-01-01T00:00:00Z', 0, 60000)",
+                rusqlite::params![format!("{disc}-m"), disc],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/mcp/qp-run",
+        Some(guard.value()),
+        Some(json!({"qp_id": "qp-global"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["samples"], 0, "{response}");
+}

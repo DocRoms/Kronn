@@ -3,7 +3,7 @@
 #[tokio::test]
 async fn unisolated_config_write_is_refused() {
     // Deliberately NO isolate_config_dir() and KRONN_DATA_DIR cleared.
-    std::env::remove_var("KRONN_DATA_DIR");
+    kronn::core::child_env::remove_var("KRONN_DATA_DIR");
     let cfg = kronn::core::config::default_config();
     let err = kronn::core::config::save(&cfg)
         .await

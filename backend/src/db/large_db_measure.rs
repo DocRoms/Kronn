@@ -160,12 +160,12 @@ fn count_rows(conn: &Connection, sql: &str) -> usize {
 #[test]
 #[ignore = "writes several gigabytes; run by hand with KRONN_MEASURE_DIR"]
 fn large_db_measure() {
-    let Ok(dir) = std::env::var("KRONN_MEASURE_DIR") else {
+    let Ok(dir) = crate::core::child_env::var("KRONN_MEASURE_DIR") else {
         eprintln!("KRONN_MEASURE_DIR is not set; nothing measured");
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    let target_mb: u64 = std::env::var("KRONN_MEASURE_MB")
+    let target_mb: u64 = crate::core::child_env::var("KRONN_MEASURE_MB")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4096);

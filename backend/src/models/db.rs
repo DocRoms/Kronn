@@ -121,6 +121,11 @@ pub struct DbExport {
     /// v5 (passe D) — anti-repetition rejection counters for learnings.
     #[serde(default)]
     pub learning_rejections: Vec<LearningRejection>,
+    /// KT-1017 — a MAC, under this instance's key, over the workflows and
+    /// Quick Execs: a restore keeps their approvals only when it verifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trust_seal: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
