@@ -851,6 +851,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "221_run_retention_reference_indexes",
         include_str!("sql/221_run_retention_reference_indexes.sql"),
     ),
+    (
+        "222_workflow_runs_project_summary_index",
+        include_str!("sql/222_workflow_runs_project_summary_index.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
