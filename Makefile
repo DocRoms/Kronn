@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-backend test-backend-lib test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -349,9 +349,16 @@ typegen:
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
 
-## Run backend tests (skips ts-rs exports to avoid overwriting generated.ts)
+## Run the backend suite CI runs: library, integration tests under
+## backend/tests/ and doctests. Skips the ts-rs exports so bindings stay put
+## (CI regenerates them in its own drift check).
 test-backend:
-	@echo "$(CYAN)▸ Running backend tests...$(RESET)"
+	@echo "$(CYAN)▸ Running backend tests (all targets, as CI)...$(RESET)"
+	cd backend && cargo test -- --skip export_bindings
+
+## Library unit tests only: a quick loop, not the gate.
+test-backend-lib:
+	@echo "$(CYAN)▸ Running backend library tests...$(RESET)"
 	cd backend && cargo test --lib -- --skip export_bindings
 
 ## Run Python helper tests (MCP bridge auto-inheritance contract).

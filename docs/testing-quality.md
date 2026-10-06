@@ -47,7 +47,7 @@ Run from the repository root unless a working directory is shown.
 | Diff hygiene | `make check-diff` (`scripts/check-diff.sh`: `git diff --check` from the merge base with `origin/main`, plus staged and unstaged changes; CI job `diff-hygiene`) | No whitespace errors or conflict markers |
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
 | Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
-| Backend tests | `make test-backend` | Entire Rust suite passes |
+| Backend tests | `make test-backend` (`cd backend && cargo test -- --skip export_bindings`: library, every `backend/tests/*.rs` integration binary and doctests, as CI's `cargo test`) | Entire Rust suite passes |
 | Python helpers | `make test-python` | Entire helper suite passes |
 | Shell | `make test-shell` | Entire bats suite passes |
 | Frontend native TS | `cd frontend && pnpm typecheck:native` | Clean |
@@ -59,6 +59,14 @@ Run from the repository root unless a working directory is shown.
 | Frontend unit/integration | `make test-frontend` | Entire Vitest suite passes |
 | Frontend production build | `cd frontend && pnpm build` | TypeScript and Vite build succeed |
 | Browser E2E | `make test-e2e` | Entire Playwright suite passes against the expected backend fixture |
+
+`make test-backend-lib` runs the library unit tests only: a quick loop, not
+evidence for the gate. `export_bindings` is skipped locally so the ts-rs
+bindings stay untouched; CI runs it in its generated-type drift check.
+`[src: file: Makefile:352-362]`
+A local green does not prove a CI green for tests that read the machine
+(installed CLIs such as LiteLLM, RTK or `npx`, the agent preflight): reproduce
+a CI-only failure in `rust:1-bookworm` before concluding.
 
 CI also checks dependency audit, generated-type drift, desktop compilation and
 repository-specific Rust safety lints. `.github/workflows/ci-test.yml` is the
