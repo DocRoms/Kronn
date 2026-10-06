@@ -152,6 +152,8 @@ pub struct BridgeCaller {
     pub project: Option<String>,
     /// The launch's own discussions (its scope and the ones it created).
     pub own_discussions: Vec<String>,
+    /// The launch's own workflow run, when it is one.
+    pub own_run: Option<String>,
 }
 
 /// Holds a live token; dropping it revokes the token.
@@ -1696,18 +1698,14 @@ pub fn residence(
             )
             .optional()?),
         Kind::Run => {
+            // A run's own project, never its workflow's current home: a run
+            // without one stays project-less (private to its launch) even
+            // after its workflow is moved into a project.
             let workflow_run = conn
                 .query_row(
-                    "SELECT r.project_id, w.project_id, w.project_scope_json FROM workflow_runs r \
-                     LEFT JOIN workflows w ON w.id = r.workflow_id WHERE r.id = ?1",
+                    "SELECT project_id FROM workflow_runs WHERE id = ?1",
                     [id],
-                    |row| {
-                        let run_project: Option<String> = row.get(0)?;
-                        Ok(match run_project {
-                            Some(project) => single_or_global(Some(project)),
-                            None => workflow_residence(row.get(1)?, row.get(2)?),
-                        })
-                    },
+                    |row| Ok(single_or_global(row.get::<_, Option<String>>(0)?)),
                 )
                 .optional()?;
             match workflow_run {

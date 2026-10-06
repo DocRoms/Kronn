@@ -952,6 +952,7 @@ async fn bridge_gate(
         token_id: grant.id.clone(),
         project: project.clone(),
         own_discussions: grant.own_discussions(),
+        own_run: grant.scope.workflow_run_id.clone(),
     });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))

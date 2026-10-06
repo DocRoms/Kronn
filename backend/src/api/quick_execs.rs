@@ -826,6 +826,7 @@ mod tests {
             token_id: "t".into(),
             project: None,
             own_discussions: vec![],
+            own_run: None,
         }))
     }
 

@@ -1633,14 +1633,20 @@ pub async fn step_schema() -> Json<ApiResponse<serde_json::Value>> {
 }
 
 /// GET /api/workflows
-pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+pub async fn list(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+    let visibility = run_visibility(&bridge);
     // Read connection: a list must not queue behind a run writing its steps.
     match state
         .db
-        .with_read_conn(|conn| {
+        .with_read_conn(move |conn| {
             let workflows = crate::db::workflows::list_workflows(conn)?;
-            // Batch-load last runs and project names (avoids N+1 queries)
-            let mut last_runs = crate::db::workflows::get_last_run_summaries(conn)?;
+            // Batch-load last runs and project names (avoids N+1 queries).
+            // A bridge token's last run is one it may see.
+            let mut last_runs =
+                crate::db::workflows::get_last_run_summaries_visible(conn, visibility.as_ref())?;
             let project_names = crate::db::projects::get_project_names(conn)?;
 
             let summaries = workflows
@@ -4183,11 +4189,26 @@ pub struct ListRunsQuery {
     state_value: Option<String>,
 }
 
+/// The runs a bridge caller may see (its project's, or its own run); `None`
+/// for a human caller.
+fn run_visibility(
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Option<crate::db::workflows::RunVisibility> {
+    bridge
+        .as_ref()
+        .map(|caller| crate::db::workflows::RunVisibility {
+            project: caller.0.project.clone(),
+            own_run: caller.0.own_run.clone(),
+        })
+}
+
 pub async fn list_runs(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Path(id): Path<String>,
     Query(params): Query<ListRunsQuery>,
 ) -> Json<ApiResponse<Vec<WorkflowRun>>> {
+    let visibility = run_visibility(&bridge);
     // ADR-001 O2 — heaviest read of the app (full step_results per run):
     // served from the read connection so a busy writer can't freeze it.
     match state
@@ -4198,13 +4219,14 @@ pub async fn list_runs(
                     .limit
                     .unwrap_or(crate::db::workflows::MAX_RUNS_UNPAGINATED)
                     .clamp(1, crate::db::workflows::MAX_RUNS_UNPAGINATED);
-                return crate::db::workflows::list_runs_by_state(
+                return crate::db::workflows::list_runs_by_state_visible(
                     conn,
                     &id,
                     key,
                     params.state_value.as_deref(),
                     limit,
                     params.offset.unwrap_or(0),
+                    visibility.as_ref(),
                 );
             }
             if params.limit.is_some() || params.offset.is_some() {
@@ -4213,17 +4235,30 @@ pub async fn list_runs(
                     .unwrap_or(crate::db::workflows::MAX_RUNS_UNPAGINATED)
                     .clamp(1, crate::db::workflows::MAX_RUNS_UNPAGINATED);
                 if params.complete_group {
-                    crate::db::workflows::list_runs_page_complete_group(
+                    crate::db::workflows::list_runs_page_complete_group_visible(
                         conn,
                         &id,
                         limit,
                         params.offset.unwrap_or(0),
+                        visibility.as_ref(),
                     )
                 } else {
-                    crate::db::workflows::list_runs_paginated(conn, &id, Some(limit), params.offset)
+                    crate::db::workflows::list_runs_paginated_visible(
+                        conn,
+                        &id,
+                        Some(limit),
+                        params.offset,
+                        visibility.as_ref(),
+                    )
                 }
             } else {
-                crate::db::workflows::list_runs(conn, &id)
+                crate::db::workflows::list_runs_paginated_visible(
+                    conn,
+                    &id,
+                    Some(crate::db::workflows::MAX_RUNS_UNPAGINATED),
+                    None,
+                    visibility.as_ref(),
+                )
             }
         })
         .await
@@ -6694,6 +6729,7 @@ mod tests {
             token_id: "t".into(),
             project: None,
             own_discussions: vec![],
+            own_run: None,
         }));
         let Json(by_bridge) = create(
             State(state.clone()),
