@@ -847,6 +847,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "220_audit_step_token_accounting",
         include_str!("sql/220_audit_step_token_accounting.sql"),
     ),
+    (
+        "221_run_retention_reference_indexes",
+        include_str!("sql/221_run_retention_reference_indexes.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
