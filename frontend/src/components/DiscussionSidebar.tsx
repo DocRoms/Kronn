@@ -1601,6 +1601,9 @@ export function DiscussionSidebar({
                 {c.status === 'pending' && !contactsOnline[c.id] && (
                   <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
                 )}
+                {c.status === 'requested' && (
+                  <span className="disc-contact-pending" title={t('contacts.requestedHint')}>{t('contacts.requested')}</span>
+                )}
                 {c.status === 'accepted' && !contactsOnline[c.id] && (
                   <span className="disc-contact-offline">offline</span>
                 )}

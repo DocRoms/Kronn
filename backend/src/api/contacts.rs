@@ -35,9 +35,14 @@ pub async fn add(
         .db
         .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code))
         .await;
-    if let Ok(Some(_)) = exists {
-        return Json(ApiResponse::err("Contact already exists"));
-    }
+    // Adding a code that came in as a request accepts that request.
+    let request = match exists {
+        Ok(Some(existing)) if existing.status == crate::db::contacts::STATUS_REQUESTED => {
+            Some(existing)
+        }
+        Ok(Some(_)) => return Json(ApiResponse::err("Contact already exists")),
+        _ => None,
+    };
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
     let health_url = format!("{}/api/health", kronn_url);
@@ -57,6 +62,25 @@ pub async fn add(
     };
 
     let status = if reachable { "accepted" } else { "pending" };
+
+    if let Some(mut existing) = request {
+        let id = existing.id.clone();
+        return match state
+            .db
+            .with_conn(move |conn| crate::db::contacts::update_contact_status(conn, &id, status))
+            .await
+        {
+            Ok(_) => {
+                existing.status = status.into();
+                existing.updated_at = Utc::now();
+                Json(ApiResponse::ok(AddContactResult {
+                    contact: existing,
+                    warning,
+                }))
+            }
+            Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
+        };
+    }
 
     let now = Utc::now();
     let contact = Contact {

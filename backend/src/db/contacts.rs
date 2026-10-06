@@ -55,6 +55,16 @@ pub fn get_contact(conn: &Connection, id: &str) -> Result<Option<Contact>> {
     Ok(rows.next().and_then(|r| r.ok()))
 }
 
+/// An incoming contact request: an unknown peer presented this code. Kronn
+/// never connects back nor verifies it until the operator adds the code.
+pub const STATUS_REQUESTED: &str = "requested";
+
+/// Whether the outbound client may dial this contact. A request or a refused
+/// contact is never dialled: dialling would mark it accepted.
+pub fn dials_outbound(status: &str) -> bool {
+    status != STATUS_REQUESTED && status != "refused"
+}
+
 /// Passe D — the ONE sanctioned way to authenticate a P2P caller by invite
 /// code: a known contact whose status is `accepted`. A pending/refused
 /// contact keeps its code but must not pass the auth-exempt routes

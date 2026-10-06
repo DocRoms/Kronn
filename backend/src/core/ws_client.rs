@@ -28,7 +28,10 @@ pub async fn run(state: AppState) {
             .db
             .with_conn(crate::db::contacts::list_contacts)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|contact| crate::db::contacts::dials_outbound(&contact.status))
+            .collect::<Vec<_>>();
 
         let active_ids: std::collections::HashSet<String> =
             contacts.iter().map(|c| c.id.clone()).collect();

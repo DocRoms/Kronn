@@ -11,6 +11,7 @@ use axum::{
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -217,7 +218,7 @@ pub async fn ws_handler(
     headers: HeaderMap,
     Query(query): Query<WsAuthQuery>,
     State(state): State<AppState>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let socket_ip = connect_info
         .map(|ext| ext.0 .0.ip())
         .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
@@ -225,6 +226,23 @@ pub async fn ws_handler(
     let peer_ip = resolve_client_ip(&headers, socket_ip, in_docker);
 
     let config = state.config.read().await;
+    // A browser always sends `Origin`: a foreign one is a page the operator
+    // visits trying to reach the bus (cross-site WebSocket hijacking).
+    let origin = classify_ws_origin(
+        headers
+            .get(axum::http::header::ORIGIN)
+            .map(|value| value.to_str().unwrap_or("null")),
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+        config.server.domain.as_deref(),
+        config.server.listening_port(),
+    );
+    if origin == WsOrigin::Foreign {
+        drop(config);
+        tracing::warn!("WS: refusing upgrade from a foreign Origin (client {peer_ip})");
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
     let auth_required = config.server.auth_enabled && config.server.auth_token.is_some();
     // Locked auth (token not decryptable): no connection is the trusted frontend.
     let auth_locked = config.server.auth_locked
@@ -243,7 +261,9 @@ pub async fn ws_handler(
     };
     drop(config);
 
-    let is_local = !auth_locked
+    // No Origin means a non-browser client (a peer, a CLI): never the frontend.
+    let is_local = origin == WsOrigin::Allowed
+        && !auth_locked
         && ws_client_is_local(WsTrust {
             client_ip: peer_ip,
             in_docker,
@@ -252,6 +272,87 @@ pub async fn ws_handler(
             has_valid_token,
         });
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip, is_local))
+        .into_response()
+}
+
+/// Where a WS upgrade comes from, judged by its `Origin` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WsOrigin {
+    /// No header: not a browser (a federation peer, a CLI, a test client).
+    Absent,
+    /// A page of this Kronn: its frontend, the desktop webview, a dev server.
+    Allowed,
+    /// Any other page, including the opaque `null` origin.
+    Foreign,
+}
+
+/// Classify the upgrade's `Origin`. Allowed: the CORS list of `build_cors`,
+/// the Tauri webview origins, a loopback page on any port (the Vite dev server
+/// and the Docker gateway port vary), and a same-origin page whose host is an
+/// IP literal (LAN or Tailscale access; an IP cannot be DNS-rebound).
+pub(crate) fn classify_ws_origin(
+    origin: Option<&str>,
+    host_header: Option<&str>,
+    domain: Option<&str>,
+    port: u16,
+) -> WsOrigin {
+    let Some(origin) = origin.map(str::trim) else {
+        return WsOrigin::Absent;
+    };
+    if crate::frontend_origins(&domain.map(str::to_owned), port)
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+    {
+        return WsOrigin::Allowed;
+    }
+    let Some((scheme, host)) = origin_scheme_host(origin) else {
+        return WsOrigin::Foreign;
+    };
+    let allowed = match scheme.as_str() {
+        "tauri" => host == "localhost",
+        "http" | "https" => {
+            host == "tauri.localhost"
+                || host_is_loopback(&host)
+                || domain.is_some_and(|domain| domain.eq_ignore_ascii_case(&host))
+                || (host.parse::<IpAddr>().is_ok()
+                    && host_header
+                        .and_then(authority_host)
+                        .is_some_and(|request_host| request_host == host))
+        }
+        _ => false,
+    };
+    if allowed {
+        WsOrigin::Allowed
+    } else {
+        WsOrigin::Foreign
+    }
+}
+
+/// Lowercased scheme and host of a serialized origin (`scheme://host[:port]`).
+fn origin_scheme_host(origin: &str) -> Option<(String, String)> {
+    let (scheme, authority) = origin.split_once("://")?;
+    if scheme.is_empty() || authority.contains(['/', '?', '#', '@']) {
+        return None;
+    }
+    Some((scheme.to_ascii_lowercase(), authority_host(authority)?))
+}
+
+/// Host part of `host[:port]` or `[v6][:port]`, lowercased, brackets removed.
+fn authority_host(authority: &str) -> Option<String> {
+    let authority = authority.trim();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split_once(']')?.0
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
+            _ => authority,
+        }
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+fn host_is_loopback(host: &str) -> bool {
+    host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Resolve the real client IP for rate-limiting, ban and trust decisions.
@@ -345,6 +446,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
     // them straight back. Only consulted for peer connections.
     let echo_guard: Arc<Mutex<PeerEchoGuard>> = Arc::new(Mutex::new(PeerEchoGuard::default()));
     let recv_guard = echo_guard.clone();
+    // Nothing from the bus leaves before the client's Presence is verified.
+    let verified_flag = Arc::new(AtomicBool::new(false));
+    let send_verified = verified_flag.clone();
 
     // Task 1: forward broadcast events → WS client.
     //
@@ -377,6 +481,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
                 }
                 recv = broadcast_rx.recv() => match recv {
                     Ok(msg) => {
+                        if !send_verified.load(Ordering::Acquire) {
+                            continue;
+                        }
                         if !send_task_is_local {
                             if !msg.is_peer_relayable() {
                                 continue;
@@ -417,6 +524,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
         // attacker model stays the same: no ChatMessage / Invite goes
         // through without a peer-authenticating Presence.
         let mut verified = false;
+        // Invite code of the verified peer, re-checked before each relayable frame.
+        let mut peer_code: Option<String> = None;
 
         // Idle dead-detection: a remote peer must produce *some* frame (its
         // keepalive Ping counts) within WS_IDLE_TIMEOUT, else the socket is
@@ -508,48 +617,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
                                 break;
                             }
                             if !from_invite_code.is_empty() {
-                                let code = from_invite_code.clone();
-                                let found = state
-                                    .db
-                                    .with_conn(move |conn| {
-                                        crate::db::contacts::find_contact_by_invite_code(
-                                            conn, &code,
-                                        )
-                                    })
-                                    .await;
-
-                                if !matches!(&found, Ok(Some(_))) {
-                                    // Unknown peer — auto-create as pending contact
-                                    if let Some(contact) =
-                                        auto_add_peer(&state, from_invite_code).await
-                                    {
-                                        tracing::info!(
-                                            "WS: auto-added peer {} from invite code",
-                                            contact.pseudo
-                                        );
-                                    } else {
-                                        // Invalid invite code — count this attempt against
-                                        // the remote IP (loopback exempted because the
-                                        // local frontend never has an invalid code).
-                                        if !is_local {
-                                            let crossed = rate_limit::record_failure(peer_ip);
-                                            if crossed {
-                                                tracing::warn!(
-                                                    "WS: peer {} hit invite-code failure threshold and is now banned",
-                                                    peer_ip
-                                                );
-                                            }
-                                        }
-                                        tracing::warn!(
-                                            "WS: rejected invalid invite code from {}: {}",
-                                            peer_ip,
-                                            from_invite_code
-                                        );
-                                        break;
-                                    }
+                                if !admit_peer_presence(&state, from_invite_code, peer_ip, is_local)
+                                    .await
+                                {
+                                    break;
                                 }
+                                peer_code = Some(from_invite_code.clone());
                             }
                             verified = true;
+                            verified_flag.store(true, Ordering::Release);
                         }
                         // The else branch is unreachable: classify_pre_presence
                         // already returned `Drop` for non-Presence frames above.
@@ -561,6 +637,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
                     // peers and loops (duplicate toasts/notifications). Other
                     // frames (Presence …) are always forwarded to the frontend.
                     let should_broadcast = if ws_msg.is_peer_relayable() {
+                        // Only an accepted contact feeds shared discussions; the
+                        // local frontend writes through the HTTP API.
+                        let Some(code) = peer_code.as_deref() else {
+                            tracing::warn!(
+                                "WS: dropping a relayable frame from a non-peer client {peer_ip}"
+                            );
+                            continue;
+                        };
+                        if !contact_is_accepted(&state, code).await {
+                            tracing::warn!(
+                                "WS: peer {peer_ip} is no longer an accepted contact, closing"
+                            );
+                            break;
+                        }
                         ingest_relayable_frame(&state, &ws_msg).await
                     } else {
                         true
@@ -590,6 +680,54 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr, is_l
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
     }
+}
+
+/// Whether `code` belongs to an accepted contact (DB errors deny).
+async fn contact_is_accepted(state: &AppState, code: &str) -> bool {
+    let code = code.to_owned();
+    matches!(
+        state
+            .db
+            .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code))
+            .await,
+        Ok(crate::db::contacts::InviteAuth::Accepted(_))
+    )
+}
+
+/// Decide a peer's Presence: only an accepted contact is verified. An unknown
+/// well-formed code is recorded as an incoming request (never contacted back
+/// until the operator adds it), and every refusal counts toward the ban.
+pub(crate) async fn admit_peer_presence(
+    state: &AppState,
+    invite_code: &str,
+    peer_ip: IpAddr,
+    is_local: bool,
+) -> bool {
+    let code = invite_code.to_owned();
+    let verdict = state
+        .db
+        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code))
+        .await;
+    match verdict {
+        Ok(crate::db::contacts::InviteAuth::Accepted(_)) => return true,
+        Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
+            tracing::warn!("WS: refusing contact {pseudo} from {peer_ip}: status {status}");
+        }
+        Ok(crate::db::contacts::InviteAuth::Unknown) => {
+            match auto_add_peer(state, invite_code).await {
+                Some(contact) => tracing::info!(
+                    "WS: recorded a contact request from {} ({peer_ip})",
+                    contact.pseudo
+                ),
+                None => tracing::warn!("WS: rejected invalid invite code from {peer_ip}"),
+            }
+        }
+        Err(error) => tracing::warn!("WS: contact lookup failed for {peer_ip}: {error}"),
+    }
+    if !is_local && rate_limit::record_failure(peer_ip) {
+        tracing::warn!("WS: peer {peer_ip} hit invite-code failure threshold and is now banned");
+    }
+    false
 }
 
 /// Insert a remote chat message into the local discussion.
@@ -979,7 +1117,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
     }
 }
 
-/// Auto-create a pending contact from an incoming invite code.
+/// Record an incoming contact request (`requested`) from an unknown invite code.
 /// Returns the created contact, or None if the code is invalid.
 async fn auto_add_peer(state: &AppState, invite_code: &str) -> Option<crate::models::Contact> {
     let (pseudo, kronn_url) = crate::db::contacts::parse_invite_code(invite_code)?;
@@ -991,7 +1129,7 @@ async fn auto_add_peer(state: &AppState, invite_code: &str) -> Option<crate::mod
         avatar_email: None,
         kronn_url,
         invite_code: invite_code.to_string(),
-        status: "pending".into(),
+        status: crate::db::contacts::STATUS_REQUESTED.into(),
         created_at: now,
         updated_at: now,
     };
@@ -1427,5 +1565,186 @@ mod relay_dedup_tests {
         assert_eq!(channel, "note");
         assert!(!awaiting_agent);
         assert_eq!(dispatch_count, 0);
+    }
+}
+
+#[cfg(test)]
+mod origin_and_admission_tests {
+    use super::*;
+
+    fn classify(origin: &str, host: &str) -> WsOrigin {
+        classify_ws_origin(Some(origin), Some(host), None, 3140)
+    }
+
+    #[test]
+    fn no_origin_is_absent() {
+        assert_eq!(
+            classify_ws_origin(None, Some("127.0.0.1:3140"), None, 3140),
+            WsOrigin::Absent
+        );
+    }
+
+    #[test]
+    fn foreign_and_opaque_origins_are_refused() {
+        assert_eq!(
+            classify("https://evil.example", "127.0.0.1:3140"),
+            WsOrigin::Foreign
+        );
+        assert_eq!(classify("null", "127.0.0.1:3140"), WsOrigin::Foreign);
+        assert_eq!(classify("file://", "127.0.0.1:3140"), WsOrigin::Foreign);
+        assert_eq!(
+            classify("http://localhost.evil.example", "localhost:3140"),
+            WsOrigin::Foreign
+        );
+    }
+
+    #[test]
+    fn a_dns_rebound_name_is_refused_even_when_it_matches_host() {
+        assert_eq!(
+            classify(
+                "http://rebind.evil.example:3140",
+                "rebind.evil.example:3140"
+            ),
+            WsOrigin::Foreign
+        );
+    }
+
+    #[test]
+    fn local_frontend_origins_are_allowed() {
+        for origin in [
+            "http://localhost:3140",
+            "http://127.0.0.1:3140",
+            "http://localhost:5173",
+            "http://[::1]:3140",
+        ] {
+            assert_eq!(
+                classify(origin, "127.0.0.1:3140"),
+                WsOrigin::Allowed,
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_desktop_webview_origins_are_allowed() {
+        for origin in [
+            "tauri://localhost",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "http://127.0.0.1:53591",
+        ] {
+            assert_eq!(
+                classify_ws_origin(Some(origin), Some("127.0.0.1:53591"), None, 53591),
+                WsOrigin::Allowed,
+                "{origin}"
+            );
+        }
+        assert_eq!(
+            classify("tauri://evil", "127.0.0.1:3140"),
+            WsOrigin::Foreign
+        );
+    }
+
+    #[test]
+    fn an_ip_literal_same_origin_page_is_allowed() {
+        assert_eq!(
+            classify("http://192.168.1.5:3140", "192.168.1.5:3140"),
+            WsOrigin::Allowed
+        );
+        // nginx forwards `$host`, without the port.
+        assert_eq!(
+            classify("http://100.64.1.5:8080", "100.64.1.5"),
+            WsOrigin::Allowed
+        );
+        assert_eq!(
+            classify("http://192.168.1.6:3140", "192.168.1.5:3140"),
+            WsOrigin::Foreign
+        );
+    }
+
+    #[test]
+    fn the_configured_domain_is_allowed() {
+        assert_eq!(
+            classify_ws_origin(
+                Some("https://kronn.example.org"),
+                Some("kronn.example.org"),
+                Some("kronn.example.org"),
+                3140
+            ),
+            WsOrigin::Allowed
+        );
+    }
+
+    fn state() -> AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config = Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    async fn insert_contact(state: &AppState, code: &str, status: &str) {
+        let contact = crate::models::Contact {
+            id: uuid::Uuid::new_v4().to_string(),
+            pseudo: "Peer".into(),
+            avatar_email: None,
+            kronn_url: "http://10.0.0.50:3456".into(),
+            invite_code: code.into(),
+            status: status.into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        state
+            .db
+            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &contact))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_well_formed_code_is_not_admitted_and_counts_toward_the_ban() {
+        let state = state();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 1));
+        rate_limit::reset(ip);
+        for n in 0..10 {
+            let code = format!("kronn:Stranger{n}@10.0.0.{n}:3456");
+            assert!(!admit_peer_presence(&state, &code, ip, false).await);
+        }
+        assert!(rate_limit::is_banned(ip), "unknown codes must count");
+        let contacts = state
+            .db
+            .with_conn(crate::db::contacts::list_contacts)
+            .await
+            .unwrap();
+        assert!(contacts
+            .iter()
+            .all(|c| c.status == crate::db::contacts::STATUS_REQUESTED));
+        assert!(contacts
+            .iter()
+            .all(|c| !crate::db::contacts::dials_outbound(&c.status)));
+        rate_limit::reset(ip);
+    }
+
+    #[tokio::test]
+    async fn only_an_accepted_contact_is_admitted() {
+        let state = state();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 2));
+        rate_limit::reset(ip);
+        insert_contact(&state, "kronn:Ok@10.0.0.50:3456", "accepted").await;
+        insert_contact(&state, "kronn:Wait@10.0.0.51:3456", "pending").await;
+        insert_contact(&state, "kronn:Req@10.0.0.52:3456", "requested").await;
+        insert_contact(&state, "kronn:No@10.0.0.53:3456", "refused").await;
+        assert!(admit_peer_presence(&state, "kronn:Ok@10.0.0.50:3456", ip, false).await);
+        for code in [
+            "kronn:Wait@10.0.0.51:3456",
+            "kronn:Req@10.0.0.52:3456",
+            "kronn:No@10.0.0.53:3456",
+        ] {
+            assert!(
+                !admit_peer_presence(&state, code, ip, false).await,
+                "{code}"
+            );
+        }
+        rate_limit::reset(ip);
     }
 }

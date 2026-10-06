@@ -736,6 +736,13 @@ instance with strict localhost or LAN exposure, the agent no longer holds a
 credential that opens the API. The per-action human proof (layer B, second
 half) closes the loopback path in 0.15.
 
+**WebSocket bus (KT-1033).** `/api/ws` refuses a browser page whose `Origin`
+is foreign (403) and never treats a client without `Origin` as the frontend; a
+federation peer is verified only as an accepted contact. A local process,
+an agent included, can still forge an allowed `Origin` and get the bus under
+loopback trust, exactly as it reaches the HTTP API; strict localhost requires
+the operator token for both.
+
 **Real probe for the human.**
 1. Start a Claude discussion on a project, with Kronn running natively.
 2. Ask Claude to run `env | grep -E 'KRONN|_API_KEY|_TOKEN'`.

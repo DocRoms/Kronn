@@ -1214,8 +1214,9 @@ pub(crate) fn is_local_ip(ip: &str) -> bool {
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
 /// Build CORS layer based on config domain.
-fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
-    let origins: Vec<String> = match domain {
+/// Browser origins of the local frontend, for CORS and the WS Origin check.
+pub(crate) fn frontend_origins(domain: &Option<String>, port: u16) -> Vec<String> {
+    match domain {
         Some(d) => vec![
             format!("https://{}", d),
             format!("http://{}", d),
@@ -1229,8 +1230,11 @@ fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
             "http://localhost:3140".into(),
             "http://localhost:3141".into(),
         ],
-    };
+    }
+}
 
+fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
+    let origins = frontend_origins(domain, port);
     let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     CorsLayer::new()

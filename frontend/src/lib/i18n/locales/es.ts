@@ -2851,6 +2851,8 @@ const es: TranslationDict = {
   'ollama.fresh.unknownHint': 'Kronn no pudo comparar este modelo con la biblioteca oficial de Ollama: no proviene de ella o la biblioteca no respondió.',
   'contacts.title': 'Contactos',
   'contacts.pending': 'pendiente',
+  'contacts.requested': 'solicitud',
+  'contacts.requestedHint': 'Quiere conectarse. Añade su código de invitación para aceptar.',
   'contacts.inviteCode': 'Código de invitación',
   'contacts.inviteHint': 'Comparte este código para que otros usuarios de Kronn puedan agregarte.',
   'contacts.add': 'Agregar contacto',

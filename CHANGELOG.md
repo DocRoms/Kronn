@@ -249,6 +249,16 @@ Release notes for 0.9.3 and earlier are available in the
     again, and the tech-debt registry lists open items only, each with its
     detail file, checked in CI (KT-1060, KT-1061).
 
+- Security: a web page the operator visits can no longer open
+  `ws://127.0.0.1:3140/api/ws` to read the event bus or inject chat messages
+  (KT-1033). The upgrade now checks `Origin`: a foreign page gets 403; the
+  frontend's own origins (the CORS list, any loopback port, the desktop
+  webview, a same-origin IP address) are allowed. A client without `Origin` is
+  treated as a federation peer and never gets the local bus. Nothing leaves the
+  bus before a verified Presence. A peer is verified only for an accepted
+  contact: an unknown invite code becomes a contact request (shown as
+  "request", never dialled back until you add its code) and counts toward the
+  ban, and chat, invite and sync frames from anyone else are dropped.
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"
