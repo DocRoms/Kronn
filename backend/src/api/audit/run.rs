@@ -136,7 +136,11 @@ pub async fn audit_run_steps(
 ) -> Json<ApiResponse<Vec<crate::models::AuditRunStep>>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::audit_runs::list_audit_steps(conn, &run_id))
+        .with_conn(move |conn| {
+            let mut steps = crate::db::audit_runs::list_audit_steps(conn, &run_id)?;
+            crate::db::audit_runs::price_steps(conn, &mut steps)?;
+            Ok(steps)
+        })
         .await;
     match result {
         Ok(steps) => Json(ApiResponse::ok(steps)),
@@ -194,6 +198,7 @@ pub async fn audit_timeline(
             {
                 steps.extend(crate::db::audit_runs::list_audit_steps(conn, &run.id)?);
             }
+            crate::db::audit_runs::price_steps(conn, &mut steps)?;
             // The latest run of any kind, as the validate-audit gate reads it.
             let latest_validation = match runs.first() {
                 Some(run) if run.status == "Completed" => match &run.validation_discussion_id {

@@ -3,6 +3,7 @@ import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { ClipboardList, X, ChevronRight, ChevronDown } from 'lucide-react';
 import { AGENT_LABELS } from '../lib/constants';
+import type { AuditTokenBreakdown } from '../types/generated';
 import './AuditRecapPanel.css';
 
 type Step = {
@@ -14,6 +15,8 @@ type Step = {
   cli_success: boolean;
   step_warning?: string | null;
   step_repaired_from_template: boolean;
+  /** The fresh headline's parts and the total with cache. */
+  breakdown?: AuditTokenBreakdown | null;
 };
 
 type AuditRun = {
@@ -107,6 +110,13 @@ function kindIcon(kind: string): string {
  */
 export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRunId }: Props) {
   const { t, locale } = useT();
+  // Same breakdown as the audit timeline: the headline is the fresh traffic.
+  const tokensTitle = (b?: AuditTokenBreakdown | null) => {
+    if (!b) return undefined;
+    const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
+    return t('auditTimeline.tokens.detail', part(b.uncached_input), part(b.output), part(b.cache_read),
+      part(b.cache_write), part(b.total_with_cache));
+  };
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyResult, setHistoryResult] = useState<HistoryResult | null>(null);
   const [latestStepsResult, setLatestStepsResult] = useState<StepsResult | null>(null);
@@ -382,7 +392,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
                           )}
                         </td>
                         <td className="arp-num">{fmtDuration(step.duration_ms)}</td>
-                        <td className="arp-num">{fmtTokens(step.step_tokens)}</td>
+                        <td className="arp-num" title={tokensTitle(step.breakdown)}>{fmtTokens(step.step_tokens)}</td>
                       </tr>
                     );
                   })}
@@ -583,7 +593,7 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
                                         )}
                                       </td>
                                       <td className="arp-num">{fmtDuration(s.duration_ms)}</td>
-                                      <td className="arp-num">{fmtTokens(s.step_tokens)}</td>
+                                      <td className="arp-num" title={tokensTitle(s.breakdown)}>{fmtTokens(s.step_tokens)}</td>
                                     </tr>
                                   );
                                 })}

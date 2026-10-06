@@ -237,6 +237,7 @@ impl AuditTracker {
                 tier: None,
                 connection_id: None,
                 recent_activity: None,
+                step_breakdown: None,
             },
         );
     }
@@ -286,6 +287,17 @@ impl AuditTracker {
         }
     }
 
+    /// The running step's headline parts, read by a client polling the progress.
+    pub fn set_step_breakdown(
+        &mut self,
+        project_id: &str,
+        breakdown: crate::models::AuditTokenBreakdown,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.step_breakdown = Some(breakdown);
+        }
+    }
+
     /// An HTTP agent's tool activity: it reports its last tool and running
     /// count rather than one event per call, so both are set, not bumped.
     pub fn set_tool_activity(&mut self, project_id: &str, tool: String, calls: u32) {
@@ -318,6 +330,7 @@ impl AuditTracker {
             // `step_start` so chip reads `🔧 Tool (1)` then `(2)` etc.
             entry.current_tool_call_count = None;
             entry.recent_activity = None;
+            entry.step_breakdown = None;
         }
     }
 

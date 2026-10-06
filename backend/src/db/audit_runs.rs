@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 
 use crate::models::{AuditRun, AuditRunStep};
 
@@ -701,9 +702,10 @@ impl StepTokens {
     }
 
     /// The same parts with `input` counted the same way for every agent: cached
-    /// prompt tokens included. Claude reports input without its cache reads and
-    /// writes, Codex and the OpenAI-compatible providers with them; without this
-    /// a Claude step's headline looked tiny next to the others' (KT-1021).
+    /// prompt tokens included, as stored. Claude reports input without its cache
+    /// reads and writes, Codex and the OpenAI-compatible providers with them
+    /// (KT-1021). The headline, [`Self::total`], then takes the cache back out
+    /// the same way for every agent.
     pub fn inclusive_for(self, agent_type: &crate::models::AgentType) -> Self {
         if *agent_type != crate::models::AgentType::ClaudeCode {
             return self;
@@ -721,13 +723,45 @@ impl StepTokens {
         }
     }
 
-    /// The step's headline figure: input plus output. `None` — unknown — unless
-    /// the runtime reported at least one of them.
+    /// Input that was neither read from nor written to the cache, from an
+    /// `input` that includes both (see [`Self::inclusive_for`]); never negative.
+    pub fn uncached_input(&self) -> Option<u64> {
+        self.input.map(|input| {
+            input
+                .saturating_sub(self.cache_read.unwrap_or(0))
+                .saturating_sub(self.cache_write.unwrap_or(0))
+        })
+    }
+
+    /// The step's headline figure: the fresh traffic, uncached input plus
+    /// output, the same for every agent. `None` — unknown — unless the runtime
+    /// reported at least one of them.
     pub fn total(&self) -> Option<u64> {
-        match (self.input, self.output) {
+        match (self.uncached_input(), self.output) {
             (None, None) => None,
             (input, output) => Some(input.unwrap_or(0).saturating_add(output.unwrap_or(0))),
         }
+    }
+
+    /// The four disjoint counters the pricing module bills on; `None` without
+    /// both input and output.
+    pub fn counters(&self) -> Option<crate::core::pricing::TokenCounters> {
+        Some(crate::core::pricing::TokenCounters::from_disjoint_input(
+            self.uncached_input()?,
+            self.output?,
+            self.cache_read,
+            self.cache_write,
+        ))
+    }
+
+    /// The live breakdown shown under the headline.
+    pub fn breakdown(&self) -> crate::models::AuditTokenBreakdown {
+        crate::models::AuditTokenBreakdown::new(
+            self.total(),
+            self.output,
+            self.cache_read,
+            self.cache_write,
+        )
     }
 }
 
@@ -843,13 +877,73 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             step_repaired_from_template: row.get::<_, i64>(10)? != 0,
             cost_usd_micros: row.get::<_, Option<i64>>(15)?.map(|v| v.max(0) as u64),
             carried_from_run_id: row.get(16)?,
+            estimated_cost_usd_micros: None,
+            cost_unknown_reason: None,
+            breakdown: None,
         })
     })?;
     let mut out = Vec::new();
     for r in rows {
-        out.push(r?);
+        let mut step = r?;
+        step.breakdown = step.step_tokens.map(|_| {
+            crate::models::AuditTokenBreakdown::new(
+                step.step_tokens,
+                step.output_tokens,
+                step.cache_read_tokens,
+                step.cache_write_tokens,
+            )
+        });
+        out.push(step);
     }
     Ok(out)
+}
+
+/// Fill the cost Kronn can estimate for each finished step whose agent reported
+/// none, from its counters and the model its run served, priced at Kronn's
+/// rates; or why it cannot. A configured model, or several, is not a served one.
+pub fn price_steps(conn: &Connection, steps: &mut [AuditRunStep]) -> Result<()> {
+    let mut runs: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for step in steps.iter_mut() {
+        if step.ended_at.is_none() || step.cost_usd_micros.is_some() {
+            continue;
+        }
+        let run_id = step
+            .carried_from_run_id
+            .clone()
+            .unwrap_or_else(|| step.audit_run_id.clone());
+        if !runs.contains_key(&run_id) {
+            let found = conn
+                .query_row(
+                    "SELECT agent_type, model FROM audit_runs WHERE id = ?1",
+                    params![run_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            runs.insert(run_id.clone(), found.unwrap_or_default());
+        }
+        let (agent_type, model) = &runs[&run_id];
+        let served = model
+            .as_deref()
+            .filter(|model| !model.ends_with("(configured)") && !model.contains(" / "));
+        let tokens = StepTokens {
+            input: step.input_tokens,
+            output: step.output_tokens,
+            cache_read: step.cache_read_tokens,
+            cache_write: step.cache_write_tokens,
+        };
+        let priced = crate::core::pricing::price_reply(
+            agent_type,
+            served,
+            step.step_tokens.unwrap_or(0),
+            None,
+            tokens.counters(),
+        );
+        step.estimated_cost_usd_micros = priced
+            .cost_usd
+            .and_then(crate::agents::chat_codec::usd_to_micros);
+        step.cost_unknown_reason = priced.cost_unknown.map(|reason| reason.reason().to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -997,7 +1091,7 @@ mod tests {
 
         let step = &list_audit_steps(&conn, "run-c").unwrap()[0];
         assert_eq!(step.duration_ms, Some(61_000));
-        assert_eq!(step.step_tokens, Some(1_200));
+        assert_eq!(step.step_tokens, Some(1_150));
         assert_eq!(step.input_tokens, Some(1_000));
         assert_eq!(step.cache_read_tokens, Some(50));
         assert_eq!(step.cost_usd_micros, Some(12_345));
@@ -1066,6 +1160,35 @@ mod tests {
             codex.inclusive_for(&AgentType::Codex).total()
         );
         assert_eq!(codex.inclusive_for(&AgentType::Codex), codex);
+        // The headline is the fresh traffic: uncached input plus output.
+        let claude = claude.inclusive_for(&AgentType::ClaudeCode);
+        let codex = codex.inclusive_for(&AgentType::Codex);
+        assert_eq!(claude.total(), Some(110));
+        assert_eq!(codex.total(), Some(110));
+        let breakdown = codex.breakdown();
+        assert_eq!(breakdown, claude.breakdown());
+        assert_eq!(
+            (
+                breakdown.uncached_input,
+                breakdown.output,
+                breakdown.cache_read,
+                breakdown.cache_write
+            ),
+            (Some(100), Some(10), Some(900), Some(50))
+        );
+        assert_eq!(
+            breakdown.total_with_cache,
+            Some(1_060),
+            "the vendor's full traffic"
+        );
+        // A cache larger than the input it is part of never goes negative.
+        let odd = StepTokens {
+            input: Some(10),
+            output: Some(5),
+            cache_read: Some(900),
+            cache_write: None,
+        };
+        assert_eq!(odd.total(), Some(5));
         assert_eq!(
             StepTokens::UNKNOWN
                 .inclusive_for(&AgentType::ClaudeCode)
@@ -1073,6 +1196,108 @@ mod tests {
             None,
             "unknown stays unknown"
         );
+    }
+
+    fn finished_step(conn: &Connection, run: &str, tokens: StepTokens) {
+        let start = Utc::now();
+        insert_audit_step_start(conn, run, 1, "docs/a.md", start).unwrap();
+        finalize_audit_step(
+            conn,
+            run,
+            1,
+            start,
+            1_000,
+            &tokens,
+            tokens.total(),
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+    }
+
+    fn codex_traffic() -> StepTokens {
+        StepTokens {
+            input: Some(1_000_000),
+            output: Some(100_000),
+            cache_read: Some(600_000),
+            cache_write: None,
+        }
+    }
+
+    #[test]
+    fn a_step_without_a_reported_cost_is_estimated_at_the_served_models_rates() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r", "p1", "Full", "Codex", Utc::now()).unwrap();
+        set_run_model(&conn, "r", "gpt-5").unwrap();
+        finished_step(&conn, "r", codex_traffic());
+        let mut steps = list_audit_steps(&conn, "r").unwrap();
+        price_steps(&conn, &mut steps).unwrap();
+        let expected = crate::core::pricing::message_cost(
+            "Codex",
+            Some("gpt-5"),
+            Some(&crate::core::pricing::TokenCounters::from_disjoint_input(
+                400_000,
+                100_000,
+                Some(600_000),
+                None,
+            )),
+        )
+        .usd()
+        .and_then(crate::agents::chat_codec::usd_to_micros);
+        assert!(expected.is_some_and(|micros| micros > 0));
+        assert_eq!(steps[0].estimated_cost_usd_micros, expected);
+        assert_eq!(
+            steps[0].cost_usd_micros, None,
+            "an estimate is never stored as reported"
+        );
+        assert_eq!(steps[0].cost_unknown_reason, None);
+        assert_eq!(steps[0].step_tokens, Some(500_000), "fresh headline");
+
+        // A reported cost is the cost: nothing to estimate.
+        set_step_cost(&conn, "r", 1, 42).unwrap();
+        let mut steps = list_audit_steps(&conn, "r").unwrap();
+        price_steps(&conn, &mut steps).unwrap();
+        assert_eq!(
+            (steps[0].cost_usd_micros, steps[0].estimated_cost_usd_micros),
+            (Some(42), None)
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_unserved_model_keeps_the_cost_unknown_with_its_reason() {
+        let conn = fresh_conn();
+        for (run, model, reason) in [
+            (
+                "r-unknown",
+                Some("mystery-model-9"),
+                crate::core::pricing::UnknownCost::NoRateForModel,
+            ),
+            (
+                "r-configured",
+                Some("gpt-5 (configured)"),
+                crate::core::pricing::UnknownCost::ModelNotReported,
+            ),
+            (
+                "r-none",
+                None,
+                crate::core::pricing::UnknownCost::ModelNotReported,
+            ),
+        ] {
+            insert_running(&conn, run, "p1", "Full", "Codex", Utc::now()).unwrap();
+            if let Some(model) = model {
+                set_run_model(&conn, run, model).unwrap();
+            }
+            finished_step(&conn, run, codex_traffic());
+            let mut steps = list_audit_steps(&conn, run).unwrap();
+            price_steps(&conn, &mut steps).unwrap();
+            assert_eq!(steps[0].estimated_cost_usd_micros, None, "{run}");
+            assert_eq!(
+                steps[0].cost_unknown_reason.as_deref(),
+                Some(reason.reason()),
+                "{run}"
+            );
+        }
     }
 
     #[test]
@@ -1567,7 +1792,11 @@ mod tests {
         let steps = list_audit_steps(&conn, "run-x").unwrap();
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].duration_ms, Some(42_000));
-        assert_eq!(steps[0].step_tokens, Some(1_234));
+        assert_eq!(
+            steps[0].step_tokens,
+            Some(1_184),
+            "fresh: 950 uncached + 234"
+        );
         assert_eq!(steps[0].cumulative_tokens, Some(1_234));
         assert_eq!(steps[0].input_tokens, Some(1_000));
         assert_eq!(steps[0].output_tokens, Some(234));
@@ -1624,7 +1853,8 @@ mod tests {
                 cache_write_prompt_tokens: None,
             },
         }));
-        assert_eq!(tokens.total(), Some(6_154));
+        // Fresh: the cached share of the input is not in the headline.
+        assert_eq!(tokens.total(), Some(4_354));
         assert_eq!(tokens.cache_read, Some(1_800));
         assert_eq!(tokens.cache_write, None);
         assert_eq!(StepTokens::from_reported(None).total(), None);
@@ -1916,7 +2146,7 @@ mod tests {
             cache_write: None,
         };
         let combined = attempt.plus(attempt);
-        assert_eq!(combined.total(), Some(220));
+        assert_eq!(combined.total(), Some(120));
         assert_eq!(combined.cache_write, None);
         for step in 1..=3 {
             insert_audit_step_start(&conn, "repair", step, "docs/a.md", now).unwrap();
@@ -1948,7 +2178,7 @@ mod tests {
             crate::api::audit::full::already_succeeded_step_indices(&steps),
             [2].into_iter().collect()
         );
-        assert_eq!(steps[0].step_tokens, Some(220));
+        assert_eq!(steps[0].step_tokens, Some(120));
         assert_eq!(steps[0].duration_ms, Some(500));
         assert!(steps[2]
             .step_warning

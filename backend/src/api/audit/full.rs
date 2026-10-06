@@ -1352,12 +1352,14 @@ pub async fn full_audit(
                                         let cumulative = run_tokens.with(step_tokens);
                                         if let Ok(mut t) = audit_tracker.lock() {
                                             t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                            t.set_step_breakdown(&project_id, step_usage.breakdown());
                                         }
                                         yield Event::default().event("step_progress").data(
                                             serde_json::json!({
                                                 "step": step,
                                                 "step_tokens": step_tokens,
                                                 "total_tokens_so_far": cumulative,
+                                                "breakdown": step_usage.breakdown(),
                                             }).to_string()
                                         );
                                     }
@@ -1461,6 +1463,7 @@ pub async fn full_audit(
                                 // output, page re-mount).
                                 if let Ok(mut t) = audit_tracker.lock() {
                                     t.update_chips(&project_id, Some(step_tokens), Some(cumulative), None);
+                                    t.set_step_breakdown(&project_id, step_usage.breakdown());
                                 }
                                 // Surface tokens-so-far LIVE so the
                                 // frontend chip ticks during the
@@ -1472,6 +1475,7 @@ pub async fn full_audit(
                                         "step": step,
                                         "step_tokens": step_tokens,
                                         "total_tokens_so_far": cumulative,
+                                        "breakdown": step_usage.breakdown(),
                                     }).to_string()
                                 );
                             }

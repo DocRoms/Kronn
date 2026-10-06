@@ -85,7 +85,10 @@ describe('AuditTimeline', () => {
 
   it('shows each step its tokens, the live step its running count (KT-994)', async () => {
     const steps = [
-      step(1, { started_at: '2026-10-03T09:46:30Z', step_tokens: 48_213, input_tokens: 40_000, output_tokens: 8_213, cache_read_tokens: 12_000 }),
+      step(1, {
+        started_at: '2026-10-03T09:46:30Z', step_tokens: 48_213, input_tokens: 52_000, output_tokens: 8_213, cache_read_tokens: 12_000,
+        breakdown: { uncached_input: 40_000, output: 8_213, cache_read: 12_000, cache_write: 500, total_with_cache: 60_713 },
+      }),
       step(2, { ended_at: null, duration_ms: null, step_tokens: null, started_at: '2026-10-03T09:50:00Z' }),
     ];
     mockTimeline([{ id: 'run-1', started_at: '2026-10-03T09:46:00Z' }], steps);
@@ -97,7 +100,8 @@ describe('AuditTimeline', () => {
 
     const done = await screen.findByTestId('audit-timeline-step-tokens-1');
     expect(done).toHaveTextContent(/48[.,]2 k tk/);
-    expect(done.getAttribute('title')).toMatch(/40[\s,.\u202f]?000.*8[\s,.\u202f]?213.*12[\s,.\u202f]?000/);
+    // The headline is the fresh traffic; the hover adds the cache and the total with it.
+    expect(done.getAttribute('title')).toMatch(/40[\s,.\u202f]?000.*8[\s,.\u202f]?213.*12[\s,.\u202f]?000.*500.*60[\s,.\u202f]?713/);
     expect(screen.getByTestId('audit-timeline-step-tokens-2')).toHaveTextContent(/1[.,]31 M tk/);
   });
 
@@ -412,6 +416,29 @@ describe('AuditTimeline', () => {
     const total = screen.getByTestId('audit-timeline-cost-total');
     expect(total).toHaveTextContent(/≥ 0[.,]42 \$/);
     expect(total).toHaveTextContent(/1/);
+  });
+
+  it('shows an estimated cost apart from a reported one, and why a cost is unknown', async () => {
+    const steps = [
+      step(1, { cost_usd_micros: 420_000 }),
+      step(2, { estimated_cost_usd_micros: 30_000 }),
+      step(3, { cost_unknown_reason: 'no confirmed rate for the serving model' }),
+    ];
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-02T09:59:00Z' }], steps);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expandAll(container);
+
+    expect(await screen.findByTestId('audit-timeline-step-cost-1')).toHaveTextContent(/~0[.,]42 \$/);
+    const estimated = screen.getByTestId('audit-timeline-step-cost-2');
+    expect(estimated).toHaveTextContent(/≈0[.,]03 \$/);
+    expect(estimated.getAttribute('title')).toBeTruthy();
+    const unknown = screen.getByTestId('audit-timeline-step-cost-3');
+    expect(unknown).toHaveTextContent(/\?/);
+    // A known pricing reason reads in the UI's language.
+    expect(unknown.getAttribute('title')).toMatch(/aucun tarif confirmé|no confirmed rate/);
+    // One estimated step makes the total estimated; the unknown one makes it a floor.
+    expect(screen.getByTestId('audit-timeline-cost-total')).toHaveTextContent(/≥ ≈0[.,]45 \$/);
   });
 
   it('totals the run exactly when every step reported, and unknown when none did (KT-997)', async () => {

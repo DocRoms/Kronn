@@ -646,12 +646,14 @@ pub async fn partial_audit(
                                         let cumulative = run_tokens.with(step_tokens);
                                         if let Ok(mut t) = audit_tracker.lock() {
                                             t.update_chips(&project_id_for_progress, Some(step_tokens), Some(cumulative), None);
+                                            t.set_step_breakdown(&project_id_for_progress, step_usage.breakdown());
                                         }
                                         yield Event::default().event("step_progress").data(
                                             serde_json::json!({
                                                 "step": step,
                                                 "step_tokens": step_tokens,
                                                 "total_tokens_so_far": cumulative,
+                                                "breakdown": step_usage.breakdown(),
                                             }).to_string()
                                         );
                                     }

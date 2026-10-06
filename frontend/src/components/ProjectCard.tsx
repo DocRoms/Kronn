@@ -16,7 +16,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse, AuditRecentActivity } from '../types/generated';
+import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse, AuditRecentActivity, AuditTokenBreakdown } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -435,6 +435,7 @@ export function ProjectCard({
   const [auditToolCallCount, setAuditToolCallCount] = useState<number | null>(null);
   // The running step's latest actions, for the timeline's details panel.
   const [auditRecent, setAuditRecent] = useState<AuditRecentActivity | null>(null);
+  const [auditStepBreakdown, setAuditStepBreakdown] = useState<AuditTokenBreakdown | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
@@ -753,6 +754,7 @@ export function ProjectCard({
     setAuditCurrentTool(null);
     setAuditToolCallCount(null);
     setAuditRecent(null);
+    setAuditStepBreakdown(null);
     // Seed the resume checkpoint immediately so a tab-away during phase 1
     // (template install) still leaves a breadcrumb to poll against.
     const startedAt = new Date().toISOString();
@@ -811,14 +813,16 @@ export function ProjectCard({
           // 0.8.4 (#319 / B3) — reset the per-step tool-call counter.
           setAuditToolCallCount(null);
           setAuditRecent(null);
+          setAuditStepBreakdown(null);
         },
         // 0.8.3 (#281) — live token tick during a step. Backend
         // emits this every time it sees a `Usage` event in the
         // stream-json. Updates the same chip as `onStepDone` so
         // the counter ticks DURING the step instead of jumping at
         // the end.
-        onStepProgress: (_step, stepTokens, totalTokensSoFar) => {
+        onStepProgress: (_step, stepTokens, totalTokensSoFar, breakdown) => {
           setAuditLastStepTokens(stepTokens);
+          setAuditStepBreakdown(breakdown ?? null);
           if (totalTokensSoFar > 0) setAuditTotalTokens(totalTokensSoFar);
         },
         // 0.8.3 (#281) — name of the tool the agent just started
@@ -938,7 +942,7 @@ export function ProjectCard({
           });
         },
         onChunk: () => {},
-        onStepDone: () => { setAuditRecent(null); },
+        onStepDone: () => { setAuditRecent(null); setAuditStepBreakdown(null); },
         onActivity: (_step, recent) => setAuditRecent(recent),
         // NON-terminal: the step closes with its own step_done and the loop
         // continues — the `done interrupted` toast owns the terminal UX.
@@ -1092,6 +1096,7 @@ export function ProjectCard({
           if (typeof p.current_tool_call_count === 'number') setAuditToolCallCount(p.current_tool_call_count);
           else if (p.current_tool_call_count === null) setAuditToolCallCount(null);
           setAuditRecent(p.recent_activity ?? null);
+          setAuditStepBreakdown(p.step_breakdown ?? null);
         } else {
           // Server reports nothing → either the audit wrapped up while we
           // were away, the checkpoint is orphaned (server restart, etc.),
@@ -1116,6 +1121,7 @@ export function ProjectCard({
           setAuditCurrentTool(null);
           setAuditToolCallCount(null);
           setAuditRecent(null);
+          setAuditStepBreakdown(null);
           if (wasActive) setAuditCompletedTick((t) => t + 1);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
@@ -2407,6 +2413,7 @@ export function ProjectCard({
                     liveToolCalls={auditToolCallCount ?? null}
                     liveActivity={auditRecent}
                     liveStepTokens={auditLastStepTokens}
+                    liveStepBreakdown={auditStepBreakdown}
                     liveTotalTokens={auditTotalTokens}
                     onResumeBriefingDiscussion={briefingDisc && !briefingDone
                       ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }

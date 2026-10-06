@@ -13,11 +13,12 @@ import { projects as projectsApi, externalApi, type ExternalApiConnectionView } 
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
-import { formatUsd, summarizeAuditCost } from '../lib/audit-cost';
+import { costReasonKey, formatUsd, summarizeAuditCost } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
 import { AuditStepActivity } from './AuditStepActivity';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, ModelTier, ModelTiersConfig,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
+  ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
 
@@ -37,6 +38,10 @@ interface StepRow {
   cache_read_tokens?: number | null;
   /** What the step's agent reported it cost; absent = unknown, never 0. */
   cost_usd_micros?: number | null;
+  /** Kronn's estimate when the agent reported none; why there is neither. */
+  estimated_cost_usd_micros?: number | null;
+  cost_unknown_reason?: string | null;
+  breakdown?: AuditTokenBreakdown | null;
   carried_from_run_id?: string | null;
 }
 
@@ -65,6 +70,8 @@ export interface AuditTimelineProps {
   /** The running step's latest actions, for its details panel. */
   liveActivity?: AuditRecentActivity | null;
   liveStepTokens: number | null;
+  /** The running step's headline parts, for its tooltip. */
+  liveStepBreakdown?: AuditTokenBreakdown | null;
   liveTotalTokens: number | null;
   /** Who runs the live audit, as the server reports it: shown and frozen in
    *  the agent panel, whichever client launched the audit. */
@@ -136,6 +143,12 @@ function formatTokens(n: number, locale: string): string {
   if (n >= 1_000_000) return `${fmt(n / 1_000_000, 2)} M`;
   if (n >= 1_000) return `${fmt(n / 1_000, 1)} k`;
   return fmt(n, 0);
+}
+
+/** A pricing reason in the UI's language; an unknown one keeps the server's text. */
+function localizedCostReason(reason: string, t: (key: string, ...args: (string | number)[]) => string): string {
+  const key = costReasonKey(reason);
+  return key ? t(key) : reason;
 }
 
 function formatDuration(ms?: number | null): string {
@@ -413,9 +426,14 @@ export function AuditTimeline(props: AuditTimelineProps) {
               <>
                 <p className="audit-tl-muted">{t('auditTimeline.audit.summary', done, total)}</p>
                 {cost.kind !== 'none' && (
-                  <p className="audit-tl-muted audit-tl-mono" data-testid="audit-timeline-cost-total" title={t('auditTimeline.cost.totalTitle')}>
-                    {cost.kind === 'exact' ? t('auditTimeline.cost.total', formatUsd(cost.usdMicros, locale))
-                      : cost.kind === 'floor' ? t('auditTimeline.cost.totalFloor', formatUsd(cost.usdMicros, locale), cost.unknownSteps)
+                  <p className="audit-tl-muted audit-tl-mono" data-testid="audit-timeline-cost-total"
+                    title={(cost.kind === 'exact' || cost.kind === 'floor') && cost.estimated
+                      ? `${t('auditTimeline.cost.totalTitle')} ${t('auditTimeline.cost.estimatedTitle')}`
+                      : t('auditTimeline.cost.totalTitle')}>
+                    {cost.kind === 'exact'
+                      ? t(cost.estimated ? 'auditTimeline.cost.totalEstimated' : 'auditTimeline.cost.total', formatUsd(cost.usdMicros, locale))
+                      : cost.kind === 'floor'
+                        ? t(cost.estimated ? 'auditTimeline.cost.totalEstimatedFloor' : 'auditTimeline.cost.totalFloor', formatUsd(cost.usdMicros, locale), cost.unknownSteps)
                         : t('auditTimeline.cost.totalUnknown')}
                   </p>
                 )}
@@ -436,7 +454,7 @@ export function AuditTimeline(props: AuditTimelineProps) {
                   </span>
                 )}
                 {props.liveTotalTokens != null && props.liveTotalTokens > 0 && (
-                  <span className="audit-tl-muted">{t('audit.totalTokens', formatTokens(props.liveTotalTokens, locale))}</span>
+                  <span className="audit-tl-muted" title={t('auditTimeline.tokens.freshTitle')}>{t('audit.totalTokens', formatTokens(props.liveTotalTokens, locale))}</span>
                 )}
                 <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onCancel}>
                   <StopCircle size={12} /> {t('audit.cancelAudit')}
@@ -523,15 +541,17 @@ export function AuditTimeline(props: AuditTimelineProps) {
                               }
                               if (tokens == null || (r.status === 'running' && tokens <= 0)) return null;
                               const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
+                              const breakdown = r.status === 'running' ? props.liveStepBreakdown : r.row?.breakdown;
                               return (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-tokens-${r.index}`}
-                                  title={r.status === 'running' ? undefined : [
-                                    t('auditTimeline.tokens.detail',
-                                      part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens)),
-                                    r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
-                                  ].filter(Boolean).join(' · ')}
+                                  title={[
+                                    breakdown ? t('auditTimeline.tokens.detail',
+                                      part(breakdown.uncached_input), part(breakdown.output), part(breakdown.cache_read),
+                                      part(breakdown.cache_write), part(breakdown.total_with_cache)) : '',
+                                    r.status !== 'running' && r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
+                                  ].filter(Boolean).join(' · ') || undefined}
                                 >
                                   {t('auditTimeline.tokens.short', formatTokens(tokens, locale))}
                                 </span>
@@ -543,11 +563,21 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                 <span className="audit-tl-mono audit-tl-muted" data-testid={`audit-timeline-step-cost-${r.index}`}>
                                   {t('auditTimeline.cost.short', formatUsd(r.row.cost_usd_micros, locale))}
                                 </span>
+                              ) : typeof r.row.estimated_cost_usd_micros === 'number' ? (
+                                <span
+                                  className="audit-tl-mono audit-tl-muted"
+                                  data-testid={`audit-timeline-step-cost-${r.index}`}
+                                  title={t('auditTimeline.cost.estimatedTitle')}
+                                >
+                                  {t('auditTimeline.cost.estimated', formatUsd(r.row.estimated_cost_usd_micros, locale))}
+                                </span>
                               ) : (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-cost-${r.index}`}
-                                  title={t('auditTimeline.cost.unknownTitle')}
+                                  title={[t('auditTimeline.cost.unknownTitle'),
+                                    r.row.cost_unknown_reason ? t('auditTimeline.cost.unknownReason', localizedCostReason(r.row.cost_unknown_reason, t)) : '',
+                                  ].filter(Boolean).join(' ')}
                                 >
                                   {t('auditTimeline.cost.unknown')}
                                 </span>

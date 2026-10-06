@@ -397,12 +397,13 @@ async fn an_acp_step_records_the_tokens_its_runtime_reported(pipeline: Pipeline)
         .await
         .unwrap();
 
+    // The headline is the fresh traffic: 100 in, 30 of them cached, 20 out.
     let done = first_step_done(&body);
-    assert_eq!(done["tokens"], json!(120), "{pipeline:?}: {done}");
-    assert_eq!(done["total_tokens"], json!(120), "{pipeline:?}: {done}");
+    assert_eq!(done["tokens"], json!(90), "{pipeline:?}: {done}");
+    assert_eq!(done["total_tokens"], json!(90), "{pipeline:?}: {done}");
     let (_, steps) = latest_run_steps(&state, "proj-usage").await;
     let step = &steps[0];
-    assert_eq!(step.step_tokens, Some(120), "{pipeline:?}");
+    assert_eq!(step.step_tokens, Some(90), "{pipeline:?}");
     assert_eq!(step.input_tokens, Some(100), "{pipeline:?}");
     assert_eq!(step.output_tokens, Some(20), "{pipeline:?}");
     assert_eq!(step.cache_read_tokens, Some(30), "{pipeline:?}");
@@ -410,7 +411,7 @@ async fn an_acp_step_records_the_tokens_its_runtime_reported(pipeline: Pipeline)
         step.cache_write_tokens, None,
         "{pipeline:?}: a cache figure the runtime did not give is absent, not 0"
     );
-    assert_eq!(step.cumulative_tokens, Some(120), "{pipeline:?}");
+    assert_eq!(step.cumulative_tokens, Some(90), "{pipeline:?}");
 }
 
 #[tokio::test]
@@ -532,10 +533,10 @@ async fn a_partial_audit_on_opencode_gets_the_read_policy_and_survives_a_refused
     assert_eq!(config["permission"]["read"]["*.env.dist"], "allow");
     assert_eq!(config["experimental"]["continue_loop_on_deny"], true);
     // The step ran on to its end: its text reached the stream and its usage was
-    // counted — 100 in, 20 out.
+    // counted — 100 in, 30 read from and 10 written to the cache, 20 out.
     assert!(body.contains("carried on after the refusal"), "{body}");
     let done = first_step_done(&body);
-    assert_eq!(done["tokens"], json!(120), "{done}");
+    assert_eq!(done["tokens"], json!(80), "{done}");
 }
 
 async fn latest_run(state: &AppState, id: &str) -> crate::models::AuditRun {

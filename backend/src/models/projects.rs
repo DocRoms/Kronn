@@ -971,6 +971,10 @@ pub struct AuditProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recent_activity: Option<AuditRecentActivity>,
+    /// The running step's headline parts, beside `step_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step_breakdown: Option<AuditTokenBreakdown>,
 }
 
 /// The running step's latest actions, newest first, and its last line of prose.
@@ -1141,6 +1145,65 @@ pub struct AuditRunStep {
     /// duration and cost are that run's, not spent again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carried_from_run_id: Option<String>,
+    /// Without a reported cost: Kronn's estimate from the step's counters and
+    /// its run's served model. Computed on read, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub estimated_cost_usd_micros: Option<u64>,
+    /// Why neither a reported nor an estimated cost exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost_unknown_reason: Option<String>,
+    /// The headline's parts, computed on read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub breakdown: Option<AuditTokenBreakdown>,
+}
+
+/// What a step's headline (`step_tokens`, the fresh traffic: uncached input
+/// plus output) is made of, and the vendor's full traffic with the cache.
+/// Each part is absent when unknown, never 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditTokenBreakdown {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub uncached_input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_with_cache: Option<u64>,
+}
+
+impl AuditTokenBreakdown {
+    /// From the fresh headline and the other parts: derived from the headline
+    /// so the parts always add up to what is shown.
+    pub fn new(
+        fresh: Option<u64>,
+        output: Option<u64>,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+    ) -> Self {
+        Self {
+            uncached_input: fresh.map(|fresh| fresh.saturating_sub(output.unwrap_or(0))),
+            output,
+            cache_read,
+            cache_write,
+            total_with_cache: fresh.map(|fresh| {
+                fresh
+                    .saturating_add(cache_read.unwrap_or(0))
+                    .saturating_add(cache_write.unwrap_or(0))
+            }),
+        }
+    }
 }
 
 /// Recommendation emitted by the completion-time cluster detector. Lives in

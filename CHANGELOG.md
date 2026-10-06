@@ -513,10 +513,17 @@ Release notes for 0.9.3 and earlier are available in the
 - A resumed audit keeps the tokens, duration and cost of the steps it inherits
   and names the run that spent them, refuses to start when it cannot record
   them, and warns when the sources moved since the run it continues (KT-1021):
-  each audit run now records its commit, branch and source fingerprint. Token
-  figures count cached prompt tokens the same way for every agent, and the
+  each audit run now records its commit, branch and source fingerprint. The
   timeline shows a step whose agent reported nothing as unknown instead of
   hiding it.
+- An audit step's token figure is now its fresh traffic, uncached input plus
+  output, counted the same way for Claude, Codex and the OpenAI-compatible
+  providers; hovering it lists uncached input, output, cache read, cache write
+  and the total with cache. The live counter, the run's total and the audit
+  recap use the same figure. A step whose agent reported no cost gets an
+  estimate from Kronn's rate table for the model its run served (shown "≈",
+  with the reason when even that is impossible), and one estimated step makes
+  the run's total estimated.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

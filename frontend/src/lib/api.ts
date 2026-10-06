@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity } from '../types/generated';
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -598,6 +598,8 @@ interface AuditSseEvent {
   /** Terminal status carried by the done event (`complete` | `interrupted` | `no_change`). */
   status?: string;
   audit_run_id?: string;
+  /** `step_progress` event: the running step's headline parts. */
+  breakdown?: AuditTokenBreakdown;
   /** `activity` event: the running step's latest actions, already sanitized. */
   recent?: AuditRecentActivity;
   succeeded_steps?: number[];
@@ -1440,7 +1442,7 @@ export const projects = {
        * rather than waiting for `step_done` (which can be 30-120s on
        * a heavy step). Optional for backwards compat.
        */
-      onStepProgress?: (step: number, stepTokens: number, totalTokensSoFar: number) => void;
+      onStepProgress?: (step: number, stepTokens: number, totalTokensSoFar: number, breakdown?: AuditTokenBreakdown) => void;
       /**
        * 0.8.3 (#281) — agent started calling a tool (Read, Glob,
        * Bash, mcp__...). Frontend surfaces the name as a chip so
@@ -1538,11 +1540,9 @@ export const projects = {
               // numbers but we guard for type safety in case a
               // future backend version omits one.
               if (typeof p.step === 'number' && typeof p.step_tokens === 'number') {
-                handlers.onStepProgress?.(
-                  p.step,
-                  p.step_tokens,
-                  (p.total_tokens_so_far as number | undefined) ?? 0,
-                );
+                const soFar = (p.total_tokens_so_far as number | undefined) ?? 0;
+                if (p.breakdown) handlers.onStepProgress?.(p.step, p.step_tokens, soFar, p.breakdown);
+                else handlers.onStepProgress?.(p.step, p.step_tokens, soFar);
               }
               break;
             case 'tool_call':

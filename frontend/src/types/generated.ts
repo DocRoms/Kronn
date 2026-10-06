@@ -752,7 +752,11 @@ connection_id?: string,
  * The running step's latest actions, for users who think a long step is
  * stuck. In memory only, already sanitized and bounded.
  */
-recent_activity?: AuditRecentActivity, };
+recent_activity?: AuditRecentActivity,
+/**
+ * The running step's headline parts, beside `step_tokens`.
+ */
+step_breakdown?: AuditTokenBreakdown, };
 
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
@@ -894,7 +898,20 @@ cost_usd_micros?: number | null,
  * For a step a resume inherited: the run that actually ran it. Its tokens,
  * duration and cost are that run's, not spent again.
  */
-carried_from_run_id?: string | null, };
+carried_from_run_id?: string | null,
+/**
+ * Without a reported cost: Kronn's estimate from the step's counters and
+ * its run's served model. Computed on read, never stored.
+ */
+estimated_cost_usd_micros?: number,
+/**
+ * Why neither a reported nor an estimated cost exists.
+ */
+cost_unknown_reason?: string,
+/**
+ * The headline's parts, computed on read.
+ */
+breakdown?: AuditTokenBreakdown, };
 
 /**
  * KT-977 — one step of the Full audit, known before any run: lets the UI
@@ -933,6 +950,13 @@ export type AuditTimelineValidation = { discussion_id: string,
 finished: boolean, archived: boolean, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
+
+/**
+ * What a step's headline (`step_tokens`, the fresh traffic: uncached input
+ * plus output) is made of, and the vendor's full traffic with the cache.
+ * Each part is absent when unknown, never 0.
+ */
+export type AuditTokenBreakdown = { uncached_input?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.
