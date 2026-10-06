@@ -4149,6 +4149,7 @@ const fr: TranslationDict = {
   'wf.createThisWorkflow': 'Créer ce workflow',
   // 0.8.3 — bundle CTA. {0}=QPs, {1}=QAs, {2}=Custom APIs.
   'wf.aiBundleReady': 'Bundle conçu par l\'IA — prêt à déployer ({0} Quick Prompts · {1} Quick APIs · {2} Custom APIs)',
+  'wf.aiCreatedDisabled': 'Créé désactivé : relis-le dans Workflows puis clique sur « Activer ». Toi seul peux l’activer.',
   // 0.8.3 — bundle button. {0}=total extras (QPs+QAs+CustomAPIs).
   'wf.createBundleBtn': 'Créer tout (1 workflow + {0} artefacts)',
   'wf.workflowCreated': 'Workflow créé avec succès',

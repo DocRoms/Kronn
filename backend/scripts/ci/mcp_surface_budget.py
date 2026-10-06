@@ -69,9 +69,11 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # parameters and manual already carry. Ceiling lowered by 1 B, not raised.
 # KT-1025: `workflow_trigger` gained `step_agents`, paid for inside its own
 # declaration (the agent detail lives in its manual); ceiling lowered by 6 B.
+# KT-1037: enabling became human-only, so `workflow_set_enabled` lost its
+# `force` input and its enable guidance; ceiling lowered by 400 B.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 86_135
+CATALOGUE_MAX_BYTES = 85_735
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

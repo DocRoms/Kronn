@@ -2109,10 +2109,18 @@ pub async fn create(
 /// value waits for a human's approval in the editor.
 pub async fn create_agent_proposal(
     State(state): State<AppState>,
-    Json(req): Json<CreateWorkflowRequest>,
+    Json(mut req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
+    // Accepting the proposal saves it; enabling it is a separate human step.
+    req.enabled = Some(false);
     create_as(state, req, WorkflowWriter::Agent).await
 }
+
+/// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
+/// Tracker trigger would then run its content with no human in the loop.
+pub(crate) const AGENT_ENABLE_REFUSAL: &str = "Enabling a workflow is a human decision: \
+     ask the user to review it and click \"Enable\" in Kronn (Workflows). Workflows an agent \
+     creates or edits stay disabled until then.";
 
 pub(crate) async fn create_as(
     state: AppState,
@@ -2129,6 +2137,10 @@ async fn create_written(
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
     if writer == WorkflowWriter::Agent {
+        if req.enabled == Some(true) {
+            return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+        }
+        req.enabled = Some(false);
         clear_human_approvals(&mut req.steps);
         clear_human_approvals(&mut req.on_failure);
     }
@@ -2469,6 +2481,19 @@ async fn update_written(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if writer == WorkflowWriter::Agent {
+        if req.enabled == Some(true) && !existing.enabled {
+            return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+        }
+        // A new trigger on an enabled workflow would arm the agent's choice
+        // (Manual → Cron) without a human: it goes back to disabled.
+        let trigger_changes = req.trigger.as_ref().is_some_and(|t| {
+            serde_json::to_value(t).ok() != serde_json::to_value(&existing.trigger).ok()
+        });
+        if existing.enabled && trigger_changes {
+            req.enabled = Some(false);
+        }
+    }
     if let Some(steps) = req.steps.as_mut() {
         drop_foreign_fields(steps);
     }
@@ -8316,6 +8341,76 @@ mod tests {
             !json.contains("referenced_quick_prompts"),
             "empty QP vec should be omitted; got: {}",
             json
+        );
+    }
+
+    /// KT-1037 / KT-1017: only a human turns a workflow on. An agent's
+    /// create lands disabled, its `enabled: true` is refused with a message
+    /// sending it to the human, and its new trigger on an enabled workflow
+    /// disables it.
+    #[tokio::test]
+    async fn an_agent_can_never_enable_a_workflow() {
+        let state = agent_state();
+        let request = |enabled: Option<bool>| -> CreateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "agent-made", "project_id": null,
+                "trigger": {"type": "Cron", "schedule": "* * * * *"},
+                "enabled": enabled,
+                "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+            }))
+            .unwrap()
+        };
+        let Json(refused) =
+            create_as(state.clone(), request(Some(true)), WorkflowWriter::Agent).await;
+        assert!(!refused.success);
+        assert!(refused.error.unwrap().contains("human"));
+        let Json(created) = create_as(state.clone(), request(None), WorkflowWriter::Agent).await;
+        assert!(created.success, "{:?}", created.error);
+        let created = created.data.unwrap();
+        assert!(!created.enabled, "an agent's workflow lands disabled");
+
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(refused) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(
+            !refused.success,
+            "a bridge workflow_update with enabled:true is refused"
+        );
+        assert!(refused.error.unwrap().contains("Enable"));
+
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(human) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(human.success, "{:?}", human.error);
+        assert!(human.data.unwrap().enabled);
+
+        let retrigger: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Cron", "schedule": "*/5 * * * *"}
+        }))
+        .unwrap();
+        let Json(edited) = update_as(
+            state.clone(),
+            created.id.clone(),
+            retrigger,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(edited.success, "{:?}", edited.error);
+        assert!(
+            !edited.data.unwrap().enabled,
+            "an agent's new trigger is not armed"
         );
     }
 

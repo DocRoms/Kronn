@@ -4135,6 +4135,7 @@ const es: TranslationDict = {
   'wf.aiExecLines': 'Líneas Exec escritas por el agente (todo valor de la ejecución espera tu aprobación en el editor):',
   // 0.8.3 — bundle CTA. {0}=QPs, {1}=QAs, {2}=Custom APIs.
   'wf.aiBundleReady': 'Bundle diseñado por IA — listo para desplegar ({0} Quick Prompts · {1} Quick APIs · {2} Custom APIs)',
+  'wf.aiCreatedDisabled': 'Se crea desactivado: revísalo en Workflows y haz clic en «Activar». Solo tú puedes activarlo.',
   // 0.8.3 — bundle button. {0}=total extras (QPs+QAs+CustomAPIs).
   'wf.createBundleBtn': 'Crear todo (1 workflow + {0} artefactos)',
   'wf.createThisWorkflow': 'Crear este workflow',

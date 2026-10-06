@@ -4085,6 +4085,7 @@ const zh: TranslationDict = {
   "wf.aiWorkflowReady": "AI设计的工作流 — 准备部署",
   "wf.aiExecLines": "由智能体编写的 Exec 行（任何运行值都需在编辑器中经你批准）：",
   "wf.aiBundleReady": "AI设计的套件 — 准备部署（{0} 个快速提示 · {1} 个快速API · {2} 个自定义API）",
+  "wf.aiCreatedDisabled": "创建后处于禁用状态：请在工作流中检查后点击“启用”。只有你可以启用它。",
   "wf.createBundleBtn": "创建全部（1个工作流 + {0} 个组件）",
   "wf.createThisWorkflow": "创建此工作流",
   "wf.workflowCreated": "工作流创建成功",

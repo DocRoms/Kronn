@@ -314,11 +314,16 @@ Release notes for 0.9.3 and earlier are available in the
   call log and MCP run status apply URL query/userinfo stripping and the
   secret heuristics to stored text, which is all that can be done for rows
   written before (KT-1035).
-- A workflow imported from a `.kronn-workflow.json` file now lands disabled,
-  as ADR-005 and the Artifact import already required: a shared file's Cron or
-  Tracker trigger no longer fires on the next tick. The import preview shows
-  the trigger, the Exec steps and the Exec allowlist and says the workflow
-  must be enabled after review (KT-1037).
+- Turning a workflow on is a human decision. A workflow imported from a
+  `.kronn-workflow.json` file, an accepted agent bundle (parent and children)
+  and an accepted agent proposal land disabled, as ADR-005 and the Artifact
+  import already required, so a shared Cron or Tracker trigger no longer
+  fires on the next tick. An agent's token can no longer enable a workflow
+  through create, `workflow_update` or `workflow_set_enabled` (`force`
+  included): the backend refuses and tells it to ask the user; an agent's
+  new trigger on an enabled workflow disables it. The import preview shows
+  the trigger, the Exec steps and the Exec allowlist, and the agent banners
+  say the workflow is created disabled (KT-1037).
 - Outbound requests to a URL a user, a plugin, a provider or an agent
   supplies go through one guarded transport (`core::safe_http`): ApiCall
   (every page, retry and redirect), OAuth and token exchange, Notify, gate

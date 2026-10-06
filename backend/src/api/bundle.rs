@@ -296,7 +296,9 @@ async fn create_bundle_as(
         on_failure: req.workflow.on_failure.clone(),
         exec_allowlist: req.workflow.exec_allowlist.clone(),
         variables: req.workflow.variables.clone(),
-        enabled: true,
+        // An agent's bundle is enabled by a human after review (KT-1037);
+        // the wizard's own preset is the human's.
+        enabled: writer == crate::api::workflows::WorkflowWriter::Human,
         created_at: now,
         updated_at: now,
     };
@@ -357,7 +359,7 @@ async fn create_bundle_as(
             on_failure: creq.on_failure.clone(),
             exec_allowlist: creq.exec_allowlist.clone(),
             variables: creq.variables.clone(),
-            enabled: true,
+            enabled: writer == crate::api::workflows::WorkflowWriter::Human,
             created_at: now,
             updated_at: now,
         });
@@ -638,6 +640,52 @@ mod tests {
         assert_eq!(step.exec_unmodelled_args_approved, None);
         assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
         assert!(crate::core::inline_code::runtime_refusal(&step).is_some());
+    }
+
+    /// KT-1037: an accepted agent bundle lands disabled, parent and children;
+    /// the wizard's own preset stays enabled.
+    #[tokio::test]
+    async fn an_agent_bundle_lands_disabled_with_its_children() {
+        let state = bundle_state();
+        let request: BundleRequest = serde_json::from_value(json!({
+            "workflow": {
+                "name": "parent", "project_id": null,
+                "trigger": {"type": "Cron", "schedule": "* * * * *"},
+                "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+            },
+            "child_workflows": [{
+                "bundle_id": "child-one",
+                "name": "child", "project_id": null, "trigger": {"type": "Manual"},
+                "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"b": 2}}]
+            }]
+        }))
+        .unwrap();
+        let Json(created) = create_bundle(State(state.clone()), Json(request)).await;
+        assert!(created.success, "{:?}", created.error);
+        let all = state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter().all(|w| !w.enabled),
+            "every bundled workflow lands disabled"
+        );
+
+        let human = bundle_state();
+        let Json(created) = create_human_bundle(
+            State(human.clone()),
+            Json(bundle_with("aws", json!(["s3", "ls"]))),
+        )
+        .await;
+        assert!(created.success, "{:?}", created.error);
+        let wizard = human
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+            .unwrap();
+        assert!(wizard[0].enabled);
     }
 
     /// F-04: an agent bundle never brings a script hash.

@@ -8972,6 +8972,20 @@ mod tests {
             .exec_script_files
             .iter()
             .all(|file| file.sha256.is_empty()));
+        // An agent's workflow lands disabled (KT-1037); a human enables it.
+        assert!(!workflow.enabled);
+        let enable: crate::models::UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let workflow = crate::api::workflows::update_as(
+            state.clone(),
+            workflow.id.clone(),
+            enable,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0
+        .data
+        .expect("enabled by a human");
 
         let run = run_scripts(&state, &workflow, "proj-kt918-agent").await;
         let output = &run.step_results.last().unwrap().output;

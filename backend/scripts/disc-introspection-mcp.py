@@ -1719,7 +1719,7 @@ TOOLS = [
             "(default `<name> (copie)`) so it never auto-fires and you "
             "never get two identically-named workflows. Typical loop: "
             "`workflow_clone` → `workflow_update` (patch a few fields) → "
-            "`workflow_set_enabled` (test). Cheaper + safer than "
+            "the user enables it. Cheaper + safer than "
             "re-authoring from scratch."
         ),
         "inputSchema": {
@@ -1756,7 +1756,7 @@ TOOLS = [
                 "on_failure": {"type": "array"},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}},
                 "artifacts": {"type": "object"},
-                "enabled": {"type": "boolean", "description": "Toggle enabled. For Cron/Tracker triggers prefer `workflow_set_enabled` (it gates auto-firing)."},
+                "enabled": {"type": "boolean", "description": "false disables. Enabling is human-only: true is refused."},
                 "project_id": {"type": "string"},
                 "concurrency_limit": {"type": "integer"},
                 "safety": {"type": "object"},
@@ -1769,19 +1769,14 @@ TOOLS = [
     {
         "name": "workflow_set_enabled",
         "description": (
-            "Enable or disable a workflow. Disabling is always allowed. "
-            "Enabling a MANUAL workflow is free (it only runs when "
-            "explicitly triggered). Enabling a CRON/TRACKER workflow is "
-            "REFUSED unless you pass `force: true` — that would schedule "
-            "autonomous runs with no human in the loop; prefer letting the "
-            "user enable scheduled workflows from the Kronn UI."
+            "Disable a workflow. Enabling is a human decision, refused "
+            "server-side for agents: ask the user to click Enable in Kronn."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workflow_id": {"type": "string", "description": "Workflow id."},
-                "enabled": {"type": "boolean", "description": "true to enable, false to disable."},
-                "force": {"type": "boolean", "description": "Pass true to enable a Cron/Tracker-triggered workflow (otherwise refused)."},
+                "enabled": {"type": "boolean", "description": "false to disable; true is refused."},
             },
             "required": ["workflow_id", "enabled"],
         },
@@ -8233,27 +8228,19 @@ def call_workflow_clone(args):
 
 
 def call_workflow_set_enabled(args):
-    """Enable/disable a workflow. Disabling is always allowed. ENABLING a
-    Cron/Tracker workflow is refused unless `force=true` — that would
-    schedule autonomous runs without a human in the loop. Manual
-    workflows (only run when explicitly triggered) enable freely."""
+    """Disable a workflow. Enabling is human-only (KT-1037): the backend
+    refuses it for an agent's token, so it is refused here first."""
     wid = args.get("workflow_id") or args.get("id")
     if not wid:
         raise RuntimeError("workflow_set_enabled: missing required 'workflow_id'")
     if "enabled" not in args:
         raise RuntimeError("workflow_set_enabled: missing required 'enabled' (bool)")
-    enabled = bool(args["enabled"])
-    if enabled and not bool(args.get("force")):
-        wf = _unwrap(_http("GET", f"/api/workflows/{wid}"))
-        ttype = (wf.get("trigger") or {}).get("type")
-        if ttype in ("Cron", "Tracker"):
-            raise RuntimeError(
-                f"workflow_set_enabled: refusing to enable a {ttype}-triggered "
-                "workflow — that would schedule autonomous runs with no human in "
-                "the loop. Enable it from the Kronn UI, or pass force=true if you "
-                "are certain. (Manual workflows enable freely.)"
-            )
-    return _unwrap(_http("PUT", f"/api/workflows/{wid}", {"enabled": enabled}))
+    if bool(args["enabled"]):
+        raise RuntimeError(
+            "workflow_set_enabled: enabling a workflow is a human decision. Ask "
+            "the user to review it and click Enable in Kronn (Workflows)."
+        )
+    return _unwrap(_http("PUT", f"/api/workflows/{wid}", {"enabled": False}))
 
 
 def call_qp_update(args):

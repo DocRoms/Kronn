@@ -820,3 +820,10 @@ fixed hosts (`core/versions.rs`, `api/version.rs`,
 host); the operator's failure webhook (`core/run_notify.rs`); the local docs
 sidecar (`api/docs.rs`); the gate auto-approve self-call to `127.0.0.1`
 (`workflows/runner.rs`).
+
+**Workflow activation is human-only (KT-1037).** In line with KT-1017 (an
+agent's lines wait for a human), an agent never arms a trigger: a bridge
+token's create lands disabled and its `enabled: true` is refused
+(`api/workflows.rs` `AGENT_ENABLE_REFUSAL`), its update cannot enable and
+its trigger change on an enabled workflow disables it; JSON imports, accepted
+agent bundles and proposals land disabled. Only a human request enables.
