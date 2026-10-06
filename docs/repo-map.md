@@ -13,11 +13,11 @@ Rust backend (axum) + React/TypeScript frontend (Vite) + nginx gateway, all in D
 ```
 Kronn/
 ├── backend/                    # Rust backend (axum web server)
-│   ├── Cargo.toml              # Dependencies: axum 0.7, tokio, serde, ts-rs, anyhow
+│   ├── Cargo.toml              # Dependencies: axum 0.8, tokio, serde, ts-rs, anyhow (versions: docs/stack.md)
 │   └── src/
 │       ├── main.rs             # Entrypoint, server startup, graceful shutdown (SIGTERM/SIGINT)
 │       ├── lib.rs              # Router definition (build_router), auth middleware, CORS, AppState
-│       ├── models/mod.rs       # All data models (Project, Discussion, MCP, Workflow, Config...)
+│       ├── models/             # Data models, one module per domain; mod.rs re-exports them (`pub use *`)
 │       ├── api/                # HTTP handlers (one file per domain)
 │       │   ├── mod.rs          # Re-exports
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
@@ -298,7 +298,7 @@ Kronn/
 ## Primary entrypoints for conventions
 
 - **Route registration**: `backend/src/lib.rs` (`build_router()`) — all API routes defined here.
-- **Data models**: `backend/src/models/mod.rs` — single file, source of truth for all types.
+- **Data models**: `backend/src/models/` — one module per domain (`discussions.rs`, `workflows.rs`, `mcp.rs`…), re-exported by `mod.rs` so `crate::models::*` still resolves; source of truth for all types. `[src: file: backend/src/models/mod.rs:1-5]`
 - **API client**: `frontend/src/lib/api.ts` — all fetch calls, SSE streaming logic.
 - **Type generation**: `make typegen` reads `#[derive(TS)]` attributes in Rust models.
 - **CLI commands**: `kronn` script, sources `lib/*.sh`.
@@ -308,7 +308,7 @@ Kronn/
 - `README.md` is not guaranteed to be up-to-date; prefer actual config files as source of truth.
 - `frontend/src/types/generated.ts` is auto-generated — never edit manually.
 - UI file sizes evolve quickly; the tree above is the reviewed 2026-08-11 snapshot. Prefer `wc -l` over copying these figures into new design decisions.
-- Hot files still above the TD watermark: `backend/src/models/mod.rs` (~2225L), `backend/src/api/audit.rs` (~1966L), `backend/src/api/projects.rs` (~1819L). `backend/src/api/discussions.rs` was 3400L; now 2880L after 2026-04-17 extraction of 9 pure helpers (`disc_helpers.rs`) and 3 prompt builders (`disc_prompts.rs`).
+- The former hot files `backend/src/models/mod.rs`, `backend/src/api/audit.rs`, `backend/src/api/projects.rs` and `backend/src/api/discussions.rs` are now module directories (`models/`, `api/audit/`, `api/projects/`, `api/discussions/`). Measure current sizes with `wc -l` rather than trusting a figure here.
 - DiscussionsPage split (2026-03-28): ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem and AgentQuestionForm. Since 0.9.4, `MarkdownComposerTools` and `AgentSwitchPicker` keep editor and agent × tier behaviour consistent across new-discussion, chat, Quick Prompt and workflow surfaces.
 - CSS system: `src/styles/` (tokens, utilities, components) + per-page CSS. ~319 inline styles remain (dynamic only).
 - TTS/STT logic extracted into `lib/tts-*.ts` and `lib/stt-*.ts` modules (7 files, ~400 lines total). Web Workers for WASM inference run off the main thread.
