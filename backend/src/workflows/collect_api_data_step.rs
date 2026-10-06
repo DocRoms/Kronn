@@ -58,7 +58,7 @@ pub async fn execute_collect_api_data_step(
     };
 
     // An inline source is approved with its step, a saved Quick Exec with itself.
-    let step_approved = step.exec_unmodelled_args_approved;
+    let step_approved = (step.exec_unmodelled_args_approved, step.exec_agent_written);
     for (index, source) in config.sources.iter().cloned().enumerate() {
         let source_id = if source.quick_exec.is_some() {
             None
@@ -184,57 +184,64 @@ pub async fn execute_collect_api_data_step(
                             exec.args,
                             Some(exec.timeout_secs),
                             exec.output_format,
-                            exec.unmodelled_args_approved,
+                            (exec.unmodelled_args_approved, exec.agent_written),
                         )
                     })
                 });
 
-            let (outcome, output_format, quick_exec_identity) =
-                if let Some((command, args, timeout_secs, output_format, approved)) = exec_config {
-                    let quick_exec_identity = Some((command.clone(), args.clone()));
-                    let child_step = WorkflowStep {
-                        name: source.alias.clone(),
-                        step_type: StepType::Exec,
-                        exec_command: Some(command),
-                        exec_args: args,
-                        exec_timeout_secs: timeout_secs,
-                        exec_unmodelled_args_approved: approved,
-                        ..WorkflowStep::default()
-                    };
-                    (
-                        super::exec_step::execute_exec_step_with_output_limit(
-                            &child_step,
-                            &workflow_allowlist,
-                            &work_dir,
-                            &child_context,
-                            super::exec_step::MAX_COLLECT_OUTPUT_BYTES,
-                            project_id.as_deref(),
-                        )
-                        .await,
-                        Some(output_format),
-                        quick_exec_identity,
-                    )
-                } else {
-                    let child_step = WorkflowStep {
-                        name: source.alias.clone(),
-                        step_type: StepType::ApiCall,
-                        quick_api_id: Some(source.quick_api_id),
-                        ..WorkflowStep::default()
-                    };
-                    (
-                        super::api_call_executor::execute_api_call_step_with_db_as(
-                            &child_step,
-                            project_id.as_deref(),
-                            &state,
-                            &child_context,
-                            SecurityPolicy::production(),
-                            log_context,
-                        )
-                        .await,
-                        None,
-                        None,
-                    )
+            let (outcome, output_format, quick_exec_identity) = if let Some((
+                command,
+                args,
+                timeout_secs,
+                output_format,
+                (approved, agent_written),
+            )) = exec_config
+            {
+                let quick_exec_identity = Some((command.clone(), args.clone()));
+                let child_step = WorkflowStep {
+                    name: source.alias.clone(),
+                    step_type: StepType::Exec,
+                    exec_command: Some(command),
+                    exec_args: args,
+                    exec_timeout_secs: timeout_secs,
+                    exec_unmodelled_args_approved: approved,
+                    exec_agent_written: agent_written,
+                    ..WorkflowStep::default()
                 };
+                (
+                    super::exec_step::execute_exec_step_with_output_limit(
+                        &child_step,
+                        &workflow_allowlist,
+                        &work_dir,
+                        &child_context,
+                        super::exec_step::MAX_COLLECT_OUTPUT_BYTES,
+                        project_id.as_deref(),
+                    )
+                    .await,
+                    Some(output_format),
+                    quick_exec_identity,
+                )
+            } else {
+                let child_step = WorkflowStep {
+                    name: source.alias.clone(),
+                    step_type: StepType::ApiCall,
+                    quick_api_id: Some(source.quick_api_id),
+                    ..WorkflowStep::default()
+                };
+                (
+                    super::api_call_executor::execute_api_call_step_with_db_as(
+                        &child_step,
+                        project_id.as_deref(),
+                        &state,
+                        &child_context,
+                        SecurityPolicy::production(),
+                        log_context,
+                    )
+                    .await,
+                    None,
+                    None,
+                )
+            };
 
             if outcome.result.status != RunStatus::Success {
                 let error =
@@ -948,6 +955,7 @@ mod tests {
                     variables: Vec::new(),
                     pinned: false,
                     unmodelled_args_approved: None,
+                    agent_written: None,
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 },

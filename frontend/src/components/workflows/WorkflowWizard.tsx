@@ -2756,6 +2756,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           command={step.exec_command ?? ''}
                           args={step.exec_args ?? []}
                           stdin={step.exec_stdin ?? undefined}
+                          setupCommand={step.exec_setup_command ?? undefined}
+                          setupArgs={step.exec_setup_args ?? []}
+                          agentWritten={step.exec_agent_written === true}
                           approved={step.exec_unmodelled_args_approved === true}
                           onChange={approved => updateStep(i, { exec_unmodelled_args_approved: approved || undefined })}
                         />

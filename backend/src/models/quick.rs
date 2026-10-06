@@ -622,11 +622,16 @@ pub struct QuickExec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unmodelled_args_approved: Option<bool>,
+    /// KT-1017 — an agent last wrote this command line: any value it carries
+    /// needs a human's approval. Set by the server on save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_written: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateQuickExecRequest {
     pub name: String,

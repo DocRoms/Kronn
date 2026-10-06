@@ -194,6 +194,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         }
     }
 }

@@ -2093,6 +2093,7 @@ mod tests {
             created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
             updated_at: Utc.timestamp_opt(1_700_000_010, 0).unwrap(),
             unmodelled_args_approved: None,
+            agent_written: None,
         }
     }
 

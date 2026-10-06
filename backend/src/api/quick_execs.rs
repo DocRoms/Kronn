@@ -49,7 +49,9 @@ pub(crate) async fn create_as(
     if let Err(error) = validate_request(&request) {
         return Json(ApiResponse::err(error));
     }
-    if let Some(error) = inline_code_error(&request) {
+    let agent_written = by_agent.then_some(true);
+    drop_stale_approval(&mut request, agent_written);
+    if let Some(error) = inline_code_error(&request, agent_written) {
         return Json(ApiResponse::err(error));
     }
     let now = Utc::now();
@@ -68,6 +70,7 @@ pub(crate) async fn create_as(
         unmodelled_args_approved: request
             .unmodelled_args_approved
             .filter(|approved| *approved),
+        agent_written,
         created_at: now,
         updated_at: now,
     };
@@ -113,10 +116,17 @@ pub(crate) async fn update_as(
     };
     // An agent's save keeps the stored approval only for the very line a
     // human approved; any other line loses it (KT-1017).
+    let same_line = existing.command == request.command.trim() && existing.args == request.args;
     if by_agent {
-        let same_line = existing.command == request.command.trim() && existing.args == request.args;
         request.unmodelled_args_approved = existing.unmodelled_args_approved.filter(|_| same_line);
     }
+    // An unchanged line keeps its writer; a changed one is this save's.
+    let agent_written = if same_line {
+        existing.agent_written
+    } else {
+        by_agent.then_some(true)
+    };
+    drop_stale_approval(&mut request, agent_written);
     // An unchanged stored line stays saveable (it is still refused at run
     // time); a new or changed one must be safe.
     let unchanged = existing.name == request.name.trim()
@@ -127,7 +137,7 @@ pub(crate) async fn update_as(
                 .unmodelled_args_approved
                 .filter(|approved| *approved);
     if !unchanged {
-        if let Some(error) = inline_code_error(&request) {
+        if let Some(error) = inline_code_error(&request, agent_written) {
             return Json(ApiResponse::err(error));
         }
     }
@@ -146,6 +156,7 @@ pub(crate) async fn update_as(
         unmodelled_args_approved: request
             .unmodelled_args_approved
             .filter(|approved| *approved),
+        agent_written,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -446,6 +457,7 @@ pub async fn run(
         exec_args: item.args.clone(),
         exec_timeout_secs: Some(item.timeout_secs),
         exec_unmodelled_args_approved: item.unmodelled_args_approved,
+        exec_agent_written: item.agent_written,
         ..WorkflowStep::default()
     };
     let running_at = Utc::now();
@@ -654,11 +666,10 @@ pub async fn import(
         return Json(ApiResponse::err("Unsupported Quick Exec export"));
     }
     let mut item = envelope.quick_exec;
-    // An import through an agent's bridge token never carries a human's
-    // approval of unmodelled programs (KT-1017).
-    if bridge.is_some() {
-        item.unmodelled_args_approved = None;
-    }
+    // An import never carries an approval: a human approves in the editor.
+    // Through an agent's bridge token, the line is the agent's (KT-1017).
+    item.unmodelled_args_approved = None;
+    item.agent_written = bridge.is_some().then_some(true);
     let validation = CreateQuickExecRequest {
         name: item.name.clone(),
         icon: Some(item.icon.clone()),
@@ -674,7 +685,7 @@ pub async fn import(
     if let Err(error) = validate_request(&validation) {
         return Json(ApiResponse::err(error));
     }
-    if let Some(error) = inline_code_error(&validation) {
+    if let Some(error) = inline_code_error(&validation, item.agent_written) {
         return Json(ApiResponse::err(error));
     }
     let now = Utc::now();
@@ -695,13 +706,44 @@ pub async fn import(
 
 /// Inline code (`python3 -c`, `node -e`…) that interpolates a value: refused
 /// with the same rule as a workflow Exec step (KT-1017).
-fn inline_code_error(request: &CreateQuickExecRequest) -> Option<String> {
+fn inline_code_error(
+    request: &CreateQuickExecRequest,
+    agent_written: Option<bool>,
+) -> Option<String> {
     crate::core::inline_code::quick_exec_validation_error(
         request.name.trim(),
         request.command.trim(),
         &request.args,
-        request.unmodelled_args_approved == Some(true),
+        crate::core::argv_roles::Trust {
+            approved: request.unmodelled_args_approved == Some(true),
+            agent_written: agent_written == Some(true),
+            declared_scripts: Vec::new(),
+        },
     )
+}
+
+/// An approval the line does not need is dropped, so it never covers what
+/// the line becomes later (KT-1017).
+fn drop_stale_approval(request: &mut CreateQuickExecRequest, agent_written: Option<bool>) {
+    if request.unmodelled_args_approved == Some(true) {
+        let unapproved = CreateQuickExecRequest {
+            unmodelled_args_approved: None,
+            ..request.clone()
+        };
+        if inline_code_error(&unapproved, agent_written).is_none() {
+            request.unmodelled_args_approved = None;
+        }
+    }
+}
+
+/// The [`Trust`](crate::core::argv_roles::Trust) of a saved Quick Exec: it
+/// pins no script, so a script shape needs the approval.
+pub(crate) fn quick_exec_trust(item: &QuickExec) -> crate::core::argv_roles::Trust {
+    crate::core::argv_roles::Trust {
+        approved: item.unmodelled_args_approved == Some(true),
+        agent_written: item.agent_written == Some(true),
+        declared_scripts: Vec::new(),
+    }
 }
 
 fn validate_request(request: &CreateQuickExecRequest) -> Result<(), String> {
@@ -783,7 +825,7 @@ mod tests {
     fn inline_code_interpolation_is_refused_with_the_recipe() {
         let mut unsafe_request = request("python3");
         unsafe_request.args = vec!["-c".into(), "print('{{ticket}}')".into()];
-        let error = inline_code_error(&unsafe_request).unwrap();
+        let error = inline_code_error(&unsafe_request, None).unwrap();
         assert!(error.contains("Quick Exec « Collect AWS »"), "{error}");
         assert!(
             error.contains("{{ticket}}") && error.contains("sys.argv"),
@@ -795,7 +837,10 @@ mod tests {
             vec!["--command=print('{{ticket}}')"],
         ] {
             unsafe_request.args = args.iter().map(|arg| arg.to_string()).collect();
-            assert!(inline_code_error(&unsafe_request).is_some(), "{args:?}");
+            assert!(
+                inline_code_error(&unsafe_request, None).is_some(),
+                "{args:?}"
+            );
         }
 
         let mut safe = request("python3");
@@ -804,13 +849,102 @@ mod tests {
             "import sys; print(sys.argv[1])".into(),
             "{{ticket}}".into(),
         ];
-        assert!(inline_code_error(&safe).is_none());
+        assert!(inline_code_error(&safe, None).is_none());
         let mut plain = request("aws");
         plain.args = vec!["s3".into(), "ls".into(), "{{bucket}}".into()];
         // `aws` is not modelled: a value reaches it only with a human's approval.
-        assert!(inline_code_error(&plain).unwrap().contains("aws"));
+        assert!(inline_code_error(&plain, None).unwrap().contains("aws"));
         plain.unmodelled_args_approved = Some(true);
-        assert!(inline_code_error(&plain).is_none());
+        assert!(inline_code_error(&plain, None).is_none());
+    }
+
+    /// R5-05 and B: an imported Quick Exec never carries an approval, and
+    /// one imported or saved by an agent needs a human for any value.
+    #[tokio::test]
+    async fn quick_exec_imports_and_agent_saves_need_a_human_for_values() {
+        let state = state();
+        let mut item = QuickExec {
+            id: "src".into(),
+            name: "Greet".into(),
+            icon: String::new(),
+            description: String::new(),
+            project_id: None,
+            command: "python3".into(),
+            args: vec![
+                "-c".into(),
+                "import sys; print(sys.argv[1])".into(),
+                "{{x}}".into(),
+            ],
+            timeout_secs: 10,
+            output_format: CollectQuickExecOutputFormat::Text,
+            variables: vec![],
+            pinned: false,
+            unmodelled_args_approved: None,
+            agent_written: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let import_as = |item: QuickExec, by_agent: bool| {
+            let state = state.clone();
+            async move {
+                let content = serde_json::to_string(&QuickExecExportEnvelope {
+                    kind: EXPORT_KIND.into(),
+                    version: EXPORT_VERSION,
+                    exported_at: Utc::now(),
+                    quick_exec: item,
+                    redacted_fields: vec![],
+                })
+                .unwrap();
+                let bridge = by_agent.then(|| {
+                    axum::Extension(crate::core::bridge_token::BridgeCaller {
+                        token_id: "t".into(),
+                        project: None,
+                        own_discussions: vec![],
+                    })
+                });
+                import(
+                    State(state),
+                    bridge,
+                    Json(ImportQuickExecRequest {
+                        content,
+                        project_id: None,
+                    }),
+                )
+                .await
+                .0
+            }
+        };
+        assert!(
+            import_as(item.clone(), false).await.success,
+            "a human's shape is trusted"
+        );
+        assert!(
+            !import_as(item.clone(), true).await.success,
+            "an agent's line needs a human"
+        );
+        item.command = "aws".into();
+        item.args = vec!["s3".into(), "ls".into(), "{{x}}".into()];
+        item.unmodelled_args_approved = Some(true);
+        assert!(
+            !import_as(item, false).await.success,
+            "the file's approval is dropped"
+        );
+
+        let mut shape = request("python3");
+        shape.args = vec![
+            "-c".into(),
+            "import sys; print(sys.argv[1])".into(),
+            "{{x}}".into(),
+        ];
+        assert!(
+            !create_as(state.clone(), shape.clone(), true)
+                .await
+                .0
+                .success
+        );
+        let human = create_as(state.clone(), shape, false).await.0;
+        assert!(human.success, "{:?}", human.error);
+        assert_eq!(human.data.unwrap().agent_written, None);
     }
 
     fn state() -> crate::AppState {

@@ -1953,7 +1953,7 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             &qe.name,
             &qe.command,
             &qe.args,
-            qe.unmodelled_args_approved == Some(true),
+            crate::api::quick_execs::quick_exec_trust(qe),
         ) {
             warnings.push(format!("Quick Exec « {} » non importé : {reason}", qe.name));
             continue;
@@ -4111,6 +4111,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         export.quick_execs = vec![
             quick_exec("qe-unsafe", "Ticket", vec!["-c", "print('{{ticket}}')"]),
@@ -4192,6 +4193,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         state
             .db

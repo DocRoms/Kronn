@@ -28,6 +28,18 @@ fn output_format_name(value: CollectQuickExecOutputFormat) -> &'static str {
     }
 }
 
+/// One column holds the line's trust: 1 approved by a human, 2 written by an
+/// agent and not approved, 0 written by a human.
+fn approval_state(quick_exec: &QuickExec) -> i32 {
+    if quick_exec.unmodelled_args_approved == Some(true) {
+        1
+    } else if quick_exec.agent_written == Some(true) {
+        2
+    } else {
+        0
+    }
+}
+
 fn row_to_quick_exec(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuickExec> {
     let args_json: String = row.get(6)?;
     let variables_json: String = row.get(9)?;
@@ -44,7 +56,8 @@ fn row_to_quick_exec(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuickExec> {
         output_format: parse_output_format(&output_format),
         variables: serde_json::from_str(&variables_json).unwrap_or_default(),
         pinned: row.get::<_, i32>(12).unwrap_or(0) != 0,
-        unmodelled_args_approved: (row.get::<_, i32>(13).unwrap_or(0) != 0).then_some(true),
+        unmodelled_args_approved: (row.get::<_, i32>(13).unwrap_or(0) == 1).then_some(true),
+        agent_written: (row.get::<_, i32>(13).unwrap_or(0) == 2).then_some(true),
         created_at: parse_dt(row.get(10)?),
         updated_at: parse_dt(row.get(11)?),
     })
@@ -92,7 +105,7 @@ pub fn insert_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
             serde_json::to_string(&quick_exec.variables)?,
             quick_exec.created_at.to_rfc3339(),
             quick_exec.updated_at.to_rfc3339(),
-            i32::from(quick_exec.unmodelled_args_approved == Some(true)),
+            approval_state(quick_exec),
         ],
     )?;
     Ok(())
@@ -118,7 +131,7 @@ pub fn update_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
             output_format_name(quick_exec.output_format),
             serde_json::to_string(&quick_exec.variables)?,
             quick_exec.updated_at.to_rfc3339(),
-            i32::from(quick_exec.unmodelled_args_approved == Some(true)),
+            approval_state(quick_exec),
         ],
     )?;
     Ok(())
@@ -164,6 +177,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         insert_quick_exec(&conn, &item).unwrap();
         let loaded = get_quick_exec(&conn, "qe-1").unwrap().unwrap();

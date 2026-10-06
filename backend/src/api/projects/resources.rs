@@ -1993,14 +1993,31 @@ fn import_document(
             // The editor's save-time rules: approval must never see a
             // definition the editor would have refused.
             // A re-import keeps the stored workflow's unchanged unsafe lines.
-            let kept = match existing_id.as_deref() {
-                Some(id) => crate::db::workflows::get_workflow(conn, id)?
-                    .map(|stored| {
-                        crate::api::workflows::kept_lines(&stored.steps, &stored.on_failure)
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
+            let stored = match existing_id.as_deref() {
+                Some(id) => crate::db::workflows::get_workflow(conn, id)?,
+                None => None,
             };
+            let kept = stored
+                .as_ref()
+                .map(|stored| crate::api::workflows::kept_lines(&stored.steps, &stored.on_failure))
+                .unwrap_or_default();
+            // The file never carries an approval: only one this instance's
+            // human gave to the very same line survives (KT-1017).
+            let (stored_steps, stored_failure) = stored
+                .map(|stored| (stored.steps, stored.on_failure))
+                .unwrap_or_default();
+            crate::api::workflows::keep_human_approvals(&mut resource.steps, &stored_steps);
+            crate::api::workflows::keep_human_approvals(&mut resource.on_failure, &stored_failure);
+            crate::api::workflows::mark_line_writers(
+                &mut resource.steps,
+                &stored_steps,
+                crate::api::workflows::WorkflowWriter::Human,
+            );
+            crate::api::workflows::mark_line_writers(
+                &mut resource.on_failure,
+                &stored_failure,
+                crate::api::workflows::WorkflowWriter::Human,
+            );
             crate::api::workflows::validate_workflow_for_import_keeping(&resource, &kept)
                 .map_err(anyhow::Error::msg)?;
             let local = crate::db::workflows::list_workflows(conn)?;
@@ -2052,6 +2069,17 @@ fn import_document(
                 .unwrap_or_else(|| Uuid::new_v4().to_string());
             resource.project_id = Some(project_id.to_string());
             resource.updated_at = now;
+            // The file never carries an approval: only one this instance's
+            // human gave to the very same line survives (KT-1017).
+            let stored_line = match existing_id.as_deref() {
+                Some(id) => crate::db::quick_execs::get_quick_exec(conn, id)?,
+                None => None,
+            }
+            .filter(|stored| stored.command == resource.command && stored.args == resource.args);
+            resource.unmodelled_args_approved = stored_line
+                .as_ref()
+                .and_then(|stored| stored.unmodelled_args_approved);
+            resource.agent_written = stored_line.and_then(|stored| stored.agent_written);
             // Same inline-code rule as the Quick Exec form; a re-import of an
             // unchanged stored line stays possible (still refused at run time).
             let unchanged = match existing_id.as_deref() {
@@ -2070,7 +2098,7 @@ fn import_document(
                     &resource.name,
                     &resource.command,
                     &resource.args,
-                    resource.unmodelled_args_approved == Some(true),
+                    crate::api::quick_execs::quick_exec_trust(&resource),
                 ) {
                     anyhow::bail!(error);
                 }
@@ -2633,6 +2661,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&base, "lint").unwrap();
 
@@ -2760,6 +2789,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&exec, "lint").unwrap();
         let entry = crate::core::repository_resources::publish(
@@ -2877,6 +2907,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         let rendered = crate::core::repository_resources::render_quick_exec(&exec, "lint").unwrap();
         let entry = crate::core::repository_resources::publish(
@@ -2984,6 +3015,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         let mut rendered =
             crate::core::repository_resources::render_quick_exec(&exec, "health").unwrap();
@@ -3332,6 +3364,7 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
             unmodelled_args_approved: None,
+            agent_written: None,
         }
     }
 

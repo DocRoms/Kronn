@@ -5271,6 +5271,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         }
     }
 
@@ -5369,6 +5370,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         };
 
         let merged: crate::models::CreateQuickExecRequest = merged_definition(

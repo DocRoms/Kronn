@@ -3085,7 +3085,12 @@ export type ExecLineCheck = {
  * The unmodelled program that receives a value from the run, when the
  * line needs a human's approval to be saved (KT-1017).
  */
-unmodelled_program: string | null, };
+unmodelled_program: string | null,
+/**
+ * Every line the approval covers, as `phase: program` (`main: aws`,
+ * `setup: terraform`, `stdin: duckdb`); empty when none needs it.
+ */
+covered: Array<string>, };
 
 /**
  * A command line to check for the step editor and the Quick Exec form.
@@ -3094,7 +3099,15 @@ export type ExecLineCheckRequest = { command: string, args?: Array<string>,
 /**
  * The step's `exec_stdin` template, when it has one.
  */
-stdin?: string | null, };
+stdin?: string | null,
+/**
+ * The step's setup line, which the same approval covers.
+ */
+setup_command?: string | null, setup_args?: Array<string>,
+/**
+ * An agent last wrote these lines: any value needs the approval.
+ */
+agent_written?: boolean, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -5946,7 +5959,12 @@ pinned: boolean,
  * KT-1017 — a human confirmed that an unmodelled program here treats
  * its arguments as plain data. Never set by an agent's save.
  */
-unmodelled_args_approved?: boolean, created_at: string, updated_at: string, };
+unmodelled_args_approved?: boolean,
+/**
+ * KT-1017 — an agent last wrote this command line: any value it carries
+ * needs a human's approval. Set by the server on save.
+ */
+agent_written?: boolean, created_at: string, updated_at: string, };
 
 export type QuickExecDiagnostics = {
 /**
@@ -9264,6 +9282,12 @@ exec_script_files?: Array<ExecScriptFile>,
  * templated values may reach them. Never set by an agent's save.
  */
 exec_unmodelled_args_approved?: boolean,
+/**
+ * KT-1017 — an agent last wrote this step's command lines: any value
+ * they carry needs a human's approval. Set by the server on save, never
+ * read from the request.
+ */
+exec_agent_written?: boolean,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

@@ -656,6 +656,24 @@ Release notes for 0.9.3 and earlier are available in the
   and `python -i` count as code.
   An approved Quick Exec now runs from its page, and "Suggest a fix" moves
   shell flags such as `-e` into a `set` line.
+- An Exec line or Quick Exec an agent writes (bridge token or Kronn's agent
+  tools) needs a human's approval for any run value, whatever its shape
+  (KT-1017): the server records who last wrote each line, and an agent can
+  neither approve nor launder a value through a `bash -c` script. A script
+  shape (`python3 tool.py …`) needs its script pinned in `exec_script_files`,
+  checked at run time to be a regular file; a shell script given to `-c`
+  never starts with `-` or `+`; shells are not trusted shapes on Windows.
+  Only `echo`, `printf` (literal format), `test`, `true`, `false`,
+  `basename`, `dirname`, `seq` and `date` stay data-only: programs reading or
+  writing paths (`cat`, `grep`, `jq`, `cp`, `tee`, `rm`…) or the environment
+  (`printenv`) need the approval. Every import drops an approval except a
+  restore of this instance's own backup; the `kronn/` import keeps only one
+  this instance gave to the very same line. One approval covers the whole
+  step: the editor lists every line it covers and an approval no line needs
+  is dropped on save. Agent background jobs run a saved Quick Exec with the
+  same checks, and a code reader behind `npx`, `kubectl exec -i`,
+  `docker compose run`, `runuser`, `xargs` or `parallel` stays refused when
+  approved.
 
 ### Changed
 

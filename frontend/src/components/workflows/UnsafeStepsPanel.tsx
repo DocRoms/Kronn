@@ -42,7 +42,10 @@ export function UnsafeStepsPanel({ workflow, onApply }: UnsafeStepsPanelProps) {
 
   if (issues.length === 0) return null;
 
-  const manualIssues = issues.filter(issue => !issue.suggested_args);
+  // A line that needs a human's approval is not an agent's to work around.
+  const manualIssues = issues.filter(
+    issue => !issue.suggested_args && issue.reason !== 'unmodelled_program',
+  );
   const agentPrompt = manualIssues.length === 0 ? '' : t(
     'wf.unsafeAgentPrompt',
     workflow.name,

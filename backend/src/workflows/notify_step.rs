@@ -323,6 +323,7 @@ mod tests {
             read_only_repos: vec![],
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
+            exec_agent_written: None,
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }

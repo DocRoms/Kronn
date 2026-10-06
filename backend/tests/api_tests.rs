@@ -1744,6 +1744,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 created_at: now,
                 updated_at: now,
                 unmodelled_args_approved: None,
+                agent_written: None,
             };
             kronn::db::quick_execs::insert_quick_exec(connection, &quick_exec)?;
 
@@ -3384,7 +3385,7 @@ async fn project_repository_resources_expose_uses_and_used_by_with_missing_refer
                         variables: Vec::new(),
                         pinned: false,
                         created_at: now,
-                        updated_at: now, unmodelled_args_approved: None,
+                        updated_at: now, unmodelled_args_approved: None, agent_written: None,
                     },
                 )?;
                 let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
@@ -3470,6 +3471,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
                         created_at: now,
                         updated_at: now,
                         unmodelled_args_approved: None,
+                        agent_written: None,
                     },
                 )?;
                 Ok(())
@@ -5235,6 +5237,8 @@ async fn workflow_http_optional_input_preserves_empty_value_in_exec_stdin() {
                 step_type: kronn::models::StepType::Exec,
                 exec_command: Some("cat".into()),
                 exec_stdin: Some("[{{foo}}]".into()),
+                // `cat` reads paths: a human approves the value it receives.
+                exec_unmodelled_args_approved: Some(true),
                 ..Default::default()
             },
         )
@@ -25821,6 +25825,7 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
                     created_at: now,
                     updated_at: now,
                     unmodelled_args_approved: None,
+                    agent_written: None,
                 },
             )
         })
