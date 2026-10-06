@@ -1151,23 +1151,32 @@ pub(crate) fn backup_before_migration(
 /// wait for the connection's busy timeout.
 const CHECKPOINT_ATTEMPTS: u32 = 3;
 
-/// The WAL SQLite really uses: next to the main file it opened, symlinks
-/// resolved (SQLite resolves them too), or `None` outside WAL mode. Any
-/// inspection error is returned, never read as "no WAL".
+/// The WAL SQLite really uses, as SQLite names it (`sqlite3_filename_wal`
+/// on the main database's filename, no resolution of our own: the Windows VFS
+/// keeps a symlink alias), or `None` outside WAL mode.
 fn active_wal_path(conn: &Connection) -> Result<Option<std::path::PathBuf>> {
     let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("wal") {
         return Ok(None);
     }
-    let main = conn
-        .path()
-        .filter(|path| !path.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("SQLite reports no file for the main database"))?;
-    let main = std::fs::canonicalize(main)
-        .map_err(|e| anyhow::anyhow!("cannot resolve the database file {main}: {e}"))?;
-    let mut wal = main.into_os_string();
-    wal.push("-wal");
-    Ok(Some(wal.into()))
+    // SAFETY: the handle stays valid for the borrow of `conn`; both strings
+    // returned by SQLite live as long as the connection and are copied here.
+    let wal = unsafe {
+        let db = conn.handle();
+        let main = rusqlite::ffi::sqlite3_db_filename(db, c"main".as_ptr());
+        if main.is_null() || *main == 0 {
+            anyhow::bail!("SQLite reports no file for the main database");
+        }
+        let wal = rusqlite::ffi::sqlite3_filename_wal(main);
+        if wal.is_null() {
+            anyhow::bail!("SQLite reports no WAL file for the main database");
+        }
+        std::ffi::CStr::from_ptr(wal).to_owned()
+    };
+    let wal = wal
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("the WAL file name is not UTF-8"))?;
+    Ok(Some(std::path::PathBuf::from(wal)))
 }
 
 /// Folds the WAL into the main file, then opens a read transaction on that
@@ -2007,10 +2016,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_database_file_fails_closed() {
+    fn an_uninspectable_wal_fails_closed() {
+        // Never read as "empty": the WAL SQLite names cannot be inspected.
         let dir = tempfile::tempdir().unwrap();
-        let (db_path, conn) = wal_db_with_unfolded_write(dir.path());
-        std::fs::rename(&db_path, dir.path().join("moved.db")).unwrap();
+        let (_db_path, conn) = wal_db_with_unfolded_write(dir.path());
+        let wal = super::active_wal_path(&conn).unwrap().unwrap();
+        std::fs::rename(&wal, dir.path().join("elsewhere")).unwrap();
         assert!(super::pin_checkpointed_file(&conn).is_err());
         assert!(conn.is_autocommit());
     }
