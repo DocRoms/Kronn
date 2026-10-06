@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
+use crate::core::safe_http::{self, ClientOptions, Redirects, SafeClient, SafeHttpPolicy};
 use tokio::sync::Mutex;
 
 use crate::models::{ApiAuthKind, TokenExchangeBodyFormat};
@@ -52,6 +52,15 @@ const SAFETY_MARGIN: Duration = Duration::from_secs(30);
 /// only for change-detection (cache invalidation on credential rotation), not
 /// security — it stays in memory next to the token it guards. Length-prefixing
 /// avoids collisions like `("a","bc")` vs `("ab","c")`.
+/// The credential body must never follow a redirect to another origin, and
+/// the token endpoint is held to the same address policy as the API call.
+fn token_client(policy: SafeHttpPolicy) -> Result<SafeClient, String> {
+    safe_http::client(
+        policy,
+        ClientOptions::new(Redirects::SameOrigin).timeout(Duration::from_secs(15)),
+    )
+}
+
 fn cred_fingerprint(parts: &[&str]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -80,6 +89,7 @@ pub async fn resolve_token(
     config_id: &str,
     auth: &ApiAuthKind,
     env: &HashMap<String, String>,
+    policy: SafeHttpPolicy,
 ) -> Result<String, String> {
     let (token_url, client_id_env, client_secret_env, scope) = match auth {
         ApiAuthKind::OAuth2ClientCredentials {
@@ -125,17 +135,15 @@ pub async fn resolve_token(
         params.push(("scope", scope.as_str()));
     }
 
-    let http = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client init failed: {}", e))?;
-
+    let http = token_client(policy)?;
+    let token_url =
+        reqwest::Url::parse(token_url).map_err(|e| format!("token exchange URL invalid: {e}"))?;
     let resp = http
         .post(token_url)
         .form(&params)
         .send()
         .await
-        .map_err(|e| format!("token exchange HTTP error: {}", e))?;
+        .map_err(|e| format!("token exchange HTTP error: {e}"))?;
 
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
@@ -218,6 +226,7 @@ pub async fn resolve_token_exchange(
     auth: &ApiAuthKind,
     base_url: &str,
     env: &HashMap<String, String>,
+    policy: SafeHttpPolicy,
 ) -> Result<String, String> {
     let (endpoint, method, body_template, body_format, token_jsonpath, ttl_seconds, creds_env_keys) =
         match auth {
@@ -279,16 +288,14 @@ pub async fn resolve_token_exchange(
     let trimmed_endpoint = endpoint.trim_start_matches('/');
     let full_url = format!("{trimmed_base}/{trimmed_endpoint}");
 
-    let http = Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client init failed: {}", e))?;
-
+    let http = token_client(policy)?;
+    let full_url =
+        reqwest::Url::parse(&full_url).map_err(|e| format!("token exchange URL invalid: {e}"))?;
     let req_builder = http.request(
         method
             .parse()
             .map_err(|e| format!("Invalid HTTP method `{method}`: {e}"))?,
-        &full_url,
+        full_url,
     );
 
     // Body format dispatch. JSON sends the rendered Value as-is; form-
@@ -301,7 +308,7 @@ pub async fn resolve_token_exchange(
             req_builder.form(&pairs).send().await
         }
     }
-    .map_err(|e| format!("token exchange HTTP error: {}", e))?;
+    .map_err(|e| format!("token exchange HTTP error: {e}"))?;
 
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
@@ -484,6 +491,8 @@ fn extract_token_jsonpath(response: &serde_json::Value, path: &str) -> Result<St
 
 #[cfg(test)]
 mod tests {
+    const TEST_POLICY: crate::core::safe_http::SafeHttpPolicy =
+        crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
     use super::*;
     use crate::models::ApiAuthKind;
 
@@ -521,7 +530,7 @@ mod tests {
         env.insert("CLIENT_ID".into(), "x".into());
         env.insert("CLIENT_SECRET".into(), "y".into());
 
-        let tok = resolve_token(&cache, "cfg-1", &sample_auth(), &env)
+        let tok = resolve_token(&cache, "cfg-1", &sample_auth(), &env, TEST_POLICY)
             .await
             .unwrap();
         assert_eq!(tok, "cached-abc");
@@ -558,7 +567,7 @@ mod tests {
         env.insert("CLIENT_ID".into(), "NEW_ID".into());
         env.insert("CLIENT_SECRET".into(), "NEW_SECRET".into());
 
-        let res = resolve_token(&cache, "cfg-rot", &sample_auth(), &env).await;
+        let res = resolve_token(&cache, "cfg-rot", &sample_auth(), &env, TEST_POLICY).await;
         // Fingerprint mismatch → no short-circuit → attempts a re-mint against
         // the dead token_url → Err. Crucially NOT the stale token.
         assert!(
@@ -571,7 +580,7 @@ mod tests {
     async fn missing_env_var_returns_clear_error() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let env = HashMap::new(); // no CLIENT_ID
-        let err = resolve_token(&cache, "cfg-2", &sample_auth(), &env)
+        let err = resolve_token(&cache, "cfg-2", &sample_auth(), &env, TEST_POLICY)
             .await
             .unwrap_err();
         assert!(
@@ -588,7 +597,7 @@ mod tests {
         let non_oauth = ApiAuthKind::Bearer {
             env_key: "X".into(),
         };
-        let err = resolve_token(&cache, "cfg-3", &non_oauth, &env)
+        let err = resolve_token(&cache, "cfg-3", &non_oauth, &env, TEST_POLICY)
             .await
             .unwrap_err();
         assert!(err.contains("non-OAuth2"));
@@ -827,6 +836,7 @@ mod tests {
             &auth,
             "http://127.0.0.1:1/unused",
             &env,
+            TEST_POLICY,
         )
         .await
         .unwrap();
@@ -840,7 +850,7 @@ mod tests {
         let non_tx = ApiAuthKind::Bearer {
             env_key: "X".into(),
         };
-        let err = resolve_token_exchange(&cache, "cfg", &non_tx, "http://x", &env)
+        let err = resolve_token_exchange(&cache, "cfg", &non_tx, "http://x", &env, TEST_POLICY)
             .await
             .unwrap_err();
         assert!(err.contains("non-TokenExchange"));
@@ -862,7 +872,7 @@ mod tests {
             creds_env_keys: vec![],
         };
         let env = HashMap::new(); // no API_KEY
-        let err = resolve_token_exchange(&cache, "cfg", &auth, "http://x", &env)
+        let err = resolve_token_exchange(&cache, "cfg", &auth, "http://x", &env, TEST_POLICY)
             .await
             .unwrap_err();
         assert!(err.contains("API_KEY"));
@@ -902,7 +912,7 @@ mod tests {
         env.insert("API_KEY".into(), "kid".into());
         env.insert("API_SECRET".into(), "ksecret".into());
 
-        let tok = resolve_token_exchange(&cache, "cfg-tx", &auth, &server.uri(), &env)
+        let tok = resolve_token_exchange(&cache, "cfg-tx", &auth, &server.uri(), &env, TEST_POLICY)
             .await
             .unwrap();
         assert_eq!(tok, "fresh-tx-123");
@@ -952,9 +962,10 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("CID".into(), "client-42".into());
 
-        let tok = resolve_token_exchange(&cache, "cfg-form", &auth, &server.uri(), &env)
-            .await
-            .unwrap();
+        let tok =
+            resolve_token_exchange(&cache, "cfg-form", &auth, &server.uri(), &env, TEST_POLICY)
+                .await
+                .unwrap();
         assert_eq!(tok, "form-tok");
     }
 
@@ -983,14 +994,73 @@ mod tests {
         };
         let env = HashMap::new();
 
-        let err = resolve_token_exchange(&cache, "cfg-bad", &auth, &server.uri(), &env)
-            .await
-            .unwrap_err();
+        let err =
+            resolve_token_exchange(&cache, "cfg-bad", &auth, &server.uri(), &env, TEST_POLICY)
+                .await
+                .unwrap_err();
         assert!(err.contains("401"), "error must surface status: {}", err);
         assert!(
             err.contains("invalid_key"),
             "error must include body excerpt: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn a_token_endpoint_307_to_another_host_never_receives_the_secret() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/token", other.uri())),
+            )
+            .mount(&origin)
+            .await;
+        Mock::given(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "stolen"
+            })))
+            .expect(0)
+            .mount(&other)
+            .await;
+        let auth = ApiAuthKind::OAuth2ClientCredentials {
+            token_url: format!("{}/token", origin.uri()),
+            client_id_env: "CID".into(),
+            client_secret_env: "CSECRET".into(),
+            scope: String::new(),
+            extra_headers: vec![],
+        };
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "s3cr3t-value".to_string()),
+        ]);
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let err = resolve_token(&cache, "cfg-307", &auth, &env, TEST_POLICY)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Security"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_token_endpoint_on_a_private_address_is_refused() {
+        let auth = ApiAuthKind::OAuth2ClientCredentials {
+            token_url: "http://[::ffff:169.254.169.254]/token".into(),
+            client_id_env: "CID".into(),
+            client_secret_env: "CSECRET".into(),
+            scope: String::new(),
+            extra_headers: vec![],
+        };
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "s".to_string()),
+        ]);
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let err = resolve_token(&cache, "cfg-meta", &auth, &env, TEST_POLICY)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Security"), "{err}");
     }
 }

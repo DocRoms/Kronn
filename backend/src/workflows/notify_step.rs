@@ -102,17 +102,19 @@ pub async fn execute_notify_step_with_policy(
     let redacted_url = redact_notify_url(&parsed_url);
 
     // ── Build and fire the request ──────────────────────────────────────
-    let client = match reqwest::Client::builder()
-        .timeout(NOTIFY_TIMEOUT)
-        // Redirects are followed by hand so each hop is re-validated.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    use crate::core::safe_http::{self, ClientOptions, Outbound, Redirects, SendError};
+    let destinations = notify_destinations(enforce_public_ip);
+    let client = match safe_http::client(
+        destinations,
+        ClientOptions::new(Redirects::Manual).timeout(NOTIFY_TIMEOUT),
+    ) {
         Ok(c) => c,
-        Err(e) => return fail(step, start, format!("HTTP client build failed: {}", e)),
+        Err(e) => return fail(step, start, e),
     };
 
     let mut headers = reqwest::header::HeaderMap::new();
+    // Every configured header may hold the webhook's credential.
+    let mut secret_headers = Vec::new();
     for (k, v) in &config.headers {
         let name = match reqwest::header::HeaderName::from_bytes(k.as_bytes()) {
             Ok(n) => n,
@@ -128,42 +130,36 @@ pub async fn execute_notify_step_with_policy(
                 )
             }
         };
+        secret_headers.push(name.clone());
         headers.append(name, value);
     }
     let send_body = method != reqwest::Method::GET && !body.is_empty();
-    let attach_body = |req: reqwest::RequestBuilder| {
+    let attach_body = |req: safe_http::SafeRequest| {
         if send_body {
             req.body(body.clone())
         } else {
             req
         }
     };
-    let guard = super::api_call_security::RedirectGuard {
-        base_url: None,
-        enforce_public_ip,
-    };
-    let response = match super::api_call_security::send_with_guarded_redirects(
+    let response = match safe_http::send_following(
         &client,
-        method.clone(),
-        parsed_url.clone(),
-        headers,
-        &attach_body,
-        &guard,
+        Outbound {
+            method: method.clone(),
+            url: parsed_url.clone(),
+            headers,
+            secret_headers: &secret_headers,
+            secret_query_keys: &[],
+            attach_body: &attach_body,
+            pinned_base: None,
+        },
     )
     .await
     {
         Ok(r) => r,
-        Err(super::api_call_security::GuardedSendError::Refused(msg)) => {
-            return fail(step, start, msg)
-        }
-        Err(super::api_call_security::GuardedSendError::Transport(e)) => {
-            // Without the URL: a webhook's secret often sits in its path.
-            return fail(
-                step,
-                start,
-                format!("HTTP request failed: {}", e.without_url()),
-            );
-        }
+        Err(SendError::Blocked(reason)) => return fail(step, start, format!("Security: {reason}")),
+        // SendError's Display never carries the URL, whose path may hold the
+        // webhook's secret.
+        Err(error) => return fail(step, start, format!("HTTP request failed: {error}")),
     };
 
     let status = response.status();
@@ -235,6 +231,16 @@ pub async fn execute_notify_step_with_policy(
         },
         condition_action,
     }
+}
+
+/// Public addresses only, except the test-only loopback allowance.
+fn notify_destinations(enforce_public_ip: bool) -> crate::core::safe_http::SafeHttpPolicy {
+    #[cfg(test)]
+    if !enforce_public_ip {
+        return crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
+    }
+    let _ = enforce_public_ip;
+    crate::core::safe_http::SafeHttpPolicy::Public
 }
 
 /// Redact a webhook URL for persistence: scheme + host + FIRST path
@@ -594,20 +600,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notify_cross_host_redirect_drops_credential_headers() {
+    async fn notify_cross_host_redirect_drops_every_configured_header() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let origin = MockServer::start().await;
         let other = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(307).insert_header(
+            .respond_with(ResponseTemplate::new(303).insert_header(
                 "location",
                 format!("http://localhost:{}/sink", other.address().port()),
             ))
             .mount(&origin)
             .await;
-        Mock::given(method("POST"))
+        Mock::given(method("GET"))
             .and(path("/sink"))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
@@ -622,7 +628,7 @@ mod tests {
                     "Bearer hook-secret".to_string(),
                 ),
                 ("X-Webhook-Token".to_string(), "hook-secret".to_string()),
-                ("Content-Type".to_string(), "application/json".to_string()),
+                ("User-Agent".to_string(), "hook-secret-ua".to_string()),
             ]),
             body_template: r#"{"a":1}"#.into(),
         });
@@ -637,11 +643,67 @@ mod tests {
         let sink = &received[0];
         assert!(sink.headers.get("authorization").is_none());
         assert!(sink.headers.get("x-webhook-token").is_none());
-        assert_eq!(
-            sink.headers.get("content-type").unwrap(),
-            "application/json"
+        assert_ne!(
+            sink.headers.get("user-agent").map(|v| v.to_str().unwrap()),
+            Some("hook-secret-ua")
         );
-        assert_eq!(sink.body, br#"{"a":1}"#);
+        assert!(sink.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notify_cross_host_307_is_refused_before_the_body_is_replayed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(307).insert_header(
+                "location",
+                format!("http://localhost:{}/sink", other.address().port()),
+            ))
+            .mount(&origin)
+            .await;
+        Mock::given(path("/sink"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&other)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook", origin.uri()),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: r#"{"token":"x"}"#.into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("307/308"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_refuses_mapped_ipv6_loopback_and_metadata() {
+        for url in [
+            "http://[::ffff:127.0.0.1]:3140/api/config",
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+        ] {
+            let step = make_step(NotifyConfig {
+                url: url.into(),
+                method: "POST".into(),
+                headers: HashMap::new(),
+                body_template: "{}".into(),
+            });
+            let out = execute_notify_step(&step, &TemplateContext::new()).await;
+            assert_eq!(out.result.status, RunStatus::Failed);
+            assert!(
+                out.result.output.contains("Security"),
+                "{url}: {}",
+                out.result.output
+            );
+        }
     }
 
     #[tokio::test]

@@ -235,7 +235,7 @@ async fn poll(
             // input: cleared against the codec policy before it is fetched,
             // and the credential travels only where that policy vouches for.
             let cleared = validate_asset_url(&download, ctx.base, &ctx.codec.asset_host_policy())?;
-            let bytes = download_asset(ctx.client, &cleared, ctx.api_key).await?;
+            let bytes = download_asset(&cleared, ctx.api_key, DOWNLOAD_PUBLIC).await?;
             persist(db, ctx, job, bytes, cost, generation_id.as_deref(), now).await?;
             Ok(MediaJobStatus::Completed)
         }
@@ -398,22 +398,60 @@ async fn read_body(response: reqwest::Response, url: &str) -> Result<String> {
     Ok(text)
 }
 
+/// Policy for an asset off the configured origin.
+const DOWNLOAD_PUBLIC: crate::core::safe_http::SafeHttpPolicy =
+    crate::core::safe_http::SafeHttpPolicy::Public;
+
 /// Download of the finished asset. Server-side on purpose: the provider URL
 /// still requires the credential, and must never reach a browser.
+///
+/// The URL comes from the provider's payload. On the configured origin (which
+/// may be a local gateway) no redirect may leave that origin; anywhere else
+/// every hop is held to `public` and a cross-origin hop loses the credential.
 async fn download_asset(
-    client: &reqwest::Client,
     cleared: &ValidatedAssetUrl,
     api_key: &str,
+    public: crate::core::safe_http::SafeHttpPolicy,
 ) -> Result<Vec<u8>> {
-    let request = client.get(&cleared.url).timeout(Duration::from_secs(300));
+    use crate::core::safe_http::{self, ClientOptions, Outbound, Redirects, SafeHttpPolicy};
+    let url = reqwest::Url::parse(&cleared.url)?;
+    let (policy, redirects) = if cleared.on_configured_origin {
+        (SafeHttpPolicy::Configured, Redirects::SameOrigin)
+    } else {
+        (public, Redirects::Manual)
+    };
+    let client = safe_http::client(
+        policy,
+        ClientOptions::new(redirects).timeout(Duration::from_secs(300)),
+    )
+    .map_err(|e| anyhow!(e))?;
+    let mut headers = reqwest::header::HeaderMap::new();
     // A pre-signed URL is its own authorisation: attaching the key there would
     // hand it to whoever serves that host.
-    let request = if cleared.send_credential {
-        request.bearer_auth(api_key)
+    if cleared.send_credential {
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))?;
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    let response = if cleared.on_configured_origin {
+        client.get(url).headers(headers).send().await
     } else {
-        request
-    };
-    let response = request.send().await?;
+        let attach = |request: safe_http::SafeRequest| request;
+        safe_http::send_following(
+            &client,
+            Outbound {
+                method: reqwest::Method::GET,
+                url,
+                headers,
+                secret_headers: &[reqwest::header::AUTHORIZATION],
+                secret_query_keys: &[],
+                attach_body: &attach,
+                pinned_base: None,
+            },
+        )
+        .await
+    }
+    .map_err(|e| anyhow!("asset download failed: {e}"))?;
     let status = response.status();
     if !status.is_success() {
         bail!("asset download answered HTTP {status}");
@@ -961,12 +999,13 @@ mod tests {
         const SECRET: &str = "sk-or-v1-must-never-leave";
         let (addr, captured) = one_shot("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").await;
         let bytes = download_asset(
-            &reqwest::Client::new(),
             &ValidatedAssetUrl {
                 url: format!("http://{addr}/asset.mp4"),
                 send_credential: false,
+                on_configured_origin: false,
             },
             SECRET,
+            crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests,
         )
         .await
         .expect("an anonymous download must still work");
@@ -990,17 +1029,46 @@ mod tests {
         const SECRET: &str = "sk-or-v1-expected-here";
         let (addr, captured) = one_shot("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc").await;
         download_asset(
-            &reqwest::Client::new(),
             &ValidatedAssetUrl {
                 url: format!("http://{addr}/asset.mp4"),
                 send_credential: true,
+                on_configured_origin: true,
             },
             SECRET,
+            DOWNLOAD_PUBLIC,
         )
         .await
         .expect("download");
         let head = captured.await.expect("server task");
         assert!(head.contains(SECRET), "expected the bearer here: {head}");
+    }
+
+    #[tokio::test]
+    async fn an_asset_redirect_to_an_internal_address_is_refused() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/asset.mp4"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+        for on_configured_origin in [true, false] {
+            let err = download_asset(
+                &ValidatedAssetUrl {
+                    url: format!("{}/asset.mp4", server.uri()),
+                    send_credential: on_configured_origin,
+                    on_configured_origin,
+                },
+                "sk-test",
+                crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests,
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("Security"), "{err}");
+        }
     }
 
     /// A synchronous image response carrying a real 1x1 PNG and a billed cost.

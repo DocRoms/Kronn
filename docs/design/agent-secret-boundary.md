@@ -70,7 +70,7 @@ The evidence for every cell is a test or a real probe listed in section 7.
 | 3 | Secret-returning or secret-moving routes open to that trust | `/api/mcps/configs/{id}/reveal`, `/api/external-api/connections/{id}/reveal`, `/api/execution-context/.../reveal`, `/api/mcps/bundles/export?include_values`, `GET /api/config/export` (bundles `recovery.key`, `api/setup.rs:1655-1662`), `POST /api/config/import`, `POST /api/config/recovery/set` (wraps the key under a caller-chosen passphrase **and** overwrites `recovery.key`, `setup.rs:2310`), `POST /api/config/sync-agent-tokens` (writes provider keys to `~/.codex/auth.json`, `~/.gemini`, `setup.rs:1126-1154`), `POST /api/config/discover-keys` (`setup.rs:1158-1210`), `POST /api/config/auth-token/regenerate` (`lib.rs:891`). `GET /api/config/auth-token` exists (`setup.rs:1018`) but is not routed |
 | 4 | **Exec routes hand out the backend environment and any file** | `POST /api/projects/{id}/exec` (`lib.rs:1268`) runs `sh -c` with no env scrub (`api/git_ops.rs:1571-1588`); the allow-list includes `env`, `cat`, `find`, `stat` with absolute paths (`git_ops.rs:1520-1524`). Workflow Exec steps also inherit the backend env (`workflows/exec_step.rs:377`) |
 | 5 | Key next to the database | sidecar `encryption_key` (`core/keyvault.rs` tier 3); `encryption_secret` still serialized in `config.toml` (`models/setup.rs:39-41`) and set again at each boot (`core/keystore.rs:135-147`) |
-| 6 | Credentials in plaintext `config.toml` | `tokens.keys[].value` (`api/external_api_connections.rs:1690-1701`), `server.auth_token` |
+| 6 | Credentials in plaintext `config.toml` | Fixed by Layer C (KT-1007): provider and connection keys and the auth token live in the encrypted `stored_credentials` table. Residual cases (key kept in `config.toml` without two durable copies, locked boot, set-aside file): `docs/tech-debt/TD-20260901-plaintext-connection-credentials.md` |
 | 7 | Key-loss traps | reconcile reads only `mcp_configs.env_encrypted` (`keystore.rs:72-83`) and mints a new key when it is empty even if other columns hold ciphertext; `OsKeychain::retrieve` returns `Ok(None)` on any keychain error (`keyvault.rs:72-88`) and `mirror()` then overwrites the item (`keyvault.rs:238-246`) |
 | 8 | Publication admin secret in a plaintext file | `core/operator_secret.rs:31` |
 | 9 | Trusted files the agent can write | natively, the bridge script path and the project `.mcp.json` (used as the canonical registry by the ACP broker) sit where the agent writes |
@@ -767,3 +767,46 @@ secrets or a signed challenge replace this in 0.15.
    http://127.0.0.1:3140/api/config/export`: expect HTTP 403.
 6. After the turn ends, the same `curl` with that token value on
    `/api/discussions` answers 401.
+
+**Outbound HTTP — shipped (KT-1039).** `backend/src/core/safe_http.rs` is the
+one transport for requests whose destination a user, a plugin spec, a
+provider payload or an agent supplies. A `SafeClient` resolves names through
+its own resolver: the answer is classified by `safe_http::is_global` (one
+rule; IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms count as their IPv4
+host; loopback, private, link-local, shared 100.64/10, documentation,
+benchmarking, reserved, unique-local and Teredo are refused), a host with any
+refused answer is refused, and the connection uses exactly the checked
+addresses, so a second DNS answer cannot reach the socket. Literal-IP URLs
+are checked by the same rule before every send and every hop; proxies are
+off. A `SafeRequest` can only leave through that checked `send`. Redirects
+are either followed by reqwest on the same origin only, or by
+`send_following`, which re-checks each hop (5 at most), refuses an https→http
+downgrade, a hop off the plugin host and any cross-origin 307/308 (it would
+replay the body), and on a cross-origin hop drops every declared secret
+header slot (whatever its name, `User-Agent` included) and the auth query
+keys.
+
+| Client | Policy |
+|---|---|
+| ApiCall: every page, retry and hop (`workflows/api_call_executor.rs`) | public; `send_following` pinned to the plugin host |
+| OAuth2 client credentials and token exchange (`core/oauth2_cache.rs`) | public; same-origin redirects only |
+| Notify (`workflows/notify_step.rs`) | public; `send_following`, every configured header is a secret slot |
+| Gate webhook (`workflows/runner.rs` `fire_gate_webhook`) | public; same-origin redirects only |
+| Media asset download (`agents/media_runner.rs`) | off the configured origin: public, `send_following`; on it: configured, same-origin only |
+| Remote MCP probe, SSE and streamable (`api/mcps.rs`) | configured (the operator's URL may be local); same-origin only |
+| Page `web_fetch` (`api/agent_workspace_tools.rs`) | public; redirects reported, not followed |
+| GitHub tracker (`workflows/tracker/github.rs`) | public; same-origin only |
+
+Deliberately left on plain reqwest, because the destination is set by the
+operator in Settings or in code, never by a request or an agent: HTTP agents
+and their probes on a configured connection (`agents/runner.rs`,
+`api/ollama.rs`, `core/ollama_registry.rs`,
+`core/model_catalog/ollama_discovery.rs`, `api/lite_llm.rs`, `api/nvidia.rs`,
+`api/external_api_connections.rs`, `agents/vision.rs`, `api/media.rs`, media
+provider calls in `agents/media_runner.rs`); peers (`api/contacts.rs`,
+`api/federation.rs`, `api/disc_invite.rs`, LAN or Tailscale by design);
+fixed hosts (`core/versions.rs`, `api/version.rs`,
+`core/github_connection.rs`, `api/discover.rs` with the operator's GitLab
+host); the operator's failure webhook (`core/run_notify.rs`); the local docs
+sidecar (`api/docs.rs`); the gate auto-approve self-call to `127.0.0.1`
+(`workflows/runner.rs`).

@@ -258,27 +258,7 @@ impl Refusal {
 ///
 /// Pure over an already-resolved address list so it is testable without DNS.
 pub fn is_public_addr(addr: &std::net::IpAddr) -> bool {
-    match addr {
-        std::net::IpAddr::V4(v4) => {
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // 100.64.0.0/10 (carrier NAT) and 169.254/16 are already covered
-                // above; 0.0.0.0/8 and 240/4 are caught here.
-                || v4.octets()[0] == 0
-                || v4.octets()[0] >= 240)
-        }
-        std::net::IpAddr::V6(v6) => {
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 unique-local and fe80::/10 link-local.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80)
-        }
-    }
+    crate::core::safe_http::is_global(*addr)
 }
 
 /// Validate a URL for fetching: scheme first (cheap, no I/O), then every address
@@ -319,22 +299,21 @@ pub async fn check_fetch_url(raw: &str) -> Result<reqwest::Url, Refusal> {
 /// Truncation is a *field*, not a silent cut: the model must know it is reasoning
 /// about a partial document.
 pub async fn fetch_text(url: reqwest::Url) -> Result<Value, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        // A redirect could land on a private address that passed the pre-flight
-        // check, so redirects are followed only within the same guarantee: we
-        // re-validate each hop by refusing them outright and reporting the
-        // Location, which keeps the guard honest instead of approximate.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("could not build client: {error}"))?;
+    // Redirects are not followed: the Location is reported so the model
+    // re-issues it through the same checks. The resolver pins the checked
+    // addresses, so the pre-flight answer cannot be swapped at connect time.
+    let client = crate::core::safe_http::client(
+        crate::core::safe_http::SafeHttpPolicy::Public,
+        crate::core::safe_http::ClientOptions::new(crate::core::safe_http::Redirects::Manual)
+            .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)),
+    )?;
     fetch_text_with_client(&client, url).await
 }
 
 /// Transport half of [`fetch_text`], split out so timeout and oversized-body
 /// behavior can be exercised against a local mock after the public SSRF gate.
 async fn fetch_text_with_client(
-    client: &reqwest::Client,
+    client: &crate::core::safe_http::SafeClient,
     url: reqwest::Url,
 ) -> Result<Value, String> {
     let response = client
@@ -2201,6 +2180,27 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn test_fetch_client(
+        timeout: Option<std::time::Duration>,
+    ) -> crate::core::safe_http::SafeClient {
+        use crate::core::safe_http::{client, ClientOptions, Redirects, SafeHttpPolicy};
+        let mut options = ClientOptions::new(Redirects::Manual);
+        if let Some(timeout) = timeout {
+            options = options.timeout(timeout);
+        }
+        client(SafeHttpPolicy::PublicOrLoopbackForTests, options).unwrap()
+    }
+
+    #[tokio::test]
+    async fn web_fetch_refuses_a_mapped_ipv6_metadata_literal() {
+        let url = reqwest::Url::parse("http://[::ffff:169.254.169.254]/latest/meta-data/").unwrap();
+        assert!(check_fetch_url(url.as_str()).await.is_err());
+        let error = fetch_text_with_client(&test_fetch_client(None), url)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Security"), "{error}");
+    }
+
     fn addr(raw: &str) -> std::net::IpAddr {
         raw.parse().unwrap()
     }
@@ -2273,7 +2273,7 @@ mod tests {
             .await;
         let url = reqwest::Url::parse(&format!("{}/page", server.uri())).unwrap();
 
-        let payload = fetch_text_with_client(&reqwest::Client::new(), url)
+        let payload = fetch_text_with_client(&test_fetch_client(None), url)
             .await
             .unwrap();
 
@@ -2294,10 +2294,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(25))
-            .build()
-            .unwrap();
+        let client = test_fetch_client(Some(std::time::Duration::from_millis(25)));
         let url = reqwest::Url::parse(&format!("{}/slow", server.uri())).unwrap();
 
         let error = fetch_text_with_client(&client, url).await.unwrap_err();
@@ -2315,7 +2312,7 @@ mod tests {
             .await;
         let url = reqwest::Url::parse(&format!("{}/large", server.uri())).unwrap();
 
-        let payload = fetch_text_with_client(&reqwest::Client::new(), url)
+        let payload = fetch_text_with_client(&test_fetch_client(None), url)
             .await
             .unwrap();
 

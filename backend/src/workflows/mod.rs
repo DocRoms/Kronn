@@ -283,7 +283,7 @@ impl WorkflowEngine {
                     owner.clone(),
                     repo.clone(),
                     token,
-                ))
+                )?)
             }
         };
 

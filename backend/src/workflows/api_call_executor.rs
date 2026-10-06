@@ -17,7 +17,6 @@
 //! See `docs/operations/deagent-apicall.md` for scope + decisions.
 
 use std::collections::{BTreeSet, HashMap};
-use std::error::Error as _;
 use std::time::{Duration, Instant};
 
 use reqwest::{
@@ -33,9 +32,9 @@ use super::api_call_binary::{
     binary_summary, read_binary_body, resolve_binary_policy, BinaryPolicy,
 };
 use super::api_call_security::{
-    assert_host_matches_base, assert_public_ip, redact_url_query, send_with_guarded_redirects,
-    GuardedSendError, RedirectGuard, ResolvedAuth,
+    assert_host_matches_base, assert_public_ip, redact_url_query, ResolvedAuth,
 };
+use crate::core::safe_http::{self, ClientOptions, Outbound, Redirects, SafeClient, SendError};
 
 /// Logging context plumbed through `execute_api_call_step_with_db` so the
 /// audit table (`api_call_logs`) can attribute each call to its source +
@@ -118,6 +117,16 @@ impl SecurityPolicy {
     /// Production default. Use this from the runner dispatch.
     pub fn production() -> Self {
         Self::default()
+    }
+
+    /// The outbound transport policy: public addresses only, except the
+    /// test-only loopback allowance.
+    pub fn destinations(self) -> safe_http::SafeHttpPolicy {
+        #[cfg(test)]
+        if !self.enforce_public_ip {
+            return safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
+        }
+        safe_http::SafeHttpPolicy::Public
     }
 
     /// For integration tests that MUST hit localhost (wiremock). Host-match
@@ -305,11 +314,23 @@ pub async fn execute_api_call_step_core(
     let pagination_truncated: bool;
     let empty_response_status: Option<u16>;
 
-    let redirect_guard = RedirectGuard {
-        base_url: policy
-            .enforce_host_match
-            .then_some(resolved_base_url.as_str()),
-        enforce_public_ip: policy.enforce_public_ip,
+    // 0.8.2 — explicit User-Agent: GitHub refuses requests without one.
+    let client = match safe_http::client(
+        policy.destinations(),
+        ClientOptions::new(Redirects::Manual)
+            .timeout(timeout)
+            .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION"))),
+    ) {
+        Ok(client) => client,
+        Err(e) => return fail(step, start, e),
+    };
+    let transport = ApiTransport {
+        client,
+        pinned_base: if policy.enforce_host_match {
+            Url::parse(&resolved_base_url).ok()
+        } else {
+            None
+        },
     };
     let response = match walk_pages(
         method.clone(),
@@ -318,13 +339,12 @@ pub async fn execute_api_call_step_core(
         &extra_headers,
         body.as_ref(),
         &query,
-        timeout,
         max_retries,
         &pagination,
         plugin_slug,
         config_id,
         binary.as_ref(),
-        &redirect_guard,
+        &transport,
     )
     .await
     {
@@ -482,7 +502,7 @@ pub async fn execute_api_call_probe(
     policy: SecurityPolicy,
 ) -> StepOutcome {
     let mut resolved_env = env.clone();
-    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env).await;
+    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env, policy).await;
     execute_api_call_step_core(step, plugin, &resolved_env, ctx, policy).await
 }
 
@@ -678,7 +698,7 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
-    resolve_dynamic_auth(&plugin, config_id, state, &mut env).await;
+    resolve_dynamic_auth(&plugin, config_id, state, &mut env, policy).await;
 
     execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
 }
@@ -692,6 +712,7 @@ async fn resolve_dynamic_auth(
     config_id: &str,
     state: &crate::AppState,
     env: &mut HashMap<String, String>,
+    policy: SecurityPolicy,
 ) {
     if let Some(spec) = plugin.api_spec.as_ref() {
         if matches!(spec.auth, ApiAuthKind::OAuth2ClientCredentials { .. }) {
@@ -700,6 +721,7 @@ async fn resolve_dynamic_auth(
                 config_id,
                 &spec.auth,
                 env,
+                policy.destinations(),
             )
             .await
             {
@@ -723,6 +745,7 @@ async fn resolve_dynamic_auth(
                 &spec.auth,
                 &spec.base_url,
                 env,
+                policy.destinations(),
             )
             .await
             {
@@ -1383,13 +1406,12 @@ async fn walk_pages(
     extra_headers: &HashMap<String, String>,
     body: Option<&Value>,
     base_query: &HashMap<String, String>,
-    timeout: Duration,
     max_retries: u8,
     pagination: &PaginationSpec,
     plugin_slug: &str,
     config_id: &str,
     binary: Option<&BinaryPolicy>,
-    redirect_guard: &RedirectGuard<'_>,
+    transport: &ApiTransport,
 ) -> Result<(Value, bool, Option<u16>), String> {
     // Returns `(merged_response, truncated, empty_response_status)`. The HTTP
     // code is kept separate from API data when the first response has no body.
@@ -1512,10 +1534,9 @@ async fn walk_pages(
             auth,
             extra_headers,
             body,
-            timeout,
             max_retries,
             binary,
-            redirect_guard,
+            transport,
         )
         .await?;
 
@@ -1751,26 +1772,12 @@ async fn send_with_retry(
     auth: &ResolvedAuth,
     extra_headers: &HashMap<String, String>,
     body: Option<&Value>,
-    timeout: Duration,
     max_retries: u8,
     binary: Option<&BinaryPolicy>,
-    redirect_guard: &RedirectGuard<'_>,
+    transport: &ApiTransport,
 ) -> Result<(Value, Option<String>, Option<u16>), String> {
-    // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
-    // "Request forbidden by administrative rules" without it — see
-    // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required).
-    // reqwest's default is to send NO User-Agent header, which is fine
-    // for most APIs but breaks GitHub. Setting a generic one is also
-    // useful for ops: backends log it so you can identify Kronn traffic
-    // in tracker access logs.
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
-        // Redirects are followed by hand so each hop is re-validated.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| format!("HTTP client build failed: {e}"))?;
     let headers = build_request_headers(auth, extra_headers)?;
+    let (secret_headers, secret_query_keys) = secret_slots(auth);
 
     // 2026-06-10 audit P1 — automatic retries are only safe on idempotent
     // verbs. A network timeout can land AFTER the server processed a POST:
@@ -1787,31 +1794,29 @@ async fn send_with_retry(
     };
     let mut attempt: u8 = 0;
     loop {
-        let attach_body = |req: reqwest::RequestBuilder| match body {
+        let attach_body = |req: safe_http::SafeRequest| match body {
             Some(b) => req.json(b),
             None => req,
         };
-        let response = match send_with_guarded_redirects(
-            &client,
-            method.clone(),
-            url.clone(),
-            headers.clone(),
-            &attach_body,
-            redirect_guard,
+        let response = match safe_http::send_following(
+            &transport.client,
+            Outbound {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                secret_headers: &secret_headers,
+                secret_query_keys: &secret_query_keys,
+                attach_body: &attach_body,
+                pinned_base: transport.pinned_base.as_ref(),
+            },
         )
         .await
         {
             Ok(r) => r,
-            Err(GuardedSendError::Refused(msg)) => return Err(msg),
-            Err(GuardedSendError::Transport(e)) => {
-                // reqwest's Display carries the full URL, auth query included.
-                let e = e.without_url();
-                let detail = scrub_auth_values(
-                    &e.source()
-                        .map(|source| format!("{e}: {source}"))
-                        .unwrap_or_else(|| e.to_string()),
-                    auth,
-                );
+            Err(SendError::Blocked(reason)) => return Err(format!("Security: {reason}")),
+            Err(error @ SendError::Transport(_)) => {
+                // SendError's Display never carries the URL.
+                let detail = scrub_auth_values(&error.to_string(), auth);
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
                     return Err(format!(
@@ -1889,6 +1894,27 @@ fn scrub_auth_values(text: &str, auth: &ResolvedAuth) -> String {
         }
     }
     out
+}
+
+/// Every request a step makes (each page, retry and hop) goes through one
+/// guarded client and, when the host is enforced, the plugin's base.
+struct ApiTransport {
+    client: SafeClient,
+    pinned_base: Option<Url>,
+}
+
+/// The header and query slots that hold the resolved credential, whatever
+/// their names; a cross-origin hop drops them.
+fn secret_slots(auth: &ResolvedAuth) -> (Vec<HeaderName>, Vec<String>) {
+    let mut headers: Vec<HeaderName> = auth
+        .headers
+        .keys()
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect();
+    if auth.bearer.is_some() {
+        headers.push(AUTHORIZATION);
+    }
+    (headers, auth.query.keys().cloned().collect())
 }
 
 /// Parse every header before constructing the request. Besides producing a
@@ -3485,6 +3511,78 @@ mod tests {
             out.result.status,
             RunStatus::Success,
             "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_header_named_user_agent_does_not_cross_to_another_port() {
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                format!("http://127.0.0.1:{}/sink", other.address().port()),
+            ))
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sink"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": 1})))
+            .expect(1)
+            .mount(&other)
+            .await;
+        let plugin = mk_plugin(
+            &origin.uri(),
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "User-Agent".into(),
+                env_key: "KEY".into(),
+            },
+            vec![mk_endpoint("GET", "/start")],
+        );
+        let env = HashMap::from([("KEY".to_string(), "ua-secret-value".to_string())]);
+        let out = execute_api_call_step_core(
+            &mk_step("/start"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        let received = other.received_requests().await.unwrap();
+        let ua = received[0]
+            .headers
+            .get("user-agent")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_ne!(ua.as_deref(), Some("ua-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn a_mapped_ipv6_metadata_base_is_refused_in_production() {
+        let plugin = mk_plugin(
+            "http://[::ffff:169.254.169.254]",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/latest")],
+        );
+        let out = execute_api_call_step_core(
+            &mk_step("/latest"),
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security"),
+            "{}",
             out.result.output
         );
     }

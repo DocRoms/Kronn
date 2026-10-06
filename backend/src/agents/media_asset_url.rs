@@ -38,6 +38,9 @@ impl AssetHostPolicy {
 pub struct ValidatedAssetUrl {
     pub url: String,
     pub send_credential: bool,
+    /// On the origin the operator configured, which may be a local service;
+    /// anywhere else the download is held to public addresses.
+    pub on_configured_origin: bool,
 }
 
 /// Clears one provider-supplied URL against the codec policy and the base the
@@ -75,6 +78,7 @@ pub fn validate_asset_url(
         return Ok(ValidatedAssetUrl {
             url: url.to_string(),
             send_credential: true,
+            on_configured_origin: true,
         });
     }
 
@@ -103,12 +107,14 @@ pub fn validate_asset_url(
         return Ok(ValidatedAssetUrl {
             url: url.to_string(),
             send_credential: true,
+            on_configured_origin: false,
         });
     }
     if matches(&host, policy.anonymous) {
         return Ok(ValidatedAssetUrl {
             url: url.to_string(),
             send_credential: false,
+            on_configured_origin: false,
         });
     }
 

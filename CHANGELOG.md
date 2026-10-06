@@ -312,12 +312,16 @@ Release notes for 0.9.3 and earlier are available in the
   Tracker trigger no longer fires on the next tick. The import preview shows
   the trigger, the Exec steps and the Exec allowlist and says the workflow
   must be enabled after review (KT-1037).
-- ApiCall and Notify steps no longer follow an HTTP redirect blindly: each hop
-  (at most 5) goes through the same checks as the first URL — the plugin's
-  host for ApiCall, a public address for both — so a 302 to the cloud metadata
-  address or to Kronn on loopback is refused. A hop to another origin keeps
-  only `Content-Type`, `Accept` and `User-Agent`, never an auth header
-  (KT-1039).
+- Outbound requests to a URL a user, a plugin, a provider or an agent
+  supplies go through one guarded transport (`core::safe_http`): ApiCall
+  (every page, retry and redirect), OAuth and token exchange, Notify, gate
+  webhooks, media asset downloads, remote MCP probes, page `web_fetch` and
+  the GitHub tracker. Its resolver checks every DNS answer and connects only
+  to the checked addresses, so a rebinding answer cannot reach the socket;
+  IPv4-mapped IPv6 forms such as `[::ffff:127.0.0.1]` are refused like their
+  IPv4 host. Each redirect hop is re-checked; an https→http downgrade and a
+  cross-origin 307/308 are refused, and a cross-origin hop drops every
+  credential header slot (whatever its name) and auth query key (KT-1039).
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"
