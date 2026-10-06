@@ -257,8 +257,13 @@ It also reads back every `locked-secrets-*.json` (see below) with the keys it
 tries plus the key stores and kept files: each row one of them decrypts goes
 back under the key in use (an MCP config only while its secret is still
 empty, any other row only when its primary key is absent), one transaction
-per file with read-back, and a file whose rows are all back is renamed
-`.restored`. Settings offers it whenever rows remain that a passphrase or code
+per file with read-back. A file whose rows are all back is renamed
+`.restored` only once those rows are loaded; until then (or when the reload
+fails) the restored credentials are kept out of every save's deletes. A row
+whose parent is gone stays in its file, any other database error stops the
+restore, a file that cannot be read is reported and skipped, and an
+unreadable key store is reported, never taken as "no key". The toast counts
+the rows put back and says how many still wait. Settings offers it whenever rows remain that a passphrase or code
 can bring back (undecryptable rows the next start does not move by itself, or
 `locked_file_rows`), with or without a kept blob (a pasted code works). Without a pasted code it tries
 every kept blob: imported ones, replaced ones and the local `recovery.key`
@@ -305,7 +310,12 @@ each matched by primary key and the copied ciphertext (a row changed
 meanwhile rolls everything back; an MCP config keeps its settings and loses
 only its secret values), then resolves a new key as above. Discussions,
 projects and workflows stay; "Re-encrypt" puts the kept rows back once the
-old passphrase or code is offered. The response names the file and, with auth on,
+old passphrase or code is offered. If the removal rolls back, every row is
+still in the database and the file is renamed `.unused`. The new key is
+adopted only once the credentials are stored (or auth is off, or a token
+serves); a credential boot that fails with auth on and no token locks auth.
+Keep `locked-secrets-*.json`: an export does not carry it, and says so
+(`X-Kronn-Export-Warning: locked-secrets-not-exported`). The response names the file and, with auth on,
 the new API token.
 
 When the key is in use but the stored credentials fail to load at start

@@ -350,6 +350,11 @@ Release notes for 0.9.3 and earlier are available in the
   reset never turns API auth off (or on), keeps a readable token, stops on an
   unreadable key store before writing anything, and removes only rows that are
   still the ones copied (KT-1007).
+- A credential store that cannot be written after starting a new key or a
+  locked reset no longer leaves the API open; secrets put back from a
+  locked-secrets file survive a failed reload; the restore reports what it put
+  back and what still waits; and an export warns that locked-secrets files stay
+  on this machine (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
