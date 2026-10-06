@@ -909,7 +909,7 @@ fn withholding_merges_and_activates() {
         set_var("KRONN_R9_LATER", "x");
         assert!(
             std::env::var_os("KRONN_R9_LATER").is_none(),
-            "policy inactive"
+            "an active policy keeps a later write off the live environment"
         );
 
         std::env::set_var("KRONN_R9_SECOND_TOKEN", "second");
@@ -967,4 +967,9 @@ fn the_design_note_states_the_environment_block_residual() {
     };
     assert!(section("## 2. ", "## 3. ").contains("exec-time environment block"));
     assert!(section("## 9. ", "**Layer B").contains("exec-time environment block"));
+    // The relaunch hands back both forbidden names it re-adds.
+    let relaunch = section("One declared exception remains", "The MCP probe");
+    assert!(relaunch.contains("key override") && relaunch.contains("KRONN_AUTH_TOKEN"));
+    let residual = section("relaunch re-creates", "Kronn warns");
+    assert!(residual.contains("KRONN_AUTH_TOKEN"));
 }

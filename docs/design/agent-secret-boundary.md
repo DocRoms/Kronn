@@ -533,8 +533,9 @@ One declared exception remains, and only on the desktop: the app relaunching
 itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through
 `cmd::full_env_sync_cmd(program, FullEnvReason::SelfRestart)`). It is Kronn
 itself: it keeps its environment and working directory (withheld credentials
-included), loses the forbidden names, and gets the operator's key override
-handed back. The test
+included), loses the forbidden names, and gets two of them handed back: the
+operator's key override and the operator's `KRONN_AUTH_TOKEN` (with the key
+locked, that environment value may be the session's only token). The test
 `full_env_cmd_sites_are_exactly_the_declared_exceptions` checks it is the only
 call site in either crate, and `both_clippy_files_ban_the_same_spawn_entry_points`
 that every Tauri restart entry point (`AppHandle::restart`,
@@ -548,7 +549,8 @@ process environment at start, like `KRONN_AUTH_TOKEN`; the key is kept in
 memory (`keyvault::take_env_kek`). Residual: removing a variable edits only the
 variable list, not the exec-time environment block, which keeps both values
 readable by same-user processes for the process lifetime (see §2); the desktop
-relaunch re-creates the key override in the new process's block. Kronn warns at
+relaunch re-creates the key override and the operator's `KRONN_AUTH_TOKEN` in
+the new process's block. Kronn warns at
 start when either came from the environment (`config::warn_secrets_taken_from_env`).
 Scrubbing the block in place was not done: it needs a raw pointer write into
 memory libc owns, and it can only be proven on Linux, which this release's

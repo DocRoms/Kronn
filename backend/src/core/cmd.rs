@@ -673,6 +673,20 @@ mod tests {
                 .map(|rest| rest.split('"').next().unwrap().to_string())
                 .collect()
         };
+        // Clippy reads `.clippy.toml` before `clippy.toml` in each directory:
+        // one there would replace the banned list unseen.
+        for dir in [
+            backend.to_path_buf(),
+            backend.join(".."),
+            backend.join("../desktop"),
+            backend.join("../desktop/src-tauri"),
+        ] {
+            assert!(
+                !dir.join(".clippy.toml").exists(),
+                "{} would override clippy.toml",
+                dir.join(".clippy.toml").display()
+            );
+        }
         let backend_paths = paths(backend.join("clippy.toml"));
         let desktop_paths = paths(backend.join("../desktop/src-tauri/clippy.toml"));
         assert_eq!(backend_paths, desktop_paths);

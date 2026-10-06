@@ -276,6 +276,21 @@ fn bundled_mcp_sidecar_path(resource_dir: &std::path::Path) -> std::path::PathBu
 #[cfg(unix)]
 const SHELL_PATH_TIMEOUT_SECS: u64 = 5;
 
+/// Messages emitted before the tracing subscriber exists, logged once it does.
+type StartupLog = Vec<(tracing::Level, String)>;
+
+/// Log what [`enrich_path`] collected before tracing started.
+fn log_startup(messages: StartupLog) {
+    for (level, message) in messages {
+        match level {
+            tracing::Level::ERROR => tracing::error!("{message}"),
+            tracing::Level::WARN => tracing::warn!("{message}"),
+            tracing::Level::INFO => tracing::info!("{message}"),
+            _ => tracing::debug!("{message}"),
+        }
+    }
+}
+
 /// Try to load the user's actual shell PATH by running their login shell.
 /// On macOS GUI apps, the inherited PATH is minimal (/usr/bin:/bin:...).
 /// Apps like VS Code use this technique to get the same PATH as Terminal.app.
@@ -286,7 +301,7 @@ const SHELL_PATH_TIMEOUT_SECS: u64 = 5;
 /// - Shells that fail with -i -l (e.g. fish strict mode) — stderr is logged
 /// - Empty SHELL var
 #[cfg(unix)]
-fn shell_path_from_user_shell() -> Option<String> {
+fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {
     let shell = kronn::core::child_env::var("SHELL")
         .ok()
         .filter(|s| !s.is_empty() && s != "/bin/false" && std::path::Path::new(s).exists())
@@ -305,7 +320,10 @@ fn shell_path_from_user_shell() -> Option<String> {
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Cannot spawn shell {} for PATH discovery: {}", shell, e);
+            log.push((
+                tracing::Level::WARN,
+                format!("Cannot spawn shell {shell} for PATH discovery: {e}"),
+            ));
             return None;
         }
     };
@@ -318,18 +336,22 @@ fn shell_path_from_user_shell() -> Option<String> {
                 let output = match child.wait_with_output() {
                     Ok(o) => o,
                     Err(e) => {
-                        tracing::warn!("Failed to read shell output: {}", e);
+                        log.push((
+                            tracing::Level::WARN,
+                            format!("Failed to read shell output: {e}"),
+                        ));
                         return None;
                     }
                 };
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    tracing::debug!(
-                        "Shell {} exited with {} when probing PATH; stderr: {}",
-                        shell,
-                        status,
-                        stderr.trim()
-                    );
+                    log.push((
+                        tracing::Level::DEBUG,
+                        format!(
+                            "Shell {shell} exited with {status} when probing PATH; stderr: {}",
+                            stderr.trim()
+                        ),
+                    ));
                     return None;
                 }
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -337,11 +359,12 @@ fn shell_path_from_user_shell() -> Option<String> {
             }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    tracing::warn!(
-                        "Shell {} did not return PATH within {}s — killing and falling back to defaults",
-                        shell,
-                        SHELL_PATH_TIMEOUT_SECS
-                    );
+                    log.push((
+                        tracing::Level::WARN,
+                        format!(
+                            "Shell {shell} did not return PATH within {SHELL_PATH_TIMEOUT_SECS}s — killing and falling back to defaults"
+                        ),
+                    ));
                     let _ = child.kill();
                     let _ = child.wait();
                     return None;
@@ -349,7 +372,10 @@ fn shell_path_from_user_shell() -> Option<String> {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => {
-                tracing::warn!("Failed to poll shell child: {}", e);
+                log.push((
+                    tracing::Level::WARN,
+                    format!("Failed to poll shell child: {e}"),
+                ));
                 let _ = child.kill();
                 return None;
             }
@@ -358,7 +384,7 @@ fn shell_path_from_user_shell() -> Option<String> {
 }
 
 #[cfg(not(unix))]
-fn shell_path_from_user_shell() -> Option<String> {
+fn shell_path_from_user_shell(_log: &mut StartupLog) -> Option<String> {
     None
 }
 
@@ -389,8 +415,9 @@ fn discover_versioned_bins(root: &str) -> Vec<String> {
 /// Shell-installed tools (npm global, homebrew, cargo, pip, etc.) are invisible.
 /// This loads the user's actual shell PATH AND adds common installation directories.
 /// It writes the live environment, so it runs in `main` before any thread;
-/// it returns its summary for the log, which starts later.
-fn enrich_path() -> String {
+/// it returns its messages for the log, which starts later.
+fn enrich_path() -> StartupLog {
+    let mut log = StartupLog::new();
     // Step 0: ensure HOME is set BEFORE we start building paths from $HOME.
     // Some Tauri macOS launches strip HOME — recover it from $USER if missing.
     #[cfg(unix)]
@@ -402,7 +429,10 @@ fn enrich_path() -> String {
             let home_guess = format!("/home/{}", user);
             if std::path::Path::new(&home_guess).is_dir() {
                 kronn::core::child_env::set_var("HOME", &home_guess);
-                tracing::warn!("HOME was not set, recovered to {}", home_guess);
+                log.push((
+                    tracing::Level::WARN,
+                    format!("HOME was not set, recovered to {home_guess}"),
+                ));
             }
         }
     }
@@ -417,14 +447,14 @@ fn enrich_path() -> String {
 
     // Step 1: try to load the full PATH from the user's shell (Unix only).
     // Has its own timeout so it never blocks startup more than a few seconds.
-    if let Some(shell_path) = shell_path_from_user_shell() {
+    if let Some(shell_path) = shell_path_from_user_shell(&mut log) {
         for dir in shell_path.split(separator) {
             let dir = dir.to_string();
             if !dir.is_empty() && !paths.contains(&dir) {
                 paths.push(dir);
             }
         }
-        tracing::info!("Loaded PATH from user shell");
+        log.push((tracing::Level::INFO, "Loaded PATH from user shell".into()));
     }
 
     // Step 2: add common install dirs as fallback (in case shell loading failed
@@ -528,11 +558,15 @@ fn enrich_path() -> String {
 
     let new_path = paths.join(separator);
     kronn::core::child_env::set_var("PATH", &new_path);
-    format!(
-        "PATH enriched: {} fallback dirs added, total {} entries",
-        added,
-        paths.len()
-    )
+    log.push((
+        tracing::Level::INFO,
+        format!(
+            "PATH enriched: {} fallback dirs added, total {} entries",
+            added,
+            paths.len()
+        ),
+    ));
+    log
 }
 
 // ── Backend ────────────────────────────────────────────────────────────────
@@ -987,7 +1021,7 @@ fn main() {
     kronn::core::keyvault::take_env_kek();
     // GUI apps on macOS/Linux inherit a minimal PATH that lacks user-installed
     // binaries (npm global, homebrew, cargo…). A live write: before any thread.
-    let path_summary = enrich_path();
+    let path_log = enrich_path();
     // The system webview starts its own helpers (WebKitGTK, WebView2) with
     // this process's environment: only an allow-list stays live.
     kronn::core::child_env::withhold_process_environment();
@@ -1019,7 +1053,7 @@ fn main() {
             .with(file_layer)
             .init();
     }
-    tracing::info!("{path_summary}");
+    log_startup(path_log);
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
     // Acquire ownership before constructing the UI. Reusing another process's
@@ -1447,20 +1481,53 @@ mod enrich_path_tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// A failing login shell returns no PATH and leaves a message for the
+    /// log, which starts after `enrich_path` runs (nothing is dropped).
     #[cfg(unix)]
     #[test]
-    fn shell_path_from_user_shell_returns_none_for_invalid_shell() {
-        // /bin/false is the canonical "shell that always exits 1" — must
-        // gracefully return None instead of hanging or panicking.
+    fn shell_path_from_user_shell_reports_a_failing_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kronn-shell-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("failing-shell");
+        std::fs::write(&shell, "#!/bin/sh\necho broken >&2\nexit 3\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let prev = kronn::core::child_env::var("SHELL").ok();
-        kronn::core::child_env::set_var("SHELL", "/bin/false");
-        let result = shell_path_from_user_shell();
-        // Either None (false rejected) or some PATH from the bash fallback —
-        // both are acceptable, what we care about is that it returns quickly.
-        let _ = result;
+        kronn::core::child_env::set_var("SHELL", &shell);
+        let mut log = Vec::new();
+        let result = shell_path_from_user_shell(&mut log);
         match prev {
             Some(s) => kronn::core::child_env::set_var("SHELL", s),
             None => kronn::core::child_env::remove_var("SHELL"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(result, None);
+        assert!(
+            log.iter()
+                .any(|(_, message)| message.contains("exited with") && message.contains("broken")),
+            "{log:?}"
+        );
+    }
+
+    /// The startup PATH code runs before tracing exists: it must collect its
+    /// messages instead of emitting them, or they are lost.
+    #[test]
+    fn startup_path_code_emits_no_tracing_event() {
+        let source = include_str!("main.rs");
+        for signature in [
+            "fn enrich_path() -> StartupLog {",
+            "fn shell_path_from_user_shell(log: &mut StartupLog) -> Option<String> {",
+        ] {
+            let start = source.find(signature).unwrap();
+            let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+            for event in [
+                "tracing::error!",
+                "tracing::warn!",
+                "tracing::info!",
+                "tracing::debug!",
+            ] {
+                assert!(!body.contains(event), "{signature} uses {event}");
+            }
         }
     }
 }
