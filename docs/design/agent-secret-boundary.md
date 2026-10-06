@@ -468,9 +468,12 @@ no restricted mode is offered: `runner::start_agent_with_config`, through which
 every route launches (discussions, rooms, workflow steps, Quick Prompts,
 summaries, audits, resume), refuses such a launch unless the agent's own
 `[agents.<agent>] full_access` setting, read from the saved configuration at
-that moment for the agent actually launched, is on, before anything is spawned;
-`AcpJsonRpcTransport::spawn_native` checks the same on its own, and model
-discovery reads it before starting the runtime. No boolean a route passes counts
+that moment for the agent actually launched, is on, before anything is spawned
+(the runner then launches with full access, whatever the route passed);
+`AcpJsonRpcTransport::spawn_native` refuses unless both its caller's value and
+the saved setting are on; model discovery and Copilot's account preflight read
+the setting before starting the CLI, and the worker catalogue starts no Copilot
+probe at all. Version detection (`<cli> --version`) runs no prompt. No boolean a route passes counts
 for these agents: not an audit's hard-coded full access, not a value cached at
 the start of a run, not a workflow reviewer's author's; a workflow reviewer
 otherwise runs with its own agent's setting. Kronn never writes the

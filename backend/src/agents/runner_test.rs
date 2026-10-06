@@ -9933,9 +9933,58 @@ Suite de la réponse.";
         );
     }
 
+    /// The Copilot account preflight starts the CLI only with Copilot's saved
+    /// full-access setting on, read at each attempt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_preflight_never_starts_the_cli_without_its_full_access_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let attempt = || {
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                (
+                    "sh".into(),
+                    vec![
+                        "-c".into(),
+                        format!("touch '{}'; printf account", marker.display()),
+                    ],
+                    false,
+                ),
+                dir.path(),
+                super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+            )
+        };
+        {
+            let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, false);
+            assert_eq!(
+                attempt().await.err(),
+                Some(CopilotTaskWorkerPreflight::FullAccessOff)
+            );
+            assert_eq!(
+                super::super::probe_copilot_task_worker_preflight(
+                    "copilot",
+                    Some("@github/copilot"),
+                    dir.path()
+                )
+                .await,
+                CopilotTaskWorkerPreflight::FullAccessOff,
+                "neither the direct attempt nor the npx fallback starts"
+            );
+            assert!(!marker.exists(), "no process was started");
+        }
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
+        attempt().await.expect("with the setting on the probe runs");
+        assert!(marker.exists());
+        assert_eq!(
+            CopilotTaskWorkerPreflight::FullAccessOff.reason_code(),
+            Some("copilot_full_access_off")
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure() {
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
         let dir = tempfile::tempdir().unwrap();
         let output = super::super::run_copilot_task_worker_preflight_with_timeout(
             (
@@ -9972,6 +10021,7 @@ Suite de la réponse.";
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn copilot_preflight_full_spawn_path_preserves_its_four_second_deadline() {
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
         let dir = tempfile::tempdir().unwrap();
         let timeout = super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT;
         assert_eq!(timeout, std::time::Duration::from_secs(4));

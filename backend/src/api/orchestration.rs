@@ -10246,6 +10246,11 @@ async fn bounded_cli_worker_preflight(
     if !(copilot.installed || copilot.runtime_available) {
         return Vec::new();
     }
+    // A native Copilot worker is refused whatever its account state
+    // (`task_worker_route_policy`): no CLI is started to probe it.
+    if crate::agents::runner::requires_explicit_full_access(&AgentType::CopilotCli) {
+        return Vec::new();
+    }
     let work_dir = std::env::temp_dir();
     // The shared runner helper owns the deadline and cancellation policy, so
     // catalogue discovery cannot abandon a live Copilot child at an outer
@@ -12955,6 +12960,41 @@ mod tests {
         }
         assert!(worker_static_refusal(&MessageTarget::agent(AgentType::ClaudeCode)).is_none());
         assert!(worker_static_refusal(&MessageTarget::agent(AgentType::Codex)).is_none());
+    }
+
+    /// The worker catalogue starts no Copilot CLI to probe an account: a native
+    /// Copilot worker is refused anyway.
+    #[tokio::test]
+    async fn the_worker_catalogue_never_starts_copilot_to_probe_it() {
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
+        let detection = crate::models::AgentDetection {
+            name: "GitHub Copilot".into(),
+            agent_type: AgentType::CopilotCli,
+            installed: true,
+            enabled: true,
+            path: Some("copilot".into()),
+            version: None,
+            latest_version: None,
+            version_checked_at: None,
+            version_check_error: None,
+            version_source_url: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: true,
+            auth_ready: Some(true),
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+            shadowed_installs: None,
+        };
+        assert!(
+            bounded_cli_worker_preflight(std::slice::from_ref(&detection))
+                .await
+                .is_empty()
+        );
     }
 
     #[test]

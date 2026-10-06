@@ -11814,6 +11814,8 @@ pub(crate) enum CopilotTaskWorkerPreflight {
     Malformed,
     SpawnFailed,
     TimedOut,
+    /// Copilot's saved full-access setting is off: the CLI is not started.
+    FullAccessOff,
 }
 
 impl CopilotTaskWorkerPreflight {
@@ -11824,6 +11826,7 @@ impl CopilotTaskWorkerPreflight {
             Self::Malformed => Some("copilot_preflight_malformed"),
             Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
             Self::TimedOut => Some("copilot_preflight_timed_out"),
+            Self::FullAccessOff => Some("copilot_full_access_off"),
         }
     }
 }
@@ -11862,6 +11865,9 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
         CopilotTaskWorkerPreflight::TimedOut => {
             "the bounded `copilot -p /user show` preflight did not finish before its deadline"
         }
+        CopilotTaskWorkerPreflight::FullAccessOff => {
+            "Copilot runs only with full access (Config › Agents › GitHub Copilot › Full access)"
+        }
         CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
     };
     format!(
@@ -11889,6 +11895,11 @@ async fn run_copilot_task_worker_preflight_with_timeout(
     work_dir: &Path,
     timeout: Duration,
 ) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    // The CLI starts here only with its saved setting on, read for each
+    // attempt (the direct one and the npx fallback alike).
+    if !crate::core::config::saved_full_access(&AgentType::CopilotCli) {
+        return Err(CopilotTaskWorkerPreflight::FullAccessOff);
+    }
     let (command, args, via_wsl) = resolved;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);
