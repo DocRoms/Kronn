@@ -857,10 +857,15 @@ async fn bridge_gate(
                 "bridge request body too large",
             );
         };
-        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body");
-        };
-        (axum::body::Body::from(bytes), Some(json))
+        // The bridge labels every request JSON, a body-less GET included.
+        if bytes.is_empty() && method == "GET" {
+            (axum::body::Body::from(bytes), None)
+        } else {
+            let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body");
+            };
+            (axum::body::Body::from(bytes), Some(json))
+        }
     } else if multipart_upload || method == "GET" {
         (body, None)
     } else {
