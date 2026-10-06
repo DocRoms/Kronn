@@ -545,3 +545,102 @@ fn step_cache_totals_sum_reporting_attempts_and_stay_unknown_otherwise() {
     ];
     assert_eq!(provenance.prompt_cache_totals(), (Some(10), Some(4)));
 }
+
+/// A reviewer runs with its own agent's access: an OpenCode reviewer whose
+/// full-access setting is off is refused, though its LiteLLM author ran with
+/// full access, and OpenCode is never started; with the setting on it runs.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn a_native_reviewer_never_inherits_its_author_s_full_access() {
+    struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
+                }
+            }
+        }
+    }
+    let bin = tempfile::tempdir().unwrap();
+    crate::acp::test_support::write_fake_opencode(bin.path());
+    let _restore = Restore(
+        ["PATH", "OPENCODE_FIXTURE_OUT", "OPENCODE_CONFIG_CONTENT"]
+            .into_iter()
+            .map(|name| (name, crate::core::child_env::var_os(name)))
+            .collect(),
+    );
+    let search_path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
+        std::env::split_paths(&crate::core::child_env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    crate::core::child_env::set_var("PATH", search_path);
+    crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
+
+    for saved in [false, true] {
+        let out = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("OPENCODE_FIXTURE_OUT", out.path());
+        let _reviewer = crate::core::config::test_saved_access::set(&AgentType::OpenCode, saved);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let (status, body) = reply("The plan", "author-model");
+                ResponseTemplate::new(status).set_body_json(body)
+            })
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy().into_owned();
+        let mut step = step();
+        step.multi_agent_review = Some(MultiAgentReviewConfig {
+            reviewer_agent: AgentType::OpenCode,
+            reviewer_tier: None,
+            debate_prompt: "Review it".into(),
+            max_rounds: Some(1),
+        });
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: vec![],
+            disabled_overrides: vec![],
+        };
+        let mut tiers = crate::models::setup::ModelTiersConfig::default();
+        tiers.lite_llm.default = Some("default-tier-model".into());
+        let result = execute_step(
+            &step,
+            &project,
+            None,
+            &project,
+            &tokens,
+            true,
+            &TemplateContext::new(),
+            None,
+            None,
+            Some(&tiers),
+            Some(&crate::models::setup::HttpEndpoints {
+                lite_llm: Some(server.uri()),
+                nvidia: None,
+            }),
+            None,
+            None,
+            None,
+            None,
+            Some("test-run"),
+        )
+        .await
+        .result;
+        let review = &result.agent_provenance.as_ref().unwrap().attempts[1];
+        assert_eq!(review.role, WorkflowAgentAttemptRole::Review);
+        assert_eq!(review.agent, AgentType::OpenCode);
+        assert_eq!(review.succeeded, saved, "saved {saved}");
+        assert_eq!(
+            out.path().join("config.json").exists(),
+            saved,
+            "OpenCode is started only with its own setting on (saved {saved})"
+        );
+    }
+}

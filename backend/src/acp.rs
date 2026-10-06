@@ -243,6 +243,19 @@ pub fn native_acp_command(agent: AcpAgent) -> Option<(&'static str, Vec<&'static
     }
 }
 
+/// The Kronn agent a native runtime is.
+fn native_agent_type(agent: AcpAgent) -> AgentType {
+    match agent {
+        AcpAgent::OpenCode => AgentType::OpenCode,
+        AcpAgent::GeminiCli => AgentType::GeminiCli,
+        AcpAgent::CopilotCli => AgentType::CopilotCli,
+        AcpAgent::Kiro => AgentType::Kiro,
+        AcpAgent::Vibe => AgentType::Vibe,
+        AcpAgent::Codex => AgentType::Codex,
+        AcpAgent::ClaudeCode => AgentType::ClaudeCode,
+    }
+}
+
 pub fn acp_agent(agent: &AgentType) -> Option<AcpAgent> {
     match agent {
         AgentType::OpenCode => Some(AcpAgent::OpenCode),
@@ -850,9 +863,9 @@ impl AcpJsonRpcTransport {
         // A native runtime loads repository plugins, tools and servers before
         // any permission check: it never starts restricted (the runner refuses
         // first; this seam holds for any other caller).
-        if !full_access {
+        if !full_access || !crate::core::config::saved_full_access(&native_agent_type(agent)) {
             return Err(AcpError::Transport(format!(
-                "{}: {agent:?} starts only with full access",
+                "{}: {agent:?} starts only with its full-access setting on",
                 crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED
             )));
         }
@@ -2146,22 +2159,28 @@ mod tests {
             AcpAgent::GeminiCli,
             AcpAgent::Kiro,
         ] {
-            let refused = AcpJsonRpcTransport::spawn_native(
-                agent,
-                &project.path().to_string_lossy(),
-                false,
-                NativeLaunchEnv::default(),
-                AcpSessionScope::new(None, "disc"),
-                Vec::new(),
-            )
-            .await;
-            let Err(AcpError::Transport(message)) = refused else {
-                panic!("{agent:?} spawned without full access");
-            };
-            assert!(
-                message.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
-                "{message}"
-            );
+            // Neither a `false` from the caller nor a `true` against the saved
+            // setting gets a native runtime spawned.
+            for (passed, saved) in [(false, true), (true, false), (false, false)] {
+                let _saved =
+                    crate::core::config::test_saved_access::set(&native_agent_type(agent), saved);
+                let refused = AcpJsonRpcTransport::spawn_native(
+                    agent,
+                    &project.path().to_string_lossy(),
+                    passed,
+                    NativeLaunchEnv::default(),
+                    AcpSessionScope::new(None, "disc"),
+                    Vec::new(),
+                )
+                .await;
+                let Err(AcpError::Transport(message)) = refused else {
+                    panic!("{agent:?} spawned (passed {passed}, saved {saved})");
+                };
+                assert!(
+                    message.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
+                    "{message}"
+                );
+            }
         }
     }
 

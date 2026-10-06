@@ -1734,6 +1734,12 @@ async fn run_multi_agent_debate(
     let reviewer_model = reviewer_shares_the_step_connection
         .then(|| step_model_override(&reviewer_step, author_connection))
         .flatten();
+    // The reviewer runs with its own agent's access, never its author's.
+    let reviewer_full_access = if cfg.reviewer_agent == step.agent {
+        full_access
+    } else {
+        crate::core::config::saved_full_access(&cfg.reviewer_agent)
+    };
 
     for round in 0..max_rounds {
         // ---- reviewer challenges ----
@@ -1761,7 +1767,7 @@ async fn run_multi_agent_debate(
             &rprompt,
             &[],
             tokens_config,
-            full_access,
+            reviewer_full_access,
             model_tiers,
             http_endpoints,
             ollama_context_overrides,

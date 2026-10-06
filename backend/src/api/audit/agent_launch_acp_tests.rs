@@ -196,6 +196,11 @@ const REPORTED: Reported = Reported {
 fn new_state() -> AppState {
     let mut config = crate::core::config::default_config();
     config.agents.open_code.full_access = true;
+    // The launch boundary reads the saved setting: this test's thread says on.
+    std::mem::forget(crate::core::config::test_saved_access::set(
+        &AgentType::OpenCode,
+        true,
+    ));
     state_with(config)
 }
 
@@ -790,5 +795,45 @@ async fn an_audit_on_opencode_without_its_full_access_setting_is_refused_before_
     assert!(
         !out.path().join("config.json").exists(),
         "the scripted OpenCode was never started"
+    );
+}
+
+/// Revoking full access between two steps of a running audit refuses the next
+/// spawn: the launcher's own value, taken at the start, is not the authority.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn revoking_full_access_during_an_audit_refuses_its_next_step() {
+    let bin = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    crate::acp::test_support::write_fake_opencode(bin.path());
+    let _environment = ScriptedOpenCodeOnPath::install(bin.path(), out.path());
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let launcher = AuditAgentLauncher::for_request(&state, &AgentType::OpenCode, None)
+        .await
+        .expect("full access is on when the audit starts");
+    let tokens = state.config.read().await.tokens.clone();
+    let path = project.path().to_string_lossy().into_owned();
+    let start = || {
+        launcher.start(
+            &AgentType::OpenCode,
+            crate::models::ModelTier::Default,
+            project.path(),
+            &path,
+            "step",
+            &tokens,
+            None,
+            "step-1",
+            None,
+        )
+    };
+    let mut first = start().await.expect("the first step starts");
+    while first.next_line().await.is_some() {}
+    let _revoked = crate::core::config::test_saved_access::set(&AgentType::OpenCode, false);
+    let refused = start().await.err().expect("the next step is refused");
+    assert!(
+        refused.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
+        "{refused}"
     );
 }

@@ -7381,6 +7381,8 @@ mod resume_delta_tests {
         assert_eq!(resume_id1, None);
         assert_eq!(checkpoint1.as_deref(), Some("m1"));
 
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+
         let mut turn1 = runner::start_agent_with_config(runner::AgentStartConfig {
             cli_resume_id: resume_id1.as_deref(),
             acp_session_store: Some(store.clone()),
@@ -7482,6 +7484,8 @@ mod resume_delta_tests {
             !prompt2.contains("content of m1"),
             "the delta must not resend what the runtime already saw"
         );
+
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
 
         let mut turn2 = runner::start_agent_with_config(runner::AgentStartConfig {
             cli_resume_id: resume_id2.as_deref(),

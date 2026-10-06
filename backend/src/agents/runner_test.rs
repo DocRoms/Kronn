@@ -232,6 +232,7 @@ mod tests {
                 resumed: std::sync::atomic::AtomicUsize::new(0),
                 prompts: Mutex::new(Vec::new()),
             });
+            let _saved = crate::core::config::test_saved_access::set(&agent, true);
             let result = start_agent_with_config(AgentStartConfig {
                 full_access: true,
                 task_worker_context: Some(&worker),
@@ -254,11 +255,14 @@ mod tests {
         }
     }
 
-    /// Every route launches through `start_agent_with_config`: a native agent
-    /// without full access is refused there, before its transport is touched,
-    /// on a fresh launch and on a resume alike; with full access it runs.
+    /// Every route launches through `start_agent_with_config`, and the
+    /// authority there is the agent's own saved setting, read for the agent
+    /// actually launched: with it off a native launch is refused before its
+    /// transport is touched, whatever `full_access` the route passed (a
+    /// reviewer inheriting its author's, a value cached at the start of a run),
+    /// on a fresh launch and on a resume alike. With it on, the launch runs.
     #[tokio::test]
-    async fn a_native_agent_without_full_access_never_reaches_its_transport() {
+    async fn a_native_agent_without_its_saved_full_access_never_reaches_its_transport() {
         let project = tempfile::tempdir().unwrap();
         let tokens = crate::models::setup::TokensConfig {
             anthropic: None,
@@ -275,13 +279,15 @@ mod tests {
             AgentType::Kiro,
         ] {
             assert!(requires_explicit_full_access(&agent), "{agent:?}");
-            for resume in [None, Some("native-session")] {
+            let _saved = crate::core::config::test_saved_access::set(&agent, false);
+            for (passed, resume) in [(false, None), (true, None), (true, Some("native-session"))] {
                 let fixture = Arc::new(NativeRouteFixture {
                     created: std::sync::atomic::AtomicUsize::new(0),
                     resumed: std::sync::atomic::AtomicUsize::new(0),
                     prompts: Mutex::new(Vec::new()),
                 });
                 let result = start_agent_with_config(AgentStartConfig {
+                    full_access: passed,
                     cli_resume_id: resume,
                     test_acp_transport: Some(fixture.clone()),
                     ..AgentStartConfig::new(
@@ -292,7 +298,9 @@ mod tests {
                     )
                 })
                 .await;
-                let error = result.err().expect("a restricted native launch is refused");
+                let error = result
+                    .err()
+                    .expect("a native launch without its setting is refused");
                 assert!(
                     error.starts_with(NATIVE_FULL_ACCESS_REQUIRED),
                     "{agent:?}: {error}"
@@ -313,26 +321,34 @@ mod tests {
         for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama] {
             assert!(!requires_explicit_full_access(&agent), "{agent:?}");
         }
-        // With full access the same launch reaches the runtime.
-        let fixture = Arc::new(NativeRouteFixture {
-            created: std::sync::atomic::AtomicUsize::new(0),
-            resumed: std::sync::atomic::AtomicUsize::new(0),
-            prompts: Mutex::new(Vec::new()),
-        });
-        let mut process = start_agent_with_config(AgentStartConfig {
-            full_access: true,
-            test_acp_transport: Some(fixture.clone()),
-            ..AgentStartConfig::new(
-                &AgentType::OpenCode,
-                project.path().to_str().unwrap(),
-                "hello",
-                &tokens,
-            )
-        })
-        .await
-        .expect("a full-access launch runs");
-        while process.next_line().await.is_some() {}
-        assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // With the setting on the launch reaches the runtime, even from a route
+        // that passed `false`: the setting is the user's choice.
+        for agent in [
+            AgentType::OpenCode,
+            AgentType::Vibe,
+            AgentType::CopilotCli,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+        ] {
+            let _saved = crate::core::config::test_saved_access::set(&agent, true);
+            let fixture = Arc::new(NativeRouteFixture {
+                created: std::sync::atomic::AtomicUsize::new(0),
+                resumed: std::sync::atomic::AtomicUsize::new(0),
+                prompts: Mutex::new(Vec::new()),
+            });
+            let mut process = start_agent_with_config(AgentStartConfig {
+                test_acp_transport: Some(fixture.clone()),
+                ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "hello", &tokens)
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{agent:?}: {error}"));
+            while process.next_line().await.is_some() {}
+            assert_eq!(
+                fixture.created.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{agent:?}"
+            );
+        }
     }
 
     #[test]
@@ -364,6 +380,7 @@ mod tests {
             disabled_overrides: Vec::new(),
         };
         let agent = AgentType::OpenCode;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
         let mut first = start_agent_with_config(AgentStartConfig {
             test_acp_transport: Some(fixture.clone()),
             full_access: true,
@@ -378,6 +395,8 @@ mod tests {
         .unwrap();
         while first.next_line().await.is_some() {}
         assert!(first.child.wait().await.unwrap().success());
+
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
 
         let mut second = start_agent_with_config(AgentStartConfig {
             cli_resume_id: Some("native-route-session"),
@@ -458,6 +477,7 @@ mod tests {
             variables: Vec::new(),
         };
         let agent = AgentType::OpenCode;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
         let mut process = start_agent_with_config(AgentStartConfig {
             skill_ids: &["repository:p1:block-migration".to_string()],
             repository_skills: std::slice::from_ref(&skill),

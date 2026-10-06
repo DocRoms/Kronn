@@ -3041,7 +3041,7 @@ const zh: TranslationDict = {
   "config.releaseCheckRequestFailed": "无法检查版本。保留之前已知的版本。",
   "config.releaseSource": "发布来源",
   "config.fullAccess": "允许网页访问、文件修改和命令执行。",
-  "config.fullAccessAcp": "扩大实时 ACP 权限自动批准范围：智能体在修改文件或执行命令前不再询问（不涉及 CLI 标志）。",
+  "config.fullAccessAcp": "运行此智能体所必需：它会在任何权限检查之前加载仓库的插件、工具和 MCP 服务器，因此 Kronn 无法为其提供受限模式。开启完全访问后，它会直接修改文件并执行命令而不再询问（不涉及 CLI 标志）。",
   "config.autoApply": "自动应用更改，无需确认。",
   "config.restrictedAgent": "智能体 {0} 未启用“完全访问”模式——它将无法修改文件。",
   "config.fullAccessRequired": "{0} 只能在完全访问模式下运行。请在 配置 › 智能体 › {0} › 完全访问 中启用，或选择其他智能体。",

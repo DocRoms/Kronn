@@ -3622,7 +3622,11 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Every route (discussion, room, workflow step, Quick Prompt, audit,
     // resume) launches through here: a native runtime without full access is
     // refused before anything is prepared or spawned, never upgraded.
-    if requires_explicit_full_access(config.agent_type) && !config.full_access {
+    // The authority is the agent's own saved setting, read now for the agent
+    // actually launched: no boolean a route passes (a reviewer inheriting its
+    // author's, a value cached at the start of a run) can stand in for it.
+    let native = requires_explicit_full_access(config.agent_type);
+    if native && !crate::core::config::saved_full_access(config.agent_type) {
         return Err(native_full_access_refusal(config.agent_type));
     }
     let has_read_only_paths =
@@ -3650,7 +3654,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     )?;
     let launch_full_access = task_worker_route_policy(
         config.agent_type,
-        config.full_access,
+        // A native runtime runs only with full access, granted above.
+        native || config.full_access,
         config.task_worker_context.is_some(),
     )
     .map_err(|reason| format!("Task worker refused: {reason}"))?;

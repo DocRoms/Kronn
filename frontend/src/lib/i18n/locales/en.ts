@@ -3073,7 +3073,7 @@ const en: TranslationDict = {
   'config.releaseCheckRequestFailed': "Could not check versions. Previously known versions are kept.",
   'config.releaseSource': 'release source',
   'config.fullAccess': 'Allows web access, file modifications and command execution.',
-  'config.fullAccessAcp': 'Widens the live ACP permission auto-approval scope: the agent no longer asks before editing files or running commands (no CLI flag involved).',
+  'config.fullAccessAcp': 'Required to run this agent: it loads the repository\'s plugins, tools and MCP servers before any permission check, so Kronn has no restricted mode for it. With full access it edits files and runs commands without asking (no CLI flag involved).',
   'config.autoApply': 'Automatically applies changes without confirmation.',
   'config.restrictedAgent': 'Agent {0} does not have "full access" mode enabled — it won\'t be able to modify files.',
   'config.fullAccessRequired': '{0} runs only with full access. Enable it in Config › Agents › {0} › Full access, or choose another agent.',

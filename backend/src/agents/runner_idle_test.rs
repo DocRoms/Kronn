@@ -782,6 +782,7 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
         keys: Vec::new(),
         disabled_overrides: Vec::new(),
     };
+    let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
     start_agent_with_config(AgentStartConfig {
         idle_timeout: run.idle,
         cancel_token: run.cancel.cloned(),
@@ -1154,6 +1155,7 @@ async fn start_scripted(
         keys: Vec::new(),
         disabled_overrides: Vec::new(),
     };
+    let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
     let running = start_agent_with_config(AgentStartConfig {
         idle_timeout: idle,
         cancel_token: cancel.cloned(),

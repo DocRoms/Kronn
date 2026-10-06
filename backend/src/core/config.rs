@@ -45,10 +45,51 @@ pub fn refuse_real_data_dir_in_tests() -> Result<(), String> {
 /// The agent's full-access setting as saved in config.toml, read without any
 /// other effect. Absent, unreadable or not `true`: `false`.
 pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
+    #[cfg(test)]
+    {
+        // A test never reads the developer's own config: it states the setting.
+        if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
+            return test_saved_access::get(agent).unwrap_or(false);
+        }
+    }
     let Ok(path) = config_path() else {
         return false;
     };
     saved_full_access_in(&std::fs::read_to_string(path).unwrap_or_default(), agent)
+}
+
+/// The saved full-access setting a test states, per thread (each tokio test
+/// runs on its own thread).
+#[cfg(test)]
+pub(crate) mod test_saved_access {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static SAVED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+    }
+
+    /// Restores the previous value when dropped.
+    pub(crate) struct SavedAccess(String, Option<bool>);
+
+    impl Drop for SavedAccess {
+        fn drop(&mut self) {
+            SAVED.with(|saved| match self.1 {
+                Some(value) => saved.borrow_mut().insert(self.0.clone(), value),
+                None => saved.borrow_mut().remove(&self.0),
+            });
+        }
+    }
+
+    pub(crate) fn set(agent: &crate::models::AgentType, value: bool) -> SavedAccess {
+        let key = format!("{agent:?}");
+        let previous = SAVED.with(|saved| saved.borrow_mut().insert(key.clone(), value));
+        SavedAccess(key, previous)
+    }
+
+    pub(crate) fn get(agent: &crate::models::AgentType) -> Option<bool> {
+        SAVED.with(|saved| saved.borrow().get(&format!("{agent:?}")).copied())
+    }
 }
 
 pub(crate) fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> bool {
