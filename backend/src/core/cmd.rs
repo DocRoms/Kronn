@@ -383,6 +383,15 @@ mod tests {
             backend.join("../desktop/src-tauri/Cargo.toml"),
         ] {
             let text = std::fs::read_to_string(&manifest).unwrap();
+            for manifest in [
+                "[lints]\nclippy = { all = \"allow\" }\n",
+                "[ lints.clippy ]\nall = \"allow\"\n",
+                "lints.clippy.all = \"allow\"\n[package]\nname = \"x\"\n",
+                "[lints.clippy]\nall = { level = \"allow\", priority = -1 }\n",
+                "[lints.clippy]\nstyle = \"force-warn\"\n",
+            ] {
+                assert!(manifest_lowers_lints(manifest), "{manifest}");
+            }
             assert!(!manifest_lowers_lints(&text), "{}", manifest.display());
         }
         // Cargo reads `.cargo/config` from every parent of the crate.
@@ -444,39 +453,40 @@ mod tests {
 
     /// A `[lints]` / `[workspace.lints]` table lowering one of the lints.
     fn manifest_lowers_lints(text: &str) -> bool {
-        // rustc reads `-` in a lint name as `_`.
-        let text = text.replace('-', "_");
-        let mut table = String::new();
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap().trim();
-            if line.starts_with('[') {
-                table = line.trim_matches(|c| c == '[' || c == ']').to_string();
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let full = format!("{table}.{}", key.trim().trim_matches('"'));
-            if !(full.starts_with("lints") || full.starts_with("workspace.lints")) {
-                continue;
-            }
-            let lowered = value.contains("allow") || value.contains("warn");
-            let names: Vec<&str> = full.split('.').collect();
-            let lint = names.last().unwrap().trim_matches('"');
-            let touches = [
-                "disallowed_methods",
-                "disallowed_method",
-                "style",
-                "all",
-                "warnings",
-            ]
-            .contains(&lint)
-                || value.contains("disallowed_method");
-            if lowered && touches {
-                return true;
-            }
+        // Parsed like Cargo does; a file that does not parse is refused.
+        let Ok(manifest) = toml::from_str::<toml::Table>(text) else {
+            return true;
+        };
+        let mut tables = Vec::new();
+        if let Some(lints) = manifest.get("lints") {
+            tables.push(lints);
         }
-        false
+        if let Some(lints) = manifest.get("workspace").and_then(|w| w.get("lints")) {
+            tables.push(lints);
+        }
+        tables.into_iter().any(|lints| {
+            lints.as_table().is_some_and(|tools| {
+                tools.iter().any(|(tool, entries)| {
+                    entries.as_table().is_some_and(|entries| {
+                        entries.iter().any(|(lint, level)| {
+                            let lint = lint.replace('-', "_");
+                            let name = if tool == "rust" {
+                                lint
+                            } else {
+                                format!("{tool}::{lint}")
+                            };
+                            let level = level
+                                .as_str()
+                                .or_else(|| level.get("level").and_then(toml::Value::as_str))
+                                .unwrap_or_default()
+                                .replace('-', "_");
+                            SPAWN_BAN_LINTS.contains(&name.as_str())
+                                && matches!(level.as_str(), "allow" | "warn" | "force_warn")
+                        })
+                    })
+                })
+            })
+        })
     }
 
     /// Rustflags allowing one of the lints, or capping every lint.
@@ -522,35 +532,63 @@ mod tests {
     }
 
     /// A Cargo configuration that lowers the ban: rustflags, an alias that
-    /// shadows `cargo clippy`, or an `[env]` value clippy-driver reads.
+    /// shadows `cargo clippy`, an `[env]` value clippy-driver reads, or a rustc
+    /// wrapper that can run rustc instead of clippy-driver.
     fn config_lowers_lints(text: &str) -> bool {
         if rustflags_lower_lints(text) {
             return true;
         }
-        let mut table = String::new();
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap().trim();
-            if line.starts_with('[') {
-                table = line
-                    .trim_matches(|c| c == '[' || c == ']')
-                    .trim()
-                    .to_string();
-                continue;
+        // Parsed like Cargo does; a file that does not parse is refused.
+        let Ok(config) = toml::from_str::<toml::Table>(text) else {
+            return true;
+        };
+        let flags_lower = |flags: &toml::Value| match flags {
+            toml::Value::String(flags) => rustflags_lower_lints(flags),
+            toml::Value::Array(items) => {
+                let joined: Vec<String> = items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(|item| format!("\"{item}\""))
+                    .collect();
+                rustflags_lower_lints(&format!("[{}]", joined.join(",")))
+                    || rustflags_lower_lints(&joined.join(" ").replace('"', ""))
             }
-            let Some((key, _)) = line.split_once('=') else {
-                continue;
-            };
-            let full = format!("{table}.{}", key.trim().trim_matches('"'));
-            let mut parts = full.splitn(2, '.');
-            let (section, key) = (parts.next().unwrap(), parts.next().unwrap_or(""));
-            if section == "alias" && key == "clippy" {
+            _ => false,
+        };
+        if config
+            .get("alias")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|aliases| aliases.contains_key("clippy"))
+        {
+            return true;
+        }
+        if config
+            .get("env")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|env| {
+                env.keys()
+                    .any(|key| key.to_ascii_uppercase().starts_with("CLIPPY_"))
+            })
+        {
+            return true;
+        }
+        if let Some(build) = config.get("build").and_then(toml::Value::as_table) {
+            if build.contains_key("rustc-wrapper") || build.contains_key("rustc-workspace-wrapper")
+            {
                 return true;
             }
-            if section == "env" && key.to_ascii_uppercase().starts_with("CLIPPY_") {
+            if build.get("rustflags").is_some_and(flags_lower) {
                 return true;
             }
         }
-        false
+        config
+            .get("target")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|targets| {
+                targets
+                    .values()
+                    .any(|target| target.get("rustflags").is_some_and(flags_lower))
+            })
     }
 
     /// Every way to lower the spawn ban is caught (B6-05).
@@ -599,6 +637,20 @@ mod tests {
             "[alias]\nclippy = [\"check\", \"--all-targets\"]\n",
             "[env]\nCLIPPY_CONF_DIR = \"x\"\n",
             "[env]\nCLIPPY_ARGS = { value = \"\", force = true }\n",
+        ] {
+            assert!(config_lowers_lints(config), "{config}");
+        }
+        for config in [
+            "alias.clippy = \"check\"\n",
+            "alias = { clippy = \"check\" }\n",
+            "[alias]\n'clippy' = \"check\"\n",
+            "env.CLIPPY_CONF_DIR = \"x\"\n",
+            "env = { CLIPPY_ARGS = \"\" }\n",
+            "[env]\nclippy_conf_dir = \"x\"\n",
+            "[build]\nrustc-wrapper = \"w\"\n",
+            "build.rustc-workspace-wrapper = \"w\"\n",
+            "[target.'cfg(unix)']\nrustflags = [\"-A\", \"clippy::all\"]\n",
+            "[build\n",
         ] {
             assert!(config_lowers_lints(config), "{config}");
         }
@@ -683,6 +735,10 @@ mod tests {
             "libc::getenv",
             "libc::secure_getenv",
             "libc::_NSGetEnviron",
+            "libc::setenv",
+            "libc::unsetenv",
+            "libc::putenv",
+            "libc::clearenv",
         ];
         for entry in required {
             assert!(desktop_paths.contains(entry), "{entry} is not banned");

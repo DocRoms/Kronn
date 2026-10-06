@@ -47,6 +47,11 @@ fn take_env_kek_from_process() -> Option<String> {
     value
 }
 
+/// Whether [`take_env_kek`] found a key override in the environment.
+pub fn key_override_taken_from_env() -> bool {
+    TAKEN_ENV_KEK.get().is_some_and(Option::is_some)
+}
+
 /// [`take_env_kek_from_process`], keeping the value for [`KeyStore::env_override`].
 pub fn take_env_kek() {
     let _ = TAKEN_ENV_KEK.set(take_env_kek_from_process());

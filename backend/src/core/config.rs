@@ -476,6 +476,34 @@ pub fn taken_env_auth_token() -> Option<String> {
         .clone()
 }
 
+/// The warnings to log once tracing runs when the admin token or the key
+/// was pinned through the environment: the exec-time environment block
+/// keeps the value readable by same-user processes for the process lifetime.
+pub fn env_secret_warnings(token_from_env: bool, key_from_env: bool) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if token_from_env {
+        warnings.push(
+            "KRONN_AUTH_TOKEN came from the environment: the process's original environment block keeps it readable by same-user processes (/proc/<pid>/environ, ps eww). Prefer config.toml.",
+        );
+    }
+    if key_from_env {
+        warnings.push(
+            "KRONN_ENCRYPTION_KEK came from the environment: the process's original environment block keeps it readable by same-user processes (/proc/<pid>/environ, ps eww). Prefer the keychain or the data-directory key file.",
+        );
+    }
+    warnings
+}
+
+/// Log [`env_secret_warnings`] for this process.
+pub fn warn_secrets_taken_from_env(token_from_env: bool) {
+    for warning in env_secret_warnings(
+        token_from_env,
+        crate::core::keyvault::key_override_taken_from_env(),
+    ) {
+        tracing::warn!("{warning}");
+    }
+}
+
 pub fn adopt_env_auth_token(server: &mut ServerConfig, env_token: Option<String>) {
     let Some(token) = env_token.filter(|token| !token.is_empty()) else {
         return;
@@ -1637,6 +1665,22 @@ mod tests {
         adopt_env_auth_token(&mut untouched, None);
         assert_eq!(untouched.auth_token, before);
         assert!(!untouched.auth_enabled);
+    }
+
+    /// A secret pinned through the environment is flagged at start: its
+    /// original environment block stays readable by same-user processes.
+    #[test]
+    fn env_pinned_secrets_are_warned_about() {
+        assert!(env_secret_warnings(false, false).is_empty());
+        let both = env_secret_warnings(true, true);
+        assert_eq!(both.len(), 2);
+        assert!(both[0].contains("KRONN_AUTH_TOKEN") && both[1].contains("KRONN_ENCRYPTION_KEK"));
+        for main in [
+            include_str!("../main.rs"),
+            include_str!("../../../desktop/src-tauri/src/main.rs"),
+        ] {
+            assert!(main.contains("warn_secrets_taken_from_env("));
+        }
     }
 
     /// The backend no longer puts its admin token into its own environment,

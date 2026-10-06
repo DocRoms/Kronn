@@ -97,6 +97,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .init();
 
     tracing::info!("tracing initialized — filter: {}", filter_src);
+    kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
     tracing::info!("Kronn — Entering the grid...");
     if app_config.server.debug_mode {
@@ -137,7 +138,11 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         // inside the same container/process tree as the backend, so
         // 127.0.0.1:<port> always reaches us. Nginx + cross-container
         // setups override this via the env.
-        kronn::core::child_env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
+        // The runtime runs: the overlay, never a live write.
+        kronn::core::child_env::set_overlay_var(
+            "KRONN_BACKEND_URL",
+            format!("http://127.0.0.1:{}", port),
+        );
     }
 
     // Open database

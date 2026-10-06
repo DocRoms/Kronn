@@ -851,3 +851,120 @@ fn writes_keep_the_withheld_set_consistent() {
     );
     remove_var("KRONN_R8_PLAIN_TOKEN");
 }
+
+/// After the desktop withholds, a write of a name off the allow-list never
+/// touches the live environment (B9-01).
+#[test]
+fn live_writes_follow_the_withholding_policy() {
+    let active = Withheld {
+        active: true,
+        vars: Vec::new(),
+    };
+    assert_eq!(
+        live_write(&active, OsStr::new("KRONN_BACKEND_URL")),
+        LiveWrite::None
+    );
+    assert_eq!(
+        live_write(&active, OsStr::new("MYSQL_PWD")),
+        LiveWrite::None
+    );
+    assert_eq!(live_write(&active, OsStr::new("PATH")), LiveWrite::Set);
+    let inactive = Withheld::default();
+    assert_eq!(
+        live_write(&inactive, OsStr::new("KRONN_BACKEND_URL")),
+        LiveWrite::Set
+    );
+}
+
+/// A value set once threads run lives in the overlay only (B9-01).
+#[test]
+fn overlay_values_are_read_but_never_live() {
+    with_withheld_state(false, &[], || {
+        set_overlay_var("KRONN_R9_OVERLAY_URL", "http://127.0.0.1:1");
+        assert!(std::env::var_os("KRONN_R9_OVERLAY_URL").is_none());
+        assert_eq!(
+            var("KRONN_R9_OVERLAY_URL").as_deref(),
+            Ok("http://127.0.0.1:1")
+        );
+        assert!(vars_os()
+            .iter()
+            .any(|(key, _)| key == "KRONN_R9_OVERLAY_URL"));
+    });
+}
+
+/// Withholding activates the policy and merges into the withheld set: a
+/// second call keeps what the first one and `set_var` put there (B9-02).
+#[test]
+#[serial_test::serial]
+fn withholding_merges_and_activates() {
+    with_withheld_state(false, &[], || {
+        std::env::set_var("KRONN_R9_SENTINEL_TOKEN", "first");
+        withhold_where(|name| name != "KRONN_R9_SENTINEL_TOKEN");
+        assert!(std::env::var_os("KRONN_R9_SENTINEL_TOKEN").is_none());
+        assert_eq!(var("KRONN_R9_SENTINEL_TOKEN").as_deref(), Ok("first"));
+        assert!(withheld_variables()
+            .iter()
+            .any(|(key, _)| key == "KRONN_R9_SENTINEL_TOKEN"));
+
+        set_var("KRONN_R9_LATER", "x");
+        assert!(
+            std::env::var_os("KRONN_R9_LATER").is_none(),
+            "policy inactive"
+        );
+
+        std::env::set_var("KRONN_R9_SECOND_TOKEN", "second");
+        withhold_where(|name| name != "KRONN_R9_SECOND_TOKEN");
+        let held = withheld_variables();
+        for name in [
+            "KRONN_R9_SENTINEL_TOKEN",
+            "KRONN_R9_LATER",
+            "KRONN_R9_SECOND_TOKEN",
+        ] {
+            assert!(held.iter().any(|(key, _)| key == name), "{name} lost");
+        }
+    });
+}
+
+/// Live writes happen before any thread: the desktop enriches PATH in `main`
+/// before withholding, and both binaries keep the backend URL in the overlay
+/// (B9-01).
+#[test]
+fn live_environment_writes_happen_before_threads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let desktop = std::fs::read_to_string(root.join("../desktop/src-tauri/src/main.rs")).unwrap();
+    let main_fn = &desktop[desktop.find("fn main() {").unwrap()..];
+    let enrich = main_fn.find("enrich_path()").expect("main enriches PATH");
+    let withhold = main_fn
+        .find("child_env::withhold_process_environment()")
+        .unwrap();
+    assert!(enrich < withhold);
+    let backend_start = &desktop[desktop.find("async fn start_backend(").unwrap()..];
+    let backend_start = &backend_start[..backend_start.find("\n}\n").unwrap()];
+    assert!(
+        !backend_start.contains("enrich_path()"),
+        "not after threads start"
+    );
+    let backend = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    for text in [&desktop, &backend] {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(!compact.contains("child_env::set_var(\"KRONN_BACKEND_URL\""));
+        assert!(compact.contains("child_env::set_overlay_var(\"KRONN_BACKEND_URL\""));
+    }
+}
+
+/// §2 and §9 state the exec-time environment block residual (B9-05).
+#[test]
+fn the_design_note_states_the_environment_block_residual() {
+    let note = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/design/agent-secret-boundary.md"),
+    )
+    .unwrap();
+    let section = |start: &str, end: &str| -> String {
+        let from = note.find(start).unwrap();
+        let to = from + note[from..].find(end).unwrap();
+        note[from..to].replace('\n', " ")
+    };
+    assert!(section("## 2. ", "## 3. ").contains("exec-time environment block"));
+    assert!(section("## 9. ", "**Layer B").contains("exec-time environment block"));
+}

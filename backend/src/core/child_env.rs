@@ -546,8 +546,18 @@ thread_local! {
 /// Runs `body` as if the desktop had withheld `vars` (this thread only).
 #[cfg(test)]
 pub(crate) fn with_withheld_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+    with_withheld_state(true, vars, body)
+}
+
+/// [`with_withheld_env`] with the withholding switched on or not yet.
+#[cfg(test)]
+pub(crate) fn with_withheld_state<T>(
+    active: bool,
+    vars: &[(&str, &str)],
+    body: impl FnOnce() -> T,
+) -> T {
     let state = Withheld {
-        active: true,
+        active,
         vars: vars
             .iter()
             .map(|(name, value)| (OsString::from(name), OsString::from(value)))
@@ -640,33 +650,67 @@ pub fn vars_os() -> Vec<(OsString, OsString)> {
     with_withheld(std::env::vars_os().collect(), &withheld())
 }
 
+/// What a write does to the live process environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveWrite {
+    /// Only the withheld set changes.
+    None,
+    Set,
+}
+
+/// Once the desktop withholds, a name off the webview allow-list is never
+/// live: a write only updates the withheld set.
+fn live_write(state: &Withheld, name: &OsStr) -> LiveWrite {
+    if state.active && !webview_keeps(name) {
+        LiveWrite::None
+    } else {
+        LiveWrite::Set
+    }
+}
+
 /// Kronn's only way to set a variable. Once the desktop withholds its
 /// environment, a name off the webview allow-list goes to the withheld set,
 /// never live (where the webview helpers would inherit it).
+///
+/// A live write is allowed only before any thread exists: `setenv` races C
+/// code reading the environment (glib, WebKitGTK, `getaddrinfo`) without
+/// Rust's lock. After start, use [`set_overlay_var`].
 #[allow(clippy::disallowed_methods)] // the one live write
 pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(name: K, value: V) {
     let (name, value) = (name.as_ref(), value.as_ref());
-    let withhold = with_state(|state| {
+    let write = with_state(|state| {
         state.vars.retain(|(key, _)| !same_name(key, name));
-        let withhold = state.active && !webview_keeps(name);
-        if withhold {
+        let write = live_write(state, name);
+        if write == LiveWrite::None {
             state.vars.push((name.to_os_string(), value.to_os_string()));
         }
-        withhold
+        write
     });
-    if withhold {
-        std::env::remove_var(name);
-    } else {
+    if write == LiveWrite::Set {
         std::env::set_var(name, value);
     }
 }
 
-/// Kronn's only way to remove a variable: live and withheld alike.
+/// A value for Kronn's own reads and for child routes, never written to the
+/// live environment: safe once threads run (`KRONN_BACKEND_URL`).
+pub fn set_overlay_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(name: K, value: V) {
+    let (name, value) = (name.as_ref(), value.as_ref());
+    with_state(|state| {
+        state.vars.retain(|(key, _)| !same_name(key, name));
+        state.vars.push((name.to_os_string(), value.to_os_string()));
+    });
+}
+
+/// Kronn's only way to remove a variable: live and withheld alike. The live
+/// removal happens only when the name is live; the same before-threads
+/// contract as [`set_var`] applies to it.
 #[allow(clippy::disallowed_methods)] // the one live write
 pub fn remove_var<K: AsRef<OsStr>>(name: K) {
     let name = name.as_ref();
     with_state(|state| state.vars.retain(|(key, _)| !same_name(key, name)));
-    std::env::remove_var(name);
+    if std::env::var_os(name).is_some() {
+        std::env::remove_var(name);
+    }
 }
 
 /// Whether a process-environment name is a credential.
@@ -732,12 +776,6 @@ fn webview_keeps(name: &OsStr) -> bool {
     listed && !is_credential(name)
 }
 
-/// Remove from this process's environment every variable the webview
-/// helpers do not need, and return them.
-fn take_process_environment() -> Vec<(OsString, OsString)> {
-    take_process_environment_where(webview_keeps)
-}
-
 /// Remove from this process's environment every variable `keep` refuses.
 #[allow(clippy::disallowed_methods)] // reads the live environment it empties
 fn take_process_environment_where(keep: impl Fn(&OsStr) -> bool) -> Vec<(OsString, OsString)> {
@@ -761,10 +799,20 @@ pub fn withheld_variables() -> Vec<(OsString, OsString)> {
 /// own reads ([`var`], [`parent_var`]) still see every withheld variable.
 /// Call before any thread exists: removing a variable is not thread-safe.
 pub fn withhold_process_environment() {
-    let held = take_process_environment();
+    withhold_where(webview_keeps);
+}
+
+/// Withhold every live variable `keep` refuses, merged into the withheld set
+/// (a later call never drops what an earlier one, or [`set_var`], put there),
+/// and route later writes of such names to the set.
+fn withhold_where(keep: impl Fn(&OsStr) -> bool) {
+    let held = take_process_environment_where(keep);
     with_state(|state| {
         state.active = true;
-        state.vars = held;
+        for (name, value) in held {
+            state.vars.retain(|(key, _)| !same_name(key, &name));
+            state.vars.push((name, value));
+        }
     });
 }
 

@@ -388,7 +388,9 @@ fn discover_versioned_bins(root: &str) -> Vec<String> {
 /// GUI apps on macOS inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin).
 /// Shell-installed tools (npm global, homebrew, cargo, pip, etc.) are invisible.
 /// This loads the user's actual shell PATH AND adds common installation directories.
-fn enrich_path() {
+/// It writes the live environment, so it runs in `main` before any thread;
+/// it returns its summary for the log, which starts later.
+fn enrich_path() -> String {
     // Step 0: ensure HOME is set BEFORE we start building paths from $HOME.
     // Some Tauri macOS launches strip HOME — recover it from $USER if missing.
     #[cfg(unix)]
@@ -526,11 +528,11 @@ fn enrich_path() {
 
     let new_path = paths.join(separator);
     kronn::core::child_env::set_var("PATH", &new_path);
-    tracing::info!(
+    format!(
         "PATH enriched: {} fallback dirs added, total {} entries",
         added,
         paths.len()
-    );
+    )
 }
 
 // ── Backend ────────────────────────────────────────────────────────────────
@@ -562,12 +564,13 @@ async fn start_backend(
 ) -> anyhow::Result<()> {
     tracing::info!("Starting embedded Kronn backend on port {}", port);
 
-    // Enrich PATH for desktop mode — GUI apps on macOS/Linux inherit a minimal PATH
-    // that doesn't include user-installed binaries (npm global, homebrew, cargo, etc.)
-    enrich_path();
     // Every child belongs to this embedded instance, including when a shell
     // inherited an override for a separate Docker/standalone installation.
-    kronn::core::child_env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{port}"));
+    // Threads run already: the overlay, never the live environment.
+    kronn::core::child_env::set_overlay_var(
+        "KRONN_BACKEND_URL",
+        format!("http://127.0.0.1:{port}"),
+    );
 
     // Load or create config
     let mut app_config = match config::load().await? {
@@ -982,6 +985,9 @@ fn main() {
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
     kronn::core::keyvault::take_env_kek();
+    // GUI apps on macOS/Linux inherit a minimal PATH that lacks user-installed
+    // binaries (npm global, homebrew, cargo…). A live write: before any thread.
+    let path_summary = enrich_path();
     // The system webview starts its own helpers (WebKitGTK, WebView2) with
     // this process's environment: only an allow-list stays live.
     kronn::core::child_env::withhold_process_environment();
@@ -1013,6 +1019,8 @@ fn main() {
             .with(file_layer)
             .init();
     }
+    tracing::info!("{path_summary}");
+    kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
     // Acquire ownership before constructing the UI. Reusing another process's
     // HTTP listener is unsafe even when versions match: that server can have a
@@ -1080,7 +1088,7 @@ fn main() {
                 Ok(resource_dir) => {
                     let mcp_sidecar = bundled_mcp_sidecar_path(&resource_dir);
                     if mcp_sidecar.is_file() || !cfg!(debug_assertions) {
-                        kronn::core::child_env::set_var(
+                        kronn::core::child_env::set_overlay_var(
                             "KRONN_INTERNAL_MCP_EXECUTABLE",
                             &mcp_sidecar,
                         );
@@ -1093,7 +1101,10 @@ fn main() {
                     }
                     let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
                     if docs_sidecar.is_file() {
-                        kronn::core::child_env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
+                        kronn::core::child_env::set_overlay_var(
+                            "KRONN_DOCS_SIDECAR",
+                            &docs_sidecar,
+                        );
                         tracing::info!(
                             "Bundled document sidecar configured at {}",
                             docs_sidecar.display()
@@ -1107,7 +1118,10 @@ fn main() {
                 }
                 Err(error) => {
                     if !cfg!(debug_assertions) {
-                        kronn::core::child_env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", "");
+                        kronn::core::child_env::set_overlay_var(
+                            "KRONN_INTERNAL_MCP_EXECUTABLE",
+                            "",
+                        );
                     }
                     // Document generation is optional. A damaged/missing
                     // sidecar must not terminate or relaunch the whole desktop.
