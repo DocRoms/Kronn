@@ -576,7 +576,10 @@ kind, never the other project's id. Then:
   private to its own launch (a run's project is its own, never its workflow's
   current home); run lists, their state filter and pages, and a workflow's
   `last_run` only consider runs of the token's project or its own run, in SQL
-  before any limit; an
+  before any limit, and so do the duration estimates of workflow trigger, run
+  status and wait; a Quick Prompt's estimate counts only launches in the
+  token's project; an in-process agent's workflow list takes its `last_run`
+  from its own project's runs; an
   MCP config linked to projects and opted into General serves those projects
   and project-less tokens, as the plugin overview shows;
 - *effects* need the token's project, or a shared resource on a route whose
