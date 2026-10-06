@@ -160,15 +160,23 @@ pub(crate) fn render_child_variables(
 
 /// Prepares the child's encrypted variable snapshot exactly like a manual
 /// launch. `None` when the child declares no variable (nothing to prepare).
+/// What a child run carries from its variable preflight.
+#[derive(Default)]
+struct PreparedChild {
+    snapshot: Option<(String, chrono::DateTime<Utc>)>,
+    /// Rendered like a manual launch's, so admission counts the right bucket.
+    concurrency_key: Option<String>,
+}
+
 async fn prepare_child_snapshot(
     state: &crate::AppState,
     child: &Workflow,
     child_run_id: &str,
     supplied: std::collections::HashMap<String, String>,
     parent_project_id: Option<&str>,
-) -> Result<Option<(String, chrono::DateTime<Utc>)>, String> {
+) -> Result<PreparedChild, String> {
     if child.variables.is_empty() {
-        return Ok(None);
+        return Ok(PreparedChild::default());
     }
     let (secret, retention_days) = {
         let config = state.config.read().await;
@@ -209,7 +217,18 @@ async fn prepare_child_snapshot(
                 serde_json::to_string(&failures).unwrap_or_default()
             )
         })?;
-    Ok(Some((prepared.snapshot_id, prepared.resolved.resolved_at)))
+    let concurrency_key = match child.concurrency_key.as_deref() {
+        Some(template) => crate::workflows::concurrency::render_key(
+            template,
+            &child.variables,
+            &prepared.resolved.values,
+        )?,
+        None => None,
+    };
+    Ok(PreparedChild {
+        snapshot: Some((prepared.snapshot_id, prepared.resolved.resolved_at)),
+        concurrency_key,
+    })
 }
 
 fn insert_snapshot_marker(
@@ -345,7 +364,7 @@ pub async fn execute_sub_workflow_step(
     let child_run_id = Uuid::new_v4().to_string();
     let mut trigger = serde_json::Map::new();
     trigger.insert("__subwf_depth__".into(), json!(child_depth));
-    match prepare_child_snapshot(
+    let prepared = match prepare_child_snapshot(
         state,
         &child_wf,
         &child_run_id,
@@ -354,9 +373,10 @@ pub async fn execute_sub_workflow_step(
     )
     .await
     {
-        Ok(snapshot) => insert_snapshot_marker(&mut trigger, snapshot),
+        Ok(prepared) => prepared,
         Err(error) => return fail(step, start, error),
-    }
+    };
+    insert_snapshot_marker(&mut trigger, prepared.snapshot);
     let mut child_run = WorkflowRun {
         id: child_run_id.clone(),
         workflow_id: child_wf.id.clone(),
@@ -378,7 +398,7 @@ pub async fn execute_sub_workflow_step(
         parent_run_id: Some(parent_run_id.to_string()),
         state: Default::default(),
         produced_branches: vec![],
-        concurrency_key: None,
+        concurrency_key: prepared.concurrency_key,
         triggered_by_run_id: None,
         project_id: child_project_id(&child_wf, launch.parent_project_id),
         parent_workflow_id: None,
@@ -390,17 +410,32 @@ pub async fn execute_sub_workflow_step(
     } else {
         parent_workspace
     };
+    // Same admission as a manual launch or TriggerWorkflow: a child over its
+    // workflow's concurrency_limit fails the step instead of running twice.
     let to_insert = child_run.clone();
-    if let Err(e) = state
+    let admission = child_wf.clone();
+    match state
         .db
-        .with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert))
+        .with_conn(move |c| {
+            crate::workflows::concurrency::insert_run_within_limit(c, &admission, &to_insert)
+        })
         .await
     {
-        return fail(
-            step,
-            start,
-            format!("Failed to create sub-workflow run row: {e}"),
-        );
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            return fail(
+                step,
+                start,
+                format!("Sub-workflow « {} » not started: {reason}", child_wf.name),
+            )
+        }
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("Failed to create sub-workflow run row: {e}"),
+            )
+        }
     }
 
     tracing::info!(
@@ -504,6 +539,42 @@ pub async fn execute_sub_workflow_step(
 
 /// Phase 3b — cap on per-item fan-out (runaway-manifest backstop).
 const MAX_FOREACH_ITEMS: usize = 30;
+
+/// Save-time shape of `sub_workflow_foreach_file`: a plain path relative to
+/// the worktree. Blank means no fan-out.
+pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.contains('\\') || path.contains('\0') {
+        return Err(format!(
+            "`sub_workflow_foreach_file` `{path}`: use a plain worktree-relative path with `/` separators"
+        ));
+    }
+    crate::core::repository_resources::validate_relative(path).map_err(|_| {
+        format!(
+            "`sub_workflow_foreach_file` `{path}` must be relative to the worktree, without `..`"
+        )
+    })
+}
+
+/// Run-time resolution: the saved shape again (a workflow stored before the
+/// check, or edited by hand), then symlinks followed and kept in the worktree.
+/// The items reach child agents, so a file outside it must never be read.
+fn resolve_foreach_file(worktree: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    validate_foreach_file(path)?;
+    crate::core::fs_guard::resolve_contained_read(
+        std::path::Path::new(worktree),
+        std::path::Path::new(path.trim()),
+    )
+    .map_err(|_| {
+        format!(
+            "foreach file `{}` resolves outside the worktree",
+            path.trim()
+        )
+    })
+}
 
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
 /// Must be a JSON array; empty or oversized arrays are explicit errors (an
@@ -695,7 +766,10 @@ async fn execute_foreach(
         Some(w) if !w.trim().is_empty() => w,
         _ => return fail(step, start, "SubWorkflow foreach requires the parent to run in a git worktree (the items file lives there).".into()),
     };
-    let items_path = std::path::Path::new(&ws).join(foreach_file);
+    let items_path = match resolve_foreach_file(&ws, foreach_file) {
+        Ok(path) => path,
+        Err(error) => return fail(step, start, error),
+    };
     let content = match std::fs::read_to_string(&items_path) {
         Ok(c) => c,
         Err(e) => {
@@ -1029,15 +1103,18 @@ async fn execute_foreach(
             }
             Err(error) => Err(error),
         };
-        match snapshot {
-            Ok(snapshot) => insert_snapshot_marker(&mut tctx, snapshot),
+        let concurrency_key = match snapshot {
+            Ok(prepared) => {
+                insert_snapshot_marker(&mut tctx, prepared.snapshot);
+                prepared.concurrency_key
+            }
             Err(error) => {
                 tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: child variables not prepared ({error}) — skipping this item");
                 failed += 1;
                 results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedVariableError", "error": error }));
                 continue;
             }
-        }
+        };
 
         let trigger_context = serde_json::Value::Object(tctx);
         let mut resumed = false;
@@ -1073,7 +1150,7 @@ async fn execute_foreach(
                 parent_run_id: Some(parent_run_id.to_string()),
                 state: Default::default(),
                 produced_branches: vec![],
-                concurrency_key: None,
+                concurrency_key,
                 triggered_by_run_id: None,
                 project_id: child_project_id(&child_wf, launch.parent_project_id),
                 parent_workflow_id: None,
@@ -1081,15 +1158,29 @@ async fn execute_foreach(
                 parent_run_started_at: None,
             };
             let to_insert = child.clone();
-            if let Err(e) = state
+            let admission = child_wf.clone();
+            match state
                 .db
-                .with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert))
+                .with_conn(move |c| {
+                    crate::workflows::concurrency::insert_run_within_limit(
+                        c, &admission, &to_insert,
+                    )
+                })
                 .await
             {
-                tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: cannot create child run row ({e}) — skipping this item");
-                failed += 1;
-                results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedDbError", "error": e.to_string() }));
-                continue;
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: child refused by its concurrency limit ({reason}) — skipping this item");
+                    failed += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedConcurrencyLimit", "error": reason }));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: cannot create child run row ({e}) — skipping this item");
+                    failed += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedDbError", "error": e.to_string() }));
+                    continue;
+                }
             }
             child
         };
@@ -1939,6 +2030,286 @@ mod tests {
             "{}",
             secret.result.output
         );
+    }
+
+    // ─── KT-1038 — the foreach file stays inside the worktree ───
+
+    #[test]
+    fn foreach_file_must_be_a_plain_worktree_relative_path() {
+        for ok in ["", "  ", "tasks.json", ".kronn/tasks.json", "a/b/c.json"] {
+            assert!(super::validate_foreach_file(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "/etc/passwd",
+            "../tasks.json",
+            "a/../../x.json",
+            "a\\b.json",
+            "a\0b",
+        ] {
+            assert!(super::validate_foreach_file(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn foreach_refuses_a_file_outside_the_worktree() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.json");
+        std::fs::write(&secret, r#"[{"id":"LEAK","what":"x"}]"#).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, ws.path().join("link.json")).unwrap();
+        let ctx = crate::workflows::template::TemplateContext::new();
+        let mut paths = vec![
+            secret.to_string_lossy().into_owned(),
+            "../secret.json".into(),
+        ];
+        if cfg!(unix) {
+            paths.push("link.json".into());
+        }
+        for path in paths {
+            let mut escaping = step.clone();
+            escaping.sub_workflow_foreach_file = Some(path.clone());
+            let outcome = super::execute_sub_workflow_step(
+                &state,
+                "parent-run",
+                0,
+                &escaping,
+                &tokens,
+                &agents,
+                crate::workflows::runner::SharedBudget::root(50),
+                Some(ws.path().to_string_lossy().to_string()),
+                super::ChildLaunch {
+                    ctx: &ctx,
+                    parent_variables: &[],
+                    parent_project_id: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                crate::models::RunStatus::Failed,
+                "{path}"
+            );
+            assert!(
+                outcome.result.output.contains("worktree")
+                    && !outcome.result.output.contains("LEAK"),
+                "{path}: {}",
+                outcome.result.output
+            );
+        }
+        assert_eq!(child_rows_for(&state, "LEAK").await, 0);
+        // The fixture's own relative file still fans out.
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
+    }
+
+    // ─── KT-1045 — a child goes through its workflow's admission ───
+
+    #[tokio::test]
+    async fn a_child_over_its_concurrency_limit_is_not_started() {
+        let (state, tokens, agents, ws, foreach_step) = foreach_fixture().await;
+        let child = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_workflow(c, "child-wf"))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut limited = child.clone();
+        limited.concurrency_limit = Some(1);
+        let mut active = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "parent-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        active.id = "child-already-running".into();
+        active.workflow_id = "child-wf".into();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::update_workflow(c, &limited)?;
+                crate::db::workflows::insert_run(c, &active)
+            })
+            .await
+            .unwrap();
+        let children = |state: crate::AppState| async move {
+            state
+                .db
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id = 'parent-run'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        };
+        let ctx = crate::workflows::template::TemplateContext::new();
+        let launch = || super::ChildLaunch {
+            ctx: &ctx,
+            parent_variables: &[],
+            parent_project_id: None,
+        };
+        let single = step_json(serde_json::json!({
+            "name": "child", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "child-wf",
+        }));
+
+        let refused = super::execute_sub_workflow_step(
+            &state,
+            "parent-run",
+            0,
+            &single,
+            &tokens,
+            &agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            None,
+            launch(),
+        )
+        .await;
+        assert_eq!(refused.result.status, crate::models::RunStatus::Failed);
+        assert!(
+            refused
+                .result
+                .output
+                .contains("not started: Concurrency limit reached (1/1)"),
+            "{}",
+            refused.result.output
+        );
+        assert_eq!(
+            children(state.clone()).await,
+            0,
+            "no child row was inserted"
+        );
+
+        let foreach = super::execute_sub_workflow_step(
+            &state,
+            "parent-run",
+            0,
+            &foreach_step,
+            &tokens,
+            &agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            Some(ws.path().to_string_lossy().to_string()),
+            launch(),
+        )
+        .await;
+        assert_ne!(foreach.result.status, crate::models::RunStatus::Success);
+        let data =
+            crate::workflows::step_output_format::parse_envelope_for_test(&foreach.result.output)
+                ["data"]
+                .clone();
+        let statuses: Vec<_> = data["items"]
+            .as_array()
+            .map(|items| items.iter().map(|i| i["status"].clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            !statuses.is_empty() && statuses.iter().all(|s| s == "SkippedConcurrencyLimit"),
+            "{}",
+            foreach.result.output
+        );
+        assert_eq!(children(state.clone()).await, 0);
+
+        // Once the other run has finished, the child is admitted.
+        state
+            .db
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE workflow_runs SET status = 'Success' WHERE id = 'child-already-running'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let admitted = super::execute_sub_workflow_step(
+            &state,
+            "parent-run",
+            0,
+            &single,
+            &tokens,
+            &agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            None,
+            launch(),
+        )
+        .await;
+        assert_eq!(
+            admitted.result.status,
+            crate::models::RunStatus::Success,
+            "{}",
+            admitted.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyed_child_is_counted_under_its_rendered_key() {
+        let (state, tokens, agents, _ws, _) = foreach_fixture().await;
+        let child: crate::models::Workflow = serde_json::from_value(serde_json::json!({
+            "id": "keyed", "name": "keyed", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "noop", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+            "actions": [], "safety": {}, "workspace_config": null,
+            "concurrency_limit": 1, "concurrency_key": "{{ticketKey}}",
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        let mut active = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "parent-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        active.id = "keyed-running".into();
+        active.workflow_id = "keyed".into();
+        active.concurrency_key = Some("EW-1".into());
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::insert_workflow(c, &child)?;
+                crate::db::workflows::insert_run(c, &active)
+            })
+            .await
+            .unwrap();
+        let parent_variables = vec![ticket_variable(None)];
+        let launch_for = |ticket: &str| {
+            let mut ctx = crate::workflows::template::TemplateContext::new();
+            ctx.set("ticket", ticket);
+            ctx
+        };
+        let step = step_json(serde_json::json!({
+            "name": "child", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "keyed",
+            "sub_workflow_variables": {"ticketKey": "{{ticket}}"},
+        }));
+        for (ticket, admitted) in [("EW-1", false), ("EW-2", true)] {
+            let ctx = launch_for(ticket);
+            let outcome = super::execute_sub_workflow_step(
+                &state,
+                "parent-run",
+                0,
+                &step,
+                &tokens,
+                &agents,
+                crate::workflows::runner::SharedBudget::root(50),
+                None,
+                super::ChildLaunch {
+                    ctx: &ctx,
+                    parent_variables: &parent_variables,
+                    parent_project_id: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status == crate::models::RunStatus::Success,
+                admitted,
+                "{ticket}: {}",
+                outcome.result.output
+            );
+        }
     }
 
     // ─── KT-1018 — a child edited later is checked against its parents ───

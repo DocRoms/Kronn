@@ -2254,6 +2254,18 @@ pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.statu
          FROM workflow_runs GROUP BY workflow_id
      ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started";
 
+/// The same summaries restricted to what a bridge token sees: its project's
+/// runs (`?1`) and its own run (`?2`).
+pub const LAST_RUN_SUMMARIES_VISIBLE_SQL: &str =
+    "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
+            wr.finished_at, wr.tokens_used
+     FROM workflow_runs wr
+     INNER JOIN (
+         SELECT workflow_id, MAX(started_at) AS max_started
+         FROM workflow_runs WHERE (project_id = ?1 OR id = ?2) GROUP BY workflow_id
+     ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started
+     WHERE (wr.project_id = ?1 OR wr.id = ?2)";
+
 /// Batch-load the last run summary of every workflow in one query (no N+1).
 pub fn get_last_run_summaries(
     conn: &Connection,
@@ -2268,15 +2280,7 @@ pub fn get_last_run_summaries_visible(
 ) -> Result<std::collections::HashMap<String, crate::models::WorkflowRunSummary>> {
     let sql = match visibility {
         None => LAST_RUN_SUMMARIES_SQL.to_string(),
-        Some(_) => "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
-                wr.finished_at, wr.tokens_used
-         FROM workflow_runs wr
-         INNER JOIN (
-             SELECT workflow_id, MAX(started_at) AS max_started
-             FROM workflow_runs WHERE (project_id = ?1 OR id = ?2) GROUP BY workflow_id
-         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started
-         WHERE (wr.project_id = ?1 OR wr.id = ?2)"
-            .to_string(),
+        Some(_) => LAST_RUN_SUMMARIES_VISIBLE_SQL.to_string(),
     };
     let (project, own) = visibility
         .map(|v| (v.project.clone(), v.own_run.clone()))

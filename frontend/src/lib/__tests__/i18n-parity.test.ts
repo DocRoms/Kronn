@@ -9,7 +9,7 @@
 // — fix them in i18n.ts and rerun.
 
 import { describe, it, expect } from 'vitest';
-import { UI_LOCALES } from '../i18n';
+import { UI_LOCALES, loadLocale, t } from '../i18n';
 import { dictionaries } from '../i18n/testing';
 
 describe('i18n key parity', () => {
@@ -48,7 +48,23 @@ describe('i18n key parity', () => {
     });
   }
 
-  it('en and es never introduce placeholders absent from the fr reference', () => {
+  it('every placeholder occurrence is filled once the fr-sized arguments are passed', async () => {
+    const placeholderRe = /\{(\d+)\}/g;
+    for (const { code } of UI_LOCALES) await loadLocale(code);
+    const leftovers: string[] = [];
+    for (const key of referenceKeys) {
+      const indices = [...reference[key].matchAll(placeholderRe)].map((m) => Number(m[1]));
+      if (indices.length === 0) continue;
+      const args = Array.from({ length: Math.max(...indices) + 1 }, (_, i) => `a${i}`);
+      for (const { code } of UI_LOCALES) {
+        const out = t(code, key, ...args);
+        if (/\{\d+\}/.test(out)) leftovers.push(`  ${code}."${key}" -> ${out}`);
+      }
+    }
+    expect(leftovers, `Placeholders left after interpolation:\n${leftovers.join('\n')}`).toEqual([]);
+  });
+
+  it('en, es and zh never introduce placeholders absent from the fr reference', () => {
     // Languages legitimately differ in pluralization/gender markers — FR
     // often has more placeholders (e.g. `{1}`, `{2}` for "s"/"x" suffixes)
     // than EN. The real bug is a target locale that uses a placeholder
@@ -59,7 +75,7 @@ describe('i18n key parity', () => {
     const mismatches: string[] = [];
     for (const key of referenceKeys) {
       const frSet = new Set(reference[key].match(placeholderRe) ?? []);
-      for (const code of ['en', 'es'] as const) {
+      for (const code of ['en', 'es', 'zh'] as const) {
         const other = dictionaries[code][key];
         if (!other) continue; // missing-key case covered above
         const extras = (other.match(placeholderRe) ?? []).filter((p) => !frSet.has(p));

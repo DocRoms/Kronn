@@ -3915,6 +3915,37 @@ fn workflow_list_last_runs_never_read_run_payloads() {
 }
 
 #[test]
+fn bridge_visible_last_runs_use_the_project_index() {
+    // KT-1050 — a bridge token's list filtered by project with no index on
+    // project_id, so it walked every run, step payload included.
+    let conn = test_db();
+    let plan = super::query_plan(&conn, crate::db::workflows::LAST_RUN_SUMMARIES_VISIBLE_SQL);
+    assert!(
+        !plan
+            .iter()
+            .any(|line| line.starts_with("SCAN wr") || line.starts_with("SCAN workflow_runs")),
+        "{plan:?}"
+    );
+    // Every read outside an index is the primary-key lookup of the caller's
+    // own run: one row, never a walk.
+    let outside = super::table_reads_outside_index(&plan, &["wr", "workflow_runs"]);
+    assert!(
+        outside
+            .iter()
+            .all(|line| line.contains("sqlite_autoindex_workflow_runs_1 (id=?)")),
+        "{plan:?}"
+    );
+    assert_eq!(
+        plan.iter()
+            .filter(|line| line
+                .contains("COVERING INDEX idx_workflow_runs_project_summary (project_id=?)"))
+            .count(),
+        2,
+        "both the aggregate and the outer read use the covering index: {plan:?}"
+    );
+}
+
+#[test]
 fn table_reads_outside_index_flags_a_payload_walk() {
     // The guard above must be able to fail: a column outside every index.
     let conn = test_db();

@@ -4,7 +4,8 @@
 
 Kronn is in active pre-1.0 development. Security fixes are applied to:
 
-- The **latest minor release** (e.g. `0.8.x` while 0.8 is current).
+- The **latest minor release**: the minor line of the most recent release
+  tag on GitHub, whatever its number.
 - The `main` branch.
 
 Older minor versions do not receive backported fixes. Upgrade to the
@@ -12,8 +13,8 @@ latest tag for security updates.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.8.x   | :white_check_mark: |
-| < 0.8   | :x:                |
+| Latest minor release (newest `x.y.*` tag) | :white_check_mark: |
+| Any older minor release | :x: |
 
 ## Reporting a Vulnerability
 
