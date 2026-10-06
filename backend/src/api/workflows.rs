@@ -769,6 +769,10 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                         s.name
                     ));
             }
+            if let Some(file) = s.sub_workflow_foreach_file.as_deref() {
+                crate::workflows::sub_workflow_step::validate_foreach_file(file)
+                    .map_err(|e| format!("Step SubWorkflow « {} » : {e}", s.name))?;
+            }
         }
         StepType::TriggerWorkflow => {
             if s.sub_workflow_id
@@ -8943,6 +8947,24 @@ mod tests {
         s.prompt_template = String::new();
         s.quick_prompt_id = Some("qp-architect".into());
         validate_required_fields_per_type(&[s]).expect("QP-ref Agent step should validate");
+    }
+
+    #[test]
+    fn sub_workflow_foreach_file_outside_the_worktree_is_refused_on_save() {
+        for bad in ["/etc/hosts", "../tasks.json", "items/../../x.json"] {
+            let mut s = mk_step("fanout", StepType::SubWorkflow);
+            s.sub_workflow_id = Some("child".into());
+            s.sub_workflow_foreach_file = Some(bad.into());
+            let err = validate_required_fields_per_type(&[s]).expect_err(bad);
+            assert!(
+                err.contains("fanout") && err.contains("relative to the worktree"),
+                "{err}"
+            );
+        }
+        let mut s = mk_step("fanout", StepType::SubWorkflow);
+        s.sub_workflow_id = Some("child".into());
+        s.sub_workflow_foreach_file = Some(".kronn/tasks.json".into());
+        validate_required_fields_per_type(&[s]).expect("a relative path is accepted");
     }
 
     #[test]

@@ -94,9 +94,9 @@ export function t(locale: UILocale, key: string, ...args: (string | number)[]): 
   const fallback = loadedDictionaries.fr;
   let str = dict?.[key] ?? fallback?.[key] ?? key;
   for (let i = 0; i < args.length; i++) {
-    // A function replacer: `$&`, `$'` and the like in an argument stay literal.
-    const arg = String(args[i]);
-    str = str.replace(`{${i}}`, () => arg);
+    // split/join replaces every occurrence (plural markers such as `{1}` repeat)
+    // and keeps `$&`, `$'` and the like in an argument literal.
+    str = str.split(`{${i}}`).join(String(args[i]));
   }
   return str;
 }

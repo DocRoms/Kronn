@@ -27,6 +27,12 @@ describe('i18n', () => {
       expect(t('en', 'auditTimeline.cost.unknownReason', "a $& b $' c $` d $$")).toContain("a $& b $' c $` d $$");
     });
 
+    it('replaces every occurrence of a repeated placeholder', () => {
+      expect(t('fr', 'setup.browseSelected', 2, 's')).toBe('2 dossiers sélectionnés');
+      expect(t('es', 'setup.browseSelected', 2, 's')).toBe('2 carpetas seleccionadas');
+      expect(t('fr', 'disc.unseenMessagesTooltip', 3, 's')).toBe('3 messages non lus');
+    });
+
     it('returns French translation by default', () => {
       expect(t('fr', 'nav.projects')).toBe('Projets');
     });

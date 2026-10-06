@@ -518,6 +518,46 @@ mod tests {
     }
 
     #[test]
+    fn every_referencing_column_leads_an_index() {
+        // Each chunk materialises one NOT IN list per column: without an index
+        // that list reads the whole referencing table on the write connection.
+        let conn = db();
+        for (table, column) in REFERENCING_COLUMNS {
+            let indexed: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pragma_index_list(?1) il
+                       JOIN pragma_index_info(il.name) ii
+                      WHERE ii.seqno = 0 AND ii.name = ?2)",
+                    [table, column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(indexed, "{table}.{column} has no index led by it");
+        }
+    }
+
+    #[test]
+    fn a_chunk_reads_no_referencing_table_in_full() {
+        let conn = db();
+        let delete = format!(
+            "SELECT run.id FROM workflow_runs run WHERE {} ORDER BY run.finished_at LIMIT ?2",
+            eligible_runs("run")
+        );
+        for sql in [payload_candidates_sql(), delete] {
+            let plan = crate::db::query_plan(&conn, &sql);
+            for (table, _) in REFERENCING_COLUMNS {
+                let full_reads: Vec<_> = plan
+                    .iter()
+                    .filter(|line| {
+                        line.split_whitespace().nth(1) == Some(table) && !line.contains("INDEX")
+                    })
+                    .collect();
+                assert!(full_reads.is_empty(), "{table}: {full_reads:?}");
+            }
+        }
+    }
+
+    #[test]
     fn every_referencing_column_exists() {
         let conn = db();
         for (table, column) in REFERENCING_COLUMNS {

@@ -274,6 +274,14 @@ jobs:
         run: |
           python3 scripts/ci/test_mcp_surface_budget.py
           python3 scripts/ci/mcp_surface_budget.py
+      - name: Gateway body caps — nginx carries every axum body limit
+        run: |
+          python3 scripts/ci/test_nginx_body_limits.py
+          python3 scripts/ci/nginx_body_limits.py
+      - name: Tech-debt registry — index rows match open detail files
+        run: |
+          python3 scripts/ci/test_tech_debt_registry.py
+          python3 scripts/ci/tech_debt_registry.py
       - name: Release body generator — links match attached installers
         run: python3 scripts/ci/test_release_notes.py
       - name: Agent task matrix — every task still reaches its content
@@ -352,6 +360,28 @@ jobs:
         # `--yes` so npx fetches jscpd non-interactively. Pinned major @4 for
         # reproducibility (output/threshold semantics are stable within v4).
         run: npx --yes jscpd@4 backend/src frontend/src backend/scripts --config .jscpd.json
+
+  # Whitespace errors and conflict markers in Markdown, YAML and other files
+  # no compiler or linter reads. A PR checkout is the merge commit, whose first
+  # parent is the base tip; other triggers compare with the merge base of main.
+  diff-hygiene:
+    if: github.event_name == 'workflow_dispatch' || inputs.ref != '' || contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: git diff --check against the base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            scripts/check-diff.sh HEAD^1
+          else
+            scripts/check-diff.sh
+          fi
 
   # ── Python helper tests ────────────────────────────────────────────────
   # `backend/scripts/disc-introspection-mcp.py` powers the kronn-internal
@@ -810,6 +840,7 @@ jobs:
       - test-backend-quality
       - test-desktop-compile
       - duplication-check
+      - diff-hygiene
       - test-python
       - test-docs-sidecar-windows
       - test-frontend

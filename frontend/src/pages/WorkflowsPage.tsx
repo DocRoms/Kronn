@@ -10,6 +10,7 @@ import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts 
 import type { ExternalApiConnectionView } from '../lib/api';
 import { userError } from '../lib/userError';
 import { useApi } from '../hooks/useApi';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, RunStatus, StepResult, QuickPrompt, CreateQuickPromptRequest,
@@ -976,6 +977,48 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       if (detailSeqRef.current === seq) setLoadingDetail(false);
     }
   };
+
+  // The ref guard stops two synchronous clicks from importing twice;
+  // `disabled={importingSubmit}` alone reads a stale render.
+  const confirmImport = useAsyncGuard(async () => {
+    const current = importing;
+    if (!current?.kind) return;
+    setImportingSubmit(true);
+    try {
+      const projectId = current.targetProjectId || null;
+      if (current.kind === 'workflow') {
+        const imported = await workflowsApi.importWorkflow({ content: current.content, project_id: projectId });
+        if (toastProp) toastProp(t('imp.workflowDone').replace('{name}', current.preview.name), 'success');
+        refetch();
+        setTab('workflows');
+        window.dispatchEvent(new Event('kronn:pages-activated'));
+        void openDetail(imported.id);
+      } else if (current.kind === 'qp') {
+        const imported = await quickPromptsApi.importQp({ content: current.content, project_id: projectId });
+        if (toastProp) toastProp(t('imp.qpDone').replace('{name}', current.preview.name), 'success');
+        refetchQP();
+        setTab('quickPrompts');
+        setSelectedQuickPromptId(imported.id);
+      } else if (current.kind === 'qa') {
+        const imported = await quickApisApi.importQa({ content: current.content, project_id: projectId });
+        if (toastProp) toastProp(t('imp.qaDone').replace('{name}', current.preview.name), 'success');
+        refetchQA();
+        setTab('quickApis');
+        setSelectedQuickApiId(imported.id);
+      } else {
+        const imported = await quickExecsApi.import({ content: current.content, project_id: projectId });
+        if (toastProp) toastProp(t('imp.qeDone').replace('{name}', current.preview.name), 'success');
+        refetchQE();
+        setTab('quickExecs');
+        setSelectedQuickExecId(imported.id);
+      }
+      setImporting(null);
+    } catch (e) {
+      if (toastProp) toastProp(userError(e), 'error');
+    } finally {
+      setImportingSubmit(false);
+    }
+  });
 
   const restoredWorkflowSelection = useRef(false);
   useEffect(() => {
@@ -4585,44 +4628,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   <button
                     className="wf-small-btn wf-small-btn-accent"
                     disabled={importingSubmit}
-                    onClick={async () => {
-                      if (!importing.kind) return;
-                      setImportingSubmit(true);
-                      try {
-                        const projectId = importing.targetProjectId || null;
-                        if (importing.kind === 'workflow') {
-                          const imported = await workflowsApi.importWorkflow({ content: importing.content, project_id: projectId });
-                          if (toastProp) toastProp(t('imp.workflowDone').replace('{name}', importing.preview.name), 'success');
-                          refetch();
-                          setTab('workflows');
-                          window.dispatchEvent(new Event('kronn:pages-activated'));
-                          void openDetail(imported.id);
-                        } else if (importing.kind === 'qp') {
-                          const imported = await quickPromptsApi.importQp({ content: importing.content, project_id: projectId });
-                          if (toastProp) toastProp(t('imp.qpDone').replace('{name}', importing.preview.name), 'success');
-                          refetchQP();
-                          setTab('quickPrompts');
-                          setSelectedQuickPromptId(imported.id);
-                        } else if (importing.kind === 'qa') {
-                          const imported = await quickApisApi.importQa({ content: importing.content, project_id: projectId });
-                          if (toastProp) toastProp(t('imp.qaDone').replace('{name}', importing.preview.name), 'success');
-                          refetchQA();
-                          setTab('quickApis');
-                          setSelectedQuickApiId(imported.id);
-                        } else {
-                          const imported = await quickExecsApi.import({ content: importing.content, project_id: projectId });
-                          if (toastProp) toastProp(t('imp.qeDone').replace('{name}', importing.preview.name), 'success');
-                          refetchQE();
-                          setTab('quickExecs');
-                          setSelectedQuickExecId(imported.id);
-                        }
-                        setImporting(null);
-                      } catch (e) {
-                        if (toastProp) toastProp(userError(e), 'error');
-                      } finally {
-                        setImportingSubmit(false);
-                      }
-                    }}
+                    onClick={() => { void confirmImport(); }}
                   >
                     {importingSubmit ? <Loader2 size={10} className="spin" /> : <Upload size={10} />}
                     {t('imp.confirm')}
