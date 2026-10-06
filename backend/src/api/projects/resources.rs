@@ -2002,7 +2002,11 @@ fn import_document(
                 .map(|stored| crate::api::workflows::kept_lines(&stored.steps, &stored.on_failure))
                 .unwrap_or_default();
             // The file never carries an approval: only one this instance's
-            // human gave to the very same line survives (KT-1017).
+            // human gave to the very same line survives. A repository file is
+            // something an agent can write, so a new or changed line is the
+            // agent's and waits for a human in the editor (KT-1017).
+            crate::api::workflows::drop_foreign_fields(&mut resource.steps);
+            crate::api::workflows::drop_foreign_fields(&mut resource.on_failure);
             let (stored_steps, stored_failure) = stored
                 .map(|stored| (stored.steps, stored.on_failure))
                 .unwrap_or_default();
@@ -2011,12 +2015,12 @@ fn import_document(
             crate::api::workflows::mark_line_writers(
                 &mut resource.steps,
                 &stored_steps,
-                crate::api::workflows::WorkflowWriter::Human,
+                crate::api::workflows::WorkflowWriter::Agent,
             );
             crate::api::workflows::mark_line_writers(
                 &mut resource.on_failure,
                 &stored_failure,
-                crate::api::workflows::WorkflowWriter::Human,
+                crate::api::workflows::WorkflowWriter::Agent,
             );
             crate::api::workflows::validate_workflow_for_import_keeping(&resource, &kept)
                 .map_err(anyhow::Error::msg)?;
@@ -2079,7 +2083,13 @@ fn import_document(
             resource.unmodelled_args_approved = stored_line
                 .as_ref()
                 .and_then(|stored| stored.unmodelled_args_approved);
-            resource.agent_written = stored_line.and_then(|stored| stored.agent_written);
+            resource.agent_written = match stored_line {
+                Some(stored) => stored.agent_written,
+                None => {
+                    crate::api::quick_execs::needs_agent_approval(&resource.command, &resource.args)
+                        .then_some(true)
+                }
+            };
             // Same inline-code rule as the Quick Exec form; a re-import of an
             // unchanged stored line stays possible (still refused at run time).
             let unchanged = match existing_id.as_deref() {
@@ -3506,6 +3516,54 @@ mod tests {
         assert!(exec.unwrap_err().contains("{{ticket}}"));
         same.expect("an unchanged stored line stays importable");
         assert!(changed.unwrap_err().contains("script inline"));
+    }
+
+    /// R6-03: a `kronn/` file is something an agent can write, so a new or
+    /// changed line it brings waits for a human in the editor.
+    #[tokio::test]
+    async fn a_kronn_import_marks_new_lines_as_an_agent_s() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let shape = serde_json::json!([
+            {"name": "plan", "step_type": {"type": "Exec"}, "exec_command": "bash",
+             "exec_args": ["-c", "terraform plan \"$1\"", "_", "{{issue.title}}"],
+             "exec_unmodelled_args_approved": true}
+        ]);
+        let mut document = workflow_document("laundered", shape);
+        document.resource["exec_allowlist"] = serde_json::json!(["bash"]);
+        let exec = crate::core::repository_resources::RepositoryDocument {
+            schema_version: 1,
+            kind: ProjectRepositoryResourceKind::QuickExec,
+            slug: "shape-exec".into(),
+            updated_at: Utc::now(),
+            requires: vec![],
+            resource: {
+                let mut exec = serde_json::to_value(sample_exec("foreign-project")).unwrap();
+                exec["command"] = serde_json::json!("python3");
+                exec["args"] = serde_json::json!(["-c", "import sys; print(sys.argv[1])", "{{x}}"]);
+                exec
+            },
+            redacted_fields: vec![],
+        };
+        let (workflow, quick_exec) = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let workflow_id = import_document(conn, "project-1", &key, &document)?;
+                let exec_id = import_document(conn, "project-1", &key, &exec)?;
+                Ok::<_, anyhow::Error>((
+                    crate::db::workflows::get_workflow(conn, &workflow_id)?.unwrap(),
+                    crate::db::quick_execs::get_quick_exec(conn, &exec_id)?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        let step = &workflow.steps[0];
+        assert_eq!(step.exec_unmodelled_args_approved, None);
+        assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
+        assert!(crate::core::inline_code::runtime_refusal(step).is_some());
+        assert_eq!(quick_exec.agent_written, Some(true));
     }
 
     #[tokio::test]

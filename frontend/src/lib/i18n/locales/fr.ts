@@ -652,6 +652,7 @@ const fr: TranslationDict = {
   'projects.repositoryResources.execution.triggers': 'Déclencheurs',
   'projects.repositoryResources.execution.network': 'Réseau',
   'projects.repositoryResources.execution.steps': 'Étapes',
+  'projects.repositoryResources.execution.exec': "Lignes Exec (une ligne nouvelle ou modifiée attend ton approbation dans l'éditeur)",
   'projects.repositoryResources.execution.agent': 'Agent',
   'projects.repositoryResources.execution.prompt': 'Prompt',
   'projects.repositoryResources.execution.none': 'Aucun',
@@ -4122,6 +4123,7 @@ const fr: TranslationDict = {
   'qa.aiArchitectTitle': 'Architecte de Quick API',
   'qa.aiArchitectPrompt': 'Je veux créer une nouvelle Quick API réutilisable. Vérifie d’abord les doublons via qa_list, retrouve la configuration via mcp_list, teste l’appel avec api_call sans exposer les secrets, puis crée-la avec qa_create_draft quand elle est prête.',
   'wf.aiWorkflowReady': 'Workflow conçu par l\'IA — prêt à être déployé',
+  'wf.aiExecLines': "Lignes Exec écrites par l'agent (toute valeur du run attend ton approbation dans l'éditeur) :",
   'wf.createThisWorkflow': 'Créer ce workflow',
   // 0.8.3 — bundle CTA. {0}=QPs, {1}=QAs, {2}=Custom APIs.
   'wf.aiBundleReady': 'Bundle conçu par l\'IA — prêt à déployer ({0} Quick Prompts · {1} Quick APIs · {2} Custom APIs)',

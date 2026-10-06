@@ -2046,6 +2046,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // See `api::bundle` for the wire shape + ref-resolution
         // protocol (`@bundle:<id>` placeholders).
         .route("/api/workflows/bundle", post(api::bundle::create_bundle))
+        .route(
+            "/api/workflows/bundle/human",
+            post(api::bundle::create_human_bundle),
+        )
+        .route(
+            "/api/workflows/agent-proposal",
+            post(api::workflows::create_agent_proposal),
+        )
         // 0.8.3 — Feasibility-Gated traceability surface. Read-only
         // for now; mutation (override / mark resolved) lands once the
         // frontend Decision-log page does.

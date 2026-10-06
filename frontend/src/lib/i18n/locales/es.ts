@@ -652,6 +652,7 @@ const es: TranslationDict = {
   'projects.repositoryResources.execution.triggers': 'Disparadores',
   'projects.repositoryResources.execution.network': 'Red',
   'projects.repositoryResources.execution.steps': 'Pasos',
+  'projects.repositoryResources.execution.exec': 'Líneas Exec (una nueva o cambiada espera tu aprobación en el editor)',
   'projects.repositoryResources.execution.agent': 'Agente',
   'projects.repositoryResources.execution.prompt': 'Prompt',
   'projects.repositoryResources.execution.none': 'Ninguno',
@@ -4109,6 +4110,7 @@ const es: TranslationDict = {
   'qa.aiArchitectTitle': 'Arquitecto de Quick API',
   'qa.aiArchitectPrompt': 'Quiero crear una nueva Quick API reutilizable. Comprueba primero los duplicados con qa_list, encuentra la configuración con mcp_list, prueba la llamada con api_call sin exponer secretos y créala con qa_create_draft cuando esté lista.',
   'wf.aiWorkflowReady': 'Workflow diseñado por IA — listo para desplegar',
+  'wf.aiExecLines': 'Líneas Exec escritas por el agente (todo valor de la ejecución espera tu aprobación en el editor):',
   // 0.8.3 — bundle CTA. {0}=QPs, {1}=QAs, {2}=Custom APIs.
   'wf.aiBundleReady': 'Bundle diseñado por IA — listo para desplegar ({0} Quick Prompts · {1} Quick APIs · {2} Custom APIs)',
   // 0.8.3 — bundle button. {0}=total extras (QPs+QAs+CustomAPIs).

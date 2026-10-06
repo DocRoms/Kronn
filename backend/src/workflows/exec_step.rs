@@ -335,7 +335,7 @@ async fn execute_exec_step_inner(
         raw_command,
         &step.exec_args,
         &rendered_args,
-        crate::core::inline_code::step_trust(step),
+        crate::core::inline_code::line_trust(step, "main"),
     ) {
         return fail(step, start, refusal);
     }
@@ -416,7 +416,7 @@ async fn execute_exec_step_inner(
             setup_cmd,
             &step.exec_setup_args,
             &setup_args,
-            crate::core::inline_code::step_trust(step),
+            crate::core::inline_code::line_trust(step, "setup"),
         ) {
             return fail(step, start, format!("{refusal} (setup)"));
         }
@@ -542,7 +542,12 @@ async fn execute_exec_step_inner(
 
     // A script shape is trusted for its script path: it must name a regular
     // file, never a device or a link to one (`tool.py -> /dev/stdin`).
-    if let Some(script) = crate::core::inline_code::trusted_script(raw_command, &step.exec_args) {
+    let stdin_script = step.exec_stdin.as_deref().and_then(|stdin| {
+        crate::core::inline_code::stdin_fed_script(raw_command, &step.exec_args, stdin)
+    });
+    if let Some(script) =
+        crate::core::inline_code::trusted_script(raw_command, &step.exec_args).or(stdin_script)
+    {
         let base = approved_copy.as_deref().unwrap_or(Path::new(work_dir));
         let regular = std::fs::canonicalize(base.join(&script)).is_ok_and(|real| {
             real.is_file() && !real.starts_with("/dev") && !real.starts_with("/proc")
@@ -994,6 +999,7 @@ mod tests {
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -1529,6 +1535,38 @@ mod tests {
         step.exec_stdin = Some("print('stdin ran')".into());
         let mut ctx = TemplateContext::new();
         ctx.set("x", "a");
+        let outcome = execute_exec_step(
+            &step,
+            &["python3".into()],
+            &dir.path().to_string_lossy(),
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Failed,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("fichier ordinaire"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    /// R6-08: an approved line whose stdin feeds a script runs only a regular
+    /// file, never a link to stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_approved_stdin_fed_script_linked_to_stdin_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/stdin", dir.path().join("x.py")).unwrap();
+        let mut step = exec_step("linked", Some("python3"), vec!["-X", "dev", "x.py"], None);
+        step.exec_unmodelled_args_approved = Some(true);
+        step.exec_stdin = Some("{{x}}".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set("x", "print('stdin ran')");
         let outcome = execute_exec_step(
             &step,
             &["python3".into()],

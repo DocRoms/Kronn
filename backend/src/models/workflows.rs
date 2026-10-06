@@ -667,6 +667,12 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub exec_agent_written: Option<bool>,
+    /// KT-1017 — which of the step's lines an agent last wrote: `main`,
+    /// `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human
+    /// edit re-attributes only the line it changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub exec_agent_lines: Vec<String>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro
@@ -2289,6 +2295,10 @@ pub struct ExecLineCheckRequest {
     /// An agent last wrote these lines: any value needs the approval.
     #[serde(default)]
     pub agent_written: bool,
+    /// The step's pinned scripts (`exec_script_files` paths): a script shape
+    /// on one of them needs no approval.
+    #[serde(default)]
+    pub declared_scripts: Vec<String>,
 }
 
 /// What the editors need to know about one command line.

@@ -1253,7 +1253,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           // Decomposed preset: create children first (they inherit the
           // parent's project_id server-side), then the parent whose
           // `sub_workflow_id: "@bundle:<id>"` is substituted. Atomic.
-          await workflowsApi.createBundle({
+          await workflowsApi.createHumanBundle({
             quick_prompts: [],
             quick_apis: [],
             custom_apis: [],
@@ -2759,6 +2759,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           setupCommand={step.exec_setup_command ?? undefined}
                           setupArgs={step.exec_setup_args ?? []}
                           agentWritten={step.exec_agent_written === true}
+                          declaredScripts={(step.exec_script_files ?? []).map(file => file.path)}
                           approved={step.exec_unmodelled_args_approved === true}
                           onChange={approved => updateStep(i, { exec_unmodelled_args_approved: approved || undefined })}
                         />

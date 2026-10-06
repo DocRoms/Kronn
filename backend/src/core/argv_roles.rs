@@ -219,11 +219,16 @@ pub fn is_stdin_path(path: &str) -> bool {
     if path == "-" {
         return true;
     }
+    let device = |normal: &str| {
+        normal == "/dev"
+            || normal.starts_with("/dev/")
+            || normal == "/proc"
+            || normal.starts_with("/proc/")
+    };
     let normal = normalize_path(path);
-    normal == "/dev"
-        || normal.starts_with("/dev/")
-        || normal == "/proc"
-        || normal.starts_with("/proc/")
+    // A relative path climbing past the work dir ends at `/` from any cwd
+    // (`../../../../dev/stdin`): judge it re-rooted there.
+    device(&normal) || (normal.starts_with("../") && device(&normalize_path(&format!("/{path}"))))
 }
 
 /// `path` with `//`, `.` and `..` resolved lexically (relative paths stay
@@ -379,10 +384,7 @@ fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
         }
         if arg == "--" {
             options_end = true;
-        } else if name == "date"
-            && matches!(arg, "-f" | "-r" | "-s" | "--file" | "--reference" | "--set")
-            && i + 1 < args.len()
-        {
+        } else if name == "date" && date_reads_a_file_or_sets(arg) && i + 1 < args.len() {
             if is_tainted(tainted, i + 1) {
                 roles[i + 1] = Role::Unmodelled;
             }
@@ -391,6 +393,21 @@ fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
         i += 1;
     }
     roles
+}
+
+/// Whether a literal `date` option takes the next argument as a file to read
+/// or a date to set: `-f`/`-r`/`-s`, also inside a cluster (`-uf`), and any
+/// unambiguous abbreviation of `--file`, `--reference`, `--set` (GNU getopt).
+fn date_reads_a_file_or_sets(arg: &str) -> bool {
+    if let Some(name) = arg.strip_prefix("--") {
+        return !name.contains('=')
+            && !name.is_empty()
+            && ["file", "reference", "set"]
+                .iter()
+                .any(|option| option.starts_with(name));
+    }
+    arg.strip_prefix('-')
+        .is_some_and(|cluster| cluster.chars().any(|c| matches!(c, 'f' | 'r' | 's')))
 }
 
 /// Whether a templated option of a data-only program keeps its value

@@ -736,20 +736,29 @@ fn inline_code_error(
 /// An approval the line does not need is dropped, so it never covers what
 /// the line becomes later (KT-1017).
 fn drop_stale_approval(request: &mut CreateQuickExecRequest, agent_written: Option<bool>) {
-    if request.unmodelled_args_approved == Some(true) {
-        let unapproved = CreateQuickExecRequest {
-            unmodelled_args_approved: None,
-            ..request.clone()
-        };
-        if inline_code_error(&unapproved, agent_written).is_none() {
-            request.unmodelled_args_approved = None;
-        }
+    // The need is read from the classifier, not the save-time refusal, which
+    // lets an agent's waiting line through and would call its approval stale.
+    let needed = matches!(
+        crate::core::inline_code::first_unsafe_placeholder_with(
+            request.command.trim(),
+            &request.args,
+            crate::core::argv_roles::Trust {
+                agent_written: agent_written == Some(true),
+                ..Default::default()
+            },
+        ),
+        Some(crate::core::inline_code::InlineFinding::UnmodelledProgram(
+            ..
+        ))
+    );
+    if !needed {
+        request.unmodelled_args_approved = None;
     }
 }
 
 /// Whether a line, written by an agent, would wait for a human's approval:
 /// only such a line carries the agent's mark (KT-1017).
-fn needs_agent_approval(command: &str, args: &[String]) -> bool {
+pub(crate) fn needs_agent_approval(command: &str, args: &[String]) -> bool {
     matches!(
         crate::core::inline_code::first_unsafe_placeholder_with(
             command.trim(),
@@ -984,6 +993,49 @@ mod tests {
         let human = create_as(state.clone(), shape, false).await.0;
         assert!(human.success, "{:?}", human.error);
         assert_eq!(human.data.unwrap().agent_written, None);
+    }
+
+    /// R6-07: a human approves an agent-written Quick Exec; the line stays
+    /// the agent's and runs.
+    #[tokio::test]
+    async fn a_human_approves_an_agent_written_quick_exec() {
+        let state = state();
+        let mut line = request("aws");
+        line.args = vec!["s3".into(), "ls".into(), "{{bucket}}".into()];
+        let created = create_as(state.clone(), line.clone(), true)
+            .await
+            .0
+            .data
+            .unwrap();
+        assert_eq!(created.agent_written, Some(true));
+        line.unmodelled_args_approved = Some(true);
+        let approved = update_as(state.clone(), created.id.clone(), line, false)
+            .await
+            .0;
+        assert!(approved.success, "{:?}", approved.error);
+        assert!(approved.notice.is_none());
+        let stored = state
+            .db
+            .with_conn(move |conn| crate::db::quick_execs::get_quick_exec(conn, &created.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.unmodelled_args_approved, Some(true));
+        assert_eq!(
+            stored.agent_written,
+            Some(true),
+            "the line is still the agent's"
+        );
+        let step = WorkflowStep {
+            name: stored.name.clone(),
+            step_type: StepType::Exec,
+            exec_command: Some(stored.command.clone()),
+            exec_args: stored.args.clone(),
+            exec_unmodelled_args_approved: stored.unmodelled_args_approved,
+            exec_agent_written: stored.agent_written,
+            ..Default::default()
+        };
+        assert_eq!(crate::core::inline_code::runtime_refusal(&step), None);
     }
 
     fn state() -> crate::AppState {

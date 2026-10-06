@@ -16,6 +16,8 @@ interface UnmodelledApprovalProps {
   setupArgs?: string[];
   /** An agent last wrote these lines: any value needs the approval. */
   agentWritten?: boolean;
+  /** The step's pinned scripts: a script shape on one needs no approval. */
+  declaredScripts?: string[];
   /** Drop a stored approval this line does not need. Off when the step's
    *  approval also covers other lines (CollectApiData sources). */
   clearStale?: boolean;
@@ -24,11 +26,13 @@ interface UnmodelledApprovalProps {
 }
 
 export function UnmodelledApproval({
-  command, args, stdin, setupCommand, setupArgs, agentWritten, clearStale = true, approved, onChange,
+  command, args, stdin, setupCommand, setupArgs, agentWritten, declaredScripts, clearStale = true, approved, onChange,
 }: UnmodelledApprovalProps) {
   const { t } = useT();
   const [covered, setCovered] = useState<string[]>([]);
-  const key = JSON.stringify([command, args, stdin ?? null, setupCommand ?? null, setupArgs ?? [], !!agentWritten]);
+  const key = JSON.stringify([
+    command, args, stdin ?? null, setupCommand ?? null, setupArgs ?? [], !!agentWritten, declaredScripts ?? [],
+  ]);
 
   useEffect(() => {
     if (!command.trim()) {
@@ -44,6 +48,7 @@ export function UnmodelledApproval({
           ...(stdin ? { stdin } : {}),
           ...(setupCommand ? { setup_command: setupCommand, setup_args: setupArgs ?? [] } : {}),
           ...(agentWritten ? { agent_written: true } : {}),
+          ...(declaredScripts && declaredScripts.length > 0 ? { declared_scripts: declaredScripts } : {}),
         }))
         .then(check => {
           if (cancelled) return;

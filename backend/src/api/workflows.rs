@@ -1274,7 +1274,10 @@ fn validate_exec_steps_keeping(
                             &format!("{} » / source « {}", s.name, source.alias),
                             cmd,
                             &exec.args,
-                            crate::core::inline_code::step_trust(s),
+                            crate::core::inline_code::line_trust(
+                                s,
+                                &crate::core::inline_code::source_line_key(&source.alias),
+                            ),
                         ) {
                             return Err(error);
                         }
@@ -1342,7 +1345,7 @@ fn validate_exec_steps_keeping(
                     cmd,
                     &s.exec_args,
                     stdin,
-                    crate::core::inline_code::step_trust(s),
+                    crate::core::inline_code::line_trust(s, "stdin"),
                 ) {
                     return Err(error);
                 }
@@ -1353,7 +1356,7 @@ fn validate_exec_steps_keeping(
                 &s.name,
                 cmd,
                 &s.exec_args,
-                crate::core::inline_code::step_trust(s),
+                crate::core::inline_code::line_trust(s, "main"),
             ) {
                 return Err(error);
             }
@@ -1417,7 +1420,7 @@ fn validate_exec_steps_keeping(
                     &s.name,
                     setup_cmd,
                     &s.exec_setup_args,
-                    crate::core::inline_code::step_trust(s),
+                    crate::core::inline_code::line_trust(s, "setup"),
                 ) {
                     return Err(format!("{error} (setup)"));
                 }
@@ -1465,13 +1468,15 @@ async fn carrying_repository_root(
 }
 
 /// Save-time check of declared repository scripts: each file exists inside the
-/// carrying repository with no escaping symlink, and an empty hash is pinned
-/// to the current content when a human saves (KT-918).
+/// carrying repository with no escaping symlink (KT-918). An empty hash is
+/// pinned only by a human's save of that very step (its lines changed, or its
+/// approval given now); an agent never supplies a hash, so one that differs
+/// from the stored step's is blanked and waits for a human (KT-1017).
 async fn pin_exec_script_files(
     state: &AppState,
     project_id: Option<String>,
-    steps: &mut [WorkflowStep],
-    on_failure: &mut [WorkflowStep],
+    (steps, stored_steps): (&mut [WorkflowStep], &[WorkflowStep]),
+    (on_failure, stored_failure): (&mut [WorkflowStep], &[WorkflowStep]),
     writer: WorkflowWriter,
 ) -> Result<(), String> {
     let Some(first) = steps
@@ -1487,16 +1492,44 @@ async fn pin_exec_script_files(
             "Step Exec « {first} » : repository scripts need a project; attach the workflow to the project whose repository carries them."
         ));
     };
-    for step in steps.iter_mut().chain(on_failure.iter_mut()) {
-        if step.exec_script_files.is_empty() {
-            continue;
+    let chains = [(steps, stored_steps), (on_failure, stored_failure)];
+    for (chain, stored) in chains {
+        for step in chain.iter_mut() {
+            if step.exec_script_files.is_empty() {
+                continue;
+            }
+            let known = stored.iter().find(|known| known.name == step.name);
+            let checked = if writer == WorkflowWriter::Human {
+                let own_save = known.is_none_or(|known| {
+                    line_identities(known) != line_identities(step)
+                        || (known.exec_unmodelled_args_approved != Some(true)
+                            && step.exec_unmodelled_args_approved == Some(true))
+                });
+                if own_save {
+                    crate::core::approved_scripts::validate_and_pin(
+                        &root,
+                        &mut step.exec_script_files,
+                    )
+                } else {
+                    crate::core::approved_scripts::validate_files(&root, &step.exec_script_files)
+                }
+            } else {
+                for file in &mut step.exec_script_files {
+                    let stored_hash = known.and_then(|known| {
+                        known
+                            .exec_script_files
+                            .iter()
+                            .find(|stored| stored.path == file.path)
+                            .map(|stored| stored.sha256.as_str())
+                    });
+                    if stored_hash != Some(file.sha256.as_str()) {
+                        file.sha256.clear();
+                    }
+                }
+                crate::core::approved_scripts::validate_files(&root, &step.exec_script_files)
+            };
+            checked.map_err(|error| format!("Step Exec « {} » : {error}", step.name))?;
         }
-        let checked = if writer == WorkflowWriter::Human {
-            crate::core::approved_scripts::validate_and_pin(&root, &mut step.exec_script_files)
-        } else {
-            crate::core::approved_scripts::validate_files(&root, &step.exec_script_files)
-        };
-        checked.map_err(|error| format!("Step Exec « {} » : {error}", step.name))?;
     }
     Ok(())
 }
@@ -1520,6 +1553,14 @@ pub async fn exec_line_check(
             .filter(|command| !command.is_empty()),
         exec_setup_args: req.setup_args,
         exec_stdin: req.stdin,
+        exec_script_files: req
+            .declared_scripts
+            .into_iter()
+            .map(|path| ExecScriptFile {
+                path,
+                sha256: String::new(),
+            })
+            .collect(),
         exec_agent_written: req.agent_written.then_some(true),
         ..WorkflowStep::default()
     };
@@ -1832,16 +1873,79 @@ pub(crate) fn clear_human_approvals(steps: &mut [WorkflowStep]) {
     }
 }
 
-/// The command lines of a step: what a human approved, or who wrote.
-fn exec_lines(step: &WorkflowStep) -> impl PartialEq {
-    (
-        step.exec_command.clone(),
-        step.exec_args.clone(),
-        step.exec_setup_command.clone(),
-        step.exec_setup_args.clone(),
-        step.exec_stdin.clone(),
-        serde_json::to_value(&step.collect_api_data).unwrap_or_default(),
-    )
+/// Each command line of a step with its identity, the unit a writer is
+/// tracked by: `main`, `setup`, `stdin` and every CollectApiData source. The
+/// identity carries the step type and the pinned scripts, so flipping the type
+/// or re-pinning a script is a change of the line.
+pub(crate) fn line_identities(step: &WorkflowStep) -> Vec<(String, serde_json::Value)> {
+    let step_type = serde_json::to_value(&step.step_type).unwrap_or_default();
+    let scripts = serde_json::to_value(&step.exec_script_files).unwrap_or_default();
+    let mut lines = Vec::new();
+    if step
+        .exec_command
+        .as_deref()
+        .is_some_and(|c| !c.trim().is_empty())
+    {
+        lines.push((
+            "main".to_string(),
+            serde_json::json!([step_type, step.exec_command, step.exec_args, scripts]),
+        ));
+    }
+    if step
+        .exec_setup_command
+        .as_deref()
+        .is_some_and(|c| !c.trim().is_empty())
+    {
+        lines.push((
+            "setup".to_string(),
+            serde_json::json!([
+                step_type,
+                step.exec_setup_command,
+                step.exec_setup_args,
+                scripts
+            ]),
+        ));
+    }
+    if step.exec_stdin.is_some() {
+        lines.push((
+            "stdin".to_string(),
+            serde_json::json!([
+                step_type,
+                step.exec_command,
+                step.exec_args,
+                step.exec_stdin
+            ]),
+        ));
+    }
+    for source in step
+        .collect_api_data
+        .iter()
+        .flat_map(|config| &config.sources)
+    {
+        lines.push((
+            crate::core::inline_code::source_line_key(&source.alias),
+            serde_json::json!([step_type, source]),
+        ));
+    }
+    lines
+}
+
+/// A step's fields that its type never reads are dropped, so they cannot be
+/// approved unseen and come alive when the type changes.
+pub(crate) fn drop_foreign_fields(steps: &mut [WorkflowStep]) {
+    for step in steps {
+        if !matches!(step.step_type, StepType::Exec) {
+            step.exec_command = None;
+            step.exec_args.clear();
+            step.exec_setup_command = None;
+            step.exec_setup_args.clear();
+            step.exec_stdin = None;
+            step.exec_script_files.clear();
+        }
+        if !matches!(step.step_type, StepType::CollectApiData) {
+            step.collect_api_data = None;
+        }
+    }
 }
 
 /// An agent's save keeps a stored approval only on a step whose command
@@ -1850,38 +1954,57 @@ pub(crate) fn keep_human_approvals(steps: &mut [WorkflowStep], stored: &[Workflo
     for step in steps {
         step.exec_unmodelled_args_approved = stored
             .iter()
-            .find(|known| known.name == step.name && exec_lines(known) == exec_lines(step))
+            .find(|known| {
+                known.name == step.name && line_identities(known) == line_identities(step)
+            })
             .and_then(|known| known.exec_unmodelled_args_approved)
             .filter(|approved| *approved);
     }
 }
 
-/// Who last wrote each step's command lines (KT-1017): unchanged lines keep
-/// their writer, changed or new ones take this save's. Never read from the
-/// request: a line an agent wrote needs a human's approval for any value.
+/// Who last wrote each command line (KT-1017): an unchanged line keeps its
+/// writer, a changed or new one takes this save's, so a human edit
+/// re-attributes only the line it changed. Never read from the request. Only
+/// an agent's line whose values then need a human carries the mark.
 pub(crate) fn mark_line_writers(
     steps: &mut [WorkflowStep],
     stored: &[WorkflowStep],
     writer: WorkflowWriter,
 ) {
-    for step in steps {
-        step.exec_agent_written = match stored
-            .iter()
-            .find(|known| known.name == step.name && exec_lines(known) == exec_lines(step))
-        {
-            Some(known) => known.exec_agent_written,
-            // Only a line whose values then need a human carries the mark.
-            None if writer == WorkflowWriter::Agent => {
-                let mut probe = step.clone();
-                probe.exec_agent_written = Some(true);
-                probe.exec_unmodelled_args_approved = None;
-                crate::core::inline_code::classify_step(&probe, false)
-                    .iter()
-                    .any(|line| line.reason == "unmodelled_program")
-                    .then_some(true)
+    for step in steps.iter_mut() {
+        let known = stored.iter().find(|known| known.name == step.name);
+        let known_lines = known.map(line_identities).unwrap_or_default();
+        let mut probe = step.clone();
+        probe.exec_unmodelled_args_approved = None;
+        probe.exec_agent_lines = line_identities(step)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        probe.exec_agent_written = Some(true);
+        let waiting: Vec<String> = crate::core::inline_code::classify_step(&probe, false)
+            .into_iter()
+            .filter(|line| line.reason == "unmodelled_program")
+            .map(|line| match line.source_alias {
+                Some(alias) => crate::core::inline_code::source_line_key(&alias),
+                None => line.phase,
+            })
+            .collect();
+        let mut agent_lines = Vec::new();
+        for (key, identity) in line_identities(step) {
+            let unchanged = known_lines.iter().any(|(known_key, known_identity)| {
+                *known_key == key && *known_identity == identity
+            });
+            let agent = if unchanged {
+                known.is_some_and(|known| crate::core::inline_code::agent_wrote_line(known, &key))
+            } else {
+                writer == WorkflowWriter::Agent && waiting.contains(&key)
+            };
+            if agent {
+                agent_lines.push(key);
             }
-            None => None,
-        };
+        }
+        step.exec_agent_written = (!agent_lines.is_empty()).then_some(true);
+        step.exec_agent_lines = agent_lines;
     }
 }
 
@@ -1893,7 +2016,7 @@ pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
         .iter()
         .chain(&wf.on_failure)
         .filter(|step| {
-            step.exec_agent_written == Some(true)
+            !step.exec_agent_lines.is_empty()
                 && crate::core::inline_code::classify_step(step, false)
                     .iter()
                     .any(|line| line.agent_written && line.reason == "unmodelled_program")
@@ -1953,6 +2076,16 @@ pub async fn create(
     create_as(state, req, WorkflowWriter::from_bridge(&bridge)).await
 }
 
+/// `POST /api/workflows/agent-proposal` — an agent's `KRONN:WORKFLOW_READY`
+/// proposal accepted by a human click: an agent save (KT-1017), so any run
+/// value waits for a human's approval in the editor.
+pub async fn create_agent_proposal(
+    State(state): State<AppState>,
+    Json(req): Json<CreateWorkflowRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    create_as(state, req, WorkflowWriter::Agent).await
+}
+
 pub(crate) async fn create_as(
     state: AppState,
     req: CreateWorkflowRequest,
@@ -1971,6 +2104,8 @@ async fn create_written(
         clear_human_approvals(&mut req.steps);
         clear_human_approvals(&mut req.on_failure);
     }
+    drop_foreign_fields(&mut req.steps);
+    drop_foreign_fields(&mut req.on_failure);
     mark_line_writers(&mut req.steps, &[], writer);
     mark_line_writers(&mut req.on_failure, &[], writer);
     clear_stale_approvals(&mut req.steps);
@@ -2110,8 +2245,8 @@ async fn create_written(
     if let Err(e) = pin_exec_script_files(
         &state,
         req.project_id.clone(),
-        &mut steps,
-        &mut on_failure,
+        (&mut steps, &[]),
+        (&mut on_failure, &[]),
         writer,
     )
     .await
@@ -2306,6 +2441,12 @@ async fn update_written(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if let Some(steps) = req.steps.as_mut() {
+        drop_foreign_fields(steps);
+    }
+    if let Some(on_failure) = req.on_failure.as_mut() {
+        drop_foreign_fields(on_failure);
+    }
     if writer == WorkflowWriter::Agent {
         if let Some(steps) = req.steps.as_mut() {
             keep_human_approvals(steps, &existing.steps);
@@ -2471,8 +2612,14 @@ async fn update_written(
             .project_id
             .clone()
             .unwrap_or_else(|| existing.project_id.clone());
-        if let Err(e) =
-            pin_exec_script_files(&state, project_id, &mut steps, &mut on_failure, writer).await
+        if let Err(e) = pin_exec_script_files(
+            &state,
+            project_id,
+            (&mut steps, &existing.steps),
+            (&mut on_failure, &existing.on_failure),
+            writer,
+        )
+        .await
         {
             return Json(ApiResponse::err(e));
         }
@@ -3171,6 +3318,8 @@ async fn import_workflow_written(
     for w in &mut all_wfs {
         clear_human_approvals(&mut w.steps);
         clear_human_approvals(&mut w.on_failure);
+        drop_foreign_fields(&mut w.steps);
+        drop_foreign_fields(&mut w.on_failure);
         mark_line_writers(&mut w.steps, &[], writer);
         mark_line_writers(&mut w.on_failure, &[], writer);
     }
@@ -5640,6 +5789,7 @@ pub async fn suggestions(
                     exec_script_files: vec![],
                     exec_unmodelled_args_approved: None,
                     exec_agent_written: None,
+                    exec_agent_lines: vec![],
                     sub_workflow_variables: std::collections::HashMap::new(),
                 })
                 .collect(),
@@ -6583,6 +6733,7 @@ mod tests {
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -6859,6 +7010,211 @@ mod tests {
             crate::core::config::default_config(),
         ));
         AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn exec_request(steps: serde_json::Value) -> CreateWorkflowRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "r6", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["bash", "terraform", "aws", "python3"], "steps": steps
+        }))
+        .unwrap()
+    }
+
+    /// R6-01: a `KRONN:WORKFLOW_READY` proposal accepted by a click is an
+    /// agent save: no approval survives and every line with values waits.
+    #[tokio::test]
+    async fn a_chat_proposal_creates_agent_written_lines() {
+        let state = agent_state();
+        for args in [
+            serde_json::json!(["plan", "{{x}}"]),
+            serde_json::json!(["-c", "terraform plan \"$1\"", "_", "{{x}}"]),
+        ] {
+            let command = if args[0] == "plan" {
+                "terraform"
+            } else {
+                "bash"
+            };
+            let request = exec_request(serde_json::json!([{
+                "name": "plan", "step_type": {"type": "Exec"}, "exec_command": command,
+                "exec_args": args, "exec_unmodelled_args_approved": true, "exec_agent_written": null
+            }]));
+            let Json(saved) = create_agent_proposal(State(state.clone()), Json(request)).await;
+            assert!(saved.success, "{:?}", saved.error);
+            let step = &saved.data.unwrap().steps[0];
+            assert_eq!(step.exec_unmodelled_args_approved, None, "{command}");
+            assert_eq!(step.exec_agent_lines, vec!["main".to_string()], "{command}");
+            assert!(crate::core::inline_code::runtime_refusal(step).is_some());
+        }
+    }
+
+    /// R6-04/05/06/14: a human edit re-attributes only the line it changed;
+    /// an agent edit of any line, its pinned scripts or the step type drops
+    /// the approval and re-marks that line.
+    #[tokio::test]
+    async fn line_writers_follow_each_line_and_its_identity() {
+        let state = agent_state();
+        let line = || {
+            serde_json::json!({
+                "name": "plan", "step_type": {"type": "Exec"}, "exec_command": "bash",
+                "exec_args": ["-c", "terraform plan \"$1\"", "_", "{{x}}"],
+                "exec_setup_command": "aws", "exec_setup_args": ["s3", "ls"],
+                "exec_stdin": "fixed"
+            })
+        };
+        let Json(created) = create_as(
+            state.clone(),
+            exec_request(serde_json::json!([line()])),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        let saved = created.data.unwrap();
+        assert_eq!(saved.steps[0].exec_agent_lines, vec!["main".to_string()]);
+
+        // A human edits only the setup: the agent's main line still waits.
+        let mut human = saved.steps.clone();
+        human[0].exec_setup_args = vec!["s3".into(), "ls".into(), "bucket".into()];
+        let Json(edited) = update_as(
+            state.clone(),
+            saved.id.clone(),
+            serde_json::from_value(serde_json::json!({"steps": human})).unwrap(),
+            WorkflowWriter::Human,
+        )
+        .await;
+        let step = edited.data.unwrap().steps[0].clone();
+        assert_eq!(step.exec_agent_lines, vec!["main".to_string()]);
+        assert!(crate::core::inline_code::runtime_refusal(&step).is_some());
+
+        // Approved by a human, then an agent touches one other line each time.
+        let mut approved = vec![step.clone()];
+        approved[0].exec_unmodelled_args_approved = Some(true);
+        let Json(ok) = update_as(
+            state.clone(),
+            saved.id.clone(),
+            serde_json::from_value(serde_json::json!({"steps": approved})).unwrap(),
+            WorkflowWriter::Human,
+        )
+        .await;
+        let approved_step = ok.data.unwrap().steps[0].clone();
+        assert_eq!(approved_step.exec_unmodelled_args_approved, Some(true));
+        type Edit = Box<dyn Fn(&mut WorkflowStep)>;
+        let edits: Vec<Edit> = vec![
+            Box::new(|s| s.exec_setup_args = vec!["s3".into(), "rm".into()]),
+            Box::new(|s| s.exec_stdin = Some("{{y}}".into())),
+            Box::new(|s| {
+                s.exec_script_files = vec![ExecScriptFile {
+                    path: "tool.py".into(),
+                    sha256: "a".repeat(64),
+                }]
+            }),
+        ];
+        for edit in edits {
+            let mut steps = vec![approved_step.clone()];
+            edit(&mut steps[0]);
+            let mut kept = steps.clone();
+            keep_human_approvals(&mut kept, std::slice::from_ref(&approved_step));
+            assert_eq!(
+                kept[0].exec_unmodelled_args_approved, None,
+                "approval dropped"
+            );
+        }
+        // The step type is part of every line's identity.
+        let mut flipped = approved_step.clone();
+        flipped.step_type = StepType::CollectApiData;
+        assert_ne!(line_identities(&flipped), line_identities(&approved_step));
+        let mut foreign = vec![flipped];
+        drop_foreign_fields(&mut foreign);
+        assert!(foreign[0].exec_command.is_none() && foreign[0].exec_stdin.is_none());
+        let mut exec_with_source = approved_step.clone();
+        exec_with_source.collect_api_data = Some(serde_json::from_value(serde_json::json!({
+            "sources": [{"alias": "hidden", "quick_exec": {"command": "terraform", "args": ["apply", "{{x}}"]}}]
+        })).unwrap());
+        let mut cleaned = vec![exec_with_source];
+        drop_foreign_fields(&mut cleaned);
+        assert!(cleaned[0].collect_api_data.is_none());
+    }
+
+    /// R6-04: an agent never supplies a script hash, and a human's save of
+    /// one step never pins another step's empty hash.
+    #[tokio::test]
+    async fn script_hashes_are_pinned_only_by_a_human_save_of_that_step() {
+        let state = agent_state();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("tool.py"), "print(1)\n").unwrap();
+        let path = root.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'P', ?1, datetime('now'), datetime('now'))",
+                    [path],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let step = |name: &str, hash: &str| {
+            let mut step = mk_exec_step(name, Some("python3"), vec!["tool.py", "{{x}}"], None);
+            step.exec_script_files = vec![ExecScriptFile {
+                path: "tool.py".into(),
+                sha256: hash.into(),
+            }];
+            step
+        };
+        let mut agent = vec![step("a", &"f".repeat(64))];
+        pin_exec_script_files(
+            &state,
+            Some("p1".into()),
+            (&mut agent, &[]),
+            (&mut [], &[]),
+            WorkflowWriter::Agent,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            agent[0].exec_script_files[0].sha256, "",
+            "an agent's hash is never taken"
+        );
+
+        let stored = vec![step("a", ""), step("b", "")];
+        let mut human = stored.clone();
+        human[1].exec_args = vec!["tool.py".into(), "{{y}}".into()];
+        pin_exec_script_files(
+            &state,
+            Some("p1".into()),
+            (&mut human, &stored),
+            (&mut [], &[]),
+            WorkflowWriter::Human,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            human[0].exec_script_files[0].sha256, "",
+            "step a was not saved by the human"
+        );
+        assert_eq!(human[1].exec_script_files[0].sha256.len(), 64, "step b was");
+    }
+
+    /// R6-13: the line check knows the step's pinned scripts.
+    #[tokio::test]
+    async fn the_line_check_trusts_a_pinned_script_shape() {
+        let check = |declared: Vec<String>| ExecLineCheckRequest {
+            command: "python3".into(),
+            args: vec!["tool.py".into(), "{{x}}".into()],
+            stdin: None,
+            setup_command: None,
+            setup_args: vec![],
+            agent_written: false,
+            declared_scripts: declared,
+        };
+        let pinned = exec_line_check(Json(check(vec!["tool.py".into()])))
+            .await
+            .0
+            .data
+            .unwrap();
+        assert!(pinned.covered.is_empty());
+        let unpinned = exec_line_check(Json(check(vec![]))).await.0.data.unwrap();
+        assert_eq!(unpinned.covered, vec!["main: python3"]);
     }
 
     /// An agent's Exec line with run values is saved, marked and named in the
@@ -7141,6 +7497,7 @@ mod tests {
                     .map(|(_, args)| args.into_iter().map(String::from).collect())
                     .unwrap_or_default(),
                 agent_written: agent,
+                declared_scripts: vec![],
             };
             async move { exec_line_check(Json(req)).await.0.data.unwrap().covered }
         };
@@ -7161,6 +7518,7 @@ mod tests {
             setup_command: None,
             setup_args: vec![],
             agent_written: false,
+            declared_scripts: vec![],
         };
         assert!(exec_line_check(Json(human_shape))
             .await
@@ -7181,6 +7539,7 @@ mod tests {
             setup_command: None,
             setup_args: vec![],
             agent_written: true,
+            declared_scripts: vec![],
         };
         assert_eq!(
             exec_line_check(Json(agent_shape))
@@ -7204,6 +7563,7 @@ mod tests {
                 setup_command: None,
                 setup_args: vec![],
                 agent_written: false,
+                declared_scripts: vec![],
             };
             async move {
                 exec_line_check(Json(req))

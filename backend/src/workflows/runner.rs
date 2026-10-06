@@ -4324,6 +4324,7 @@ mod tests {
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }
@@ -4672,6 +4673,7 @@ mod tests {
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
+            exec_agent_lines: vec![],
             sub_workflow_variables: std::collections::HashMap::new(),
         }
     }

@@ -1673,6 +1673,13 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .filter(|p| !p.is_builtin)
         .collect();
 
+    let trust_seal = state
+        .config
+        .read()
+        .await
+        .encryption_secret
+        .as_deref()
+        .map(|secret| approvals_seal(secret, &workflows, &quick_execs));
     Ok(DbExport {
         version: crate::models::db::CURRENT_EXPORT_VERSION,
         exported_at: Utc::now(),
@@ -1687,11 +1694,85 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         contacts,
         quick_prompts,
         quick_apis,
+        trust_seal,
         quick_execs,
         learnings,
         quick_prompt_versions,
         learning_rejections,
     })
+}
+
+/// HMAC-SHA256 (RFC 2104).
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let pad = |byte: u8| block.iter().map(|b| b ^ byte).collect::<Vec<u8>>();
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .into()
+}
+
+/// The seal that ties a backup's approvals and line writers to the instance
+/// that made it (KT-1017): a MAC over the canonical JSON of its workflows and
+/// Quick Execs, under a key derived from this instance's encryption secret.
+pub(crate) fn approvals_seal(
+    secret: &str,
+    workflows: &[Workflow],
+    quick_execs: &[QuickExec],
+) -> String {
+    let canonical = serde_json::to_value((workflows, quick_execs))
+        .and_then(|value| serde_json::to_vec(&value))
+        .unwrap_or_default();
+    let key = hmac_sha256(b"kronn-export-approvals", secret.as_bytes());
+    hmac_sha256(&key, &canonical)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A restore from an archive this instance did not seal drops every approval
+/// and marks each line with run values as an agent's (KT-1017).
+async fn distrust_foreign_approvals(
+    state: &AppState,
+    data: &DbExport,
+) -> (Vec<Workflow>, Vec<QuickExec>, bool) {
+    let secret = state.config.read().await.encryption_secret.clone();
+    let sealed = matches!(
+        (&secret, &data.trust_seal),
+        (Some(secret), Some(seal)) if *seal == approvals_seal(secret, &data.workflows, &data.quick_execs)
+    );
+    let mut workflows = data.workflows.clone();
+    let mut quick_execs = data.quick_execs.clone();
+    if !sealed {
+        for workflow in &mut workflows {
+            for chain in [&mut workflow.steps, &mut workflow.on_failure] {
+                crate::api::workflows::clear_human_approvals(chain);
+                crate::api::workflows::mark_line_writers(
+                    chain,
+                    &[],
+                    crate::api::workflows::WorkflowWriter::Agent,
+                );
+            }
+        }
+        for item in &mut quick_execs {
+            item.unmodelled_args_approved = None;
+            item.agent_written =
+                crate::api::quick_execs::needs_agent_approval(&item.command, &item.args)
+                    .then_some(true);
+        }
+    }
+    (workflows, quick_execs, sealed)
 }
 
 /// Build an exportable config.toml (without auth_token, encryption_secret, and API key values)
@@ -1943,8 +2024,41 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
 
     // Workflows failing the editor's Exec rules are imported disabled and named
     // in the report (KT-1017); unsafe Quick Execs are left out, named too.
+    let (restored_workflows, restored_quick_execs, sealed) =
+        distrust_foreign_approvals(state, data).await;
+    if sealed {
+        let kept: Vec<String> = restored_workflows
+            .iter()
+            .flat_map(|wf| {
+                wf.steps
+                    .iter()
+                    .chain(&wf.on_failure)
+                    .filter(|step| step.exec_unmodelled_args_approved == Some(true))
+                    .map(move |step| format!("{} › {}", wf.name, step.name))
+            })
+            .chain(
+                restored_quick_execs
+                    .iter()
+                    .filter(|item| item.unmodelled_args_approved == Some(true))
+                    .map(|item| item.name.clone()),
+            )
+            .collect();
+        if !kept.is_empty() {
+            warnings.push(format!(
+                "Approbations conservées (sauvegarde de cette instance) : {}",
+                kept.join(", ")
+            ));
+        }
+    } else {
+        warnings.push(
+            "Sauvegarde non signée par cette instance : ses approbations d'étapes Exec sont \
+             retirées, et les lignes qui reçoivent des valeurs attendent l'approbation d'un \
+             humain dans l'éditeur."
+                .to_string(),
+        );
+    }
     let mut workflows = Vec::new();
-    for wf in &data.workflows {
+    for wf in &restored_workflows {
         let mut w = wf.clone();
         if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
             w.enabled = false;
@@ -1956,7 +2070,7 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         workflows.push(w);
     }
     let mut quick_execs = Vec::new();
-    for qe in &data.quick_execs {
+    for qe in &restored_quick_execs {
         if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
             &qe.name,
             &qe.command,
@@ -3655,6 +3769,7 @@ mod tests {
             learnings: vec![],
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
         }
     }
 
@@ -3849,6 +3964,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
             projects: vec![],
             discussions: vec![],
             workflows: vec![],
@@ -4087,6 +4203,50 @@ mod tests {
             assert_eq!(kept, "ciphertext-local");
         })
         .await;
+    }
+
+    /// R6-11: a restore keeps approvals only from an archive this instance
+    /// sealed; any other drops them and leaves the lines waiting for a human.
+    #[tokio::test]
+    async fn only_this_instance_s_sealed_backup_keeps_its_approvals() {
+        let state = test_state();
+        state.config.write().await.encryption_secret = Some("instance-secret".into());
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "plan", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["terraform"], "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null, "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "steps": [{"name": "plan", "step_type": {"type": "Exec"}, "exec_command": "terraform",
+                       "exec_args": ["plan", "{{x}}"], "exec_unmodelled_args_approved": true}]
+        }))
+        .unwrap();
+        let mut data = empty_export();
+        data.workflows = vec![workflow];
+        let (foreign, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed);
+        assert_eq!(foreign[0].steps[0].exec_unmodelled_args_approved, None);
+        assert_eq!(
+            foreign[0].steps[0].exec_agent_lines,
+            vec!["main".to_string()]
+        );
+
+        data.trust_seal = Some(approvals_seal(
+            "instance-secret",
+            &data.workflows,
+            &data.quick_execs,
+        ));
+        let (own, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(sealed);
+        assert_eq!(own[0].steps[0].exec_unmodelled_args_approved, Some(true));
+
+        data.trust_seal = Some(approvals_seal(
+            "other-instance",
+            &data.workflows,
+            &data.quick_execs,
+        ));
+        let (_, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed, "a backup sealed elsewhere is foreign");
     }
 
     fn test_state() -> AppState {
@@ -4390,6 +4550,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
             projects: vec![],
             discussions: vec![],
             workflows: vec![],

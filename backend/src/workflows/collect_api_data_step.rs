@@ -57,9 +57,17 @@ pub async fn execute_collect_api_data_step(
         work_dir.to_string()
     };
 
-    // An inline source is approved with its step, a saved Quick Exec with itself.
-    let step_approved = (step.exec_unmodelled_args_approved, step.exec_agent_written);
+    // An inline source is approved with its step and written by whoever last
+    // wrote that source; a saved Quick Exec carries both itself.
     for (index, source) in config.sources.iter().cloned().enumerate() {
+        let step_approved = (
+            step.exec_unmodelled_args_approved,
+            crate::core::inline_code::agent_wrote_line(
+                step,
+                &crate::core::inline_code::source_line_key(&source.alias),
+            )
+            .then_some(true),
+        );
         let source_id = if source.quick_exec.is_some() {
             None
         } else if !source.quick_exec_id.is_empty() {

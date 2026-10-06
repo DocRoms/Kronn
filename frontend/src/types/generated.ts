@@ -1821,7 +1821,12 @@ quick_prompt_versions: Array<QuickPromptVersion>,
 /**
  * v5 (passe D) — anti-repetition rejection counters for learnings.
  */
-learning_rejections: Array<LearningRejection>, };
+learning_rejections: Array<LearningRejection>,
+/**
+ * KT-1017 — a MAC, under this instance's key, over the workflows and
+ * Quick Execs: a restore keeps their approvals only when it verifies.
+ */
+trust_seal?: string, };
 
 export type DbInfo = { size_bytes: number, project_count: number, discussion_count: number, message_count: number, mcp_count: number, workflow_count: number, workflow_run_count: number, custom_skill_count: number, custom_profile_count: number, custom_directive_count: number, };
 
@@ -3107,7 +3112,12 @@ setup_command?: string | null, setup_args?: Array<string>,
 /**
  * An agent last wrote these lines: any value needs the approval.
  */
-agent_written?: boolean, };
+agent_written?: boolean,
+/**
+ * The step's pinned scripts (`exec_script_files` paths): a script shape
+ * on one of them needs no approval.
+ */
+declared_scripts?: Array<string>, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -9307,6 +9317,12 @@ exec_unmodelled_args_approved?: boolean,
  * read from the request.
  */
 exec_agent_written?: boolean,
+/**
+ * KT-1017 — which of the step's lines an agent last wrote: `main`,
+ * `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human
+ * edit re-attributes only the line it changed.
+ */
+exec_agent_lines?: Array<string>,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

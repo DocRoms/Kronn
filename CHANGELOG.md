@@ -678,7 +678,21 @@ Release notes for 0.9.3 and earlier are available in the
   names the waiting steps (`notice`, `kronn_notice` for agents), and the
   workflow page and step editor show "written by an agent: needs your
   approval" with the line and an approve action. Inline CollectApiData
-  sources get the approval box in the editor. A script
+  sources get the approval box in the editor.
+- Whatever originates from an agent is agent-written, whatever the transport
+  (KT-1017): a `KRONN:WORKFLOW_READY` or `BUNDLE_READY` proposal accepted by a
+  click, and a new or changed line of a `kronn/` file, wait for an approval in
+  the editor; the creation banner and the approve sheet list the Exec lines.
+  The writer is tracked per line (main, setup, stdin, each source) and a line's
+  identity includes its step type and pinned scripts; fields a step type never
+  reads are dropped on save. An agent never supplies a script hash, and an
+  empty hash is pinned only by a human's save of that step. A human can approve
+  an agent-written Quick Exec (writer and approval are stored apart). A config
+  restore keeps approvals only from a backup this instance sealed. Launchers
+  that start a default shell (`su`, `script`, `chroot`, `unshare`, `nsenter`,
+  `sudo -s`, `newgrp`, `sg`) and stdin paths climbing to `/dev` count as code
+  readers, and a script fed by a templated stdin must be a regular file at run
+  time. `date` options are matched in clusters and abbreviations. A script
   shape (`python3 tool.py …`) needs its script pinned in `exec_script_files`,
   checked at run time to be a regular file; a shell script given to `-c`
   never starts with `-` or `+`; shells are not trusted shapes on Windows.

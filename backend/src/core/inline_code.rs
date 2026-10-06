@@ -333,11 +333,46 @@ pub fn trusted_script(cmd: &str, args: &[String]) -> Option<String> {
     .then(|| args[0].clone())
 }
 
+/// The script file an interpreter reads while a templated stdin feeds it
+/// (`python3 x.py` with `exec_stdin: "{{x}}"`), after wrappers: the run
+/// checks it is a regular file, so a link to `/dev/stdin` cannot turn the
+/// stdin into the program.
+pub fn stdin_fed_script(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
+    untrusted_in(stdin)?;
+    let (program, program_args) = crate::core::argv_roles::launched_program(cmd, args)
+        .unwrap_or_else(|| (cmd.to_string(), args.to_vec()));
+    option_parsing(&program)?;
+    interpreter_script(&program, &program_args)
+        .filter(|script| *script != "-")
+        .map(str::to_string)
+}
+
 /// The [`Trust`] of a saved step's lines.
 pub fn step_trust(step: &WorkflowStep) -> Trust {
+    line_trust(step, "main")
+}
+
+/// The key of a step's line for its writer: `main`, `setup`, `stdin`,
+/// `source:<alias>`.
+pub fn source_line_key(alias: &str) -> String {
+    format!("source:{alias}")
+}
+
+/// Whether an agent last wrote line `key` of `step`. A step saved before
+/// lines were tracked one by one counts every line as the agent's.
+pub fn agent_wrote_line(step: &WorkflowStep, key: &str) -> bool {
+    if step.exec_agent_lines.is_empty() {
+        step.exec_agent_written == Some(true)
+    } else {
+        step.exec_agent_lines.iter().any(|line| line == key)
+    }
+}
+
+/// The [`Trust`] of one line of a saved step.
+pub fn line_trust(step: &WorkflowStep, key: &str) -> Trust {
     Trust {
         approved: step.exec_unmodelled_args_approved == Some(true),
-        agent_written: step.exec_agent_written == Some(true),
+        agent_written: agent_wrote_line(step, key),
         declared_scripts: step
             .exec_script_files
             .iter()
@@ -363,12 +398,13 @@ pub fn approval_message(subject: &str, program: &str, path: &str, agent_written:
 /// inline Quick Exec source of a CollectApiData step), with a suggested
 /// rewrite when one is provably equivalent.
 pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecStep> {
-    let trust = step_trust(step);
     let mut found = Vec::new();
     let mut check = |phase: &str, alias: Option<&str>, cmd: Option<&str>, args: &[String]| {
         let Some(cmd) = cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) else {
             return;
         };
+        let key = alias.map_or_else(|| phase.to_string(), source_line_key);
+        let trust = line_trust(step, &key);
         let Some(finding) = first_unsafe_placeholder_with(cmd, args, trust.clone()) else {
             return;
         };
@@ -427,6 +463,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 .map(str::trim)
                 .unwrap_or_default();
             if let Some(stdin) = step.exec_stdin.as_deref() {
+                let trust = line_trust(step, "stdin");
                 if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin, &trust) {
                     let unmodelled = stdin_unmodelled_program(command, &step.exec_args, &trust);
                     let manual_fix = match &unmodelled {
@@ -818,6 +855,9 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
     if matches!(name.as_str(), "xargs" | "parallel") {
         return stdin_becomes_code_argv(&name, args);
     }
+    if starts_a_default_shell(&name, cmd, args) {
+        return true;
+    }
     if let Some((inner, inner_args)) = crate::core::argv_roles::launched_program(cmd, args) {
         return reads_program_from_stdin(&inner, &inner_args);
     }
@@ -919,6 +959,38 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
         }),
         _ => crate::core::argv_roles::is_unmodelled_evaluator(&name),
+    }
+}
+
+/// A launcher given no program starts the user's shell, which then reads its
+/// commands from stdin: `su USER`, `script FILE`, `chroot DIR`, `unshare -r`,
+/// `nsenter -t 1 -m`, `sudo -s|-i`, `doas -s`, `newgrp`, `sg GROUP`.
+fn starts_a_default_shell(name: &str, cmd: &str, args: &[String]) -> bool {
+    let has = |options: &[&str]| {
+        args.iter().any(|arg| {
+            options
+                .iter()
+                .any(|option| arg == option || arg.starts_with(&format!("{option}=")))
+        })
+    };
+    let operands = args.iter().filter(|arg| !arg.starts_with('-')).count();
+    let shell_flag = args
+        .iter()
+        .take_while(|arg| arg.starts_with('-'))
+        .any(|arg| {
+            matches!(arg.as_str(), "--shell" | "--login")
+                || (!arg.starts_with("--") && arg[1..].contains(['s', 'i']))
+        });
+    match name {
+        "chroot" | "unshare" | "nsenter" => {
+            crate::core::argv_roles::launched_program(cmd, args).is_none()
+        }
+        "sudo" | "doas" => shell_flag,
+        "su" => !has(&["-c", "--command"]),
+        "script" => !has(&["-c", "--command"]) && operands <= 1,
+        "newgrp" => true,
+        "sg" => !has(&["-c"]) && operands <= 1,
+        _ => false,
     }
 }
 
@@ -2552,6 +2624,91 @@ mod tests {
                 Err(Untrusted::Shape)
             );
         }
+    }
+
+    /// R6-08: a relative path climbing to `/dev` names stdin from any cwd.
+    #[test]
+    fn a_climbing_relative_path_to_stdin_is_a_code_reader() {
+        for path in [
+            "../../../../dev/stdin",
+            "../../../../../../../../proc/self/fd/0",
+        ] {
+            assert!(crate::core::argv_roles::is_stdin_path(path), "{path}");
+            assert!(
+                stdin_validation_error("s", "python3.14", &args(&[path]), "{{x}}", true).is_some(),
+                "{path}"
+            );
+        }
+        assert!(!crate::core::argv_roles::is_stdin_path("dev/server.py"));
+        assert!(!crate::core::argv_roles::is_stdin_path("a/../dev/stdin.py"));
+    }
+
+    /// R6-09: a launcher given no program starts a shell reading stdin.
+    #[test]
+    fn a_launcher_starting_a_default_shell_reads_stdin_as_code() {
+        for (cmd, line) in [
+            ("su", vec!["nobody", "-s", "/bin/sh"]),
+            ("script", vec!["-q", "/dev/null"]),
+            ("chroot", vec!["/"]),
+            ("unshare", vec!["-r"]),
+            ("nsenter", vec!["-t", "1", "-m"]),
+            ("sudo", vec!["-s"]),
+            ("sudo", vec!["-i"]),
+            ("doas", vec!["-s"]),
+            ("newgrp", vec![]),
+            ("sg", vec!["staff"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        assert!(
+            stdin_validation_error("s", "su", &args(&["nobody", "-c", "id"]), "{{x}}", true)
+                .is_none()
+        );
+    }
+
+    /// R6-10: `date` reads a file or sets the date from a cluster or an
+    /// abbreviation too.
+    #[test]
+    fn date_file_and_set_options_are_found_in_clusters_and_abbreviations() {
+        for line in [
+            vec!["-uf", "{{x}}"],
+            vec!["--fi", "{{x}}"],
+            vec!["--ref", "{{x}}"],
+            vec!["-us", "{{x}}"],
+        ] {
+            assert!(
+                first_unsafe_placeholder("date", &args(&line)).is_some(),
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            first_unsafe_placeholder("date", &args(&["-u", "+%F"])),
+            None
+        );
+        assert_eq!(
+            first_unsafe_placeholder("date", &args(&["-d", "{{when}}"])),
+            None
+        );
+    }
+
+    /// R6-14: one outside value next to a Kronn value is still outside, and a
+    /// malformed placeholder is never taken for a Kronn value.
+    #[test]
+    fn a_kronn_value_never_vouches_for_its_neighbour() {
+        assert_eq!(
+            first_unsafe_placeholder("cp", &args(&["a", "{{run.artifacts_dir}}"])),
+            None
+        );
+        assert!(matches!(
+            first_unsafe_placeholder("cp", &args(&["a", "{{run.artifacts_dir}}/{{x}}"])),
+            Some(InlineFinding::UnmodelledProgram(..))
+        ));
+        assert!(validation_error("s", "cp", &args(&["a", "{{run.artifacts_dir"]), false).is_some());
+        let malformed = args(&["a", "{{run.artifacts_dir"]);
+        assert!(rendered_refusal("s", "cp", &malformed, &args(&["a", "x"]), false).is_some());
     }
 
     #[test]

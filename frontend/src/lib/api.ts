@@ -2429,7 +2429,11 @@ export const workflows = {
    *  sentinels. The server creates everything in a single SQLite
    *  transaction — rollback on any failure, no orphan rows. Drives
    *  the `KRONN:BUNDLE_READY` chat signal flow. */
+  // KT-1017 — an agent's chat proposal is an agent save; the wizard's own
+  // decomposed preset is the human's.
   createBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle', req),
+  createHumanBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle/human', req),
+  createAgentProposal: (req: unknown) => api<Workflow>('POST', '/workflows/agent-proposal', req),
   update: (id: string, req: UpdateWorkflowRequest) => api<Workflow>('PUT', `/workflows/${id}`, req),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
