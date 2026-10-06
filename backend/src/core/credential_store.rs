@@ -529,9 +529,11 @@ pub async fn boot(
         merged.push(PlainCredential::auth_token(
             uuid::Uuid::new_v4().to_string(),
         ));
-        // A restore never changes whether auth is on.
+        // A restore never changes whether auth is on, and a start never
+        // turns off an auth already on (a token row lost after a kill).
         if mode == BootMode::Startup {
-            config.server.auth_enabled = crate::core::env::auth_on_by_default();
+            config.server.auth_enabled =
+                config.server.auth_enabled || crate::core::env::auth_on_by_default();
         }
         generated_auth_token = true;
         tracing::info!(
@@ -600,7 +602,7 @@ fn toml_holds_secrets(text: &str) -> bool {
 
 /// Whether a config.toml text carries a token or credential value (the key
 /// itself aside: a backup encrypted under that key would protect nothing).
-fn toml_holds_credentials(text: &str) -> bool {
+pub(crate) fn toml_holds_credentials(text: &str) -> bool {
     let Ok(table) = text.parse::<toml::Table>() else {
         // Unparseable: treat as sensitive rather than skip the backup.
         return true;

@@ -109,9 +109,9 @@ pub async fn load() -> Result<Option<AppConfig>> {
             // Credentials of a parseable file join the credential boot (the
             // file wins, as in the migration).
             let salvaged = salvage_credentials(&content, &mut config);
-            let mentions_credentials = salvaged > 0
-                || content.contains("auth_token")
-                || content.contains("[[tokens.keys]]");
+            let parseable = content.parse::<toml::Table>().is_ok();
+            let mentions_credentials =
+                salvaged > 0 || crate::core::credential_store::toml_holds_credentials(&content);
             tracing::error!(
                 "config.toml was set aside as {kept}: {cause} ({schema_error}). Kronn starts as \
                  a first run{}; {salvaged} credential(s) recovered from it",
@@ -134,7 +134,8 @@ pub async fn load() -> Result<Option<AppConfig>> {
             }
             if mentions_credentials {
                 notice.push_str(&format!(
-                    " {kept} holds credentials in clear: delete it once you have checked them."
+                    " {kept} {} credentials in clear: delete it once you have checked them.",
+                    if parseable { "holds" } else { "may hold" }
                 ));
             }
             record_set_aside(&dir, notice);
@@ -657,6 +658,14 @@ fn salvage_credentials(content: &str, config: &mut AppConfig) -> usize {
         config.server.auth_token = Some(token.to_string());
         n += 1;
     }
+    // The saved auth choice comes with the token.
+    if let Some(enabled) = table
+        .get("server")
+        .and_then(|s| s.get("auth_enabled"))
+        .and_then(|v| v.as_bool())
+    {
+        config.server.auth_enabled = enabled;
+    }
     if let Some(keys) = table
         .get("tokens")
         .and_then(|t| t.get("keys"))
@@ -665,6 +674,26 @@ fn salvage_credentials(content: &str, config: &mut AppConfig) -> usize {
         for key in keys {
             if let Ok(k) = key.clone().try_into::<crate::models::ApiKey>() {
                 config.tokens.keys.push(k);
+                n += 1;
+            }
+        }
+    }
+    // Legacy single-key fields, migrated as `load` does.
+    if config.tokens.keys.is_empty() {
+        for provider in ["anthropic", "openai", "google"] {
+            if let Some(val) = table
+                .get("tokens")
+                .and_then(|t| t.get(provider))
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            {
+                config.tokens.keys.push(ApiKey {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "Personal API Key".into(),
+                    provider: provider.into(),
+                    value: val.to_string(),
+                    active: true,
+                });
                 n += 1;
             }
         }
@@ -1029,6 +1058,27 @@ mod tests {
             "{body}"
         );
         assert_eq!(take_env_auth_token(), None);
+    }
+
+    /// C7-08 — legacy single keys of a schema-invalid file are recovered and
+    /// the notice says the kept file holds credentials in clear.
+    #[tokio::test]
+    #[serial]
+    async fn legacy_keys_of_a_schema_invalid_config_are_recovered() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("legacy-salvage");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(
+            tmp.join(CONFIG_FILE),
+            "[server]\nport = \"x\"\n[tokens]\nanthropic = \"sk-legacy-x\"\n",
+        )
+        .unwrap();
+        let loaded = load().await.unwrap().expect("first run");
+        assert!(loaded.tokens.keys.iter().any(|k| k.value == "sk-legacy-x"));
+        let notice = set_aside_notice(&tmp).expect("recorded");
+        assert!(notice.contains("credentials in clear"), "{notice}");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// C2-31 — only an empty or key-only file counts as "key only".

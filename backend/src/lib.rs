@@ -44,6 +44,23 @@ pub async fn resolve_key_and_credentials(
     database: &Arc<Database>,
     env_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
+    resolve_key_and_credentials_in_mode(
+        config,
+        database,
+        env_auth_token,
+        crate::core::credential_store::BootMode::Startup,
+    )
+    .await
+}
+
+/// As [`resolve_key_and_credentials`]; `BootMode::Restore` (a running instance
+/// setting up a key again) never changes whether auth is enabled.
+pub async fn resolve_key_and_credentials_in_mode(
+    config: &mut AppConfig,
+    database: &Arc<Database>,
+    env_auth_token: Option<String>,
+    mode: crate::core::credential_store::BootMode,
+) -> anyhow::Result<()> {
     let key_outcome = match crate::core::keystore::reconcile(config, database).await {
         Ok(outcome) => {
             tracing::info!("Encryption key reconciled: {outcome:?}");
@@ -61,7 +78,7 @@ pub async fn resolve_key_and_credentials(
         &dir,
         &key_outcome,
         env_auth_token.as_deref(),
-        crate::core::credential_store::BootMode::Startup,
+        mode,
     )
     .await
     {
@@ -3173,6 +3190,11 @@ mod auth_tests {
             "no key: no new token"
         );
         assert!(!auth_locked_allows(regen, false, true));
+        // Starting a new key: local, and only while the key is locked.
+        let fresh = "/api/config/recovery/start-new-key";
+        assert!(auth_locked_allows(fresh, true, false));
+        assert!(!auth_locked_allows(fresh, false, false));
+        assert!(!auth_locked_allows(fresh, true, true));
     }
 
     // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────

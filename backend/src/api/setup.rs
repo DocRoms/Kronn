@@ -2536,7 +2536,7 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
 /// Resolve the key and arm the credential store on a copy of `live` (key
 /// locked, nothing undecryptable left), adopted only on success: on failure
 /// `live` keeps no key and its auth fields as they were.
-async fn resolve_fresh_key(
+pub(crate) async fn resolve_fresh_key(
     live: &mut crate::models::AppConfig,
     db: &std::sync::Arc<crate::db::Database>,
     dir: &std::path::Path,
@@ -2547,12 +2547,29 @@ async fn resolve_fresh_key(
         .clone()
         .filter(|_| live.server.auth_token_session_only);
     let mut candidate = live.clone();
-    candidate.server.auth_token = None;
+    // Only a session token is handed over as such; a readable config.toml
+    // token stays and is stored like any other credential.
+    if session.is_some() {
+        candidate.server.auth_token = None;
+    }
     candidate.server.auth_token_session_only = false;
     candidate.server.auth_locked = false;
     // The value config.toml kept is a candidate (set aside if not used).
     candidate.encryption_secret = config::retained_disk_key(dir);
-    crate::resolve_key_and_credentials(&mut candidate, db, session).await?;
+    // Restore mode: setting up a key again never turns auth on or off.
+    crate::resolve_key_and_credentials_in_mode(
+        &mut candidate,
+        db,
+        session,
+        crate::core::credential_store::BootMode::Restore,
+    )
+    .await?;
+    // A still-locked outcome (undecryptable data appeared meanwhile) is not
+    // a new key: nothing is adopted.
+    anyhow::ensure!(
+        candidate.encryption_secret.is_some(),
+        "encrypted data no key decrypts appeared meanwhile; nothing was adopted, retry"
+    );
     *live = candidate;
     Ok(())
 }
@@ -2569,7 +2586,8 @@ pub struct StartNewKeyResponse {
 
 /// POST /api/config/recovery/start-new-key — the key is lost for good: set the
 /// encrypted rows no key decrypts aside in a kept file, then start a new key.
-/// Discussions, projects and workflows stay. Key locked, local caller only.
+/// Discussions, projects and workflows stay. Key locked; a local caller, or
+/// one with the API token (gated as destructive; auth locked: local only).
 pub async fn start_new_key(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<StartNewKeyResponse>> {
@@ -2674,6 +2692,10 @@ pub struct RecoveryStatus {
     pub file_key_moves_pending: Vec<String>,
     /// Encrypted rows the key in use cannot decrypt (0 when the key is locked).
     pub undecryptable_rows: u32,
+    /// Of those, rows under a kept file key that the next start moves.
+    pub file_key_rows_pending: u32,
+    /// Rows waiting in `locked-secrets-*.json` files (a key given up).
+    pub locked_file_rows: u32,
     /// recovery.key predates 0.14.3: it can be replaced without its passphrase
     /// after a confirmation (it is kept, a restore still tries it).
     pub recovery_unverified: bool,
@@ -2746,6 +2768,10 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
         rows_moved_from_files: report.rows_moved_from_files.clone(),
         file_key_moves_pending: report.file_key_moves_pending.clone(),
         undecryptable_rows: 0,
+        file_key_rows_pending: report.file_key_rows_pending as u32,
+        locked_file_rows: dir
+            .map(crate::core::keystore::locked_file_rows)
+            .unwrap_or(0) as u32,
         recovery_unverified: recovery_state
             == Some(crate::core::recovery::RecoveryMatch::Unverified),
         recovery_damaged: recovery_state == Some(crate::core::recovery::RecoveryMatch::Unreadable)
@@ -2853,6 +2879,8 @@ pub struct ReencryptResponse {
     pub rewritten: u32,
     pub already_current: u32,
     pub untouched: u32,
+    /// Rows put back from the files kept when a key was given up.
+    pub restored_from_files: u32,
 }
 
 /// POST /api/config/recovery/reencrypt — re-encrypt secrets imported from
@@ -2878,7 +2906,7 @@ pub async fn reencrypt_imported(
     .await
     {
         Ok(r) => {
-            if r.rewritten > 0 {
+            if r.rewritten > 0 || r.restored_from_files > 0 {
                 // Stored credentials may be among the rewritten rows: reload the
                 // store so they appear now, not after a restart.
                 let outcome = crate::core::keystore::KeyOutcome::Resolved {
@@ -2917,6 +2945,7 @@ pub async fn reencrypt_imported(
                 rewritten: r.rewritten as u32,
                 already_current: r.already_current as u32,
                 untouched: r.untouched as u32,
+                restored_from_files: r.restored_from_files as u32,
             }))
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),

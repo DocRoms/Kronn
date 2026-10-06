@@ -2207,3 +2207,325 @@ async fn credentials_of_a_schema_invalid_config_are_recovered() {
     let notice = config::set_aside_notice(dir.path()).unwrap();
     assert!(notice.contains("credentials in clear"), "{notice}");
 }
+
+// ── review round 8 ──────────────────────────────────────────────────────────
+
+fn set_docker(on: bool) -> Option<String> {
+    let previous = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
+    if on {
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+    } else {
+        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+    }
+    previous
+}
+
+fn restore_docker(previous: Option<String>) {
+    match previous {
+        Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
+        None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
+    }
+}
+
+/// C7-01 — under Docker, starting a new key or a locked reset keeps auth on:
+/// the new token is returned and a LAN request without it is refused.
+#[tokio::test]
+#[serial]
+async fn auth_stays_on_after_a_new_key_or_a_locked_reset_under_docker() {
+    // The locked reset is reachable only with an operator session token.
+    for (route, session) in [
+        ("/api/config/recovery/start-new-key", None),
+        ("/api/setup/reset", Some("session-token".to_string())),
+    ] {
+        let previous = set_docker(true);
+        let dir = DataDir::new();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        migrated_then_key_lost(&dir, &db).await;
+        let mut cfg = config::load().await.unwrap().unwrap();
+        crate::resolve_key_and_credentials(&mut cfg, &db, session)
+            .await
+            .unwrap();
+        assert!(cfg.server.auth_enabled && cfg.encryption_secret.is_none());
+        let state = state_with(cfg, &db);
+        let router = crate::build_router_with_auth(state.clone(), true);
+        let (_, body) = json_of(router.clone(), "POST", route, serde_json::json!({})).await;
+        restore_docker(previous);
+        assert_eq!(body["success"], true, "{route}: {body}");
+        assert!(state.config.read().await.server.auth_enabled, "{route}");
+        if route.ends_with("start-new-key") {
+            assert!(body["data"]["auth_token"].is_string(), "{body}");
+        }
+        let (status, _) = json_from(
+            router,
+            "GET",
+            "/api/projects",
+            serde_json::json!({}),
+            [192, 168, 1, 9],
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{route}");
+    }
+}
+
+/// C7-02 — rows set aside when the key was given up come back once its
+/// passphrase is offered to "Re-encrypt imported secrets".
+#[tokio::test]
+#[serial]
+async fn rows_set_aside_come_back_with_the_old_key() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let old = migrated_then_key_lost(&dir, &db).await;
+    crate::core::recovery::save_blob(
+        dir.path(),
+        &crate::core::recovery::wrap_key(&old, "old passphrase").unwrap(),
+    )
+    .unwrap();
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, fresh) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/start-new-key",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(fresh["success"], true, "{fresh}");
+    let (_, status) = json_of(
+        router.clone(),
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        status["data"]["locked_file_rows"].as_u64().unwrap() > 0,
+        "{status}"
+    );
+    let (_, back) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/reencrypt",
+        serde_json::json!({"passphrase": "old passphrase"}),
+    )
+    .await;
+    assert_eq!(back["success"], true, "{back}");
+    let new_key = state.config.read().await.encryption_secret.clone().unwrap();
+    let parsed = crypto::parse_secret(&new_key).unwrap();
+    let (mcp, snap, gh): (String, String, String) = db
+        .with_conn(|c| {
+            Ok((
+                c.query_row("SELECT env_encrypted FROM mcp_configs", [], |r| r.get(0))?,
+                c.query_row(
+                    "SELECT values_encrypted FROM execution_variable_snapshots",
+                    [],
+                    |r| r.get(0),
+                )?,
+                c.query_row(
+                    "SELECT token_encrypted FROM project_github_connections",
+                    [],
+                    |r| r.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert!(crate::db::mcps::decrypt_env(&mcp, &new_key)
+        .unwrap()
+        .values()
+        .any(|v| v == MCP_SECRET));
+    assert_eq!(crypto::decrypt(&snap, &parsed).unwrap(), SNAPSHOT_SECRET);
+    assert!(crypto::decrypt(&gh, &parsed).is_ok());
+    let (_, tokens) = json_of(router, "GET", "/api/config/tokens", serde_json::json!({})).await;
+    assert!(tokens.to_string().contains("Personal API Key"), "{tokens}");
+}
+
+/// C7-05 — a resolve that ends locked adopts nothing.
+#[tokio::test]
+#[serial]
+async fn a_locked_resolve_adopts_nothing() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &crypto::generate_secret()).await;
+    let mut live = config::default_config_without_key();
+    live.server.auth_token = Some("session".into());
+    live.server.auth_token_session_only = true;
+    live.server.auth_enabled = true;
+    let before = live.clone();
+    assert!(
+        crate::api::setup::resolve_fresh_key(&mut live, &db, dir.path())
+            .await
+            .is_err()
+    );
+    assert!(live.encryption_secret.is_none());
+    assert_eq!(live.server.auth_token, before.server.auth_token);
+    assert_eq!(live.server.auth_enabled, before.server.auth_enabled);
+    assert!(live.server.auth_token_session_only);
+}
+
+/// C7-06 — a readable config.toml token survives a new key.
+#[tokio::test]
+#[serial]
+async fn a_readable_config_token_survives_a_new_key() {
+    let dir = DataDir::new();
+    let lost = crypto::generate_secret();
+    let text = write_0142_config_text(&lost)
+        .lines()
+        .filter(|l| !l.starts_with("encryption_secret"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(dir.path().join("config.toml"), text).unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &lost).await;
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(cfg.encryption_secret.is_none());
+    assert_eq!(cfg.server.auth_token.as_deref(), Some(AUTH_TOKEN));
+    let state = state_with(cfg, &db);
+    let (_, body) = json_of(
+        crate::build_router_with_auth(state.clone(), true),
+        "POST",
+        "/api/config/recovery/start-new-key",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let live = state.config.read().await;
+    assert_eq!(live.server.auth_token.as_deref(), Some(AUTH_TOKEN));
+    let key = live.encryption_secret.clone().unwrap();
+    let stored = db.with_conn(rows::list).await.unwrap();
+    let row = stored.iter().find(|r| r.kind == KIND_AUTH_TOKEN).unwrap();
+    assert_eq!(
+        decrypt_value(&row.value_encrypted, &key).unwrap(),
+        AUTH_TOKEN
+    );
+}
+
+/// C7-08 — a native schema-invalid 0.14.2 file keeps its auth choice.
+#[tokio::test]
+#[serial]
+async fn a_schema_invalid_config_keeps_auth_enabled() {
+    let previous = set_docker(false);
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    let text = write_0142_config_text(&key).replacen("port = ", "port = \"x\" # ", 1);
+    std::fs::write(dir.path().join("config.toml"), &text).unwrap();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    restore_docker(previous);
+    assert!(cfg.server.auth_enabled);
+    assert_eq!(cfg.server.auth_token.as_deref(), Some(AUTH_TOKEN));
+}
+
+fn garble_writes(c: &rusqlite::Connection) -> rusqlite::Result<()> {
+    c.execute_batch(
+        "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+         UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END; \
+         CREATE TRIGGER no_delete BEFORE DELETE ON stored_credentials BEGIN \
+         SELECT RAISE(ABORT, 'disk full'); END;",
+    )
+}
+
+/// C7-10 — connection update and delete whose save fails leave the live
+/// keys as stored.
+#[tokio::test]
+#[serial]
+async fn failed_connection_update_and_delete_leave_the_live_keys() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, created) = json_of(
+        router.clone(),
+        "POST",
+        "/api/external-api/connections",
+        serde_json::json!({
+            "display_name": "OpenRouter",
+            "mention_alias": "orkeep",
+            "endpoint": "https://openrouter.ai/api",
+            "origin_preset": "open_router",
+            "api_key": "sk-or-v1-firstkey"
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let before: Vec<String> = state
+        .config
+        .read()
+        .await
+        .tokens
+        .keys
+        .iter()
+        .map(|k| k.value.clone())
+        .collect();
+    db.with_conn(|c| Ok(garble_writes(c)?)).await.unwrap();
+    let (_, updated) = json_of(
+        router.clone(),
+        "PUT",
+        &format!("/api/external-api/connections/{id}"),
+        serde_json::json!({
+            "display_name": "OpenRouter",
+            "mention_alias": "orkeep",
+            "endpoint": "https://openrouter.ai/api",
+            "origin_preset": "open_router",
+            "api_key": "sk-or-v1-secondkey"
+        }),
+    )
+    .await;
+    assert_eq!(updated["success"], false, "{updated}");
+    let (_, deleted) = json_of(
+        router,
+        "DELETE",
+        &format!("/api/external-api/connections/{id}"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(deleted["success"], false, "{deleted}");
+    let after: Vec<String> = state
+        .config
+        .read()
+        .await
+        .tokens
+        .keys
+        .iter()
+        .map(|k| k.value.clone())
+        .collect();
+    assert_eq!(after, before);
+}
+
+/// C7-10 — LiteLLM and the standalone start-up discovery adopt their copy
+/// only inside the successful-save arm.
+#[test]
+fn litellm_and_startup_discovery_adopt_only_once_saved() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (file, adopt) in [
+        ("src/api/lite_llm.rs", "*live = cfg;"),
+        ("src/main.rs", "*live = config;"),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        assert_eq!(text.matches(adopt).count(), 1, "{file}");
+        let at = text.find(adopt).unwrap();
+        let before = &text[..at];
+        let ok = before.rfind("Ok(_) => {").unwrap();
+        assert!(
+            !before[ok..].contains("Err("),
+            "{file}: the adoption must sit in the Ok arm"
+        );
+        assert!(
+            text.contains("live.clone()"),
+            "{file}: changes go to a copy"
+        );
+    }
+}

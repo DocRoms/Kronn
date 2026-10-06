@@ -165,10 +165,16 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
             {t('settings.recovery.rowsMoved', (status.rows_moved_from_files ?? []).join('; '))}
           </div>
         )}
-        {/* Whenever rows remain that the key in use cannot decrypt: a pasted
-            code works without any kept blob. */}
+        {status && (status.file_key_moves_pending ?? []).length > 0 && (
+          <div className="set-hint" data-testid="recovery-moves-pending">
+            {t('settings.recovery.movesPending', (status.file_key_moves_pending ?? []).join('; '))}
+          </div>
+        )}
+        {/* Rows a passphrase or code can bring back: undecryptable ones the next
+            start does not move by itself, or rows kept in a locked-secrets file. */}
         {status && !status.key_locked
-          && ((status.undecryptable_rows ?? 0) > 0 || (status.locked_credentials ?? 0) > 0) && (
+          && ((status.undecryptable_rows ?? 0) > (status.file_key_rows_pending ?? 0)
+            || (status.locked_file_rows ?? 0) > 0) && (
           <RecoveryRestorePanel toast={toast} t={t} onRestored={() => window.location.reload()} />
         )}
 

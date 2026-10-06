@@ -515,6 +515,7 @@ pub async fn reconcile_with(
     // to boot.
     let mut moved: Vec<String> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
+    let mut pending_rows = 0usize;
     if let Decision::Conflict(found) = &decision {
         let live: Vec<_> = found
             .iter()
@@ -538,6 +539,7 @@ pub async fn reconcile_with(
             {
                 let file = file_name(from).unwrap_or_else(|| (*src).to_string());
                 if !durable {
+                    pending_rows += n;
                     pending.push(format!(
                         "{n} row(s) under the key kept in {file}: moved once the key in use has \
                          a durable copy (next start)"
@@ -565,6 +567,7 @@ pub async fn reconcile_with(
                         ));
                     }
                     Err(e) => {
+                        pending_rows += n;
                         tracing::warn!(
                             "keystore: the rows under key {fp} kept in {file} could not be moved \
                              ({e:#}); nothing changed, the next start retries"
@@ -674,7 +677,7 @@ pub async fn reconcile_with(
             || config::retained_disk_key(dir)
                 .is_some_and(|k| crate::core::keyvault::same_key(&k, &key)),
     );
-    record_moves(dir, moved, pending);
+    record_moves(dir, moved, pending, pending_rows);
     Ok(outcome)
 }
 
@@ -756,6 +759,8 @@ pub struct KeyReport {
     pub rows_moved_from_files: Vec<String>,
     /// Such moves that did not happen yet (retried at the next start).
     pub file_key_moves_pending: Vec<String>,
+    /// Rows those pending moves cover.
+    pub file_key_rows_pending: usize,
 }
 
 static REPORTS: std::sync::LazyLock<
@@ -791,11 +796,12 @@ fn record_report(
             file_keeps_key,
             rows_moved_from_files: Vec::new(),
             file_key_moves_pending: Vec::new(),
+            file_key_rows_pending: 0,
         },
     );
 }
 
-fn record_moves(dir: &Path, moved: Vec<String>, pending: Vec<String>) {
+fn record_moves(dir: &Path, moved: Vec<String>, pending: Vec<String>, pending_rows: usize) {
     if let Some(r) = REPORTS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -803,6 +809,7 @@ fn record_moves(dir: &Path, moved: Vec<String>, pending: Vec<String>) {
     {
         r.rows_moved_from_files = moved;
         r.file_key_moves_pending = pending;
+        r.file_key_rows_pending = pending_rows;
     }
 }
 
@@ -822,6 +829,7 @@ pub(crate) fn record_report_for_tests(
             file_keeps_key,
             rows_moved_from_files: Vec::new(),
             file_key_moves_pending: Vec::new(),
+            file_key_rows_pending: 0,
         },
     );
 }
@@ -1135,37 +1143,85 @@ pub struct SetAside {
     pub rows: usize,
 }
 
-/// Every candidate key Kronn can find now: key stores, the config.toml value
-/// and the files it keeps.
-fn every_candidate(dir: &Path, store: &KeyStore) -> Vec<String> {
-    let (mut keys, _) = store_sources(store);
+/// Every candidate key Kronn can find now: key stores (read strictly: an
+/// unreadable one stops the caller), the config.toml value and kept files.
+fn every_candidate(dir: &Path, store: &KeyStore) -> Result<Vec<String>> {
+    let snapshot = store
+        .snapshot()
+        .map_err(|failure| KeyBootError::VaultUnreadable {
+            vault: failure.vault,
+            hint: vault_hint(failure.vault, failure.corrupted),
+            error: failure.error,
+        })?;
+    let mut keys: Vec<String> = snapshot
+        .into_iter()
+        .filter_map(|(_, v)| v.and_then(|v| crypto::canonical_secret(&v).ok()))
+        .collect();
     if let Some(k) = config::retained_disk_key(dir).and_then(|v| crypto::canonical_secret(&v).ok())
     {
-        keys.push((k, "legacy-config"));
+        keys.push(k);
     }
-    for (k, src, _) in file_keys(dir) {
-        keys.push((k, src));
+    keys.extend(file_keys(dir).into_iter().map(|(k, ..)| k));
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Primary-key columns of a registered table (TEXT keys: the rowid is not stable).
+fn primary_key(table: &str) -> &'static [&'static str] {
+    match table {
+        "stored_credentials" => &["kind", "id"],
+        "project_github_connections" => &["project_id"],
+        _ => &["id"],
     }
-    keys.into_iter().map(|(k, _)| k).collect()
+}
+
+#[cfg(test)]
+type SetAsideHook = fn(&rusqlite::Connection);
+
+/// Test seam: runs between reading the rows and removing them.
+#[cfg(test)]
+static SET_ASIDE_HOOK: std::sync::Mutex<Option<(std::path::PathBuf, SetAsideHook)>> =
+    std::sync::Mutex::new(None);
+
+/// One row set aside: where it was, its primary key and the copied ciphertext.
+struct LockedRow {
+    column: EncryptedColumn,
+    key: Vec<String>,
+    cipher: String,
+    row: serde_json::Value,
+}
+
+fn json_of_sql(v: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(n) => n.into(),
+        ValueRef::Real(f) => f.into(),
+        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned().into(),
+        ValueRef::Blob(b) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(b).into()
+        }
+    }
 }
 
 /// Key lost for good: copy every encrypted row no known key decrypts into an
 /// owner-only `locked-secrets-<ts>.json` (read back), then remove it from the
-/// database in one transaction (an MCP config keeps its settings and loses
-/// only its secret values). Nothing else is touched; a key found later can
-/// re-import the file.
+/// database in one transaction, matched by primary key AND the copied
+/// ciphertext (an MCP config keeps its settings and loses only its secret
+/// values). Nothing else is touched; [`restore_locked_files`] reads it back.
 pub async fn set_aside_locked_rows(
     db: &Database,
     dir: &Path,
     store: &KeyStore,
 ) -> Result<SetAside> {
-    let candidates = every_candidate(dir, store);
-    let rows = db
+    let candidates = every_candidate(dir, store)?;
+    let rows: Vec<LockedRow> = db
         .with_conn(move |conn| {
-            let mut out: Vec<(EncryptedColumn, i64, serde_json::Value)> = Vec::new();
+            let mut out = Vec::new();
             for col in ENCRYPTED_COLUMNS {
                 let mut stmt = conn.prepare(&format!(
-                    "SELECT rowid, * FROM {t} WHERE {c} IS NOT NULL AND {c} != ''",
+                    "SELECT * FROM {t} WHERE {c} IS NOT NULL AND {c} != ''",
                     t = col.table,
                     c = col.column
                 ))?;
@@ -1173,29 +1229,33 @@ pub async fn set_aside_locked_rows(
                     stmt.column_names().iter().map(|n| n.to_string()).collect();
                 let mut q = stmt.query([])?;
                 while let Some(row) = q.next()? {
-                    let rowid: i64 = row.get(0)?;
                     let mut obj = serde_json::Map::new();
-                    let mut cipher = String::new();
-                    for (i, name) in names.iter().enumerate().skip(1) {
-                        use rusqlite::types::ValueRef;
-                        let v = match row.get_ref(i)? {
-                            ValueRef::Null => serde_json::Value::Null,
-                            ValueRef::Integer(n) => n.into(),
-                            ValueRef::Real(f) => f.into(),
-                            ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned().into(),
-                            ValueRef::Blob(b) => {
-                                use base64::Engine;
-                                base64::engine::general_purpose::STANDARD.encode(b).into()
-                            }
-                        };
-                        if name == col.column {
-                            cipher = v.as_str().unwrap_or_default().to_string();
-                        }
-                        obj.insert(name.clone(), v);
+                    for (i, name) in names.iter().enumerate() {
+                        obj.insert(name.clone(), json_of_sql(row.get_ref(i)?));
                     }
-                    if !candidates.iter().any(|k| decrypts(&cipher, k)) {
-                        out.push((*col, rowid, serde_json::Value::Object(obj)));
+                    let cipher = obj
+                        .get(col.column)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if candidates.iter().any(|k| decrypts(&cipher, k)) {
+                        continue;
                     }
+                    let key = primary_key(col.table)
+                        .iter()
+                        .map(|k| {
+                            obj.get(*k)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        })
+                        .collect();
+                    out.push(LockedRow {
+                        column: *col,
+                        key,
+                        cipher,
+                        row: serde_json::Value::Object(obj),
+                    });
                 }
             }
             Ok(out)
@@ -1205,7 +1265,9 @@ pub async fn set_aside_locked_rows(
     let file = format!("{LOCKED_SECRETS_PREFIX}{stamp}.json");
     let doc: Vec<serde_json::Value> = rows
         .iter()
-        .map(|(col, _, row)| serde_json::json!({"table": col.table, "column": col.column, "row": row}))
+        .map(|r| {
+            serde_json::json!({"table": r.column.table, "column": r.column.column, "row": r.row})
+        })
         .collect();
     let content = serde_json::to_string_pretty(&doc).context("serialize the locked rows")?;
     let path = dir.join(&file);
@@ -1224,32 +1286,281 @@ pub async fn set_aside_locked_rows(
         "{file} did not read back; nothing was removed"
     );
     let count = rows.len();
-    let targets: Vec<(EncryptedColumn, i64)> = rows.iter().map(|(c, id, _)| (*c, *id)).collect();
+    let targets: Vec<(EncryptedColumn, Vec<String>, String)> = rows
+        .into_iter()
+        .map(|r| (r.column, r.key, r.cipher))
+        .collect();
+    #[cfg(test)]
+    let hook = SET_ASIDE_HOOK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+        .filter(|(d, _)| d == dir)
+        .map(|(_, f)| f);
     db.with_conn(move |conn| {
+        #[cfg(test)]
+        if let Some(f) = hook {
+            f(conn);
+        }
         let tx = conn.unchecked_transaction()?;
-        for (col, rowid) in &targets {
-            if col.table == "mcp_configs" {
-                tx.execute(
-                    &format!(
-                        "UPDATE {} SET {} = '' WHERE rowid = ?1",
-                        col.table, col.column
-                    ),
-                    [rowid],
-                )?;
+        for (col, key, cipher) in &targets {
+            let pk = primary_key(col.table);
+            let mut clause: Vec<String> = pk
+                .iter()
+                .enumerate()
+                .map(|(i, k)| format!("{k} = ?{}", i + 1))
+                .collect();
+            clause.push(format!("{} = ?{}", col.column, pk.len() + 1));
+            let sql = if col.table == "mcp_configs" {
+                format!(
+                    "UPDATE {} SET {} = '' WHERE {}",
+                    col.table,
+                    col.column,
+                    clause.join(" AND ")
+                )
             } else {
-                tx.execute(
-                    &format!("DELETE FROM {} WHERE rowid = ?1", col.table),
-                    [rowid],
-                )?;
-            }
+                format!("DELETE FROM {} WHERE {}", col.table, clause.join(" AND "))
+            };
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                key.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+            params.push(cipher);
+            let changed = tx.execute(&sql, params.as_slice())?;
+            // The row must still be the one copied; otherwise roll back.
+            anyhow::ensure!(
+                changed == 1,
+                "the data changed while it was being set aside; nothing was removed, retry"
+            );
         }
         tx.commit()?;
         Ok(())
     })
     .await
-    .with_context(|| format!("remove the locked rows (kept in {file}); nothing was removed"))?;
+    .with_context(|| format!("remove the locked rows (kept in {file})"))?;
     tracing::warn!("keystore: {count} encrypted row(s) no key decrypts were set aside in {file}");
     Ok(SetAside { file, rows: count })
+}
+
+/// The `locked-secrets-*.json` files not yet restored, sorted.
+fn locked_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .is_some_and(|n| n.starts_with(LOCKED_SECRETS_PREFIX) && n.ends_with(".json"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Rows still waiting in `locked-secrets-*.json` files.
+pub fn locked_file_rows(dir: &Path) -> usize {
+    locked_files(dir)
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|t| serde_json::from_str::<Vec<serde_json::Value>>(&t).ok())
+        .map(|v| v.len())
+        .sum()
+}
+
+/// Put back the rows of every `locked-secrets-*.json` that one of `keys`
+/// decrypts, re-encrypted under `to_hex`: an MCP config only while its secret
+/// is still empty, any other row only when its primary key is absent. One
+/// transaction per file with read-back; a file whose rows are all back (or
+/// present again) is renamed `.restored`. Returns the rows put back.
+pub async fn restore_locked_files(
+    db: &Database,
+    dir: &Path,
+    keys: &[String],
+    to_hex: &str,
+) -> Result<usize> {
+    let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
+    let parsed: Vec<_> = keys
+        .iter()
+        .filter_map(|k| crypto::parse_secret(k).ok())
+        .collect();
+    let mut restored = 0;
+    for path in locked_files(dir) {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let entries: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(&path).with_context(|| format!("read {name}"))?,
+        )
+        .with_context(|| format!("parse {name}"))?;
+        let mut undecryptable = 0;
+        // (column, row object, new ciphertext, plaintext)
+        let mut prepared = Vec::new();
+        for entry in entries {
+            let Some(col) = ENCRYPTED_COLUMNS.iter().find(|c| {
+                entry["table"].as_str() == Some(c.table)
+                    && entry["column"].as_str() == Some(c.column)
+            }) else {
+                undecryptable += 1;
+                continue;
+            };
+            let Some(row) = entry["row"].as_object().cloned() else {
+                undecryptable += 1;
+                continue;
+            };
+            let cipher = row
+                .get(col.column)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            match parsed.iter().find_map(|k| crypto::decrypt(cipher, k).ok()) {
+                Some(plain) => {
+                    let fresh = crypto::encrypt(&plain, &to).map_err(anyhow::Error::msg)?;
+                    prepared.push((*col, row, fresh, plain));
+                }
+                None => undecryptable += 1,
+            }
+        }
+        if prepared.is_empty() && undecryptable > 0 {
+            continue;
+        }
+        let to_read = to;
+        let (put_back, unsettled) = db
+            .with_conn(move |conn| {
+                let tx = conn.unchecked_transaction()?;
+                let (mut put_back, mut unsettled) = (0usize, 0usize);
+                for (col, row, fresh, plain) in &prepared {
+                    let pk = primary_key(col.table);
+                    let key: Vec<String> = pk
+                        .iter()
+                        .map(|k| {
+                            row.get(*k)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        })
+                        .collect();
+                    let where_pk: Vec<String> = pk
+                        .iter()
+                        .enumerate()
+                        .map(|(i, k)| format!("{k} = ?{}", i + 1))
+                        .collect();
+                    let key_params: Vec<&dyn rusqlite::ToSql> =
+                        key.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                    let wrote = if col.table == "mcp_configs" {
+                        let mut params = vec![fresh as &dyn rusqlite::ToSql];
+                        params.extend(key_params.iter().copied());
+                        let shifted: Vec<String> = pk
+                            .iter()
+                            .enumerate()
+                            .map(|(i, k)| format!("{k} = ?{}", i + 2))
+                            .collect();
+                        tx.execute(
+                            &format!(
+                                "UPDATE {} SET {} = ?1 WHERE {} AND ({c} IS NULL OR {c} = '')",
+                                col.table,
+                                col.column,
+                                shifted.join(" AND "),
+                                c = col.column
+                            ),
+                            params.as_slice(),
+                        )? == 1
+                    } else {
+                        let present: i64 = tx.query_row(
+                            &format!(
+                                "SELECT COUNT(*) FROM {} WHERE {}",
+                                col.table,
+                                where_pk.join(" AND ")
+                            ),
+                            key_params.as_slice(),
+                            |r| r.get(0),
+                        )?;
+                        if present > 0 {
+                            false
+                        } else {
+                            // Only columns the table really has.
+                            let mut stmt =
+                                tx.prepare(&format!("PRAGMA table_info({})", col.table))?;
+                            let real: Vec<String> = stmt
+                                .query_map([], |r| r.get::<_, String>(1))?
+                                .collect::<rusqlite::Result<_>>()?;
+                            let cols: Vec<&String> =
+                                row.keys().filter(|k| real.contains(k)).collect();
+                            let values: Vec<rusqlite::types::Value> = cols
+                                .iter()
+                                .map(|k| {
+                                    use rusqlite::types::Value;
+                                    if k.as_str() == col.column {
+                                        return Value::Text(fresh.clone());
+                                    }
+                                    match &row[k.as_str()] {
+                                        serde_json::Value::Null => Value::Null,
+                                        serde_json::Value::Bool(b) => Value::Integer(*b as i64),
+                                        serde_json::Value::Number(n) => {
+                                            n.as_i64().map(Value::Integer).unwrap_or_else(|| {
+                                                Value::Real(n.as_f64().unwrap_or(0.0))
+                                            })
+                                        }
+                                        serde_json::Value::String(s) => Value::Text(s.clone()),
+                                        other => Value::Text(other.to_string()),
+                                    }
+                                })
+                                .collect();
+                            let marks: Vec<String> =
+                                (1..=cols.len()).map(|i| format!("?{i}")).collect();
+                            let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
+                            match tx.execute(
+                                &format!(
+                                    "INSERT INTO {} ({}) VALUES ({})",
+                                    col.table,
+                                    names.join(", "),
+                                    marks.join(", ")
+                                ),
+                                rusqlite::params_from_iter(values.iter()),
+                            ) {
+                                Ok(_) => true,
+                                // A row whose parent is gone (a deleted project) stays in the file.
+                                Err(_) => {
+                                    unsettled += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    if !wrote {
+                        continue;
+                    }
+                    let back: String = tx.query_row(
+                        &format!(
+                            "SELECT {} FROM {} WHERE {}",
+                            col.column,
+                            col.table,
+                            where_pk.join(" AND ")
+                        ),
+                        key_params.as_slice(),
+                        |r| r.get(0),
+                    )?;
+                    anyhow::ensure!(
+                        crypto::decrypt(&back, &to_read).ok().as_deref() == Some(plain.as_str()),
+                        "a restored row did not read back; nothing was restored"
+                    );
+                    put_back += 1;
+                }
+                tx.commit()?;
+                Ok((put_back, unsettled))
+            })
+            .await
+            .with_context(|| format!("restore the rows kept in {name}"))?;
+        restored += put_back;
+        if undecryptable == 0 && unsettled == 0 {
+            let done = path.with_file_name(format!("{name}.restored"));
+            if let Err(e) = std::fs::rename(&path, &done) {
+                tracing::warn!("keystore: {name} restored but not renamed: {e}");
+            }
+        }
+        tracing::info!("keystore: {put_back} row(s) put back from {name}");
+    }
+    Ok(restored)
 }
 
 /// What [`reencrypt_rows`] did.
@@ -1261,6 +1572,8 @@ pub struct Reencrypted {
     pub already_current: usize,
     /// Rows neither key decrypts, left as they are.
     pub untouched: usize,
+    /// Rows put back from `locked-secrets-*.json` files.
+    pub restored_from_files: usize,
 }
 
 /// Re-encrypt every registered-column row that `from_hex` decrypts under
@@ -1368,9 +1681,14 @@ pub async fn reencrypt_imported(
         anyhow::bail!("Wrong recovery passphrase for the imported data");
     }
     let mut total = Reencrypted::default();
-    for source in sources {
-        total.rewritten += reencrypt_rows(db, &source, active).await?.rewritten;
+    for source in &sources {
+        total.rewritten += reencrypt_rows(db, source, active).await?.rewritten;
     }
+    // Rows set aside when a key was given up come back with any key found
+    // since: the unwrapped ones, the key stores and the kept files.
+    let mut keys = sources.clone();
+    keys.extend(every_candidate(dir, &KeyStore::standard(dir)).unwrap_or_default());
+    total.restored_from_files = restore_locked_files(db, dir, &keys, active).await?;
     // Counted once over every row after all passes, so nothing is counted twice.
     let columns = collect_encrypted_rows(db).await?;
     let rows: usize = columns.iter().map(|c| c.total).sum();
@@ -2112,7 +2430,8 @@ mod tests {
             Reencrypted {
                 rewritten: 1,
                 already_current: 1,
-                untouched: 0
+                untouched: 0,
+                ..Default::default()
             }
         );
         let again = reencrypt_imported(&cfg, &db, "source pass", None, tmp.path())
@@ -2170,7 +2489,8 @@ mod tests {
             Reencrypted {
                 rewritten: 0,
                 already_current: 0,
-                untouched: 1
+                untouched: 1,
+                ..Default::default()
             }
         );
     }
@@ -3718,6 +4038,95 @@ mod tests {
             .unwrap();
         assert_eq!(locked.encryption_secret.as_deref(), Some(k.as_str()));
         config::release_disk_key(dir);
+    }
+
+    // ── review round 7 ──────────────────────────────────────────────────────
+
+    fn locked_files_in(dir: &Path) -> usize {
+        locked_files(dir).len()
+    }
+
+    /// C7-03 — an unreadable key store stops the set-aside before anything is
+    /// written: no file, every row still in place.
+    #[tokio::test]
+    async fn an_unreadable_store_stops_the_set_aside() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, _s) = mem_vault("sidecar", Some(&k));
+        let store = KeyStore::from_vaults(vec![
+            Box::new(DeniedVault {
+                writes: Default::default(),
+            }),
+            sidecar,
+        ]);
+        assert!(set_aside_locked_rows(&db, tmp.path(), &store)
+            .await
+            .is_err());
+        assert_eq!(locked_files_in(tmp.path()), 0);
+        let cols = collect_encrypted_rows(&db).await.unwrap();
+        assert!(cols
+            .iter()
+            .all(|c| c.sample.iter().all(|e| decrypts(e, &k))));
+        assert_eq!(cols.iter().map(|c| c.total).sum::<usize>(), 1);
+    }
+
+    /// C7-03 — a row a kept file key decrypts stays; only the others go.
+    #[tokio::test]
+    async fn a_row_under_a_file_key_is_not_set_aside() {
+        let db = Database::open_in_memory().unwrap();
+        let k_file = crypto::generate_secret();
+        let lost = crypto::generate_secret();
+        seed_row(&db, &k_file).await;
+        seed_snapshot(&db, &lost).await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml.backup.1"),
+            format!("encryption_secret = \"{k_file}\"\n"),
+        )
+        .unwrap();
+        let (sidecar, _s) = mem_vault("sidecar", None);
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let done = set_aside_locked_rows(&db, tmp.path(), &store)
+            .await
+            .unwrap();
+        assert_eq!(done.rows, 1);
+        let cols = collect_encrypted_rows(&db).await.unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].column.table, "mcp_configs");
+    }
+
+    fn rewrite_snapshot(conn: &rusqlite::Connection) {
+        conn.execute(
+            "UPDATE execution_variable_snapshots SET values_encrypted = 'changed'",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// C7-04 — a row changed between the copy and the removal: nothing is
+    /// removed and the file stays.
+    #[tokio::test]
+    async fn a_row_changed_meanwhile_stops_the_removal() {
+        let db = Database::open_in_memory().unwrap();
+        let lost = crypto::generate_secret();
+        seed_row(&db, &lost).await;
+        seed_snapshot(&db, &lost).await;
+        let tmp = tempfile::tempdir().unwrap();
+        *SET_ASIDE_HOOK.lock().unwrap() = Some((tmp.path().to_path_buf(), rewrite_snapshot));
+        let (sidecar, _s) = mem_vault("sidecar", None);
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let res = set_aside_locked_rows(&db, tmp.path(), &store).await;
+        *SET_ASIDE_HOOK.lock().unwrap() = None;
+        assert!(res.is_err());
+        assert_eq!(locked_files_in(tmp.path()), 1);
+        let cols = collect_encrypted_rows(&db).await.unwrap();
+        assert_eq!(
+            cols.iter().map(|c| c.total).sum::<usize>(),
+            2,
+            "nothing removed"
+        );
     }
 
     /// C4-10 — every key or credential file write syncs its directory.

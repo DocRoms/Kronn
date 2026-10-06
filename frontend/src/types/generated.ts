@@ -6195,6 +6195,14 @@ file_key_moves_pending: Array<string>,
  */
 undecryptable_rows: number,
 /**
+ * Of those, rows under a kept file key that the next start moves.
+ */
+file_key_rows_pending: number,
+/**
+ * Rows waiting in `locked-secrets-*.json` files (a key given up).
+ */
+locked_file_rows: number,
+/**
  * recovery.key predates 0.14.3: it can be replaced without its passphrase
  * after a confirmation (it is kept, a restore still tries it).
  */
@@ -6218,7 +6226,11 @@ field: string, };
 /**
  * What `POST /api/config/recovery/reencrypt` did.
  */
-export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number, };
+export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number,
+/**
+ * Rows put back from the files kept when a key was given up.
+ */
+restored_from_files: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 

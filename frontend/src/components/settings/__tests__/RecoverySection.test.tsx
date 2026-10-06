@@ -120,7 +120,7 @@ describe('RecoverySection', () => {
     configured: true, matches_key: true, key_locked: false, key_copies_kept: false,
     config_holds_key: false, copies: 2, stale_sources: [], invalid_sources: [],
     locked_credentials: 0, kept_recovery_blobs: 0, recovery_other_key: false, config_set_aside: null,
-    rows_moved_from_files: [], undecryptable_rows: 0, recovery_unverified: false, recovery_damaged: false, credentials_unavailable: null, ...over,
+    rows_moved_from_files: [], file_key_moves_pending: [], file_key_rows_pending: 0, locked_file_rows: 0, undecryptable_rows: 0, recovery_unverified: false, recovery_damaged: false, credentials_unavailable: null, ...over,
   });
 
   it('replaces a recovery.key for another key without asking its passphrase', async () => {
@@ -202,6 +202,22 @@ describe('RecoverySection', () => {
     fireEvent.change(screen.getByTestId('recovery-confirm'), { target: { value: 'long-enough-pass' } });
     fireEvent.click(screen.getByTestId('recovery-save'));
     await waitFor(() => expect(config.setRecovery).toHaveBeenCalledWith('long-enough-pass', undefined, true));
+  });
+
+  it('says pending file-key moves need nothing and offers no passphrase form (C7-07)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({
+      file_key_moves_pending: ['3 row(s) under the key kept in config.toml.backup.1'],
+      file_key_rows_pending: 3, undecryptable_rows: 3,
+    }));
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-moves-pending')).toBeTruthy();
+    expect(screen.queryByTestId('recovery-restore-cta')).toBeNull();
+  });
+
+  it('offers re-encryption for rows kept in a locked-secrets file (C7-02)', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ locked_file_rows: 4 }));
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-restore-cta')).toBeTruthy();
   });
 
   it('offers the restore form, not the set form, when the key is locked', async () => {
