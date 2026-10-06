@@ -106,16 +106,36 @@ pub struct AcpPermissionBroker {
     scope: Option<AcpSessionScope>,
     protocol_session_id: Mutex<Option<String>>,
     authorized_tools: Mutex<BTreeMap<String, BTreeSet<String>>>,
-    trusted_internal_mcp: AtomicBool,
+    /// The id the runtime registered Kronn's own bridge under (unique per
+    /// launch for native runtimes, so no other config can claim it).
+    trusted_bridge: Mutex<Option<String>>,
+    /// `rawInput.{server,tool}` is the tool's own arguments on every native
+    /// runtime Kronn drives (model-written): trusted only when opted in.
+    raw_input_identity: AtomicBool,
     /// Vibe's permission request carries only a `toolCallId`; the tool it names
     /// is the harness-resolved `_meta.tool_name` of the preceding `tool_call`.
     harness_tool_names: AtomicBool,
-    observed_tools: Mutex<BTreeMap<String, String>>,
+    observed_tools: Mutex<BTreeMap<String, ObservedCall>>,
     audit_log: Mutex<Vec<AcpAuditEntry>>,
 }
 
-/// Bound on remembered tool calls: one is consumed by its permission request.
-const MAX_OBSERVED_TOOL_CALLS: usize = 256;
+/// What the frames for one Vibe `toolCallId` established. The id comes from the
+/// model and may be reused: any disagreement poisons it for good, and an id is
+/// never armed twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ObservedCall {
+    Armed {
+        kind: Option<String>,
+        effect_kind: Option<String>,
+        tool_name: Option<String>,
+    },
+    Consumed,
+    Poisoned,
+}
+
+/// Bound on remembered tool-call ids. Past it a new id is not recorded, so its
+/// request finds no identity and is denied; nothing is evicted.
+const MAX_OBSERVED_TOOL_CALLS: usize = 4096;
 
 impl AcpPermissionBroker {
     pub fn new(full_access: bool) -> Self {
@@ -124,7 +144,8 @@ impl AcpPermissionBroker {
             scope: None,
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
-            trusted_internal_mcp: AtomicBool::new(false),
+            trusted_bridge: Mutex::new(None),
+            raw_input_identity: AtomicBool::new(false),
             harness_tool_names: AtomicBool::new(false),
             observed_tools: Mutex::new(BTreeMap::new()),
             audit_log: Mutex::new(Vec::new()),
@@ -141,7 +162,8 @@ impl AcpPermissionBroker {
             scope: Some(scope),
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
-            trusted_internal_mcp: AtomicBool::new(false),
+            trusted_bridge: Mutex::new(None),
+            raw_input_identity: AtomicBool::new(false),
             harness_tool_names: AtomicBool::new(false),
             observed_tools: Mutex::new(BTreeMap::new()),
             audit_log: Mutex::new(Vec::new()),
@@ -358,9 +380,17 @@ impl AcpPermissionBroker {
         self.harness_tool_names.store(true, Ordering::Relaxed);
     }
 
-    /// Remember the harness tool name of a `tool_call` update from the bound
-    /// session. `_meta.tool_name` is the registered tool Vibe resolved and is
-    /// about to run, never model text; the first announcement of an id wins.
+    /// Trust `rawInput.{server,tool}` as a tool identity. No runtime Kronn
+    /// drives over live ACP writes its own metadata there (Copilot and Vibe put
+    /// the model's arguments), so no production transport calls this.
+    pub fn identify_tools_by_raw_input(&self) {
+        self.raw_input_identity.store(true, Ordering::Relaxed);
+    }
+
+    /// Track the `tool_call` and `tool_call_update` frames of the bound
+    /// session. `_meta.tool_name` is the registered tool Vibe resolved, never
+    /// model text, but the id is the model's: a second `tool_call`, or an update
+    /// whose kind or tool differs, poisons the id permanently.
     pub fn observe_tool_call_update(&self, params: &Value) {
         if !self.harness_tool_names.load(Ordering::Relaxed)
             || !self.protocol_session_matches(params.get("sessionId").and_then(Value::as_str))
@@ -370,9 +400,11 @@ impl AcpPermissionBroker {
         let Some(update) = params.get("update") else {
             return;
         };
-        if update.get("sessionUpdate").and_then(Value::as_str) != Some("tool_call") {
-            return;
-        }
+        let announcement = match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("tool_call") => true,
+            Some("tool_call_update") => false,
+            _ => return,
+        };
         let Some(id) = update
             .get("toolCallId")
             .and_then(Value::as_str)
@@ -380,26 +412,61 @@ impl AcpPermissionBroker {
         else {
             return;
         };
-        // Every first announcement is kept, a non-MCP one as "": a later frame
-        // reusing its id must not turn a shell call into a bridge tool.
-        let name = update
-            .pointer("/_meta/tool_name")
-            .and_then(Value::as_str)
-            .filter(|name| name.len() <= 512)
-            .filter(|_| {
-                update.pointer("/_meta/effect_kind").and_then(Value::as_str) == Some("tool")
-            })
-            .unwrap_or_default();
+        let field = |pointer: &str| {
+            update
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(|value| value.chars().take(512).collect::<String>())
+        };
+        let (kind, effect_kind, tool_name) = (
+            field("/kind"),
+            field("/_meta/effect_kind"),
+            field("/_meta/tool_name"),
+        );
         let mut observed = self
             .observed_tools
             .lock()
             .expect("ACP observed-tools mutex poisoned");
-        if observed.len() >= MAX_OBSERVED_TOOL_CALLS {
-            observed.clear();
+        let full = observed.len() >= MAX_OBSERVED_TOOL_CALLS;
+        match observed.get_mut(id) {
+            None if full => {}
+            None if announcement => {
+                observed.insert(
+                    id.to_owned(),
+                    ObservedCall::Armed {
+                        kind,
+                        effect_kind,
+                        tool_name,
+                    },
+                );
+            }
+            // An update for an id never announced: nothing it says is trusted.
+            None => {
+                observed.insert(id.to_owned(), ObservedCall::Poisoned);
+            }
+            Some(state) => {
+                let disagrees = match &*state {
+                    ObservedCall::Armed {
+                        kind: armed_kind,
+                        effect_kind: armed_effect,
+                        tool_name: armed_tool,
+                    } => {
+                        let differs = |seen: &Option<String>, armed: &Option<String>| {
+                            seen.is_some() && seen != armed
+                        };
+                        announcement
+                            || differs(&kind, armed_kind)
+                            || differs(&effect_kind, armed_effect)
+                            || differs(&tool_name, armed_tool)
+                    }
+                    ObservedCall::Consumed => announcement,
+                    ObservedCall::Poisoned => false,
+                };
+                if disagrees {
+                    *state = ObservedCall::Poisoned;
+                }
+            }
         }
-        observed
-            .entry(id.to_owned())
-            .or_insert_with(|| name.to_owned());
     }
 
     /// Server and tool of a harness-named call. Vibe routes an MCP tool as
@@ -411,12 +478,27 @@ impl AcpPermissionBroker {
             return None;
         }
         let id = tool_call?.get("toolCallId")?.as_str()?;
-        let name = self
-            .observed_tools
-            .lock()
-            .expect("ACP observed-tools mutex poisoned")
-            .remove(id)
-            .filter(|name| !name.is_empty())?;
+        let name = {
+            let mut observed = self
+                .observed_tools
+                .lock()
+                .expect("ACP observed-tools mutex poisoned");
+            let state = observed.get_mut(id)?;
+            let armed = std::mem::replace(state, ObservedCall::Consumed);
+            match armed {
+                ObservedCall::Armed {
+                    kind: Some(kind),
+                    effect_kind: Some(effect_kind),
+                    tool_name: Some(tool_name),
+                } if kind == "other" && effect_kind == "tool" => tool_name,
+                // Poisoned stays poisoned; anything else is spent.
+                ObservedCall::Poisoned => {
+                    *state = ObservedCall::Poisoned;
+                    return None;
+                }
+                _ => return None,
+            }
+        };
         let authorized = self
             .authorized_tools
             .lock()
@@ -444,11 +526,36 @@ impl AcpPermissionBroker {
         Some((server.clone(), tool))
     }
 
+    /// Register Kronn's own bridge, under the id the runtime declares it with
+    /// (`kronn-internal`, or a per-launch `kronn-internal-<suffix>`).
     pub fn register_trusted_mcp_server(&self, server: &super::AcpMcpServer) {
         self.register_authorized_servers(std::slice::from_ref(server));
-        if server.id == "kronn-internal" {
-            self.trusted_internal_mcp.store(true, Ordering::Relaxed);
+        if is_bridge_id(&server.id) {
+            *self
+                .trusted_bridge
+                .lock()
+                .expect("ACP trusted-bridge mutex poisoned") = Some(server.id.clone());
         }
+    }
+
+    /// Audit a bridge grant the runtime applies itself (Copilot's
+    /// `--allow-tool`): those calls never reach the broker.
+    pub fn record_launch_grant(&self, server: &str, tools: &[String]) {
+        self.record_context(
+            "session/launch_grant",
+            AcpPermissionVerdict::Allow,
+            format!(
+                "runtime approves {} of Kronn's bridge without asking",
+                if tools.is_empty() {
+                    "every tool".to_owned()
+                } else {
+                    tools.join(",")
+                }
+            ),
+            Some(server.to_owned()),
+            None,
+            Vec::new(),
+        );
     }
 
     fn register_authorized_servers(&self, servers: &[super::AcpMcpServer]) {
@@ -489,12 +596,20 @@ impl AcpPermissionBroker {
         );
         let request_session = params.get("sessionId").and_then(Value::as_str);
         let session_matches = self.protocol_session_matches(request_session);
-        let (mut server, mut tool) = tool_identity(tool_call);
-        let mut harness_identified = false;
+        let (mut server, mut tool) = if self.raw_input_identity.load(Ordering::Relaxed) {
+            tool_identity(tool_call)
+        } else {
+            (None, None)
+        };
+        let mut identity = if server.is_some() || tool.is_some() {
+            " identity=raw_input"
+        } else {
+            ""
+        };
         if server.is_none() && tool.is_none() {
             if let Some((harness_server, harness_tool)) = self.harness_identity(tool_call) {
                 (server, tool) = (Some(harness_server), Some(harness_tool));
-                harness_identified = true;
+                identity = " identity=harness";
             }
         }
         let tool_scoped = self.tool_identity_is_authorized(server.as_deref(), tool.as_deref());
@@ -522,9 +637,13 @@ impl AcpPermissionBroker {
         // Scope trumps `full_access`: it broadens operations inside the bound
         // project/server only. A missing location and missing server/tool
         // identity is unverifiable and therefore denied.
-        let trusted_internal_call = server.as_deref() == Some("kronn-internal")
-            && tool_scoped
-            && self.trusted_internal_mcp.load(Ordering::Relaxed);
+        let trusted_internal_call = tool_scoped
+            && server.is_some()
+            && server
+                == *self
+                    .trusted_bridge
+                    .lock()
+                    .expect("ACP trusted-bridge mutex poisoned");
         let allow = session_matches
             && resource_scoped
             && !secret_target
@@ -550,7 +669,7 @@ impl AcpPermissionBroker {
             format!(
                 "tool_call kind={}{} full_access={} session_matches={} resource_scoped={} secret_file={} -> {}",
                 kind.unwrap_or("unspecified"),
-                if harness_identified { " identity=harness" } else { "" },
+                identity,
                 self.full_access,
                 session_matches,
                 resource_scoped,
@@ -751,6 +870,15 @@ fn tool_identity(tool_call: Option<&Value>) -> (Option<String>, Option<String>) 
     )
 }
 
+/// Kronn's bridge: `kronn-internal`, or the per-launch name a native runtime
+/// receives it under.
+pub(crate) fn is_bridge_id(id: &str) -> bool {
+    id == "kronn-internal"
+        || id.strip_prefix("kronn-internal-").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+}
+
 /// A name as Vibe's runtime normalizes it into a route identifier
 /// (`kronn-internal` -> `kronn_internal`). A name it would normalize otherwise
 /// matches nothing and stays denied.
@@ -767,14 +895,13 @@ fn vibe_identifier(name: &str) -> String {
 }
 
 /// Field names of an ACP frame with short harness labels, to capture each
-/// runtime's request shape. Argument values are never rendered: only `kind`,
-/// `status`, `title`, `toolCallId`, `optionId`, `sessionUpdate` and Vibe's
-/// `_meta.tool_name`/`effect_kind`, truncated.
+/// runtime's request shape. Argument values and titles (model text, a shell
+/// command) are never rendered: only `kind`, `status`, `toolCallId`,
+/// `optionId`, `sessionUpdate` and Vibe's `_meta.tool_name`/`effect_kind`.
 pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
     const LABELS: &[&str] = &[
         "kind",
         "status",
-        "title",
         "toolCallId",
         "optionId",
         "sessionUpdate",
@@ -1186,6 +1313,7 @@ mod tests {
             AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-tool"),
         );
         broker.bind_protocol_session("s1").unwrap();
+        broker.identify_tools_by_raw_input();
         broker.register_trusted_mcp_server(&crate::acp::AcpMcpServer {
             id: "kronn-internal".into(),
             command: "python3".into(),
@@ -1224,6 +1352,7 @@ mod tests {
     fn only_the_runtime_registered_kronn_bridge_can_write_without_full_access() {
         let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "room"));
         broker.bind_protocol_session("s1").unwrap();
+        broker.identify_tools_by_raw_input();
         let server = crate::acp::AcpMcpServer {
             id: "kronn-internal".into(),
             command: "owned-bridge".into(),
@@ -1725,5 +1854,173 @@ mod tests {
     fn vibe_identifiers_follow_the_runtime_normalization() {
         assert_eq!(vibe_identifier("kronn-internal"), "kronn_internal");
         assert_eq!(vibe_identifier("GitHub.Tools"), "github_tools");
+    }
+
+    /// P2-3 — on a native runtime `rawInput` holds the tool's own (model
+    /// written) arguments: naming the bridge there identifies nothing.
+    #[test]
+    fn model_written_raw_input_never_names_the_bridge() {
+        for broker in [
+            AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "disc-cop")),
+            vibe_broker(false, None),
+        ] {
+            let _ = broker.bind_protocol_session("s-cop");
+            broker.register_trusted_mcp_server(&bridge(&[]));
+            for kind in ["other", "execute"] {
+                let request = json!({
+                    "sessionId": "s-cop",
+                    "toolCall": {"kind": kind, "toolCallId": "call_1", "title": "call",
+                                 "rawInput": {"server": "kronn-internal", "tool": "bridge_info",
+                                              "command": "env"}},
+                    "options": [{"optionId": "allow", "kind": "allow_once"},
+                                {"optionId": "reject", "kind": "reject_once"}]
+                });
+                assert_eq!(
+                    broker.decide_tool_call_permission("session/request_permission", &request)
+                        ["outcome"]["optionId"],
+                    "reject",
+                    "{kind}"
+                );
+            }
+        }
+    }
+
+    /// P1-2 — the review's exploit: a bridge call with arguments that fail
+    /// validation announces id X, then a bash call reusing X sends only an update
+    /// and asks permission under X.
+    #[test]
+    fn a_shell_call_reusing_a_bridge_call_id_is_denied() {
+        let broker = vibe_broker(false, None);
+        broker.register_trusted_mcp_server(&bridge(&[]));
+        let name = "mcp_kronn_internal.disc_meta";
+        broker.observe_tool_call_update(&vibe_tool_call("X", "tool", name, "other", name));
+        let mut bash = vibe_tool_call("X", "shell", "bash", "execute", "bash: env > /tmp/x");
+        bash["update"]["sessionUpdate"] = json!("tool_call_update");
+        broker.observe_tool_call_update(&bash);
+        assert_eq!(
+            broker.decide_tool_call_permission(
+                "session/request_permission",
+                &vibe_permission_request("X")
+            )["outcome"]["optionId"],
+            "reject_once"
+        );
+        // Poisoned for good: a fresh, well-formed announcement cannot re-arm it.
+        broker.observe_tool_call_update(&vibe_tool_call("X", "tool", name, "other", name));
+        assert_eq!(
+            broker.decide_tool_call_permission(
+                "session/request_permission",
+                &vibe_permission_request("X")
+            )["outcome"]["optionId"],
+            "reject_once"
+        );
+    }
+
+    #[test]
+    fn a_vibe_id_is_never_armed_twice_and_updates_must_agree() {
+        let broker = vibe_broker(false, None);
+        broker.register_trusted_mcp_server(&bridge(&[]));
+        let name = "mcp_kronn_internal.disc_meta";
+        let decide = |id: &str| {
+            broker.decide_tool_call_permission(
+                "session/request_permission",
+                &vibe_permission_request(id),
+            )["outcome"]["optionId"]
+                .clone()
+        };
+        // A consistent progress update keeps the identity.
+        broker.observe_tool_call_update(&vibe_tool_call("A", "tool", name, "other", name));
+        let mut progress = vibe_tool_call("A", "tool", name, "other", "another title");
+        progress["update"]["sessionUpdate"] = json!("tool_call_update");
+        broker.observe_tool_call_update(&progress);
+        assert_eq!(decide("A"), "allow_once");
+        // Consumed: a new announcement under the same id is not a new call.
+        broker.observe_tool_call_update(&vibe_tool_call("A", "tool", name, "other", name));
+        assert_eq!(decide("A"), "reject_once");
+        // A second announcement before the request poisons the id.
+        broker.observe_tool_call_update(&vibe_tool_call("B", "tool", name, "other", name));
+        broker.observe_tool_call_update(&vibe_tool_call("B", "tool", name, "other", name));
+        assert_eq!(decide("B"), "reject_once");
+        // An update for an id never announced, then its announcement.
+        let mut orphan = vibe_tool_call("C", "tool", name, "other", name);
+        orphan["update"]["sessionUpdate"] = json!("tool_call_update");
+        broker.observe_tool_call_update(&orphan);
+        broker.observe_tool_call_update(&vibe_tool_call("C", "tool", name, "other", name));
+        assert_eq!(decide("C"), "reject_once");
+        // The announced kind must be `other`.
+        broker.observe_tool_call_update(&vibe_tool_call("D", "tool", name, "execute", name));
+        assert_eq!(decide("D"), "reject_once");
+    }
+
+    /// P3-1 — a full map refuses new identities instead of forgetting old ones.
+    #[test]
+    fn a_full_vibe_id_map_denies_instead_of_evicting() {
+        let broker = vibe_broker(false, None);
+        broker.register_trusted_mcp_server(&bridge(&[]));
+        broker
+            .observe_tool_call_update(&vibe_tool_call("shell", "shell", "bash", "execute", "bash"));
+        for index in 1..MAX_OBSERVED_TOOL_CALLS {
+            let id = format!("read-{index}");
+            broker.observe_tool_call_update(&vibe_tool_call(
+                &id,
+                "file_read",
+                "read_file",
+                "read",
+                "r",
+            ));
+        }
+        let name = "mcp_kronn_internal.disc_meta";
+        // The shell id's marker survived: it cannot become the bridge.
+        broker.observe_tool_call_update(&vibe_tool_call("shell", "tool", name, "other", name));
+        // A new id is not recorded, so it has no identity.
+        broker.observe_tool_call_update(&vibe_tool_call("late", "tool", name, "other", name));
+        for id in ["shell", "late"] {
+            assert_eq!(
+                broker.decide_tool_call_permission(
+                    "session/request_permission",
+                    &vibe_permission_request(id)
+                )["outcome"]["optionId"],
+                "reject_once",
+                "{id}"
+            );
+        }
+    }
+
+    /// P2-2 — only the name the bridge was registered under is trusted: a
+    /// server from another config that normalizes to `kronn_internal` is not
+    /// the per-launch bridge.
+    #[test]
+    fn vibe_trusts_only_the_bridge_s_per_launch_name() {
+        let broker = vibe_broker(false, None);
+        broker.register_trusted_mcp_server(&crate::acp::AcpMcpServer {
+            id: "kronn-internal-0123456789ab".into(),
+            ..bridge(&[])
+        });
+        let decide = |id: &str, name: &str| {
+            broker.observe_tool_call_update(&vibe_tool_call(id, "tool", name, "other", name));
+            broker.decide_tool_call_permission(
+                "session/request_permission",
+                &vibe_permission_request(id),
+            )["outcome"]["optionId"]
+                .clone()
+        };
+        assert_eq!(
+            decide("e1", "mcp_kronn_internal_0123456789ab.disc_meta"),
+            "allow_once"
+        );
+        assert_eq!(decide("e2", "mcp_kronn_internal.run"), "reject_once");
+        assert!(is_bridge_id("kronn-internal-0123456789ab"));
+        assert!(!is_bridge_id("kronn-internal-"));
+        assert!(!is_bridge_id("kronn-internal-x(y)"));
+    }
+
+    #[test]
+    fn a_runtime_launch_grant_is_audited() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "disc"));
+        broker.record_launch_grant("kronn-internal-0123456789ab", &["disc_meta".into()]);
+        let entry = &broker.audit_log()[0];
+        assert_eq!(entry.method, "session/launch_grant");
+        assert_eq!(entry.verdict, AcpPermissionVerdict::Allow);
+        assert_eq!(entry.server.as_deref(), Some("kronn-internal-0123456789ab"));
+        assert!(entry.reason.contains("disc_meta"));
     }
 }
