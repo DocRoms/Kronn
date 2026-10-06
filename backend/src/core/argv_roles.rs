@@ -10,6 +10,11 @@
 //! `npx`…) only decide what no approval lifts: a value in code, at an option
 //! position or naming a program, and the run-time checks of rendered values.
 
+/// The options of wrapper `cmd` that take a value (`sudo -u USER`).
+pub fn wrapper_value_options(cmd: &str) -> &'static [&'static str] {
+    wrapper(&normalize_command(cmd)).map_or(&[], |spec| spec.value_options)
+}
+
 /// The program that receives argument `index`: the nearest program position
 /// before it (a wrapper's program, `find -exec`, `docker run`…), else `cmd`.
 pub fn owning_program(cmd: &str, args: &[String], roles: &[Role], index: usize) -> String {
@@ -82,6 +87,29 @@ pub fn normalize_command(cmd: &str) -> String {
 
 const MAX_DEPTH: usize = 8;
 
+/// Who stands behind the values of a command line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trust {
+    /// A human approved the step: a value the model leaves as data is
+    /// accepted on any line (never in code, an option or a program name).
+    pub approved: bool,
+    /// An agent wrote the line: no shape is trusted, every value needs the
+    /// approval.
+    pub agent_written: bool,
+    /// Scripts the step pins by hash (`exec_script_files`): the only ones a
+    /// script shape trusts.
+    pub declared_scripts: Vec<String>,
+}
+
+impl From<bool> for Trust {
+    fn from(approved: bool) -> Self {
+        Self {
+            approved,
+            ..Self::default()
+        }
+    }
+}
+
 /// Why a command line is not one of the shapes Kronn trusts without a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Untrusted {
@@ -91,26 +119,37 @@ pub enum Untrusted {
     Shape,
     /// The inline code or the script path carries a template value.
     TemplatedCode,
-    /// The script is stdin (`-`, `/dev/stdin`, `/dev/fd/0`…).
+    /// The script is stdin or a device (`-`, `/dev/stdin`, `//dev/./fd/0`…).
     StdinScript,
+}
+
+/// Which trusted shape a line has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// `bash|sh -c`, `python3 -c`, `node -e`: the code is in the line.
+    InlineCode,
+    /// `python3 SCRIPT`, `node SCRIPT`: the code is in a file.
+    Script,
 }
 
 /// The only lines whose values Kronn trusts without a human, matched exactly:
 /// `bash|sh -c SCRIPT [NAME ARGS…]`, `python3 -c CODE [ARGS…]`,
 /// `python3 SCRIPT [ARGS…]`, `node -e CODE [-- ARGS…]`, `node SCRIPT [ARGS…]`,
-/// where `SCRIPT`/`CODE` carry no outside value.
-pub fn trusted_shape(cmd: &str, args: &[String], tainted: &[bool]) -> Result<(), Untrusted> {
+/// where `SCRIPT`/`CODE` carry no outside value. A shell script does not
+/// start with `-` or `+`: bash reads it as one more option (`bash -c -- X`
+/// runs `X`).
+pub fn trusted_shape(cmd: &str, args: &[String], tainted: &[bool]) -> Result<Shape, Untrusted> {
     let literal = |i: usize| !tainted.get(i).copied().unwrap_or(false);
-    let code_then = |option: &str| -> Result<(), Untrusted> {
+    let code_then = |option: &str| -> Result<Shape, Untrusted> {
         if args.first().map(String::as_str) != Some(option) || args.len() < 2 {
             return Err(Untrusted::Shape);
         }
         if !literal(1) {
             return Err(Untrusted::TemplatedCode);
         }
-        Ok(())
+        Ok(Shape::InlineCode)
     };
-    let script = || -> Result<(), Untrusted> {
+    let script = || -> Result<Shape, Untrusted> {
         let Some(first) = args.first() else {
             return Err(Untrusted::StdinScript);
         };
@@ -123,10 +162,16 @@ pub fn trusted_shape(cmd: &str, args: &[String], tainted: &[bool]) -> Result<(),
         if first.starts_with('-') {
             return Err(Untrusted::Shape);
         }
-        Ok(())
+        Ok(Shape::Script)
     };
     match trusted_program(cmd) {
-        Some("bash" | "sh") => code_then("-c"),
+        Some("bash" | "sh") => {
+            code_then("-c")?;
+            if args[1].starts_with(['-', '+']) {
+                return Err(Untrusted::Shape);
+            }
+            Ok(Shape::InlineCode)
+        }
         Some("python3") if args.first().is_some_and(|a| a == "-c") => code_then("-c"),
         Some("python3") => script(),
         Some("node") if args.first().is_some_and(|a| a == "-e") => {
@@ -134,45 +179,111 @@ pub fn trusted_shape(cmd: &str, args: &[String], tainted: &[bool]) -> Result<(),
             if args.len() > 2 && args[2] != "--" {
                 return Err(Untrusted::Shape);
             }
-            Ok(())
+            Ok(Shape::InlineCode)
         }
         Some("node") => script(),
         _ => Err(Untrusted::Program),
     }
 }
 
-/// The trusted program `cmd` names, by exact base name.
-fn trusted_program(cmd: &str) -> Option<&'static str> {
-    let base = cmd.trim().rsplit(['/', '\\']).next().unwrap_or_default();
-    ["bash", "sh", "python3", "node"]
-        .into_iter()
-        .find(|name| *name == base)
+/// Whether `trust` lets the shape of `cmd args` carry values without a human:
+/// a human wrote it, and a script shape runs a script the step pins.
+pub fn trusted_by_shape(cmd: &str, args: &[String], tainted: &[bool], trust: &Trust) -> bool {
+    if trust.agent_written {
+        return false;
+    }
+    match trusted_shape(cmd, args, tainted) {
+        Ok(Shape::InlineCode) => true,
+        Ok(Shape::Script) => {
+            let script = args[0].trim_start_matches("./");
+            trust
+                .declared_scripts
+                .iter()
+                .any(|declared| declared.trim_start_matches("./") == script)
+        }
+        Err(_) => false,
+    }
 }
 
-/// A path that names stdin.
+/// The trusted program `cmd` names, by exact base name. On Windows `bash`
+/// may be the WSL launcher, which hands its command line to another shell:
+/// shells there are not trusted.
+fn trusted_program(cmd: &str) -> Option<&'static str> {
+    let base = cmd.trim().rsplit(['/', '\\']).next().unwrap_or_default();
+    let names: &[&'static str] = if cfg!(windows) {
+        &["python3", "node"]
+    } else {
+        &["bash", "sh", "python3", "node"]
+    };
+    names.iter().copied().find(|name| *name == base)
+}
+
+/// A path that names stdin or a device, after lexical normalisation
+/// (`//dev/./stdin`, `/dev/../dev/fd/0`).
 pub fn is_stdin_path(path: &str) -> bool {
-    path == "-"
-        || path == "/dev/stdin"
-        || path.starts_with("/dev/fd/")
-        || (path.starts_with("/proc/") && path.contains("/fd/"))
+    if path == "-" {
+        return true;
+    }
+    let device = |normal: &str| {
+        normal == "/dev"
+            || normal.starts_with("/dev/")
+            || normal == "/proc"
+            || normal.starts_with("/proc/")
+    };
+    let normal = normalize_path(path);
+    // A relative path climbing past the work dir ends at `/` from any cwd
+    // (`../../../../dev/stdin`): judge it re-rooted there.
+    device(&normal) || (normal.starts_with("../") && device(&normalize_path(&format!("/{path}"))))
+}
+
+/// `path` with `//`, `.` and `..` resolved lexically (relative paths stay
+/// relative; a `..` above the root stays at the root).
+pub fn normalize_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|last| *last != "..") {
+                    parts.pop();
+                } else if !absolute {
+                    parts.push("..");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+/// The role of every argument of `cmd args` for a line a human wrote, with
+/// no pinned script. See [`roles_with`].
+pub fn roles(cmd: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
+    roles_with(cmd, args, tainted, &Trust::default())
 }
 
 /// The role of every argument of `cmd args`. `tainted` marks arguments that
 /// carry an outside value: they never end option parsing or name a program,
 /// since their rendered text is not known (or not trusted).
 ///
-/// Only a trusted shape ([`trusted_shape`]) or a data-only program keeps a
-/// value as data without a human: on any other line, a value the model
-/// leaves as data is [`Role::Unmodelled`]. The model still decides the
-/// refusals no approval lifts (code, option and program positions).
-pub fn roles(cmd: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
+/// Only a trusted shape ([`trusted_by_shape`]) or a data-only program keeps
+/// a value as data without a human, and only on a line a human wrote: on any
+/// other line, a value the model leaves as data is [`Role::Unmodelled`]. The
+/// model still decides the refusals no approval lifts (code, option and
+/// program positions).
+pub fn roles_with(cmd: &str, args: &[String], tainted: &[bool], trust: &Trust) -> Vec<Role> {
     let mut flags = tainted.to_vec();
     flags.resize(args.len(), false);
     let mut roles = model_roles(cmd, args, &flags);
-    if flags.iter().any(|value| *value)
-        && !is_data_only(cmd)
-        && trusted_shape(cmd, args, &flags).is_err()
-    {
+    let trusted =
+        !trust.agent_written && (is_data_only(cmd) || trusted_by_shape(cmd, args, &flags, trust));
+    if flags.iter().any(|value| *value) && !trusted {
         for (role, value) in roles.iter_mut().zip(&flags) {
             if *value && matches!(role, Role::Data | Role::RuntimeOption) {
                 *role = Role::Unmodelled;
@@ -229,36 +340,46 @@ fn roles_at(cmd: &str, args: &[String], tainted: &[bool], depth: usize) -> Vec<R
         _ if UNMODELLED_EVALUATORS.contains(&name.as_str()) => vec![Role::Option; args.len()],
         _ => match flag_spec(&name) {
             Some(spec) => flag_roles(args, tainted, &spec),
-            None if is_data_only(cmd) => data_only_roles(&name, args, tainted),
+            None if is_data_only(cmd) => data_only_roles(&exact_base(cmd), args, tainted),
             None => vec![Role::Unmodelled; args.len()],
         },
     }
 }
 
-/// Data-only programs still parse options (`rm -rf`, `date -s`): a value is
-/// checked at run time until a literal `--` ends them. `echo`, `test` and
-/// `[` read no option a value could turn on, and do not end options on `--`.
+/// Data-only programs still parse options: a value is checked at run time
+/// until a literal `--` ends them. `echo`, `test` and `[` read no option a
+/// value could turn on. `printf`'s format is a small language, so a value
+/// there needs a human; so does a file `date` would read (`-f`, `-r`) or a
+/// date it would set (`-s`).
 fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
     if matches!(name, "echo" | "test" | "[" | "true" | "false") {
         return vec![Role::Data; args.len()];
     }
-    let code = data_only_code_options(name);
     let mut options_end = false;
+    let mut operands = 0;
     let mut roles = vec![Role::Data; args.len()];
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
         let value = is_tainted(tainted, i);
-        if options_end {
+        let format = name == "printf" && operands == 0;
+        if options_end || (!value && !is_option(arg)) {
+            if value && format {
+                roles[i] = Role::Unmodelled;
+            }
+            operands += usize::from(arg != "--" || options_end);
             i += 1;
             continue;
         }
         if value {
             roles[i] = if !is_option(arg) {
-                Role::RuntimeOption
-            } else if attached_option_matches(arg, code) {
-                Role::Code
-            } else if attached_value(arg, data_only_values(name)) {
+                operands += 1;
+                if format {
+                    Role::Unmodelled
+                } else {
+                    Role::RuntimeOption
+                }
+            } else if data_only_attached(name, arg) {
                 Role::Data
             } else {
                 Role::Option
@@ -268,8 +389,10 @@ fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
         }
         if arg == "--" {
             options_end = true;
-        } else if is_option(arg) && takes_code(arg, code) && i + 1 < args.len() {
-            roles[i + 1] = Role::Code;
+        } else if name == "date" && date_reads_a_file_or_sets(arg) && i + 1 < args.len() {
+            if is_tainted(tainted, i + 1) {
+                roles[i + 1] = Role::Unmodelled;
+            }
             i += 1;
         }
         i += 1;
@@ -277,63 +400,38 @@ fn data_only_roles(name: &str, args: &[String], tainted: &[bool]) -> Vec<Role> {
     roles
 }
 
-/// Whether `arg` (written by the author) is a code option of `options` whose
-/// value is the next argument: the option alone, or a short cluster ending
-/// with its letter (`jq -rf FILE`).
-fn takes_code(arg: &str, options: &[&str]) -> bool {
-    if arg.starts_with("--") {
-        return !arg.contains('=') && option_in(arg, options);
-    }
-    let cluster = arg.strip_prefix('-').unwrap_or_default();
-    cluster.chars().all(|c| c.is_ascii_alphabetic())
-        && cluster.chars().last().is_some_and(|last| {
-            options
+/// Whether a literal `date` option takes the next argument as a file to read
+/// or a date to set: `-f`/`-r`/`-s`, also inside a cluster (`-uf`), and any
+/// unambiguous abbreviation of `--file`, `--reference`, `--set` (GNU getopt).
+fn date_reads_a_file_or_sets(arg: &str) -> bool {
+    if let Some(name) = arg.strip_prefix("--") {
+        return !name.contains('=')
+            && !name.is_empty()
+            && ["file", "reference", "set"]
                 .iter()
-                .any(|option| option.len() == 2 && option.ends_with(last))
-        })
+                .any(|option| option.starts_with(name));
+    }
+    arg.strip_prefix('-')
+        .is_some_and(|cluster| cluster.chars().any(|c| matches!(c, 'f' | 'r' | 's')))
 }
 
-/// Options of a data-only program whose value is code: jq reads its program
-/// from `-f` and its modules from `-L`.
-fn data_only_code_options(name: &str) -> &'static [&'static str] {
-    match name {
-        "jq" => &["-f", "--from-file", "-L", "--library-path"],
-        _ => &[],
+/// Whether a templated option of a data-only program keeps its value
+/// attached to an option that takes a plain value (`seq -f{{fmt}}`,
+/// `date --date={{when}}`), so the rendered text cannot add options.
+fn data_only_attached(name: &str, arg: &str) -> bool {
+    let (letters, long): (&[char], &[&str]) = match name {
+        "basename" => (&['s'], &["--suffix"]),
+        "seq" => (&['f', 's'], &["--format", "--separator"]),
+        "date" => (&['d'], &["--date"]),
+        _ => (&[], &[]),
+    };
+    let prefix = arg.split("{{").next().unwrap_or_default();
+    if prefix.starts_with("--") {
+        return prefix
+            .split_once('=')
+            .is_some_and(|(option, _)| long.contains(&option));
     }
-}
-
-/// Short options of a data-only program that take a value, so a templated
-/// `-n{{count}}` keeps the value attached instead of adding options.
-fn data_only_values(name: &str) -> &'static [char] {
-    match name {
-        "head" | "tail" => &['n', 'c'],
-        "cut" => &['d', 'f', 'c', 'b'],
-        "grep" | "egrep" | "fgrep" => &['e', 'f', 'm', 'A', 'B', 'C'],
-        "date" => &['d', 'r'],
-        "mkdir" | "mkfifo" => &['m'],
-        "cp" | "mv" | "ln" => &['t', 'S'],
-        "touch" => &['d', 'r', 't'],
-        "du" => &['d', 'B'],
-        "df" => &['B', 't'],
-        "stat" => &['c'],
-        "base64" => &['w'],
-        "seq" => &['f', 's'],
-        "paste" => &['d'],
-        "join" => &['t', 'j', 'o'],
-        "fold" => &['w'],
-        "column" => &['s', 'c'],
-        "nl" => &['b', 's', 'w', 'v', 'i'],
-        "od" => &['A', 'j', 'N', 't'],
-        "hexdump" => &['n', 's'],
-        "xxd" => &['c', 'g', 'l', 's'],
-        "iconv" => &['f', 't'],
-        "shasum" => &['a'],
-        "uniq" => &['f', 's', 'w'],
-        "basename" => &['s'],
-        "diff" => &['U', 'C', 'I'],
-        "unzip" => &['d', 'P'],
-        _ => &[],
-    }
+    attached_value(arg, letters)
 }
 
 /// Whether a templated option argument keeps its value attached to an option
@@ -1663,96 +1761,30 @@ const UNMODELLED_EVALUATORS: &[&str] = &[
     "batch",
 ];
 
-/// Programs whose arguments are plain data by construction: none of their
-/// options names a command, a script or a program to run, and none reads its
-/// argument text as code. Every entry was checked against that rule; programs
-/// that fail it stay out (or get their own model): `sort --compress-program`,
-/// `zip -TT`, `rg --pre`, `less` (`!cmd`, `LESSOPEN`), `tar --to-command`,
-/// `find -exec`, `sed` (`e`), `awk`, `xargs`, `env`, `git`, `diff3
-/// --diff-program`, `sdiff --diff-program`, `hostname` (sets the host name).
+/// Programs whose operands are neither code nor paths: a value can only be
+/// printed, compared or formatted. Programs that read a path (`cat`, `grep`,
+/// `jq`), write one (`cp`, `tee`, `rm`, `chmod`) or read the environment
+/// (`printenv`) need a human's approval for a value.
 pub const DATA_ONLY_PROGRAMS: &[&str] = &[
-    "echo",
-    "printf",
-    "cat",
-    "ls",
-    "grep",
-    "egrep",
-    "fgrep",
-    "jq",
-    "wc",
-    "head",
-    "tail",
-    "uniq",
-    "cut",
-    "tr",
-    "date",
-    "mkdir",
-    "rmdir",
-    "cp",
-    "mv",
-    "rm",
-    "ln",
-    "touch",
-    "test",
-    "[",
-    "true",
-    "false",
-    "sleep",
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    "stat",
-    "du",
-    "df",
-    "tee",
-    "diff",
-    "cmp",
-    "comm",
-    "shasum",
-    "sha256sum",
-    "sha1sum",
-    "md5sum",
-    "base64",
-    "gzip",
-    "gunzip",
-    "bzip2",
-    "xz",
-    "unzip",
-    "file",
-    "which",
-    "pwd",
-    "id",
-    "whoami",
-    "uname",
-    "printenv",
-    "seq",
-    "nl",
-    "paste",
-    "join",
-    "fold",
-    "column",
-    "od",
-    "hexdump",
-    "xxd",
-    "iconv",
-    "chmod",
-    "chown",
-    "mkfifo",
+    "echo", "printf", "test", "[", "true", "false", "basename", "dirname", "seq", "date",
 ];
 
 /// Whether `cmd` is a data-only program. The exact base name is compared,
 /// without the version-suffix stripping of [`normalize_command`]: `diff3`
 /// (which takes `--diff-program`) is not `diff`.
 pub fn is_data_only(cmd: &str) -> bool {
+    DATA_ONLY_PROGRAMS.contains(&exact_base(cmd).as_str())
+}
+
+/// The base name of `cmd`, lowercased, without `.exe` or version stripping.
+fn exact_base(cmd: &str) -> String {
     let base = cmd
         .trim()
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let base = base.strip_suffix(".exe").unwrap_or(&base);
-    DATA_ONLY_PROGRAMS.contains(&base)
+    base.strip_suffix(".exe").unwrap_or(&base).to_string()
 }
 
 /// An interpreter with no modelled argv (see [`UNMODELLED_EVALUATORS`]).
@@ -2656,7 +2688,13 @@ mod tests {
         }
         for program in DATA_ONLY_PROGRAMS {
             assert!(is_data_only(program), "{program}");
-            assert!(!refused(program, &["{{x}}"]), "{program}");
+            // printf's format is a small language: a value goes after it.
+            let line: &[&str] = if *program == "printf" {
+                &["%s", "{{x}}"]
+            } else {
+                &["{{x}}"]
+            };
+            assert!(!refused(program, line), "{program}");
         }
     }
 
@@ -2680,13 +2718,13 @@ mod tests {
             ("vim", vec!["-{{x}}"]),
             ("sqlite3", vec!["-{{x}}", "db"]),
             ("make", vec!["-{{x}}"]),
-            ("rm", vec!["-{{x}}", "file"]),
-            ("rm", vec!["--{{x}}", "file"]),
-            ("cp", vec!["-r{{x}}", "a", "b"]),
-            ("grep", vec!["-v{{x}}", "pattern"]),
             ("date", vec!["-{{x}}"]),
+            ("date", vec!["--{{x}}"]),
+            ("seq", vec!["-w{{x}}", "3"]),
+            ("cp", vec!["-S{{x}}", "a", "b"]),
         ] {
-            assert!(!approvable(cmd, &items), "{cmd} {items:?}");
+            assert!(!approvable(cmd, &items) || cmd == "cp", "{cmd} {items:?}");
+            assert!(refused(cmd, &items), "{cmd} {items:?}");
         }
         for (cmd, items) in [
             ("git", vec!["commit", "-m{{msg}}"]),
@@ -2701,13 +2739,17 @@ mod tests {
             assert!(approvable(cmd, &items), "{cmd} {items:?}");
         }
         for (cmd, items) in [
-            ("head", vec!["-n{{count}}", "file"]),
-            ("grep", vec!["-e{{pattern}}", "file"]),
-            ("grep", vec!["--regexp={{pattern}}", "file"]),
-            ("rm", vec!["--", "-{{x}}"]),
+            ("seq", vec!["-f{{fmt}}", "3"]),
+            ("seq", vec!["--separator={{sep}}", "3"]),
+            ("date", vec!["-d{{when}}"]),
+            ("basename", vec!["-s{{suffix}}", "a.txt"]),
+            ("basename", vec!["--", "-{{x}}"]),
         ] {
             assert!(!refused(cmd, &items), "{cmd} {items:?}");
         }
+        // Only the listed long options keep a value attached.
+        assert!(refused("date", &["--set={{when}}"]));
+        assert!(refused("date", &["--reference={{file}}"]));
         // An unmodelled program stays default-deny, option-shaped or not.
         assert!(refused("terraform", &["-{{x}}"]));
         assert!(refused("terraform", &["--var={{x}}"]));
@@ -2758,9 +2800,14 @@ mod tests {
         ] {
             assert!(refused("jq", &items), "{items:?}");
         }
-        assert!(!refused("jq", &["-r", ".name", "{{file}}"]));
-        assert!(!refused("jq", &["--arg", "name", "{{value}}", ".x"]));
-        assert!(!refused("jq", &["-L", "/usr/share/jq", ".", "{{file}}"]));
+        // jq reads paths: a value in a data position needs a human.
+        for items in [
+            vec!["-r", ".name", "{{file}}"],
+            vec!["--arg", "name", "{{value}}", ".x"],
+        ] {
+            assert!(refused("jq", &items), "{items:?}");
+            assert!(approvable("jq", &items), "{items:?}");
+        }
     }
 
     /// A data-only program still reads options: a value rendering to one
@@ -2769,10 +2816,7 @@ mod tests {
     #[test]
     fn a_data_only_operand_rendering_to_an_option_is_refused_at_run_time() {
         let tainted = |items: &[&str]| -> Vec<String> { line(items) };
-        for program in [
-            "rm", "cp", "mv", "chmod", "chown", "ln", "tee", "date", "grep", "jq", "printf",
-            "touch", "mkdir", "/bin/rm",
-        ] {
+        for program in ["basename", "dirname", "seq", "date", "/bin/date"] {
             let templates = tainted(&["{{x}}", "target"]);
             let refusal = |rendered: &[&str]| {
                 rendered_refusal("s", program, &templates, &line(rendered), false)
@@ -2803,7 +2847,7 @@ mod tests {
         }
         // A value rendering to `--` does not end options for the next one.
         let templates = line(&["{{x}}", "{{y}}"]);
-        assert!(rendered_refusal("s", "rm", &templates, &line(&["--", "-rf"]), false).is_some());
+        assert!(rendered_refusal("s", "seq", &templates, &line(&["--", "-rf"]), false).is_some());
         // `echo` and `test` read no option a value could turn on.
         for program in ["echo", "test"] {
             let templates = line(&["{{x}}"]);

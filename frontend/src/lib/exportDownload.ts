@@ -8,6 +8,7 @@ const WARNINGS: Record<string, string> = {
   'no-recovery-passphrase': 'config.exportNoRecoveryWarning',
   'key-locked': 'config.exportKeyLockedWarning',
   'recovery-not-bundled': 'config.exportRecoveryWarning',
+  'locked-secrets-not-exported': 'config.exportLockedSecretsWarning',
 };
 
 export async function exportAndDownload(
@@ -23,7 +24,9 @@ export async function exportAndDownload(
     a.download = `kronn-export-${new Date().toISOString().slice(0, 10)}.zip`;
     a.click();
     URL.revokeObjectURL(url);
-    if (warning) toast(t(WARNINGS[warning] ?? 'config.exportRecoveryWarning'), 'error');
+    for (const w of (warning ?? '').split(',').map(s => s.trim()).filter(Boolean)) {
+      toast(t(WARNINGS[w] ?? 'config.exportRecoveryWarning'), 'error');
+    }
   } catch (err) {
     toast(err instanceof Error ? err.message : String(err), 'error');
   }

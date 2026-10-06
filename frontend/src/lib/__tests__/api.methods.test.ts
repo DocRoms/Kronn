@@ -428,6 +428,8 @@ describe('api.discussions (rest)', () => {
 // ════════════════════════════════════════════════════════════════════════════
 describe('api.workflows (rest)', () => {
   it('createBundle', async () => { await exec(workflows.createBundle({}), 'POST', '/workflows/bundle'); });
+  it('createHumanBundle', async () => { await exec(workflows.createHumanBundle({}), 'POST', '/workflows/bundle/human'); });
+  it('createAgentProposal', async () => { await exec(workflows.createAgentProposal({}), 'POST', '/workflows/agent-proposal'); });
   it('deleteAllRuns', async () => { await exec(workflows.deleteAllRuns('wf-1'), 'DELETE', '/workflows/wf-1/runs'); });
   it('cancelRun', async () => { await exec(workflows.cancelRun('wf-1', 'r-1'), 'POST', '/workflows/wf-1/runs/r-1/cancel'); });
   it('decideRun', async () => { await exec(workflows.decideRun('wf-1', 'r-1', { decision: 'approve' } as never), 'POST', '/workflows/wf-1/runs/r-1/decide'); });

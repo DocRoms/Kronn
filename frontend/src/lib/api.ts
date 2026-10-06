@@ -264,7 +264,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus } from '../types/generated';
+import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -908,7 +908,11 @@ export const config = {
   getRecoveryStatus: () => api<RecoveryStatus>('GET', '/config/recovery/status'),
   /** Returns the recovery code the user MUST save off-machine. */
   // Replacing an existing passphrase requires the current one (KT-1007).
-  setRecovery: (passphrase: string, currentPassphrase?: string) => api<{ recovery_code: string }>('POST', '/config/recovery/set', currentPassphrase ? { passphrase, current_passphrase: currentPassphrase } : { passphrase }),
+  setRecovery: (passphrase: string, currentPassphrase?: string, replaceUnverified?: boolean) => api<{ recovery_code: string }>('POST', '/config/recovery/set', {
+    passphrase,
+    ...(currentPassphrase ? { current_passphrase: currentPassphrase } : {}),
+    ...(replaceUnverified ? { replace_unverified: true } : {}),
+  }),
   /** Restores the encryption key when the token subsystem is locked. `recoveryCode`
    *  optional — omitted, the local recovery sidecar is used. */
   restoreRecovery: (passphrase: string, recoveryCode?: string) =>
@@ -917,6 +921,9 @@ export const config = {
    *  key, with that machine's passphrase (the instance key never changes). */
   reencryptImported: (passphrase: string, recoveryCode?: string) =>
     api<ReencryptResponse>('POST', '/config/recovery/reencrypt', { passphrase, recovery_code: recoveryCode || null }),
+  /** Key lost for good: keeps the locked secrets in a file, removes them and
+   *  starts a new key (discussions, projects and workflows stay). */
+  startNewKey: () => api<StartNewKeyResponse>('POST', '/config/recovery/start-new-key'),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   /** Batch storage weight for the discussions currently on screen. Sparse:
    * an id that holds nothing is absent from `weights`. Never call this to
@@ -2426,7 +2433,11 @@ export const workflows = {
    *  sentinels. The server creates everything in a single SQLite
    *  transaction — rollback on any failure, no orphan rows. Drives
    *  the `KRONN:BUNDLE_READY` chat signal flow. */
+  // KT-1017 — an agent's chat proposal is an agent save; the wizard's own
+  // decomposed preset is the human's.
   createBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle', req),
+  createHumanBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle/human', req),
+  createAgentProposal: (req: unknown) => api<Workflow>('POST', '/workflows/agent-proposal', req),
   update: (id: string, req: UpdateWorkflowRequest) => api<Workflow>('PUT', `/workflows/${id}`, req),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),

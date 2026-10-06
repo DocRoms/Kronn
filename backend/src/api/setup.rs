@@ -17,7 +17,7 @@ use chrono::Utc;
 /// On Linux/macOS: user home.
 fn default_scan_path() -> Option<String> {
     // Docker: mounted host home
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         return Some(host_home);
     }
 
@@ -245,7 +245,10 @@ pub async fn save_api_key(
     State(state): State<AppState>,
     Json(req): Json<SaveApiKeyRequest>,
 ) -> Json<ApiResponse<ApiKeyDisplay>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     if req.value.is_empty() || req.value.contains('*') {
         return Json(ApiResponse::err("Invalid key value"));
@@ -282,13 +285,16 @@ pub async fn save_api_key(
     };
 
     match config::save(&config).await {
-        Ok(_) => Json(ApiResponse::ok(ApiKeyDisplay {
-            id: key.id,
-            name: key.name,
-            provider: key.provider,
-            masked_value: mask_token(&key.value),
-            active: key.active,
-        })),
+        Ok(_) => {
+            *live = config;
+            Json(ApiResponse::ok(ApiKeyDisplay {
+                id: key.id,
+                name: key.name,
+                provider: key.provider,
+                masked_value: mask_token(&key.value),
+                active: key.active,
+            }))
+        }
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
 }
@@ -299,7 +305,10 @@ pub async fn delete_api_key(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     let idx = config.tokens.keys.iter().position(|k| k.id == id);
     if let Some(i) = idx {
@@ -316,7 +325,10 @@ pub async fn delete_api_key(
             }
         }
         match config::save(&config).await {
-            Ok(_) => Json(ApiResponse::ok(())),
+            Ok(_) => {
+                *live = config;
+                Json(ApiResponse::ok(()))
+            }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
         }
     } else {
@@ -330,7 +342,10 @@ pub async fn activate_api_key(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved: a failed save leaves the
+    // live config as stored.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
 
     let provider = config
         .tokens
@@ -346,7 +361,10 @@ pub async fn activate_api_key(
             }
         }
         match config::save(&config).await {
-            Ok(_) => Json(ApiResponse::ok(())),
+            Ok(_) => {
+                *live = config;
+                Json(ApiResponse::ok(()))
+            }
             Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
         }
     } else {
@@ -1077,7 +1095,7 @@ pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<O
 
 /// Write or remove the OpenAI key from ~/.codex/auth.json
 fn sync_codex_auth(key: Option<&str>) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let home = crate::core::child_env::var("HOME").unwrap_or_else(|_| "/root".into());
     let codex_auth_path = std::path::PathBuf::from(home)
         .join(".codex")
         .join("auth.json");
@@ -1238,7 +1256,9 @@ pub async fn discover_keys(
         return Json(ApiResponse::err(locked));
     }
     let discovered = crate::core::key_discovery::discover_keys().await;
-    let mut config = state.config.write().await;
+    // Changed on a copy, adopted only once saved.
+    let mut live = state.config.write().await;
+    let mut config = live.clone();
     let mut imported_count = 0u32;
     let mut results = Vec::new();
 
@@ -1268,13 +1288,19 @@ pub async fn discover_keys(
 
     if imported_count > 0 {
         match config::save(&config).await {
-            Ok(_) => tracing::info!("Auto-imported {} API key(s)", imported_count),
+            Ok(_) => {
+                *live = config;
+                tracing::info!("Auto-imported {} API key(s)", imported_count)
+            }
             // Keys live only in memory now — claiming success would leave the
             // user believing they persisted (they vanish at next restart).
             Err(e) => {
-                tracing::error!("Auto-imported {} API key(s) but SAVING the config failed: {e} — keys are in memory only and will be lost at restart", imported_count);
+                tracing::error!(
+                    "Found {} API key(s) but saving them failed: {e}; none was imported",
+                    imported_count
+                );
                 return Json(ApiResponse::err(format!(
-                    "Imported {imported_count} key(s) but persisting config.toml failed: {e}"
+                    "Found {imported_count} key(s) but storing them failed ({e}); none was imported"
                 )));
             }
         }
@@ -1647,6 +1673,13 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .filter(|p| !p.is_builtin)
         .collect();
 
+    let trust_seal = state
+        .config
+        .read()
+        .await
+        .encryption_secret
+        .as_deref()
+        .map(|secret| approvals_seal(secret, &workflows, &quick_execs));
     Ok(DbExport {
         version: crate::models::db::CURRENT_EXPORT_VERSION,
         exported_at: Utc::now(),
@@ -1661,11 +1694,98 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         contacts,
         quick_prompts,
         quick_apis,
+        trust_seal,
         quick_execs,
         learnings,
         quick_prompt_versions,
         learning_rejections,
     })
+}
+
+/// HMAC-SHA256 (RFC 2104).
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut block = [0u8; 64];
+    if key.len() > 64 {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let pad = |byte: u8| block.iter().map(|b| b ^ byte).collect::<Vec<u8>>();
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(message)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .into()
+}
+
+/// The seal that ties a backup's approvals and line writers to the instance
+/// that made it (KT-1017): a MAC over the canonical JSON of its workflows and
+/// Quick Execs, under a key derived from this instance's encryption secret.
+pub(crate) fn approvals_seal(
+    secret: &str,
+    workflows: &[Workflow],
+    quick_execs: &[QuickExec],
+) -> String {
+    let canonical = serde_json::to_value((workflows, quick_execs))
+        .and_then(|value| serde_json::to_vec(&value))
+        .unwrap_or_default();
+    let key = hmac_sha256(b"kronn-export-approvals", secret.as_bytes());
+    hmac_sha256(&key, &canonical)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Whether a backup's seal equals the expected one, compared in constant time.
+fn seal_matches(seal: &str, expected: &str) -> bool {
+    let (seal, expected) = (seal.as_bytes(), expected.as_bytes());
+    seal.len() == expected.len()
+        && seal
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+/// A restore from an archive this instance did not seal drops every approval
+/// and marks each line with run values as an agent's (KT-1017).
+async fn distrust_foreign_approvals(
+    state: &AppState,
+    data: &DbExport,
+) -> (Vec<Workflow>, Vec<QuickExec>, bool) {
+    let secret = state.config.read().await.encryption_secret.clone();
+    let sealed = matches!(
+        (&secret, &data.trust_seal),
+        (Some(secret), Some(seal))
+            if seal_matches(seal, &approvals_seal(secret, &data.workflows, &data.quick_execs))
+    );
+    let mut workflows = data.workflows.clone();
+    let mut quick_execs = data.quick_execs.clone();
+    if !sealed {
+        for workflow in &mut workflows {
+            for chain in [&mut workflow.steps, &mut workflow.on_failure] {
+                crate::api::workflows::clear_human_approvals(chain);
+                crate::api::workflows::blank_unpinned_hashes(chain, &[]);
+                crate::api::workflows::mark_line_writers(
+                    chain,
+                    &[],
+                    crate::api::workflows::WorkflowWriter::Agent,
+                );
+            }
+        }
+        for item in &mut quick_execs {
+            item.unmodelled_args_approved = None;
+            item.agent_written =
+                crate::api::quick_execs::needs_agent_approval(&item.command, &item.args)
+                    .then_some(true);
+        }
+    }
+    (workflows, quick_execs, sealed)
 }
 
 /// Build an exportable config.toml (without auth_token, encryption_secret, and API key values)
@@ -1746,8 +1866,17 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"kronn-export.zip\"",
         );
-    if let Some(warning) = export_warning {
-        response = response.header("X-Kronn-Export-Warning", warning);
+    // Secrets kept aside when a key was given up stay on this machine only.
+    let locked_rows = config::config_dir()
+        .ok()
+        .map(|d| crate::core::keystore::locked_file_rows(&d))
+        .unwrap_or(0);
+    let warnings: Vec<&str> = export_warning
+        .into_iter()
+        .chain((locked_rows > 0).then_some("locked-secrets-not-exported"))
+        .collect();
+    if !warnings.is_empty() {
+        response = response.header("X-Kronn-Export-Warning", warnings.join(","));
     }
     response.body(Body::from(bytes)).unwrap()
 }
@@ -1917,8 +2046,41 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
 
     // Workflows failing the editor's Exec rules are imported disabled and named
     // in the report (KT-1017); unsafe Quick Execs are left out, named too.
+    let (restored_workflows, restored_quick_execs, sealed) =
+        distrust_foreign_approvals(state, data).await;
+    if sealed {
+        let kept: Vec<String> = restored_workflows
+            .iter()
+            .flat_map(|wf| {
+                wf.steps
+                    .iter()
+                    .chain(&wf.on_failure)
+                    .filter(|step| step.exec_unmodelled_args_approved == Some(true))
+                    .map(move |step| format!("{} › {}", wf.name, step.name))
+            })
+            .chain(
+                restored_quick_execs
+                    .iter()
+                    .filter(|item| item.unmodelled_args_approved == Some(true))
+                    .map(|item| item.name.clone()),
+            )
+            .collect();
+        if !kept.is_empty() {
+            warnings.push(format!(
+                "Approbations conservées (sauvegarde de cette instance) : {}",
+                kept.join(", ")
+            ));
+        }
+    } else {
+        warnings.push(
+            "Sauvegarde non signée par cette instance : ses approbations d'étapes Exec sont \
+             retirées, et les lignes qui reçoivent des valeurs attendent l'approbation d'un \
+             humain dans l'éditeur."
+                .to_string(),
+        );
+    }
     let mut workflows = Vec::new();
-    for wf in &data.workflows {
+    for wf in &restored_workflows {
         let mut w = wf.clone();
         if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
             w.enabled = false;
@@ -1930,12 +2092,12 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         workflows.push(w);
     }
     let mut quick_execs = Vec::new();
-    for qe in &data.quick_execs {
+    for qe in &restored_quick_execs {
         if let Some(reason) = crate::core::inline_code::quick_exec_validation_error(
             &qe.name,
             &qe.command,
             &qe.args,
-            qe.unmodelled_args_approved == Some(true),
+            crate::api::quick_execs::quick_exec_trust(qe),
         ) {
             warnings.push(format!("Quick Exec « {} » non importé : {reason}", qe.name));
             continue;
@@ -2370,13 +2532,128 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     let previous = cfg.clone();
     *cfg = config::default_config();
     cfg.encryption_secret = previous.encryption_secret;
-    cfg.server.auth_token = previous.server.auth_token;
+    cfg.server.auth_token = previous.server.auth_token.clone();
     cfg.server.auth_enabled = previous.server.auth_enabled;
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
 
+    if key_locked {
+        // Nothing encrypted is left: resolve the key and arm the store now
+        // (adopt or mint), as a fresh start would, instead of staying keyless.
+        if let Err(e) = resolve_fresh_key(&mut cfg, &state.db, &dir).await {
+            return Json(ApiResponse::err(format!(
+                "Reset cleared everything, but a new key could not be set up ({e:#}). Restart \
+                 Kronn."
+            )));
+        }
+        // A reset is a first run: the credential boot wrote a full config.toml.
+        if let Err(e) = config::reset_to_key_only().await {
+            tracing::warn!("Reset could not leave config.toml for a first run: {e:#}");
+        }
+    }
     Json(ApiResponse::ok(()))
+}
+
+/// Resolve the key and arm the credential store on a copy of `live` (key
+/// locked, nothing undecryptable left), adopted only on success: on failure
+/// `live` keeps no key and its auth fields as they were.
+pub(crate) async fn resolve_fresh_key(
+    live: &mut crate::models::AppConfig,
+    db: &std::sync::Arc<crate::db::Database>,
+    dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let session = live
+        .server
+        .auth_token
+        .clone()
+        .filter(|_| live.server.auth_token_session_only);
+    let mut candidate = live.clone();
+    // Only a session token is handed over as such; a readable config.toml
+    // token stays and is stored like any other credential.
+    if session.is_some() {
+        candidate.server.auth_token = None;
+    }
+    candidate.server.auth_token_session_only = false;
+    candidate.server.auth_locked = false;
+    // The value config.toml kept is a candidate (set aside if not used).
+    candidate.encryption_secret = config::retained_disk_key(dir);
+    // Restore mode: setting up a key again never turns auth on or off.
+    crate::resolve_key_and_credentials_in_mode(
+        &mut candidate,
+        db,
+        session,
+        crate::core::credential_store::BootMode::Restore,
+    )
+    .await?;
+    // A still-locked outcome (undecryptable data appeared meanwhile) is not
+    // a new key: nothing is adopted.
+    anyhow::ensure!(
+        candidate.encryption_secret.is_some(),
+        "encrypted data no key decrypts appeared meanwhile; nothing was adopted, retry"
+    );
+    // The credentials must be stored too: an unarmed store with auth on and
+    // no token would leave the API open or wrongly locked.
+    anyhow::ensure!(
+        crate::core::credential_store::is_armed(dir)
+            || !candidate.server.auth_enabled
+            || candidate.server.auth_token.is_some(),
+        "the credentials could not be stored; nothing was adopted, retry"
+    );
+    *live = candidate;
+    Ok(())
+}
+
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct StartNewKeyResponse {
+    /// Owner-only file in the data directory holding the rows set aside.
+    pub kept_file: String,
+    pub rows: u32,
+    /// The new API token when auth is on (shown once, to a local caller).
+    pub auth_token: Option<String>,
+}
+
+/// POST /api/config/recovery/start-new-key — the key is lost for good: set the
+/// encrypted rows no key decrypts aside in a kept file, then start a new key.
+/// Discussions, projects and workflows stay. Key locked; a local caller, or
+/// one with the API token (gated as destructive; auth locked: local only).
+pub async fn start_new_key(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<StartNewKeyResponse>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    let mut cfg = state.config.write().await;
+    if cfg.encryption_secret.is_some() {
+        return Json(ApiResponse::err(
+            "The encryption key is in use: there are no locked secrets to set aside.",
+        ));
+    }
+    let store = crate::core::keyvault::KeyStore::standard(&dir);
+    let set_aside =
+        match crate::core::keystore::set_aside_locked_rows(&state.db, &dir, &store).await {
+            Ok(s) => s,
+            Err(e) => return Json(ApiResponse::err(format!("{e:#}"))),
+        };
+    if let Err(e) = resolve_fresh_key(&mut cfg, &state.db, &dir).await {
+        return Json(ApiResponse::err(format!(
+            "The locked secrets were kept in {} and removed, but a new key could not be set up \
+             ({e:#}). Restart Kronn.",
+            set_aside.file
+        )));
+    }
+    let auth_token = cfg
+        .server
+        .auth_token
+        .clone()
+        .filter(|_| cfg.server.auth_enabled && !cfg.server.auth_token_session_only);
+    Json(ApiResponse::ok(StartNewKeyResponse {
+        kept_file: set_aside.file,
+        rows: set_aside.rows as u32,
+        auth_token,
+    }))
 }
 
 // ── Recovery passphrase (P2) ────────────────────────────────────────────────
@@ -2387,6 +2664,10 @@ pub struct SetRecoveryRequest {
     /// Required to replace an existing recovery passphrase.
     #[serde(default)]
     pub current_passphrase: Option<String>,
+    /// Replace the recovery passphrase without it (from before 0.14.3, or
+    /// forgotten): the old file is kept and a restore still tries it.
+    #[serde(default, alias = "replace_confirmed")]
+    pub replace_unverified: bool,
 }
 
 #[derive(serde::Serialize, ts_rs::TS)]
@@ -2432,6 +2713,24 @@ pub struct RecoveryStatus {
     pub recovery_other_key: bool,
     /// config.toml could not be read at start and was kept aside: what and why.
     pub config_set_aside: Option<String>,
+    /// Rows this start moved from a key kept only in a file (config backup,
+    /// retired or corrupt config) to the key in use; the files are kept.
+    pub rows_moved_from_files: Vec<String>,
+    /// Such moves still to do (no durable copy yet, or a failed write):
+    /// retried at the next start, nothing changed meanwhile.
+    pub file_key_moves_pending: Vec<String>,
+    /// Encrypted rows the key in use cannot decrypt (0 when the key is locked).
+    pub undecryptable_rows: u32,
+    /// Of those, rows under a kept file key that the next start moves.
+    pub file_key_rows_pending: u32,
+    /// Rows waiting in `locked-secrets-*.json` files (a key given up).
+    pub locked_file_rows: u32,
+    /// recovery.key predates 0.14.3: it can be replaced without its passphrase
+    /// after a confirmation (it is kept, a restore still tries it).
+    pub recovery_unverified: bool,
+    /// recovery.key parses but its payload is damaged: replaced without a
+    /// passphrase (kept aside).
+    pub recovery_damaged: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -2447,10 +2746,13 @@ pub struct RestoreRecoveryRequest {
 pub async fn recovery_status(State(state): State<AppState>) -> Json<ApiResponse<RecoveryStatus>> {
     let dir = config::config_dir().ok();
     let key = state.config.read().await.encryption_secret.clone();
-    Json(ApiResponse::ok(recovery_status_in(
-        dir.as_deref(),
-        key.as_deref(),
-    )))
+    let mut status = recovery_status_in(dir.as_deref(), key.as_deref());
+    if let Some(k) = key.as_deref() {
+        status.undecryptable_rows = crate::core::keystore::undecryptable_rows(&state.db, k)
+            .await
+            .unwrap_or(0) as u32;
+    }
+    Json(ApiResponse::ok(status))
 }
 
 fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> RecoveryStatus {
@@ -2465,6 +2767,10 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
     let report = dir
         .map(crate::core::keystore::boot_report)
         .unwrap_or_default();
+    let recovery_state = match (dir, key) {
+        (Some(d), Some(k)) => Some(crate::core::recovery::matches_key(d, k)),
+        _ => None,
+    };
     let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     RecoveryStatus {
         configured,
@@ -2488,6 +2794,17 @@ fn recovery_status_in(dir: Option<&std::path::Path>, key: Option<&str>) -> Recov
             _ => false,
         },
         config_set_aside: dir.and_then(config::set_aside_notice),
+        rows_moved_from_files: report.rows_moved_from_files.clone(),
+        file_key_moves_pending: report.file_key_moves_pending.clone(),
+        undecryptable_rows: 0,
+        file_key_rows_pending: report.file_key_rows_pending as u32,
+        locked_file_rows: dir
+            .map(crate::core::keystore::locked_file_rows)
+            .unwrap_or(0) as u32,
+        recovery_unverified: recovery_state
+            == Some(crate::core::recovery::RecoveryMatch::Unverified),
+        recovery_damaged: recovery_state == Some(crate::core::recovery::RecoveryMatch::Unreadable)
+            && dir.and_then(crate::core::recovery::load_blob).is_some(),
         copies: report.copies as u32,
         stale_sources: names(&report.stale_sources),
         invalid_sources: names(&report.invalid_sources),
@@ -2516,6 +2833,7 @@ pub async fn set_recovery(
         &config,
         &req.passphrase,
         req.current_passphrase.as_deref(),
+        req.replace_unverified,
     ) {
         Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -2565,6 +2883,8 @@ pub async fn restore_recovery(
             .await
             {
                 tracing::error!("Credential store after key restore: {e:#}");
+                // The status and the locked screen then say "fix and restart".
+                crate::core::credential_store::record_boot_failure(&dir, Some(format!("{e:#}")));
                 return Json(ApiResponse::err(format!(
                     "The key was restored, but loading the stored credentials failed: {e:#}. \
                      Restart Kronn; nothing was deleted."
@@ -2588,6 +2908,8 @@ pub struct ReencryptResponse {
     pub rewritten: u32,
     pub already_current: u32,
     pub untouched: u32,
+    /// Rows put back from the files kept when a key was given up.
+    pub restored_from_files: u32,
 }
 
 /// POST /api/config/recovery/reencrypt — re-encrypt secrets imported from
@@ -2613,7 +2935,9 @@ pub async fn reencrypt_imported(
     .await
     {
         Ok(r) => {
-            if r.rewritten > 0 {
+            // Rows put back but not loaded yet: no save may delete them.
+            crate::core::credential_store::preserve_rows(&dir, &r.locked.credentials);
+            if r.rewritten > 0 || r.restored_from_files > 0 {
                 // Stored credentials may be among the rewritten rows: reload the
                 // store so they appear now, not after a restart.
                 let outcome = crate::core::keystore::KeyOutcome::Resolved {
@@ -2634,6 +2958,10 @@ pub async fn reencrypt_imported(
                 )
                 .await
                 {
+                    crate::core::credential_store::record_boot_failure(
+                        &dir,
+                        Some(format!("{e:#}")),
+                    );
                     return Json(ApiResponse::err(format!(
                         "The secrets were re-encrypted, but reloading the stored credentials \
                          failed ({e:#}): restart Kronn to load them."
@@ -2644,10 +2972,13 @@ pub async fn reencrypt_imported(
                     config.server.auth_locked = false;
                 }
             }
+            // Loaded (or nothing to load): the kept files are done.
+            crate::core::keystore::mark_locked_files_restored(&r.locked.files_done);
             Json(ApiResponse::ok(ReencryptResponse {
                 rewritten: r.rewritten as u32,
                 already_current: r.already_current as u32,
                 untouched: r.untouched as u32,
+                restored_from_files: r.restored_from_files as u32,
             }))
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -2758,7 +3089,7 @@ pub fn browse_roots(configured: &[String]) -> Vec<BrowseRoot> {
     if let Some(home) = directories::UserDirs::new() {
         push("Dossier personnel", home.home_dir().to_path_buf());
     }
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         push(
             "Dossier personnel (hôte)",
             crate::core::scanner::resolve_host_path(&host_home),
@@ -3500,6 +3831,7 @@ mod tests {
             learnings: vec![],
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
         }
     }
 
@@ -3694,6 +4026,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
             projects: vec![],
             discussions: vec![],
             workflows: vec![],
@@ -3765,12 +4098,12 @@ mod tests {
         Fut: std::future::Future<Output = ()>,
     {
         let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", dir.path());
+        let previous = crate::core::child_env::var("KRONN_DATA_DIR").ok();
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
         f(dir.path().to_path_buf()).await;
         match previous {
-            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(v) => crate::core::child_env::set_var("KRONN_DATA_DIR", v),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -3934,6 +4267,100 @@ mod tests {
         .await;
     }
 
+    /// F-07: RFC 4231 vectors 1, 2 and 6 (key longer than a block), and a
+    /// seal compared in constant time refuses any change.
+    #[test]
+    fn the_seal_hmac_matches_rfc_4231_and_refuses_a_tampered_seal() {
+        let hex = |bytes: [u8; 32]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(hmac_sha256(&[0x0b; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hex(hmac_sha256(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+        let seal = approvals_seal("s", &[], &[]);
+        assert!(seal_matches(&seal, &seal));
+        let mut tampered = seal.clone();
+        tampered.replace_range(0..1, if seal.starts_with('0') { "1" } else { "0" });
+        assert!(!seal_matches(&tampered, &seal));
+        assert!(!seal_matches(&seal[..10], &seal));
+    }
+
+    /// F-04: an unsealed restore blanks the script hashes it carries.
+    #[tokio::test]
+    async fn an_unsealed_restore_blanks_carried_script_hashes() {
+        let state = test_state();
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "tool", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["python3"], "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null, "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "steps": [{"name": "run", "step_type": {"type": "Exec"}, "exec_command": "python3",
+                       "exec_args": ["tool.py"],
+                       "exec_script_files": [{"path": "tool.py", "sha256": "a".repeat(64)}]}]
+        }))
+        .unwrap();
+        let mut data = empty_export();
+        data.workflows = vec![workflow];
+        let (restored, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed);
+        assert_eq!(restored[0].steps[0].exec_script_files[0].sha256, "");
+    }
+
+    /// R6-11: a restore keeps approvals only from an archive this instance
+    /// sealed; any other drops them and leaves the lines waiting for a human.
+    #[tokio::test]
+    async fn only_this_instance_s_sealed_backup_keeps_its_approvals() {
+        let state = test_state();
+        state.config.write().await.encryption_secret = Some("instance-secret".into());
+        let workflow: Workflow = serde_json::from_value(serde_json::json!({
+            "id": "wf", "name": "plan", "project_id": null, "trigger": {"type": "Manual"},
+            "exec_allowlist": ["terraform"], "actions": [],
+            "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+            "workspace_config": null, "concurrency_limit": null, "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+            "steps": [{"name": "plan", "step_type": {"type": "Exec"}, "exec_command": "terraform",
+                       "exec_args": ["plan", "{{x}}"], "exec_unmodelled_args_approved": true}]
+        }))
+        .unwrap();
+        let mut data = empty_export();
+        data.workflows = vec![workflow];
+        let (foreign, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed);
+        assert_eq!(foreign[0].steps[0].exec_unmodelled_args_approved, None);
+        assert_eq!(
+            foreign[0].steps[0].exec_agent_lines,
+            vec!["main".to_string()]
+        );
+
+        data.trust_seal = Some(approvals_seal(
+            "instance-secret",
+            &data.workflows,
+            &data.quick_execs,
+        ));
+        let (own, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(sealed);
+        assert_eq!(own[0].steps[0].exec_unmodelled_args_approved, Some(true));
+
+        data.trust_seal = Some(approvals_seal(
+            "other-instance",
+            &data.workflows,
+            &data.quick_execs,
+        ));
+        let (_, _, sealed) = distrust_foreign_approvals(&state, &data).await;
+        assert!(!sealed, "a backup sealed elsewhere is foreign");
+    }
+
     fn test_state() -> AppState {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
         let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
@@ -4039,6 +4466,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         export.quick_execs = vec![
             quick_exec("qe-unsafe", "Ticket", vec!["-c", "print('{{ticket}}')"]),
@@ -4120,6 +4548,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         state
             .db
@@ -4187,7 +4616,7 @@ mod tests {
                 .unwrap_or(0),
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let state = test_state();
         let mut imported = config::default_config();
@@ -4233,6 +4662,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            trust_seal: None,
             projects: vec![],
             discussions: vec![],
             workflows: vec![],

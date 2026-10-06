@@ -65,7 +65,7 @@ struct GitHubAsset {
 pub const DESKTOP_APP_ENV: &str = "KRONN_DESKTOP_APP";
 
 fn updates_by_installer() -> bool {
-    std::env::var(DESKTOP_APP_ENV).as_deref() == Ok("1")
+    crate::core::child_env::var(DESKTOP_APP_ENV).as_deref() == Ok("1")
 }
 
 /// Whether one of a release's assets installs on `os`/`arch`, by Tauri's file

@@ -9,7 +9,7 @@ mod tests {
     /// Returns the absolute path to the templates/ directory at the repo root.
     fn templates_dir() -> PathBuf {
         // CARGO_MANIFEST_DIR is the backend/ directory during tests.
-        let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        let manifest = crate::core::child_env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR must be set during tests");
         PathBuf::from(manifest).join("../templates")
     }

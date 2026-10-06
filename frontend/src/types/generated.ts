@@ -516,7 +516,12 @@ config_keys?: Array<ApiConfigKey>,
  * (e.g. Notion's mandatory `Notion-Version`). A header given on the
  * call itself overrides the default of the same name.
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Path of the declared endpoint the "Test" button calls to check the
+ * credentials. Only a `GET` without path parameters qualifies.
+ */
+test_endpoint?: string, };
 
 export type AppConfig = { server: ServerConfig, tokens: TokensConfig, scan: ScanConfig, agents: AgentsConfig,
 /**
@@ -1181,7 +1186,11 @@ endpoints?: Array<ApiEndpoint>,
 /**
  * Headers sent on every call (see `ApiSpec::default_headers`).
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
+ */
+test_endpoint?: string, };
 
 /**
  * One Quick API declared inside a bundle.
@@ -1802,7 +1811,11 @@ endpoints?: Array<ApiEndpoint>,
 /**
  * Headers sent on every call (see `ApiSpec::default_headers`).
  */
-default_headers?: Array<ApiDefaultHeader>, };
+default_headers?: Array<ApiDefaultHeader>,
+/**
+ * Endpoint the "Test" button calls (see `ApiSpec::test_endpoint`).
+ */
+test_endpoint?: string, };
 
 export type DailyUsage = { date: string, tokens: number, cost: CostAggregate, anthropic: number, openai: number, google: number, mistral: number, amazon: number, github: number, };
 
@@ -1854,7 +1867,12 @@ quick_prompt_versions: Array<QuickPromptVersion>,
 /**
  * v5 (passe D) — anti-repetition rejection counters for learnings.
  */
-learning_rejections: Array<LearningRejection>, };
+learning_rejections: Array<LearningRejection>,
+/**
+ * KT-1017 — a MAC, under this instance's key, over the workflows and
+ * Quick Execs: a restore keeps their approvals only when it verifies.
+ */
+trust_seal?: string, };
 
 export type DbInfo = { size_bytes: number, project_count: number, discussion_count: number, message_count: number, mcp_count: number, workflow_count: number, workflow_run_count: number, custom_skill_count: number, custom_profile_count: number, custom_directive_count: number, };
 
@@ -3124,7 +3142,12 @@ export type ExecLineCheck = {
  * The unmodelled program that receives a value from the run, when the
  * line needs a human's approval to be saved (KT-1017).
  */
-unmodelled_program: string | null, };
+unmodelled_program: string | null,
+/**
+ * Every line the approval covers, as `phase: program` (`main: aws`,
+ * `setup: terraform`, `stdin: duckdb`); empty when none needs it.
+ */
+covered: Array<string>, };
 
 /**
  * A command line to check for the step editor and the Quick Exec form.
@@ -3133,7 +3156,20 @@ export type ExecLineCheckRequest = { command: string, args?: Array<string>,
 /**
  * The step's `exec_stdin` template, when it has one.
  */
-stdin?: string | null, };
+stdin?: string | null,
+/**
+ * The step's setup line, which the same approval covers.
+ */
+setup_command?: string | null, setup_args?: Array<string>,
+/**
+ * An agent last wrote these lines: any value needs the approval.
+ */
+agent_written?: boolean,
+/**
+ * The step's pinned scripts (`exec_script_files` paths): a script shape
+ * on one of them needs no approval.
+ */
+declared_scripts?: Array<string>, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
 
@@ -5985,7 +6021,12 @@ pinned: boolean,
  * KT-1017 — a human confirmed that an unmodelled program here treats
  * its arguments as plain data. Never set by an agent's save.
  */
-unmodelled_args_approved?: boolean, created_at: string, updated_at: string, };
+unmodelled_args_approved?: boolean,
+/**
+ * KT-1017 — an agent last wrote this command line: any value it carries
+ * needs a human's approval. Set by the server on save.
+ */
+agent_written?: boolean, created_at: string, updated_at: string, };
 
 export type QuickExecDiagnostics = {
 /**
@@ -6177,7 +6218,39 @@ recovery_other_key: boolean,
 /**
  * config.toml could not be read at start and was kept aside: what and why.
  */
-config_set_aside: string | null, };
+config_set_aside: string | null,
+/**
+ * Rows this start moved from a key kept only in a file (config backup,
+ * retired or corrupt config) to the key in use; the files are kept.
+ */
+rows_moved_from_files: Array<string>,
+/**
+ * Such moves still to do (no durable copy yet, or a failed write):
+ * retried at the next start, nothing changed meanwhile.
+ */
+file_key_moves_pending: Array<string>,
+/**
+ * Encrypted rows the key in use cannot decrypt (0 when the key is locked).
+ */
+undecryptable_rows: number,
+/**
+ * Of those, rows under a kept file key that the next start moves.
+ */
+file_key_rows_pending: number,
+/**
+ * Rows waiting in `locked-secrets-*.json` files (a key given up).
+ */
+locked_file_rows: number,
+/**
+ * recovery.key predates 0.14.3: it can be replaced without its passphrase
+ * after a confirmation (it is kept, a restore still tries it).
+ */
+recovery_unverified: boolean,
+/**
+ * recovery.key parses but its payload is damaged: replaced without a
+ * passphrase (kept aside).
+ */
+recovery_damaged: boolean, };
 
 export type RedactedField = {
 /**
@@ -6192,7 +6265,11 @@ field: string, };
 /**
  * What `POST /api/config/recovery/reencrypt` did.
  */
-export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number, };
+export type ReencryptResponse = { rewritten: number, already_current: number, untouched: number,
+/**
+ * Rows put back from the files kept when a key was given up.
+ */
+restored_from_files: number, };
 
 export type RefreshModelCatalogRequest = { runtime_target_id: string, agent_type: AgentType, force?: boolean, };
 
@@ -7438,6 +7515,16 @@ export type StartBatchCompareJudgeResponse = { judge_run_id: string, judge_discu
 
 export type StartBriefingResponse = { discussion_id: string, };
 
+export type StartNewKeyResponse = {
+/**
+ * Owner-only file in the data directory holding the rows set aside.
+ */
+kept_file: string, rows: number,
+/**
+ * The new API token when auth is on (shown once, to a local caller).
+ */
+auth_token: string | null, };
+
 /**
  * A state file absent from the checked-out branch but present in git history,
  * e.g. committed on a feature branch only.
@@ -8262,7 +8349,11 @@ placeholder: string,
 /**
  * `inline_code_interpolation` or `malformed_placeholder`.
  */
-reason: string, suggested_args: Array<string> | null, manual_fix: string | null, };
+reason: string, suggested_args: Array<string> | null, manual_fix: string | null,
+/**
+ * An agent wrote the line: it waits for a human's approval.
+ */
+agent_written: boolean, };
 
 export type UpdateBatchCompareManualScoreRequest = {
 /**
@@ -9284,6 +9375,18 @@ exec_script_files?: Array<ExecScriptFile>,
  * templated values may reach them. Never set by an agent's save.
  */
 exec_unmodelled_args_approved?: boolean,
+/**
+ * KT-1017 — an agent last wrote this step's command lines: any value
+ * they carry needs a human's approval. Set by the server on save, never
+ * read from the request.
+ */
+exec_agent_written?: boolean,
+/**
+ * KT-1017 — which of the step's lines an agent last wrote: `main`,
+ * `setup`, `stdin`, `source:<alias>`. Set by the server on save; a human
+ * edit re-attributes only the line it changed.
+ */
+exec_agent_lines?: Array<string>,
 /**
  * Payload JSON émis par le step. Validé au save (parse JSON valide,
  * taille raisonnable). Aucun templating au runtime — la valeur est

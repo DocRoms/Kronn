@@ -96,7 +96,8 @@ describe('App', () => {
     );
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('auth-locked-screen')).toBeTruthy());
-    expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();
+    // The panel appears once the screen has read the recovery status.
+    expect(await screen.findByTestId('recovery-restore-panel')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();
     expect(setupApi.getStatus).toHaveBeenCalledTimes(1);
   });
@@ -158,6 +159,17 @@ describe('App', () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('dashboard')).toBeDefined());
+  });
+
+  it('shows a config.toml set aside at start on the dashboard (C5-02)', async () => {
+    vi.mocked(configApi.getRecoveryStatus).mockResolvedValueOnce({
+      key_locked: false,
+      config_set_aside: 'config.toml could not be read and was kept as config.toml.corrupt.1',
+    } as never);
+    vi.mocked(setupApi.getStatus).mockResolvedValue({ is_first_run: false, current_step: 'Complete', agents_detected: [], scan_paths_set: true, scan_paths_explored: [], config_set_aside: null, repos_detected: [], default_scan_path: '/home' });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('dashboard')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('config-set-aside-banner')).toHaveTextContent('config.toml.corrupt.1'));
   });
 
   it('renders the last known setup state while refreshing it in the background', async () => {

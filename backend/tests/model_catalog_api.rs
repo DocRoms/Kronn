@@ -29,8 +29,8 @@ fn isolate_config_dir() {
         let host_home = root.path().join("host-home");
         std::fs::create_dir_all(&data_dir).expect("create model-catalog data fixture");
         std::fs::create_dir_all(&host_home).expect("create model-catalog host fixture");
-        std::env::set_var("KRONN_DATA_DIR", data_dir);
-        std::env::set_var("KRONN_HOST_HOME", host_home);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
         root
     });
 }

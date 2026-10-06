@@ -27,6 +27,8 @@ struct InlineCodeOptions {
     glued: bool,
 }
 
+use crate::core::argv_roles::Trust;
+
 /// The normalised program name (path, case, `.exe` and version suffix
 /// removed), see [`crate::core::argv_roles::normalize_command`].
 fn base_name(cmd: &str) -> String {
@@ -133,6 +135,13 @@ pub fn is_trusted_template_path(path: &str) -> bool {
     path == "run.id" || path.starts_with("time.now")
 }
 
+/// Values Kronn sets itself for the run (`run.id`, `run.artifacts_dir`,
+/// `time.now…`): never outside data, so a data position takes them freely.
+/// Program text still accepts only [`is_trusted_template_path`].
+pub fn is_kronn_value(path: &str) -> bool {
+    is_trusted_template_path(path) || path == "run.artifacts_dir"
+}
+
 /// Why an inline script is unsafe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InlineFinding {
@@ -159,13 +168,14 @@ pub fn first_unsafe_placeholder(cmd: &str, args: &[String]) -> Option<InlineFind
     first_unsafe_placeholder_with(cmd, args, false)
 }
 
-/// [`first_unsafe_placeholder`], where `approved` says a human confirmed that
-/// the unmodelled programs of the line treat their arguments as data.
+/// [`first_unsafe_placeholder`] for a line with this [`Trust`]: who wrote it,
+/// whether a human approved it, which scripts its step pins.
 pub fn first_unsafe_placeholder_with(
     cmd: &str,
     args: &[String],
-    approved: bool,
+    trust: impl Into<Trust>,
 ) -> Option<InlineFinding> {
+    let trust = trust.into();
     if let Some(finding) = untrusted_in(cmd) {
         return Some(match finding {
             Some(path) => InlineFinding::TemplatedExecutable(path),
@@ -173,7 +183,7 @@ pub fn first_unsafe_placeholder_with(
         });
     }
     let tainted = tainted_templates(args);
-    let roles = crate::core::argv_roles::roles(cmd, args, &tainted);
+    let roles = crate::core::argv_roles::roles_with(cmd, args, &tainted, &trust);
     let finding_at = |index: usize, make: fn(String) -> InlineFinding| {
         Some(match untrusted_in(&args[index]).flatten() {
             Some(path) => make(path),
@@ -192,8 +202,10 @@ pub fn first_unsafe_placeholder_with(
             _ => {}
         }
     }
-    if !approved {
-        if let Some(index) = (0..args.len()).find(|&i| tainted[i] && roles[i] == Role::Unmodelled) {
+    if !trust.approved {
+        if let Some(index) = (0..args.len())
+            .find(|&i| roles[i] == Role::Unmodelled && carries_outside_value(&args[i]))
+        {
             let program = crate::core::argv_roles::owning_program(cmd, args, &roles, index);
             return Some(match untrusted_in(&args[index]).flatten() {
                 Some(path) => InlineFinding::UnmodelledProgram(program, path),
@@ -202,6 +214,15 @@ pub fn first_unsafe_placeholder_with(
         }
     }
     None
+}
+
+/// Whether `arg` carries a value from outside Kronn, Kronn's own run values
+/// ([`is_kronn_value`]) excepted.
+fn carries_outside_value(arg: &str) -> bool {
+    match crate::workflows::template::placeholder_paths(arg) {
+        Ok(paths) => paths.iter().any(|path| !is_kronn_value(path)),
+        Err(_) => true,
+    }
 }
 
 /// `Some(Some(path))` for the first untrusted placeholder in `text`,
@@ -224,13 +245,19 @@ pub fn safe_recipe(path: &str) -> String {
          pour un shell, `[\"-c\", \"import sys; print(sys.argv[1])\", \"{{{{{path}}}}}\"]` pour Python, \
          `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{{{{path}}}}}\"]` pour Node (le `--` est \
          obligatoire), sans autre option, ou via `exec_stdin` à un programme de données ou à \
-         l'une de ces formes (code inline ou script donné)"
+         l'une de ces formes (code inline ou script donné). Écrite par un agent, la ligne attend \
+         ensuite qu'un humain approuve l'étape dans l'éditeur"
     )
 }
 
 /// Save-time refusal for one command line (main or setup).
-pub fn validation_error(step: &str, cmd: &str, args: &[String], approved: bool) -> Option<String> {
-    refusal(&format!("Step Exec « {step} »"), cmd, args, approved)
+pub fn validation_error(
+    step: &str,
+    cmd: &str,
+    args: &[String],
+    trust: impl Into<Trust>,
+) -> Option<String> {
+    refusal(&format!("Step Exec « {step} »"), cmd, args, &trust.into())
 }
 
 /// Save-time refusal for a Quick Exec, with the same rule, message and
@@ -240,9 +267,9 @@ pub fn quick_exec_validation_error(
     name: &str,
     cmd: &str,
     args: &[String],
-    approved: bool,
+    trust: impl Into<Trust>,
 ) -> Option<String> {
-    let message = refusal(&format!("Quick Exec « {name} »"), cmd, args, approved)?;
+    let message = refusal(&format!("Quick Exec « {name} »"), cmd, args, &trust.into())?;
     Some(match suggest_args(cmd, args) {
         Ok(fixed) => format!(
             "{message} Arguments proposés : {}",
@@ -252,8 +279,14 @@ pub fn quick_exec_validation_error(
     })
 }
 
-fn refusal(subject: &str, cmd: &str, args: &[String], approved: bool) -> Option<String> {
-    match first_unsafe_placeholder_with(cmd, args, approved)? {
+fn refusal(subject: &str, cmd: &str, args: &[String], trust: &Trust) -> Option<String> {
+    let finding = first_unsafe_placeholder_with(cmd, args, trust.clone())?;
+    // A line an agent wrote is saved and waits for a human's approval; the
+    // run refuses it until then. Hard refusals stay refused for everyone.
+    if trust.agent_written && matches!(finding, InlineFinding::UnmodelledProgram(..)) {
+        return None;
+    }
+    match finding {
         InlineFinding::Malformed => Some(format!(
             "{subject} : le code inline de `{cmd}` contient un placeholder mal formé."
         )),
@@ -284,27 +317,133 @@ fn refusal(subject: &str, cmd: &str, args: &[String], approved: bool) -> Option<
 pub fn unmodelled_message(subject: &str, program: &str, path: &str) -> String {
     format!(
         "{subject} : `{{{{{path}}}}}` est passé à `{program}` dans une ligne que Kronn ne vérifie \
-         pas. Sans humain, une valeur n'est acceptée que par un programme de données (`echo`, \
-         `grep`, `jq`…) ou dans l'une de ces formes exactes, sans autre option : \
-         `bash -c SCRIPT NOM ARGS…`, `python3 -c CODE ARGS…`, `python3 SCRIPT ARGS…`, \
-         `node -e CODE -- ARGS…`, `node SCRIPT ARGS…` (code et script sans valeur). Passe la \
-         valeur en argument d'un script de cette forme, ou fais approuver l'étape par un humain \
-         (« {program} reçoit des valeurs du run ; je confirme qu'il traite ses arguments comme \
-         de simples données »)."
+         pas seul. Un humain doit approuver cette étape dans l'éditeur (« {program} reçoit des \
+         valeurs du run ; je confirme qu'il traite ses arguments comme de simples données »). \
+         Une ligne écrite par un agent attend toujours cette approbation."
     )
+}
+
+/// The script of a line in a trusted script shape (`python3 tool.py …`).
+pub fn trusted_script(cmd: &str, args: &[String]) -> Option<String> {
+    let tainted = tainted_templates(args);
+    matches!(
+        crate::core::argv_roles::trusted_shape(cmd, args, &tainted),
+        Ok(crate::core::argv_roles::Shape::Script)
+    )
+    .then(|| args[0].clone())
+}
+
+/// The script file an interpreter reads while a templated stdin feeds it
+/// (`python3 x.py` with `exec_stdin: "{{x}}"`), after wrappers: the run
+/// checks it is a regular file, so a link to `/dev/stdin` cannot turn the
+/// stdin into the program.
+pub fn stdin_fed_script(cmd: &str, args: &[String], stdin: &str) -> Option<String> {
+    untrusted_in(stdin)?;
+    program_file(cmd, args, 0)
+}
+
+/// The file a code reader takes its program from: an interpreter's script,
+/// `awk|sed|make|psql -f FILE`, a `lua|tclsh|osascript|Rscript` script, after
+/// wrappers and launchers that pass stdin on.
+fn program_file(cmd: &str, args: &[String], depth: usize) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    let name = base_name(cmd);
+    if let Some((inner, inner_args)) = crate::core::argv_roles::launched_program(cmd, args)
+        .or_else(|| stdin_forwarded_to(&name, cmd, args))
+    {
+        return program_file(&inner, &inner_args, depth + 1);
+    }
+    let file = match name.as_str() {
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "gsed" | "psql" => {
+            file_option(args, &["-f", "--file"]).map(str::to_string)
+        }
+        "make" | "gmake" | "bmake" => {
+            file_option(args, &["-f", "--file", "--makefile"]).map(str::to_string)
+        }
+        "lua" | "luajit" | "tclsh" | "wish" | "osascript" | "rscript" => {
+            // A script given with `-e` is inline code, not a file.
+            if args.iter().any(|arg| arg == "-e") {
+                return None;
+            }
+            let values = ["-l", "-s", "-encoding"];
+            let mut skip = false;
+            args.iter()
+                .find(|arg| {
+                    let operand = !skip && !arg.starts_with('-');
+                    skip = values.contains(&arg.as_str());
+                    operand
+                })
+                .cloned()
+        }
+        _ => {
+            option_parsing(cmd)?;
+            interpreter_script(cmd, args).map(str::to_string)
+        }
+    };
+    file.filter(|file| file != "-")
+}
+
+/// The [`Trust`] of a saved step's lines.
+pub fn step_trust(step: &WorkflowStep) -> Trust {
+    line_trust(step, "main")
+}
+
+/// The key of a step's line for its writer: `main`, `setup`, `stdin`,
+/// `source:<alias>`.
+pub fn source_line_key(alias: &str) -> String {
+    format!("source:{alias}")
+}
+
+/// Whether an agent last wrote line `key` of `step`. A step saved before
+/// lines were tracked one by one counts every line as the agent's.
+pub fn agent_wrote_line(step: &WorkflowStep, key: &str) -> bool {
+    if step.exec_agent_lines.is_empty() {
+        step.exec_agent_written == Some(true)
+    } else {
+        step.exec_agent_lines.iter().any(|line| line == key)
+    }
+}
+
+/// The [`Trust`] of one line of a saved step.
+pub fn line_trust(step: &WorkflowStep, key: &str) -> Trust {
+    Trust {
+        approved: step.exec_unmodelled_args_approved == Some(true),
+        agent_written: agent_wrote_line(step, key),
+        declared_scripts: step
+            .exec_script_files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect(),
+    }
+}
+
+/// What a line waiting for a human's approval says: written by an agent, it
+/// is saved and waits; otherwise the human approves it in the editor.
+pub fn approval_message(subject: &str, program: &str, path: &str, agent_written: bool) -> String {
+    if agent_written {
+        format!(
+            "{subject} : écrite par un agent, cette ligne passe `{{{{{path}}}}}` à `{program}` ; \
+             elle attend ton approbation dans l'éditeur avant de tourner."
+        )
+    } else {
+        unmodelled_message(subject, program, path)
+    }
 }
 
 /// Every unsafe command line of a saved step (main, then setup, or each
 /// inline Quick Exec source of a CollectApiData step), with a suggested
 /// rewrite when one is provably equivalent.
 pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecStep> {
-    let approved = step.exec_unmodelled_args_approved == Some(true);
     let mut found = Vec::new();
     let mut check = |phase: &str, alias: Option<&str>, cmd: Option<&str>, args: &[String]| {
         let Some(cmd) = cmd.map(str::trim).filter(|cmd| !cmd.is_empty()) else {
             return;
         };
-        let Some(finding) = first_unsafe_placeholder_with(cmd, args, approved) else {
+        let key = alias.map_or_else(|| phase.to_string(), source_line_key);
+        let trust = line_trust(step, &key);
+        let Some(finding) = first_unsafe_placeholder_with(cmd, args, trust.clone()) else {
             return;
         };
         let placeholder = match &finding {
@@ -317,10 +456,11 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
         let (suggested_args, manual_fix) = match (&finding, suggest_args(cmd, args)) {
             (InlineFinding::UnmodelledProgram(program, path), _) => (
                 None,
-                Some(unmodelled_message(
+                Some(approval_message(
                     &format!("Step Exec « {} »", step.name),
                     program,
                     path,
+                    trust.agent_written,
                 )),
             ),
             (_, Ok(rewritten)) => (Some(rewritten), None),
@@ -343,6 +483,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
             },
             suggested_args,
             manual_fix,
+            agent_written: trust.agent_written,
         });
     };
     match step.step_type {
@@ -360,14 +501,15 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                 .map(str::trim)
                 .unwrap_or_default();
             if let Some(stdin) = step.exec_stdin.as_deref() {
-                if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin, approved)
-                {
-                    let unmodelled = stdin_unmodelled_program(command, &step.exec_args);
+                let trust = line_trust(step, "stdin");
+                if let Some(placeholder) = stdin_finding(command, &step.exec_args, stdin, &trust) {
+                    let unmodelled = stdin_unmodelled_program(command, &step.exec_args, &trust);
                     let manual_fix = match &unmodelled {
-                        Some(program) => unmodelled_message(
+                        Some(program) => approval_message(
                             &format!("Step Exec « {} » (stdin)", step.name),
                             program,
                             placeholder.trim_start_matches("{{").trim_end_matches("}}"),
+                            trust.agent_written,
                         ),
                         None => "correction manuelle requise : le programme lit son code sur \
                                  stdin ; donne-lui un script ou du code inline sans valeur, et \
@@ -389,6 +531,7 @@ pub fn classify_step(step: &WorkflowStep, on_failure: bool) -> Vec<UnsafeExecSte
                         },
                         suggested_args: None,
                         manual_fix: Some(manual_fix),
+                        agent_written: trust.agent_written,
                     });
                 }
             }
@@ -420,10 +563,15 @@ pub fn stdin_validation_error(
     cmd: &str,
     args: &[String],
     stdin: &str,
-    approved: bool,
+    trust: impl Into<Trust>,
 ) -> Option<String> {
-    let path = stdin_finding(cmd, args, stdin, approved)?;
-    if let Some(program) = stdin_unmodelled_program(cmd, args) {
+    let trust = trust.into();
+    let path = stdin_finding(cmd, args, stdin, &trust)?;
+    if let Some(program) = stdin_unmodelled_program(cmd, args, &trust) {
+        if trust.agent_written {
+            // Saved; it waits for a human's approval (see `refusal`).
+            return None;
+        }
         return Some(unmodelled_message(
             &format!("Step Exec « {step} » (stdin)"),
             &program,
@@ -449,16 +597,18 @@ enum StdinReach {
     Unchecked(String),
 }
 
-fn stdin_reach(cmd: &str, args: &[String]) -> StdinReach {
-    // The shape alone decides where stdin goes; a value inside the code is
-    // the argument check's refusal, not a reason to ask for an approval here.
-    let trusted =
-        crate::core::argv_roles::trusted_shape(cmd, args, &vec![false; args.len()]).is_ok();
-    if crate::core::argv_roles::is_data_only(cmd) || trusted {
-        return StdinReach::Data;
-    }
+fn stdin_reach(cmd: &str, args: &[String], trust: &Trust) -> StdinReach {
+    // Code readers first: no approval or shape lifts them. Then the shape
+    // alone decides; a value inside the code is the argument check's refusal.
     if reads_program_from_stdin(cmd, args) {
         return StdinReach::Code;
+    }
+    let untainted = vec![false; args.len()];
+    if !trust.agent_written
+        && (crate::core::argv_roles::is_data_only(cmd)
+            || crate::core::argv_roles::trusted_by_shape(cmd, args, &untainted, trust))
+    {
+        return StdinReach::Data;
     }
     StdinReach::Unchecked(
         crate::core::argv_roles::launched_program(cmd, args)
@@ -468,11 +618,11 @@ fn stdin_reach(cmd: &str, args: &[String]) -> StdinReach {
 
 /// The first untrusted placeholder of `stdin` when it reaches code, or a
 /// program outside the trusted set that no human approved.
-fn stdin_finding(cmd: &str, args: &[String], stdin: &str, approved: bool) -> Option<String> {
+fn stdin_finding(cmd: &str, args: &[String], stdin: &str, trust: &Trust) -> Option<String> {
     let finding = untrusted_in(stdin)?;
-    match stdin_reach(cmd, args) {
+    match stdin_reach(cmd, args, trust) {
         StdinReach::Data => return None,
-        StdinReach::Unchecked(_) if approved => return None,
+        StdinReach::Unchecked(_) if trust.approved => return None,
         _ => {}
     }
     Some(match finding {
@@ -483,8 +633,8 @@ fn stdin_finding(cmd: &str, args: &[String], stdin: &str, approved: bool) -> Opt
 
 /// The program a templated stdin reaches when only a human approval can let
 /// it through.
-pub fn stdin_unmodelled_program(cmd: &str, args: &[String]) -> Option<String> {
-    match stdin_reach(cmd, args) {
+pub fn stdin_unmodelled_program(cmd: &str, args: &[String], trust: &Trust) -> Option<String> {
+    match stdin_reach(cmd, args, trust) {
         StdinReach::Unchecked(program) => Some(program),
         _ => None,
     }
@@ -633,6 +783,39 @@ fn code_option(options: &InlineCodeOptions, arg: &str) -> Option<bool> {
     Some(options.glued && at + c.len_utf8() < cluster.len())
 }
 
+/// For a shell given `-c`: `Some(script index)`, or `Some(None)` when no
+/// script is found before the arguments run out. `-c` is a flag: the script
+/// is the first operand after every option (`bash -c -- X` and `bash -c -x X`
+/// run `X`), and a value in the option zone never ends it. `None` without
+/// `-c`.
+fn shell_script(args: &[String], tainted: &[bool]) -> Option<Option<usize>> {
+    let mut command = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if tainted.get(i).copied().unwrap_or(false) {
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            return command.then_some((i + 1 < args.len()).then_some(i + 1));
+        }
+        if arg.len() > 1 && (arg.starts_with('-') || arg.starts_with('+')) {
+            if !arg.starts_with("--") && arg[1..].contains('c') {
+                command = true;
+            }
+            i += if matches!(arg, "-o" | "+o" | "-O" | "+O") {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        return command.then_some(Some(i));
+    }
+    command.then_some(None)
+}
+
 /// Where an interpreter's arguments become plain data (`args.len()` when
 /// never). A tainted argument never ends option parsing: at save time it is
 /// a placeholder, at run time its rendered text is not trusted.
@@ -642,6 +825,11 @@ fn interpreter_data_start(cmd: &str, args: &[String], tainted: &[bool]) -> Optio
     let is_tainted = |i: usize| tainted.get(i).copied().unwrap_or(false);
     if parsing == OptionParsing::Never {
         return Some(args.len());
+    }
+    if is_shell(cmd) {
+        if let Some(script) = shell_script(args, tainted) {
+            return Some(script.map_or(args.len(), |script| script + 1));
+        }
     }
     let values = value_options(cmd);
     let mut i = 0;
@@ -700,10 +888,20 @@ fn interpreter_data_start(cmd: &str, args: &[String], tainted: &[bool]) -> Optio
 /// option, `make -f -`, a remote shell without a command, and so on.
 /// Wrappers are followed to the program they launch.
 pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
+    let name = base_name(cmd);
+    // xargs and parallel turn stdin into argv of the program they launch.
+    if matches!(name.as_str(), "xargs" | "parallel") {
+        return stdin_becomes_code_argv(&name, args);
+    }
+    if starts_a_default_shell(&name, cmd, args) {
+        return true;
+    }
     if let Some((inner, inner_args)) = crate::core::argv_roles::launched_program(cmd, args) {
         return reads_program_from_stdin(&inner, &inner_args);
     }
-    let name = base_name(cmd);
+    if let Some((inner, inner_args)) = stdin_forwarded_to(&name, cmd, args) {
+        return reads_program_from_stdin(&inner, &inner_args);
+    }
     let has = |options: &[&str]| {
         args.iter().any(|arg| {
             options
@@ -716,19 +914,7 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
         .filter(|arg| !arg.starts_with('-') || *arg == "-")
         .collect();
     // The file named by one of `options` (`-f FILE`, `-fFILE`, `--file=FILE`).
-    let file_option = |options: &[&str]| -> Option<&str> {
-        args.iter().enumerate().find_map(|(i, arg)| {
-            options.iter().find_map(|option| {
-                if arg == option {
-                    args.get(i + 1).map(String::as_str)
-                } else if option.starts_with("--") {
-                    arg.strip_prefix(&format!("{option}="))
-                } else {
-                    arg.strip_prefix(option).filter(|rest| !rest.is_empty())
-                }
-            })
-        })
-    };
+    let file_option = |options: &[&str]| file_option(args, options);
     let stdin = |path: &str| crate::core::argv_roles::is_stdin_path(path);
     if let Some(parsing) = option_parsing(cmd) {
         if parsing == OptionParsing::Never {
@@ -795,11 +981,195 @@ pub fn reads_program_from_stdin(cmd: &str, args: &[String]) -> bool {
         "gdb" | "ssh" => true,
         "docker" | "podman" => args.iter().any(|arg| {
             arg == "-i"
-                || arg == "--interactive"
+                || arg.starts_with("--interactive")
                 || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
         }),
         _ => crate::core::argv_roles::is_unmodelled_evaluator(&name),
     }
+}
+
+/// A launcher given no program starts the user's shell, which then reads its
+/// commands from stdin: `su USER`, `script FILE`, `chroot DIR`, `unshare -r`,
+/// `nsenter -t 1 -m`, `sudo -s|-i`, `doas -s`, `newgrp`, `sg GROUP`.
+fn starts_a_default_shell(name: &str, cmd: &str, args: &[String]) -> bool {
+    let has = |options: &[&str]| {
+        args.iter().any(|arg| {
+            options
+                .iter()
+                .any(|option| arg == option || arg.starts_with(&format!("{option}=")))
+        })
+    };
+    // BSD `script -F PIPE -t TIME`, util-linux `-E -T -I -O -B -m`.
+    const SCRIPT_VALUES: &[&str] = &[
+        "-F",
+        "-t",
+        "-E",
+        "-T",
+        "-I",
+        "-O",
+        "-B",
+        "-m",
+        "--echo",
+        "--timing",
+        "--log-io",
+        "--log-in",
+        "--log-out",
+        "--log-timing",
+        "--logging-format",
+    ];
+    match name {
+        "chroot" | "unshare" | "nsenter" => {
+            crate::core::argv_roles::launched_program(cmd, args).is_none()
+        }
+        "sudo" | "doas" => asks_for_a_shell(cmd, args),
+        "su" => !has(&["-c", "--command"]),
+        "script" => !has(&["-c", "--command"]) && operands_after_values(args, SCRIPT_VALUES) <= 1,
+        "newgrp" => true,
+        "sg" => !has(&["-c"]) && operands_after_values(args, &[]) <= 1,
+        _ => false,
+    }
+}
+
+/// The file named by one of `options` (`-f FILE`, `-fFILE`, `--file=FILE`).
+fn file_option<'a>(args: &'a [String], options: &[&str]) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(i, arg)| {
+        options.iter().find_map(|option| {
+            if arg == option {
+                args.get(i + 1).map(String::as_str)
+            } else if option.starts_with("--") {
+                arg.strip_prefix(&format!("{option}="))
+            } else {
+                arg.strip_prefix(option).filter(|rest| !rest.is_empty())
+            }
+        })
+    })
+}
+
+/// The operands of `args` once the values of `value_options` are skipped
+/// (`script -t 0 FILE` has one operand, not two).
+fn operands_after_values(args: &[String], value_options: &[&str]) -> usize {
+    let mut operands = 0;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if value_options.contains(&arg) {
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            operands += 1;
+        }
+        i += 1;
+    }
+    operands
+}
+
+/// Whether a `sudo`/`doas` option zone asks for a shell (`-s`, `-i`,
+/// `--shell`, `--login`), skipping the values of its options (`-u USER`).
+fn asks_for_a_shell(cmd: &str, args: &[String]) -> bool {
+    let values = crate::core::argv_roles::wrapper_value_options(cmd);
+    let short_values: Vec<char> = values
+        .iter()
+        .filter(|option| option.len() == 2 && !option.starts_with("--"))
+        .filter_map(|option| option.chars().nth(1))
+        .collect();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" || !arg.starts_with('-') || arg.len() < 2 {
+            return false;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or_default();
+            if matches!(name, "shell" | "login") {
+                return true;
+            }
+            i += if values.contains(&arg) { 2 } else { 1 };
+            continue;
+        }
+        let cluster: Vec<char> = arg[1..].chars().collect();
+        let mut skip_next = false;
+        for (at, letter) in cluster.iter().enumerate() {
+            if matches!(letter, 's' | 'i') {
+                return true;
+            }
+            if short_values.contains(letter) {
+                // The rest of the cluster, or the next argument, is its value.
+                skip_next = at + 1 == cluster.len();
+                break;
+            }
+        }
+        i += if skip_next { 2 } else { 1 };
+    }
+    false
+}
+
+/// The program a launcher hands its stdin to: `npx`/`bunx`/`uvx`,
+/// `npm|pnpm|yarn exec|dlx`, `runuser`, `kubectl|oc exec|run -i`,
+/// `docker|podman compose run|exec` (stdin attached by default).
+fn stdin_forwarded_to(name: &str, cmd: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    let interactive = || {
+        args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-i" | "--stdin" | "--stdin=true" | "--interactive"
+            ) || arg.starts_with("--interactive=t")
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
+        })
+    };
+    let forwards = match name {
+        "npx" | "bunx" | "uvx" | "npm" | "pnpm" | "yarn" | "runuser" => true,
+        "kubectl" | "oc" => interactive(),
+        "docker" | "podman" => args.iter().any(|arg| arg == "compose"),
+        _ => false,
+    };
+    if !forwards {
+        return None;
+    }
+    let roles = crate::core::argv_roles::model_roles(cmd, args, &vec![false; args.len()]);
+    let at = roles
+        .iter()
+        .position(|role| *role == crate::core::argv_roles::Role::Executable)?;
+    Some((args[at].clone(), args[at + 1..].to_vec()))
+}
+
+/// Whether the stdin words xargs or parallel append to the program they
+/// launch land on its code, an option or its program name (`xargs sh -c`,
+/// `xargs -I{} sh -c {}`, `parallel` with no command).
+fn stdin_becomes_code_argv(name: &str, args: &[String]) -> bool {
+    use crate::core::argv_roles::Role;
+    let roles = crate::core::argv_roles::model_roles(name, args, &vec![false; args.len()]);
+    let Some(at) = roles.iter().position(|role| *role == Role::Executable) else {
+        // No program: parallel runs each line as a command, xargs runs echo.
+        return name == "parallel";
+    };
+    let replace = args[..at]
+        .iter()
+        .enumerate()
+        .find_map(|(i, arg)| match arg.as_str() {
+            "-I" | "--replace" => args.get(i + 1).cloned(),
+            "-i" => Some("{}".to_string()),
+            other => other
+                .strip_prefix("-I")
+                .or_else(|| other.strip_prefix("--replace="))
+                .filter(|rest| !rest.is_empty())
+                .map(str::to_string),
+        });
+    let inner = &args[at];
+    let mut inner_args: Vec<String> = args[at + 1..].to_vec();
+    let mut tainted: Vec<bool> = inner_args
+        .iter()
+        .map(|arg| replace.as_deref().is_some_and(|r| arg.contains(r)))
+        .collect();
+    if replace.is_none() {
+        inner_args.push("{{stdin}}".to_string());
+        tainted.push(true);
+    }
+    let inner_roles = crate::core::argv_roles::model_roles(inner, &inner_args, &tainted);
+    let lands_on_code = (0..inner_args.len()).any(|i| {
+        tainted[i] && matches!(inner_roles[i], Role::Code | Role::Option | Role::Executable)
+    });
+    lands_on_code || reads_program_from_stdin(inner, &args[at + 1..])
 }
 
 /// The script operand of an interpreter (file, `-` for stdin, or the
@@ -859,6 +1229,11 @@ pub(crate) fn interpreter_roles(
             roles[code.index] = Role::Code;
         }
     }
+    if is_shell(cmd) {
+        if let Some(Some(script)) = shell_script(args, tainted) {
+            roles[script] = Role::Code;
+        }
+    }
     Some(roles)
 }
 
@@ -869,7 +1244,8 @@ pub fn first_tainted_option_position(
     args: &[String],
     tainted: &[bool],
 ) -> Option<usize> {
-    first_tainted_position_with(cmd, args, tainted, false)
+    let outside: Vec<bool> = args.iter().map(|arg| carries_outside_value(arg)).collect();
+    first_tainted_position_with(cmd, args, tainted, &outside, &Trust::default())
 }
 
 /// [`first_tainted_option_position`]; with `approved`, a value given to an
@@ -878,14 +1254,16 @@ fn first_tainted_position_with(
     cmd: &str,
     args: &[String],
     tainted: &[bool],
-    approved: bool,
+    outside: &[bool],
+    trust: &Trust,
 ) -> Option<usize> {
     use crate::core::argv_roles::Role;
-    let roles = crate::core::argv_roles::roles(cmd, args, tainted);
+    let roles = crate::core::argv_roles::roles_with(cmd, args, tainted, trust);
     (0..args.len()).find(|&i| {
         tainted.get(i).copied().unwrap_or(false)
             && !matches!(roles[i], Role::Data | Role::RuntimeOption)
-            && !(approved && roles[i] == Role::Unmodelled)
+            && !(roles[i] == Role::Unmodelled
+                && (trust.approved || !outside.get(i).copied().unwrap_or(true)))
     })
 }
 
@@ -911,9 +1289,10 @@ pub fn rendered_refusal(
     cmd: &str,
     templates: &[String],
     rendered: &[String],
-    approved: bool,
+    trust: impl Into<Trust>,
 ) -> Option<String> {
     use crate::core::argv_roles::Role;
+    let trust = trust.into();
     let tainted = tainted_templates(templates);
     let saved = crate::core::argv_roles::model_roles(cmd, templates, &tainted);
     let option_like = (0..rendered.len()).find(|&i| {
@@ -953,15 +1332,17 @@ pub fn rendered_refusal(
             }
         })
         .collect();
-    let index = first_tainted_position_with(cmd, &parsed, &tainted, approved)
-        .or_else(|| first_tainted_position_with(cmd, templates, &tainted, approved))
+    // Judged on the templates: a rendered value no longer shows where it came from.
+    let outside: Vec<bool> = templates.iter().map(|t| carries_outside_value(t)).collect();
+    let index = first_tainted_position_with(cmd, &parsed, &tainted, &outside, &trust)
+        .or_else(|| first_tainted_position_with(cmd, templates, &tainted, &outside, &trust))
         .or(option_like)
         .or(emptied)?;
     Some(format!(
         "Exec step `{step}` refusé avant exécution : l'argument #{index} de `{cmd}` vient d'une \
          valeur extérieure et tombe là où `{cmd}` lit encore des options ou du code. Ouvre le \
-         workflow et applique la correction proposée, ou place les valeurs après le code inline \
-         (`bash -c`, `python3 -c`) ou après `--` (node, perl, ruby, php, git, rm, cp…)."
+         workflow et applique la correction proposée, ou fais approuver l'étape par un humain \
+         dans l'éditeur."
     ))
 }
 
@@ -1601,6 +1982,22 @@ mod tests {
 
     const HOSTILE: &str = "a'b\"c $(touch pwned) ; touch pwned2 `touch pwned3` \\ é🦀";
 
+    /// Kronn's own run values (`run.artifacts_dir`) are data anywhere a value
+    /// is data, with no approval; program text still refuses them.
+    #[test]
+    fn kronn_run_values_need_no_approval_in_data_positions() {
+        let copy = args(&["shot.png", "{{run.artifacts_dir}}/S1.png"]);
+        assert!(validation_error("s", "cp", &copy, false).is_none());
+        let outsider = args(&["shot.png", "{{steps.x.output}}/S1.png"]);
+        assert!(validation_error("s", "cp", &outsider, false).is_some());
+        let code = args(&["-c", "ls {{run.artifacts_dir}}"]);
+        assert!(validation_error("s", "bash", &code, false).is_some());
+        // At run time, origin is judged on the templates, never the rendered text.
+        let rendered = args(&["shot.png", "/data/run-artifacts/r1/S1.png"]);
+        assert!(rendered_refusal("s", "cp", &copy, &rendered, false).is_none());
+        assert!(rendered_refusal("s", "cp", &outsider, &rendered, false).is_some());
+    }
+
     #[test]
     fn shell_values_move_to_positional_arguments_in_order() {
         assert_eq!(
@@ -1885,14 +2282,12 @@ mod tests {
                 "python3",
                 vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"],
             ),
-            ("python3", vec!["tool.py", "--flag", "{{x}}"]),
             (
                 "node",
                 vec!["-e", "console.log(process.argv[1])", "--", "{{x}}"],
             ),
-            ("node", vec!["app.js", "{{x}}"]),
             ("echo", vec!["{{x}}"]),
-            ("grep", vec!["--", "{{x}}", "file"]),
+            ("seq", vec!["--", "{{x}}"]),
         ] {
             assert_eq!(
                 first_unsafe_placeholder(cmd, &args(&line)),
@@ -1910,6 +2305,9 @@ mod tests {
             ("python3", vec!["-X", "utf8", "tool.py", "{{x}}"]),
             ("python3", vec!["-m", "http.server", "{{port}}"]),
             ("python", vec!["tool.py", "{{x}}"]),
+            ("python3", vec!["tool.py", "--flag", "{{x}}"]),
+            ("node", vec!["app.js", "{{x}}"]),
+            ("grep", vec!["--", "{{x}}", "file"]),
             ("python3", vec!["/dev/stdin", "{{x}}"]),
             ("perl", vec!["-e", "print @ARGV", "--", "{{x}}"]),
             ("git", vec!["commit", "-m", "{{message}}"]),
@@ -1940,7 +2338,7 @@ mod tests {
             ("node", vec!["-e", "console.log(1)", "x", "{{x}}"]),
             ("env", vec!["{{cmd}}"]),
             ("git", vec!["-c", "core.sshCommand={{x}}", "fetch"]),
-            ("rm", vec!["-{{x}}", "file"]),
+            ("date", vec!["-{{x}}"]),
         ] {
             let line = args(&line);
             assert!(
@@ -2016,23 +2414,45 @@ mod tests {
                 "{cmd} {line:?}"
             );
         }
-        assert!(stdin_validation_error("s", "npx", &args(&["node"]), "{{x}}", true).is_none());
+        assert!(stdin_validation_error("s", "npx", &args(&["prettier"]), "{{x}}", true).is_none());
     }
 
     /// A templated stdin is data only for a data-only program or a trusted
     /// shape (bash/sh `-c`, python3, node given their code or a script).
     #[test]
     fn a_templated_stdin_is_trusted_only_by_data_programs_and_trusted_shapes() {
-        for (cmd, line) in [
-            ("jq", vec!["."]),
-            ("cat", vec![]),
-            ("python3", vec!["-c", "import sys; print(sys.stdin.read())"]),
-            ("python3", vec!["tool.py"]),
-            ("node", vec!["-e", "process.stdin.pipe(process.stdout)"]),
-            ("node", vec!["tool.js"]),
+        let pinned = |script: &str| Trust {
+            declared_scripts: vec![script.to_string()],
+            ..Trust::default()
+        };
+        for (cmd, line, trust) in [
+            ("echo", vec![], Trust::default()),
+            (
+                "python3",
+                vec!["-c", "import sys; print(sys.stdin.read())"],
+                Trust::default(),
+            ),
+            ("python3", vec!["tool.py"], pinned("tool.py")),
+            (
+                "node",
+                vec!["-e", "process.stdin.pipe(process.stdout)"],
+                Trust::default(),
+            ),
+            ("node", vec!["tool.js"], pinned("tool.js")),
         ] {
             assert!(
-                stdin_validation_error("s", cmd, &args(&line), "{{x}}", false).is_none(),
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", trust).is_none(),
+                "{cmd} {line:?}"
+            );
+        }
+        // An unpinned script shape, or a former data reader, needs a human.
+        for (cmd, line) in [
+            ("python3", vec!["tool.py"]),
+            ("jq", vec!["."]),
+            ("cat", vec![]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", false).is_some(),
                 "{cmd} {line:?}"
             );
         }
@@ -2048,6 +2468,379 @@ mod tests {
         assert!(stdin_validation_error("s", "bash", &[], "{{x}}", true).is_some());
         assert!(stdin_validation_error("s", "bash", &args(&["-s"]), "{{x}}", true).is_some());
         assert!(stdin_validation_error("s", "sh", &args(&["-s", "a"]), "{{x}}", true).is_some());
+    }
+
+    /// R5-01: a shell's `-c` is a flag; the script is the first operand
+    /// after every option, so `bash -c -- {{x}}` puts the value in code.
+    #[test]
+    fn a_shell_script_is_the_first_operand_after_its_options() {
+        for cmd in ["bash", "sh", "zsh", "dash"] {
+            for line in [
+                vec!["-c", "--", "{{x}}"],
+                vec!["-c", "-x", "{{x}}"],
+                vec!["-c", "+e", "{{x}}"],
+            ] {
+                let line = args(&line);
+                for approved in [false, true] {
+                    assert!(
+                        matches!(
+                            first_unsafe_placeholder_with(cmd, &line, approved),
+                            Some(InlineFinding::Untrusted(_) | InlineFinding::OptionPosition(_))
+                        ),
+                        "{cmd} {line:?} approved={approved}"
+                    );
+                }
+            }
+            // A literal option first: not the exact shape, so a human approves.
+            let line = args(&["-c", "--", "echo \"$1\"", "_", "{{x}}"]);
+            assert!(first_unsafe_placeholder(cmd, &line).is_some(), "{cmd}");
+        }
+    }
+
+    /// B: a line an agent wrote has no trusted shape; any value needs a
+    /// human's approval, and code positions stay refused even then.
+    #[test]
+    fn an_agent_written_line_needs_a_human_for_any_value() {
+        let agent = Trust {
+            agent_written: true,
+            ..Trust::default()
+        };
+        for (cmd, line) in [
+            ("bash", vec!["-c", "terraform plan \"$1\"", "_", "{{x}}"]),
+            (
+                "python3",
+                vec!["-c", "import sys; print(sys.argv[1])", "{{x}}"],
+            ),
+            ("echo", vec!["{{x}}"]),
+        ] {
+            let line = args(&line);
+            assert_eq!(
+                first_unsafe_placeholder(cmd, &line),
+                None,
+                "{cmd} by a human"
+            );
+            assert!(
+                matches!(
+                    first_unsafe_placeholder_with(cmd, &line, agent.clone()),
+                    Some(InlineFinding::UnmodelledProgram(..))
+                ),
+                "{cmd} by an agent"
+            );
+            let approved = Trust {
+                approved: true,
+                ..agent.clone()
+            };
+            assert_eq!(
+                first_unsafe_placeholder_with(cmd, &line, approved),
+                None,
+                "{cmd}"
+            );
+        }
+        // Saved waiting for a human; the run refuses it until then.
+        assert!(stdin_validation_error(
+            "s",
+            "bash",
+            &args(&["-c", "psql"]),
+            "{{x}}",
+            agent.clone()
+        )
+        .is_none());
+        assert!(stdin_finding("bash", &args(&["-c", "psql"]), "{{x}}", &agent).is_some());
+        assert!(
+            stdin_validation_error("s", "bash", &args(&["-c", "psql"]), "{{x}}", false).is_none()
+        );
+    }
+
+    /// R5-04: a stdin or device path in any spelling is not a script.
+    #[test]
+    fn stdin_path_aliases_are_never_a_trusted_script() {
+        for path in [
+            "//dev/stdin",
+            "/dev/./stdin",
+            "/dev/../dev/stdin",
+            "//proc/self/fd/0",
+            "/dev/fd/0",
+        ] {
+            assert!(crate::core::argv_roles::is_stdin_path(path), "{path}");
+            for cmd in ["python3", "node", "python3.12"] {
+                assert!(
+                    stdin_validation_error("s", cmd, &args(&[path]), "{{x}}", true).is_some(),
+                    "{cmd} {path}"
+                );
+            }
+        }
+        assert!(!crate::core::argv_roles::is_stdin_path(
+            "tools/dev/stdin.py"
+        ));
+        assert_eq!(
+            crate::core::argv_roles::normalize_path("a/./b/../c//d"),
+            "a/c/d"
+        );
+    }
+
+    /// R5-06/R5-07: programs reading or writing paths, or the environment,
+    /// are no longer data-only: a value reaching them needs a human.
+    #[test]
+    fn path_and_environment_programs_need_a_human_for_a_value() {
+        for (cmd, line) in [
+            ("jq", vec!["-r", "{{x}}", "data.json"]),
+            ("jq", vec!["-r", ".a", "{{file}}"]),
+            ("printenv", vec!["{{name}}"]),
+            ("cat", vec!["{{path}}"]),
+            ("tee", vec!["{{path}}"]),
+            ("cp", vec!["{{src}}", "{{dst}}"]),
+            ("rm", vec!["--", "{{x}}"]),
+            ("chmod", vec!["+x", "{{path}}"]),
+            ("printf", vec!["{{format}}", "a"]),
+            ("printf", vec!["--", "{{format}}"]),
+            ("date", vec!["-r", "{{file}}"]),
+            ("date", vec!["-f", "{{file}}"]),
+        ] {
+            let line = args(&line);
+            assert!(
+                matches!(
+                    first_unsafe_placeholder(cmd, &line),
+                    Some(InlineFinding::UnmodelledProgram(..))
+                ),
+                "{cmd} {line:?}"
+            );
+        }
+        for (cmd, line) in [
+            ("echo", vec!["{{x}}"]),
+            ("printf", vec!["%s\\n", "{{x}}"]),
+            ("test", vec!["{{a}}", "=", "{{b}}"]),
+            ("basename", vec!["{{path}}"]),
+            ("dirname", vec!["{{path}}"]),
+            ("seq", vec!["1", "{{n}}"]),
+            ("date", vec!["-d{{when}}"]),
+            ("date", vec!["--date={{when}}"]),
+        ] {
+            assert_eq!(
+                first_unsafe_placeholder(cmd, &args(&line)),
+                None,
+                "{cmd} {line:?}"
+            );
+        }
+        // stdin to a former data reader needs a human too.
+        assert!(stdin_validation_error("s", "jq", &args(&["."]), "{{x}}", false).is_some());
+        assert!(stdin_validation_error("s", "jq", &args(&["."]), "{{x}}", true).is_none());
+    }
+
+    /// R5-08: "refused even when approved" holds through every launcher.
+    #[test]
+    fn a_code_reader_behind_a_launcher_stays_refused_when_approved() {
+        for (cmd, line) in [
+            ("npx", vec!["node"]),
+            ("kubectl", vec!["exec", "-i", "pod", "--", "sh"]),
+            ("docker", vec!["compose", "run", "svc", "sh"]),
+            ("runuser", vec!["-u", "u", "--", "sh"]),
+            ("xargs", vec!["sh", "-c"]),
+            ("xargs", vec!["-I{}", "sh", "-c", "{}"]),
+            ("parallel", vec![]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        assert!(stdin_validation_error("s", "xargs", &args(&["echo"]), "{{x}}", true).is_none());
+    }
+
+    /// R5-10: a script shape is trusted only for a script the step pins.
+    #[test]
+    fn a_script_shape_needs_its_script_pinned() {
+        let line = args(&["tools/report.py", "{{x}}"]);
+        assert!(matches!(
+            first_unsafe_placeholder("python3", &line),
+            Some(InlineFinding::UnmodelledProgram(..))
+        ));
+        let pinned = Trust {
+            declared_scripts: vec!["tools/report.py".into()],
+            ..Trust::default()
+        };
+        assert_eq!(
+            first_unsafe_placeholder_with("python3", &line, pinned.clone()),
+            None
+        );
+        assert_eq!(
+            first_unsafe_placeholder_with(
+                "node",
+                &args(&["./tools/report.js", "{{x}}"]),
+                Trust {
+                    declared_scripts: vec!["tools/report.js".into()],
+                    ..Trust::default()
+                }
+            ),
+            None
+        );
+        let other = Trust {
+            declared_scripts: vec!["tools/other.py".into()],
+            ..Trust::default()
+        };
+        assert!(first_unsafe_placeholder_with("python3", &line, other).is_some());
+    }
+
+    /// R5-12: the shape rules, independent of the program model.
+    #[test]
+    fn the_trusted_shape_rules_hold_on_their_own() {
+        use crate::core::argv_roles::{trusted_shape, Shape, Untrusted};
+        let (f, t) = (false, true);
+        let shape =
+            |cmd: &str, items: &[&str], tainted: &[bool]| trusted_shape(cmd, &args(items), tainted);
+        assert_eq!(
+            shape("node", &["-e", "c", "app.js", "{{x}}"], &[f, f, f, t]),
+            Err(Untrusted::Shape)
+        );
+        assert_eq!(
+            shape("node", &["-e", "c", "--", "{{x}}"], &[f, f, f, t]),
+            Ok(Shape::InlineCode)
+        );
+        assert_eq!(
+            shape("bash", &["-c", "{{x}}"], &[f, t]),
+            Err(Untrusted::TemplatedCode)
+        );
+        assert_eq!(
+            shape("python3", &["{{s}}", "a"], &[t, f]),
+            Err(Untrusted::TemplatedCode)
+        );
+        assert_eq!(
+            shape("python3", &["tool.py", "{{x}}"], &[f, t]),
+            Ok(Shape::Script)
+        );
+        assert_eq!(
+            shape("python3", &["//dev/stdin"], &[f]),
+            Err(Untrusted::StdinScript)
+        );
+        assert_eq!(
+            shape("python", &["-c", "c"], &[f, f]),
+            Err(Untrusted::Program)
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                shape("bash", &["-c", "c", "_", "{{x}}"], &[f, f, f, t]),
+                Err(Untrusted::Program)
+            );
+        } else {
+            assert_eq!(
+                shape("bash", &["-c", "c", "_", "{{x}}"], &[f, f, f, t]),
+                Ok(Shape::InlineCode)
+            );
+            assert_eq!(
+                shape("bash", &["-c", "--", "c"], &[f, f, f]),
+                Err(Untrusted::Shape)
+            );
+            assert_eq!(
+                shape("sh", &["-c", "+x", "c"], &[f, f, f]),
+                Err(Untrusted::Shape)
+            );
+        }
+    }
+
+    /// R6-08: a relative path climbing to `/dev` names stdin from any cwd.
+    #[test]
+    fn a_climbing_relative_path_to_stdin_is_a_code_reader() {
+        for path in [
+            "../../../../dev/stdin",
+            "../../../../../../../../proc/self/fd/0",
+        ] {
+            assert!(crate::core::argv_roles::is_stdin_path(path), "{path}");
+            assert!(
+                stdin_validation_error("s", "python3.14", &args(&[path]), "{{x}}", true).is_some(),
+                "{path}"
+            );
+        }
+        assert!(!crate::core::argv_roles::is_stdin_path("dev/server.py"));
+        assert!(!crate::core::argv_roles::is_stdin_path("a/../dev/stdin.py"));
+    }
+
+    /// R6-09: a launcher given no program starts a shell reading stdin.
+    #[test]
+    fn a_launcher_starting_a_default_shell_reads_stdin_as_code() {
+        for (cmd, line) in [
+            ("su", vec!["nobody", "-s", "/bin/sh"]),
+            ("script", vec!["-q", "/dev/null"]),
+            ("chroot", vec!["/"]),
+            ("unshare", vec!["-r"]),
+            ("nsenter", vec!["-t", "1", "-m"]),
+            ("sudo", vec!["-s"]),
+            ("sudo", vec!["-i"]),
+            ("doas", vec!["-s"]),
+            ("newgrp", vec![]),
+            ("sg", vec!["staff"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        assert!(
+            stdin_validation_error("s", "su", &args(&["nobody", "-c", "id"]), "{{x}}", true)
+                .is_none()
+        );
+    }
+
+    /// R6-10: `date` reads a file or sets the date from a cluster or an
+    /// abbreviation too.
+    #[test]
+    fn date_file_and_set_options_are_found_in_clusters_and_abbreviations() {
+        for line in [
+            vec!["-uf", "{{x}}"],
+            vec!["--fi", "{{x}}"],
+            vec!["--ref", "{{x}}"],
+            vec!["-us", "{{x}}"],
+        ] {
+            assert!(
+                first_unsafe_placeholder("date", &args(&line)).is_some(),
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            first_unsafe_placeholder("date", &args(&["-u", "+%F"])),
+            None
+        );
+        assert_eq!(
+            first_unsafe_placeholder("date", &args(&["-d", "{{when}}"])),
+            None
+        );
+    }
+
+    /// R6-14: one outside value next to a Kronn value is still outside, and a
+    /// malformed placeholder is never taken for a Kronn value.
+    #[test]
+    fn a_kronn_value_never_vouches_for_its_neighbour() {
+        assert_eq!(
+            first_unsafe_placeholder("cp", &args(&["a", "{{run.artifacts_dir}}"])),
+            None
+        );
+        assert!(matches!(
+            first_unsafe_placeholder("cp", &args(&["a", "{{run.artifacts_dir}}/{{x}}"])),
+            Some(InlineFinding::UnmodelledProgram(..))
+        ));
+        assert!(validation_error("s", "cp", &args(&["a", "{{run.artifacts_dir"]), false).is_some());
+        let malformed = args(&["a", "{{run.artifacts_dir"]);
+        assert!(rendered_refusal("s", "cp", &malformed, &args(&["a", "x"]), false).is_some());
+    }
+
+    /// F-01/F-02: a shell flag after an option value, and option values
+    /// counted apart from operands, still start a default shell.
+    #[test]
+    fn option_values_never_hide_a_default_shell() {
+        for (cmd, line) in [
+            ("sudo", vec!["-u", "u", "-s"]),
+            ("sudo", vec!["-u", "u", "-i"]),
+            ("sudo", vec!["--user", "u", "--login"]),
+            ("doas", vec!["-u", "u", "-s"]),
+            ("script", vec!["-q", "-t", "0", "/dev/null"]),
+            ("script", vec!["-E", "never", "f"]),
+        ] {
+            assert!(
+                stdin_validation_error("s", cmd, &args(&line), "{{x}}", true).is_some(),
+                "{cmd} {line:?}"
+            );
+        }
+        assert!(
+            stdin_validation_error("s", "sudo", &args(&["-u", "u", "id"]), "{{x}}", true).is_none()
+        );
     }
 
     #[test]
@@ -2081,7 +2874,7 @@ mod tests {
             let line = args(&line);
             let tainted = tainted_templates(&line);
             assert_eq!(
-                first_tainted_position_with(cmd, &line, &tainted, true),
+                first_tainted_position_with(cmd, &line, &tainted, &tainted, &Trust::from(true)),
                 None,
                 "{cmd} {line:?}"
             );
@@ -2360,7 +3153,11 @@ mod tests {
         )
         .is_some());
         assert!(stdin_validation_error("s", "duckdb", &duckdb, "select 1", false).is_none());
-        for (cmd, line) in [("cat", vec![]), ("wc", vec!["-l"]), ("jq", vec!["."])] {
+        for (cmd, line) in [
+            ("echo", vec![]),
+            ("test", vec!["-n", "x"]),
+            ("seq", vec!["3"]),
+        ] {
             assert!(
                 stdin_validation_error("s", cmd, &args(&line), "{{issue.title}}", false).is_none(),
                 "{cmd}"
@@ -2405,7 +3202,7 @@ mod tests {
             "jq",
             &args(&["."]),
             "{{steps.fetch.data_json}}",
-            false
+            true
         )
         .is_none());
         let step = crate::models::WorkflowStep {

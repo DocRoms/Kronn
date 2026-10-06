@@ -1,7 +1,7 @@
-// KT-1017 — a run value reaching a program Kronn does not model is refused
-// unless a human confirms that program treats its arguments as plain data.
-// The checkbox appears only for such a line; the server keeps an agent's
-// save from setting it.
+// KT-1017 — a run value reaching a line Kronn does not check alone (a
+// program it does not model, or any line an agent wrote) is refused unless a
+// human confirms it. One approval covers the whole step, so every line it
+// covers is listed; the server keeps an agent's save from setting it.
 import { useEffect, useState } from 'react';
 import { workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
@@ -9,35 +9,63 @@ import { useT } from '../../lib/I18nContext';
 interface UnmodelledApprovalProps {
   command: string;
   args: string[];
-  /** The step's stdin template, which an unmodelled program may also read. */
+  /** The step's stdin template, which the same approval covers. */
   stdin?: string;
+  /** The step's setup line, which the same approval covers. */
+  setupCommand?: string;
+  setupArgs?: string[];
+  /** An agent last wrote these lines: any value needs the approval. */
+  agentWritten?: boolean;
+  /** The step's pinned scripts: a script shape on one needs no approval. */
+  declaredScripts?: string[];
+  /** Drop a stored approval this line does not need. Off when the step's
+   *  approval also covers other lines (CollectApiData sources). */
+  clearStale?: boolean;
   approved: boolean;
   onChange: (approved: boolean) => void;
 }
 
-export function UnmodelledApproval({ command, args, stdin, approved, onChange }: UnmodelledApprovalProps) {
+export function UnmodelledApproval({
+  command, args, stdin, setupCommand, setupArgs, agentWritten, declaredScripts, clearStale = true, approved, onChange,
+}: UnmodelledApprovalProps) {
   const { t } = useT();
-  const [program, setProgram] = useState<string | null>(null);
-  const key = JSON.stringify([command, args, stdin ?? null]);
+  const [covered, setCovered] = useState<string[]>([]);
+  const key = JSON.stringify([
+    command, args, stdin ?? null, setupCommand ?? null, setupArgs ?? [], !!agentWritten, declaredScripts ?? [],
+  ]);
 
   useEffect(() => {
     if (!command.trim()) {
-      setProgram(null);
+      setCovered([]);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(() => {
       Promise.resolve()
-        .then(() => workflowsApi.execLineCheck(stdin ? { command, args, stdin } : { command, args }))
-        .then(check => { if (!cancelled) setProgram(check.unmodelled_program ?? null); })
-        .catch(() => { if (!cancelled) setProgram(null); });
+        .then(() => workflowsApi.execLineCheck({
+          command,
+          args,
+          ...(stdin ? { stdin } : {}),
+          ...(setupCommand ? { setup_command: setupCommand, setup_args: setupArgs ?? [] } : {}),
+          ...(agentWritten ? { agent_written: true } : {}),
+          ...(declaredScripts && declaredScripts.length > 0 ? { declared_scripts: declaredScripts } : {}),
+        }))
+        .then(check => {
+          if (cancelled) return;
+          const lines = check.covered ?? [];
+          setCovered(lines);
+          // An approval no line needs any more never stays behind.
+          if (clearStale && lines.length === 0 && approved) onChange(false);
+        })
+        .catch(() => { if (!cancelled) setCovered([]); });
     }, 300);
     return () => { cancelled = true; clearTimeout(timer); };
-    // `key` carries command, args and stdin.
+    // `key` carries every line; `approved` is read, never a trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  if (!program) return null;
+  if (covered.length === 0) return null;
+  const programs = [...new Set(covered.map(line => line.split(': ').slice(1).join(': ')))].join(', ');
   return (
     <label className="wf-unmodelled-approval">
       <input
@@ -45,7 +73,11 @@ export function UnmodelledApproval({ command, args, stdin, approved, onChange }:
         checked={approved}
         onChange={event => onChange(event.target.checked)}
       />
-      <span>{t('exec.unmodelledApprove', program)}</span>
+      <span>
+        {agentWritten ? `${t('exec.agentWrittenApprove')} ` : ''}
+        {t('exec.unmodelledApprove', programs)}
+      </span>
+      <small>{t('exec.unmodelledCovers', covered.join(' · '))}</small>
     </label>
   );
 }

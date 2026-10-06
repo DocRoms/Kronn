@@ -8,7 +8,7 @@ use crate::models::{CollectQuickExecOutputFormat, QuickExec};
 
 const COLUMNS: &str = "id, name, description, icon, project_id, command, args_json, \
     timeout_secs, output_format, variables_json, created_at, updated_at, pinned, \
-    unmodelled_args_approved";
+    unmodelled_args_approved, agent_written";
 
 fn parse_output_format(value: &str) -> CollectQuickExecOutputFormat {
     match value {
@@ -44,7 +44,8 @@ fn row_to_quick_exec(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuickExec> {
         output_format: parse_output_format(&output_format),
         variables: serde_json::from_str(&variables_json).unwrap_or_default(),
         pinned: row.get::<_, i32>(12).unwrap_or(0) != 0,
-        unmodelled_args_approved: (row.get::<_, i32>(13).unwrap_or(0) != 0).then_some(true),
+        unmodelled_args_approved: (row.get::<_, i32>(13).unwrap_or(0) == 1).then_some(true),
+        agent_written: (row.get::<_, i32>(14).unwrap_or(0) != 0).then_some(true),
         created_at: parse_dt(row.get(10)?),
         updated_at: parse_dt(row.get(11)?),
     })
@@ -77,8 +78,8 @@ pub fn insert_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
         "INSERT INTO quick_execs (
             id, name, description, icon, project_id, command, args_json,
             timeout_secs, output_format, variables_json, created_at, updated_at,
-            unmodelled_args_approved
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            unmodelled_args_approved, agent_written
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             quick_exec.id,
             quick_exec.name,
@@ -93,6 +94,7 @@ pub fn insert_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
             quick_exec.created_at.to_rfc3339(),
             quick_exec.updated_at.to_rfc3339(),
             i32::from(quick_exec.unmodelled_args_approved == Some(true)),
+            i32::from(quick_exec.agent_written == Some(true)),
         ],
     )?;
     Ok(())
@@ -104,7 +106,7 @@ pub fn update_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
             name = ?2, description = ?3, icon = ?4, project_id = ?5,
             command = ?6, args_json = ?7, timeout_secs = ?8,
             output_format = ?9, variables_json = ?10, updated_at = ?11,
-            unmodelled_args_approved = ?12
+            unmodelled_args_approved = ?12, agent_written = ?13
          WHERE id = ?1",
         params![
             quick_exec.id,
@@ -119,6 +121,7 @@ pub fn update_quick_exec(conn: &Connection, quick_exec: &QuickExec) -> Result<()
             serde_json::to_string(&quick_exec.variables)?,
             quick_exec.updated_at.to_rfc3339(),
             i32::from(quick_exec.unmodelled_args_approved == Some(true)),
+            i32::from(quick_exec.agent_written == Some(true)),
         ],
     )?;
     Ok(())
@@ -164,6 +167,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         };
         insert_quick_exec(&conn, &item).unwrap();
         let loaded = get_quick_exec(&conn, "qe-1").unwrap().unwrap();

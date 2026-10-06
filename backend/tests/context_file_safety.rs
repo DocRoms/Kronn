@@ -18,8 +18,8 @@ fn data_dir() -> &'static tempfile::TempDir {
         let host_home = directory.path().join("host-home");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::create_dir_all(&host_home).unwrap();
-        std::env::set_var("KRONN_DATA_DIR", data_dir);
-        std::env::set_var("KRONN_HOST_HOME", host_home);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
         directory
     })
 }

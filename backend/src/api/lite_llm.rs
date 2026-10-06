@@ -149,7 +149,7 @@ fn resolve_base_url(stored: Option<&str>) -> String {
     if let Some(url) = stored.map(str::trim).filter(|u| !u.is_empty()) {
         return normalize_url(url);
     }
-    if let Ok(env) = std::env::var("LITELLM_BASE_URL") {
+    if let Ok(env) = crate::core::child_env::var("LITELLM_BASE_URL") {
         let env = env.trim();
         if !env.is_empty() && env != "0.0.0.0" {
             return normalize_url(env);
@@ -375,7 +375,9 @@ pub async fn test(
 
     match probe(&base, effective_key.as_deref()).await {
         Ok(models) => {
-            let mut cfg = state.config.write().await;
+            // Changed on a copy, adopted only once saved.
+            let mut live = state.config.write().await;
+            let mut cfg = live.clone();
             cfg.agents.lite_llm.base_url = Some(base.clone());
             // Only touch the store when the caller actually sent a key, so a
             // re-test from the card doesn't wipe a working credential.
@@ -383,7 +385,10 @@ pub async fn test(
                 upsert_key(&mut cfg, k);
             }
             let saved = match config::save(&cfg).await {
-                Ok(_) => true,
+                Ok(_) => {
+                    *live = cfg;
+                    true
+                }
                 Err(e) => {
                     tracing::warn!("LiteLLM config save failed: {}", e);
                     false
@@ -631,8 +636,8 @@ mod tests {
     #[test]
     #[serial]
     fn blank_stored_endpoint_falls_through_to_the_default_port() {
-        let prev = std::env::var("LITELLM_BASE_URL").ok();
-        std::env::remove_var("LITELLM_BASE_URL");
+        let prev = crate::core::child_env::var("LITELLM_BASE_URL").ok();
+        crate::core::child_env::remove_var("LITELLM_BASE_URL");
         for stored in [None, Some(""), Some("   ")] {
             assert!(
                 resolve_base_url(stored).ends_with(":4000"),
@@ -641,7 +646,7 @@ mod tests {
             );
         }
         if let Some(p) = prev {
-            std::env::set_var("LITELLM_BASE_URL", p);
+            crate::core::child_env::set_var("LITELLM_BASE_URL", p);
         }
     }
 

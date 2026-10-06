@@ -127,7 +127,7 @@ fn bounded_command_error(output: &Output) -> String {
 }
 
 fn hosts_file_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("KRONN_HOSTS_FILE") {
+    if let Some(path) = crate::core::child_env::var_os("KRONN_HOSTS_FILE") {
         return Some(PathBuf::from(path));
     }
 
@@ -138,7 +138,7 @@ fn hosts_file_path() -> Option<PathBuf> {
 
     #[cfg(windows)]
     {
-        std::env::var_os("SystemRoot")
+        crate::core::child_env::var_os("SystemRoot")
             .map(PathBuf::from)
             .map(|root| root.join("System32/drivers/etc/hosts"))
     }

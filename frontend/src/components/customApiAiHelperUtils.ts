@@ -10,6 +10,7 @@ export interface CustomApiFormSnapshot {
   fields: CustomApiField[];
   endpoints: ApiEndpoint[];
   default_headers: ApiDefaultHeader[];
+  test_endpoint?: string | null;
 }
 
 export function buildSystemPrompt(t: Translator): string {
@@ -39,13 +40,16 @@ KRONN:APPLY
   ],
   "default_headers": [
     {"name": "Accept", "value": "application/json"}
-  ]
+  ],
+  "test_endpoint": "/sobjects/Account"
 }
 \`\`\`
 
 ${t('mcp.custom.helper.sys.endpoints')}
 
 ${t('mcp.custom.helper.sys.headers')}
+
+${t('mcp.custom.helper.sys.testEndpoint')}
 
 ${t('mcp.custom.helper.sys.verify')}
 
@@ -78,7 +82,8 @@ ${fieldsLine}
 - endpoints   :
 ${endpointsLine}
 - default_headers :
-${headersLine}`;
+${headersLine}
+- test_endpoint : ${snapshot.test_endpoint || t('mcp.custom.helper.ctx.empty')}`;
 }
 
 export function applyToCustomForm(parsed: Record<string, unknown>): Partial<CustomApiPayload> {
@@ -134,6 +139,9 @@ export function applyToCustomForm(parsed: Record<string, unknown>): Partial<Cust
       });
     }
     if (headers.length > 0) updates.default_headers = headers;
+  }
+  if (typeof parsed.test_endpoint === 'string' && parsed.test_endpoint.trim()) {
+    updates.test_endpoint = parsed.test_endpoint.trim();
   }
   return updates;
 }

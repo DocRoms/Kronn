@@ -845,12 +845,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "218_quick_exec_unmodelled_args_approved",
         include_str!("sql/218_quick_exec_unmodelled_args_approved.sql"),
     ),
+    (
+        "219_quick_exec_agent_written",
+        include_str!("sql/219_quick_exec_agent_written.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
 /// token and provider keys (KT-1007): the copy never holds credentials, even if
 /// the credential store boot that follows fails.
-fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
     let cfg = dir.join("config.toml");
     let text = match std::fs::read_to_string(&cfg) {
         Ok(text) => text,
@@ -874,8 +878,7 @@ fn backup_config_without_credentials(dir: &Path) -> std::io::Result<()> {
         Err(e) => return Err(e),
     }
     let tmp = dir.join(".config.toml.backup.tmp");
-    crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
-    std::fs::rename(&tmp, backup)
+    crate::core::keyvault::write_private_atomic(&tmp, &backup, scrubbed.as_bytes())
 }
 
 /// Move `backup` to `config.toml.backup.<UTC timestamp>` (owner-only).
@@ -893,12 +896,15 @@ pub(crate) fn rotate_config_backup(dir: &Path, backup: &Path) -> std::io::Result
     match crate::core::credential_store::without_credentials(&existing) {
         Some(scrubbed) => {
             let tmp = dir.join(".config.toml.backup.rotate.tmp");
-            crate::core::keyvault::write_private_temp(&tmp, scrubbed.as_bytes())?;
-            std::fs::rename(&tmp, &target)?;
+            crate::core::keyvault::write_private_atomic(&tmp, &target, scrubbed.as_bytes())?;
             std::fs::remove_file(backup)?;
+            crate::core::keyvault::sync_dir(dir);
         }
         // Unparseable: kept as it is (it may be the only copy of a key).
-        None => std::fs::rename(backup, &target)?,
+        None => {
+            std::fs::rename(backup, &target)?;
+            crate::core::keyvault::sync_dir(dir);
+        }
     }
     #[cfg(unix)]
     {
@@ -1076,7 +1082,8 @@ pub(crate) fn backup_before_migration(
     path: &Path,
     available_space: impl Fn(&Path) -> std::io::Result<u64>,
 ) -> Result<()> {
-    if std::env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0") {
+    if crate::core::child_env::var("KRONN_MIGRATION_BACKUP").is_ok_and(|value| value.trim() == "0")
+    {
         tracing::warn!("KRONN_MIGRATION_BACKUP=0: migrating without a database backup");
         return Ok(());
     }

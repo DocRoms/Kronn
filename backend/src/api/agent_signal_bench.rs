@@ -160,8 +160,11 @@ async fn bench_native_signal_discovery() {
     use crate::agents::runner::{
         parse_http_turn_telemetry, start_agent_with_config, AgentStartConfig,
     };
-    assert_eq!(std::env::var("KRONN_SIGNAL_BENCH").as_deref(), Ok("1"));
-    let model = std::env::var("KRONN_BENCH_MODEL").expect("explicit local model");
+    assert_eq!(
+        crate::core::child_env::var("KRONN_SIGNAL_BENCH").as_deref(),
+        Ok("1")
+    );
+    let model = crate::core::child_env::var("KRONN_BENCH_MODEL").expect("explicit local model");
     let directory = tempfile::tempdir().unwrap();
     let config = crate::core::config::default_config();
     let mut reports = Vec::new();
@@ -261,7 +264,7 @@ async fn bench_native_signal_discovery() {
             let report = json!({"model":model,"kind":kind,"discoverable":discoverable,"ok":ok,"exit_success":exit_success,"target_read":target_read,"contract_read":contract_read,"valid_card":valid_card,"suggested_topic":suggested_topic,"launches":launches,"catalogue_bytes":catalogue_bytes,"notice_bytes":notice.len(),"first_prompt_tokens":turns.first().map(|t|t.prompt_tokens),"total_prompt_tokens":turns.iter().map(|t|t.prompt_tokens).sum::<u64>(),"turns":turns.len(),"seconds":started.elapsed().as_secs_f64(),"prompt":prompt,"calls":calls,"emitted_text":output,"actions":actions});
             println!("{report}");
             reports.push(report);
-            if let Ok(path) = std::env::var("KRONN_BENCH_REPORT") {
+            if let Ok(path) = crate::core::child_env::var("KRONN_BENCH_REPORT") {
                 std::fs::write(path, serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
             }
         }

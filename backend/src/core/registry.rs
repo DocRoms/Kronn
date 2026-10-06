@@ -125,6 +125,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                 docs_url: None,
                 config_keys: vec![],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
 
@@ -192,6 +193,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}/labels".into(), method: "POST".into(), description: "[ISSUES · add labels] Add labels to an issue/PR (additive — does not remove existing). Body: `{labels: [\"ci-test\"]}`. Replace `{issue_number}`.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         McpDefinition {
@@ -543,6 +545,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/chats/{chat_id}/messages".into(), method: "POST".into(), description: "[TEAMS · write] Post a message to a chat. Confirm before use.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         // ── Project Management ──────────────────────────────────────────────
@@ -641,6 +644,7 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/rest/api/3/filter/search".into(),                method: "GET".into(),  description: "[FILTERS] User-saved JQL filters. Query: `accountId=...&filterName=Backlog`. Surfaces the JQL of each filter in `jql`.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         // ── Design ──────────────────────────────────────────────────────────
@@ -1100,6 +1104,7 @@ Official docs: https://resend.com/docs/api-reference/introduction
                     ApiEndpoint { path: "/api-keys".into(),                              method: "GET".into(),    description: "[KEYS · introspection] List API keys (metadata only — secrets never returned).".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         // Mailjet — EU-friendly transactional + marketing email API. The
@@ -1372,6 +1377,7 @@ Official docs: https://dev.mailjet.com/email/reference/
                     ApiEndpoint { path: "/v3/REST/messagesentstatistics".into(),                   method: "GET".into(),  description: "[STATS] Per-message statistics (opens, clicks). Joinable on MessageID.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         // ── AI & Reasoning ───────────────────────────────────────────────
@@ -1799,6 +1805,7 @@ the final report so the user can judge for themselves.
                     ApiEndpoint { path: "/stats/usage_by_service".into(), method: "GET".into(), description: "[USAGE] Usage grouped by Fastly service.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
         McpDefinition {
@@ -2059,6 +2066,7 @@ Official docs: https://docs.chartbeat.com/cbp/api/historical-api/getting-started
                     ApiEndpoint { path: "/historical/social/stats/".into(),  method: "GET".into(), description: "[HIST · X-CB-AK · sync] Aggregate social-referrer stats over a date range.".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
 
@@ -2267,6 +2275,7 @@ Full schema: [Adobe Analytics 2.0 API docs](https://developer.adobe.com/analytic
                     ApiEndpoint { path: "/users/me".into(),               method: "GET".into(),  description: "[SMOKE · OAuth2 · sync] Current user profile — use as a health check".into() },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
 
@@ -2436,6 +2445,7 @@ Official docs: https://developers.google.com/custom-search/v1/reference/rest
                     },
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
 
@@ -2539,6 +2549,7 @@ is well within bounds for typical fan-outs.
                     // that does not exist, when /v1/tests was the only real source.
                 ],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         },
     ]

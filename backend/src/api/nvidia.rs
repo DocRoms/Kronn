@@ -44,7 +44,7 @@ fn resolve_base_url(stored: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            std::env::var("NVIDIA_BASE_URL")
+            crate::core::child_env::var("NVIDIA_BASE_URL")
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())

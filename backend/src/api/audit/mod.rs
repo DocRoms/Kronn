@@ -3206,8 +3206,8 @@ mod prompt_tests {
     fn launch_audit_request_ts_file_covers_all_rust_fields() {
         // The .ts file lives outside the crate; resolve via
         // CARGO_MANIFEST_DIR which points at `backend/`.
-        let manifest =
-            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest = crate::core::child_env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR set by cargo");
         let ts_path = std::path::Path::new(&manifest)
             .join("..")
             .join("frontend")

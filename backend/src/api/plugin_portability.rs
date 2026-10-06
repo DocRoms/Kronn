@@ -1394,6 +1394,7 @@ mod tests {
                     description: String::new(),
                 }],
                 default_headers: vec![],
+                test_endpoint: None,
             }),
         }
     }

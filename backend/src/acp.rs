@@ -201,7 +201,7 @@ pub fn production_route(agent: &AgentType) -> AcpProductionRoute {
 /// strict boolean interpretation: only `1`/`true` enable, including whitespace
 /// and case normalization. Empty, malformed and false values keep direct CLI.
 fn env_flag_enabled(var: &str) -> bool {
-    match std::env::var(var) {
+    match crate::core::child_env::var(var) {
         Ok(value) => matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"),
         Err(std::env::VarError::NotPresent) => true,
         Err(std::env::VarError::NotUnicode(_)) => false,
@@ -784,7 +784,8 @@ fn native_command(
     };
     // Native runtimes are refused inside WSL, so the backend URL is the plain one.
     let backend_url = launch.discussion_id.is_some().then(|| {
-        std::env::var("KRONN_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3140".into())
+        crate::core::child_env::var("KRONN_BACKEND_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:3140".into())
     });
     child_env::apply_agent_launch(
         command.as_std_mut(),
@@ -810,7 +811,7 @@ fn native_command(
 /// alone.
 fn apply_opencode_policy(command: &mut tokio::process::Command) {
     const VARIABLE: &str = "OPENCODE_CONFIG_CONTENT";
-    if std::env::var_os(VARIABLE).is_some() {
+    if crate::core::child_env::var_os(VARIABLE).is_some() {
         tracing::info!("{VARIABLE} is already set; Kronn's OpenCode read policy is not applied");
         return;
     }
@@ -2414,8 +2415,8 @@ mod tests {
     #[test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     fn the_adapted_route_is_default_and_never_widens_other_agents() {
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
-        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
             AcpProductionRoute::AdaptedAcp
@@ -2434,9 +2435,9 @@ mod tests {
     #[test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     fn each_agent_s_toggle_only_widens_that_agent_s_own_route() {
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
-        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
-        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
             AcpProductionRoute::DirectCliMigration
@@ -2446,9 +2447,9 @@ mod tests {
             AcpProductionRoute::AdaptedAcp,
             "Claude's route must stay unaffected by Codex's toggle"
         );
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
 
-        std::env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CLAUDE", "0");
         assert_eq!(
             resolve_acp_route(&AgentType::ClaudeCode),
             AcpProductionRoute::DirectCliMigration
@@ -2458,7 +2459,7 @@ mod tests {
             AcpProductionRoute::AdaptedAcp,
             "Codex's route must stay unaffected by Claude's toggle"
         );
-        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
     }
 
     #[test]
@@ -2469,7 +2470,7 @@ mod tests {
         // to mean "off" (`"0"`, `"false"`) without realizing only unsetting
         // the variable actually disables it.
         for falsy in ["0", "false", "False", "FALSE", "no", "off", "", "  ", "2"] {
-            std::env::set_var("KRONN_ACP_ADAPTER_CODEX", falsy);
+            crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", falsy);
             assert_eq!(
                 resolve_acp_route(&AgentType::Codex),
                 AcpProductionRoute::DirectCliMigration,
@@ -2477,14 +2478,14 @@ mod tests {
             );
         }
         for truthy in ["1", "true", "True", "TRUE", " 1 ", " true "] {
-            std::env::set_var("KRONN_ACP_ADAPTER_CODEX", truthy);
+            crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", truthy);
             assert_eq!(
                 resolve_acp_route(&AgentType::Codex),
                 AcpProductionRoute::AdaptedAcp,
                 "KRONN_ACP_ADAPTER_CODEX={truthy:?} must activate the adapter"
             );
         }
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         assert_eq!(
             resolve_acp_route(&AgentType::Codex),
             AcpProductionRoute::AdaptedAcp,
@@ -2875,7 +2876,7 @@ mod tests {
                 .and_then(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
         }
 
-        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
         let mut command = tokio::process::Command::new("opencode");
         apply_opencode_policy(&mut command);
         assert_eq!(
@@ -2883,10 +2884,10 @@ mod tests {
             Some(secret_files::opencode_config_content().as_str())
         );
 
-        std::env::set_var("OPENCODE_CONFIG_CONTENT", r#"{"theme":"mine"}"#);
+        crate::core::child_env::set_var("OPENCODE_CONFIG_CONTENT", r#"{"theme":"mine"}"#);
         let mut command = tokio::process::Command::new("opencode");
         apply_opencode_policy(&mut command);
-        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
         assert_eq!(
             config_of(&command),
             None,
@@ -2905,7 +2906,7 @@ mod tests {
     async fn a_refused_read_does_not_end_the_turn_and_the_turn_reports_its_usage() {
         let out = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::remove_var("OPENCODE_CONFIG_CONTENT");
+        crate::core::child_env::remove_var("OPENCODE_CONFIG_CONTENT");
         // Only the program differs from `spawn_native`: the environment Kronn
         // gives OpenCode is built by the same function.
         let mut command = native_command(

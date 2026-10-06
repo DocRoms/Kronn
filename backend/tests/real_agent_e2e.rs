@@ -41,14 +41,16 @@
 //! of feature needs a real-agent test even when unit tests are
 //! green.
 
-use std::env;
-
 /// Helper that runs at the start of every test in this file: if the
 /// opt-in env var is missing, panic with a clear message + cost
 /// reminder. Tests are `#[ignore]` AND opt-in — belt and braces so
 /// nobody runs them by accident.
 fn require_opt_in() {
-    if env::var("KRONN_E2E_REAL_AGENT").ok().as_deref() != Some("1") {
+    if kronn::core::child_env::var("KRONN_E2E_REAL_AGENT")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
         panic!(
             "Real-agent E2E tests are opt-in: set KRONN_E2E_REAL_AGENT=1 to run. \
              Expect ~30-80k tokens per test (real LLM cost). \
@@ -159,20 +161,16 @@ fn opt_in_panic_message_is_actionable() {
     //
     // This test always runs in CI (not `#[ignore]`) and verifies the
     // safety rail itself, NOT any agent behavior — so it's free.
-    let prev = env::var("KRONN_E2E_REAL_AGENT").ok();
-    // SAFETY: env::remove_var can be unsafe in multi-threaded test
+    let prev = kronn::core::child_env::var("KRONN_E2E_REAL_AGENT").ok();
+    // env::remove_var can race in multi-threaded test
     // environments. Tests in this file are #[ignore]'d so they only
     // run when explicitly requested — never in parallel CI.
-    unsafe {
-        env::remove_var("KRONN_E2E_REAL_AGENT");
-    }
+    kronn::core::child_env::remove_var("KRONN_E2E_REAL_AGENT");
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         require_opt_in();
     }));
     if let Some(prev_val) = prev {
-        unsafe {
-            env::set_var("KRONN_E2E_REAL_AGENT", prev_val);
-        }
+        kronn::core::child_env::set_var("KRONN_E2E_REAL_AGENT", prev_val);
     }
     let err = r.expect_err("require_opt_in() must panic when env is missing");
     let msg = err

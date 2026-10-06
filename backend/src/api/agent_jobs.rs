@@ -208,6 +208,9 @@ pub(crate) async fn start_background_job(
         .iter()
         .map(|argument| context.render_strict(argument))
         .collect::<Result<Vec<_>>>()?;
+    if let Some(refusal) = quick_exec_job_refusal(&quick, &argv) {
+        anyhow::bail!(refusal);
+    }
     let spec = QuickExecSpec {
         binary: quick.command.clone(),
         argv: argv.clone(),
@@ -419,6 +422,29 @@ fn settle_and_dispatch(
     Ok(Some(dispatch.id.clone()))
 }
 
+/// The KT-1017 checks a Quick Exec run gets anywhere else: the saved line
+/// (with its approval and writer), then the rendered argv.
+fn quick_exec_job_refusal(quick: &crate::models::QuickExec, argv: &[String]) -> Option<String> {
+    let step = crate::models::WorkflowStep {
+        name: quick.name.clone(),
+        step_type: crate::models::StepType::Exec,
+        exec_command: Some(quick.command.clone()),
+        exec_args: quick.args.clone(),
+        exec_unmodelled_args_approved: quick.unmodelled_args_approved,
+        exec_agent_written: quick.agent_written,
+        ..Default::default()
+    };
+    crate::core::inline_code::runtime_refusal(&step).or_else(|| {
+        crate::core::inline_code::rendered_refusal(
+            &quick.name,
+            &quick.command,
+            &quick.args,
+            argv,
+            crate::api::quick_execs::quick_exec_trust(quick),
+        )
+    })
+}
+
 async fn run_job(state: AppState, id: String) {
     let claim_id = id.clone();
     let job = match state
@@ -599,6 +625,47 @@ pub async fn cancel(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// A background job runs a saved Quick Exec with agent-chosen values:
+    /// the saved line, its approval and the rendered argv are checked.
+    #[test]
+    fn a_background_quick_exec_gets_the_exec_checks() {
+        let quick = |command: &str, args: &[&str], approved: bool| crate::models::QuickExec {
+            id: "qe".into(),
+            name: "job".into(),
+            icon: String::new(),
+            description: String::new(),
+            project_id: None,
+            command: command.into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            timeout_secs: 10,
+            output_format: crate::models::CollectQuickExecOutputFormat::Text,
+            variables: vec![],
+            pinned: false,
+            unmodelled_args_approved: approved.then_some(true),
+            agent_written: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let argv = |items: &[&str]| items.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let code = quick("python3", &["-c", "print('{{x}}')"], true);
+        assert!(quick_exec_job_refusal(&code, &argv(&["-c", "print('a')"])).is_some());
+        let unapproved = quick("git", &["log", "{{x}}"], false);
+        assert!(quick_exec_job_refusal(&unapproved, &argv(&["log", "main"])).is_some());
+        let approved = quick("git", &["fetch", "{{r}}"], true);
+        assert!(quick_exec_job_refusal(&approved, &argv(&["fetch", "origin"])).is_none());
+        assert!(
+            quick_exec_job_refusal(&approved, &argv(&["fetch", "--upload-pack=touch x"])).is_some()
+        );
+        let mut agent = quick(
+            "python3",
+            &["-c", "import sys; print(sys.argv[1])", "{{x}}"],
+            false,
+        );
+        assert!(quick_exec_job_refusal(&agent, &argv(&["-c", "c", "a"])).is_none());
+        agent.agent_written = Some(true);
+        assert!(quick_exec_job_refusal(&agent, &argv(&["-c", "c", "a"])).is_some());
+    }
 
     #[test]
     fn common_fields_refuse_empty_and_unbounded_values() {

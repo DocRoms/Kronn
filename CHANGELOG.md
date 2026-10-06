@@ -168,8 +168,8 @@ Release notes for 0.9.3 and earlier are available in the
   and the step shows the agent it really ran on; the workflow is never
   modified.
 - API plugins can declare headers sent on every call, whatever their
-  authentication: Notion's mandatory `Notion-Version`, GitHub's
-  `X-GitHub-Api-Version`, a required `Accept`. Without one, such an API
+  authentication: Notion's mandatory `Notion-Version`, Anthropic's
+  `anthropic-version`, the `Accept` Heroku requires. Without one, such an API
   refused every request (Notion: `400 missing_version`) and each workflow
   step or agent had to repeat it. Custom API plugins edit them in the new
   **Headers sent on every call** section, as a literal or `${ENV.KEY}` from
@@ -180,6 +180,13 @@ Release notes for 0.9.3 and earlier are available in the
   check refusing CLI-token authentication.
 - Agents no longer see an API's authentication keys, or keys already sent as
   headers, listed as "pass as query params" in their API context.
+- A Custom API plugin's **Test** button now works: it calls the endpoint
+  marked as test endpoint (a round button on each endpoint row), which must be
+  a `GET` without path parameters. Kronn selects the most likely one by
+  default (`/users/me`, `/me`, `/whoami`…, else the first such `GET`), so
+  existing plugins pass the test without being edited. It used to answer "No
+  side-effect-free authentication probe is declared" for every custom plugin,
+  even a working one.
 
 ### Fixed
 
@@ -213,8 +220,9 @@ Release notes for 0.9.3 and earlier are available in the
   project alone, creates its tasks there and names the project on its card. A
   token's workflow may publish only into its own project's pages and rooms; a
   workflow run without a project is private to its launch, even after its
-  workflow moves into a project, and a token's run lists, run filters and
-  `last_run` only consider runs it may see; peer-join cannot
+  workflow moves into a project, and a token's run lists, run filters,
+  `last_run` and duration estimates (workflow and Quick Prompt) only consider
+  runs and launches it may see; peer-join cannot
   end a session another project's room holds; a config opted into General is
   usable by project-less tokens as the plugin overview shows; a page slug can
   no longer look like a page id, a page resolves by id first, and a token's
@@ -257,7 +265,15 @@ Release notes for 0.9.3 and earlier are available in the
   an MCP server, which may come from a repository's
   `.mcp.json`, starts it with only its own configured values. An
   operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
-  start, like the admin token. npm registry credentials
+  start, like the admin token. On the desktop, only an allow-list (display,
+  locale, paths, proxies and toolkit settings) stays in the process
+  environment, so the system webview's helper processes (Linux, Windows)
+  never inherit a credential, whatever its name; Kronn and its agents still
+  get every variable, and `KRONN_USE_KEYCHAIN=0` keeps working. Kronn
+  warns at start when the admin token or the key came from the environment:
+  the process's original environment block keeps them readable by
+  same-user processes, so the keychain, the key file or `config.toml` are
+  safer. npm registry credentials
   (`npm_config__auth` and its registry-scoped forms) are dropped like any
   other secret.
 - `git push` and `gh` PR creation use the project's own GitHub connection,
@@ -314,6 +330,31 @@ Release notes for 0.9.3 and earlier are available in the
   without a recovery passphrase warns; a `config.toml` set aside at start is
   shown in the setup wizard; every backup copy is scrubbed even when one
   fails; and key files are synced to disk with their directory (KT-1007).
+- Secrets under an older key kept only in a `config.toml` backup, a set-aside
+  value or a corrupt `config.toml` are re-encrypted under the key in use at
+  start (the file is kept) instead of stopping the start; a set-aside
+  `config.toml` and a credential load failure are shown app-wide; a reset
+  while the key is locked sets up a new key at once; a provider key whose
+  save fails no longer appears saved; and a recovery passphrase from before
+  0.14.3, or a damaged one, can be replaced from Settings (KT-1007).
+- A lost key with no recovery passphrase no longer holds the rest hostage:
+  "set the locked secrets aside and start a new key" keeps them in a file and
+  keeps discussions, projects and workflows. A failed reset while locked keeps
+  the API authenticated; moves from kept key files wait for a durable copy and
+  never stop the start; connection keys, LiteLLM and discovered keys appear
+  only once saved; credentials of an unreadable `config.toml` are recovered;
+  a forgotten passphrase can be replaced; and the desktop restart keeps the
+  operator's API token (KT-1007).
+- Secrets set aside when a key was given up come back through "Re-encrypt"
+  once the old passphrase or code is offered; starting a new key or a locked
+  reset never turns API auth off (or on), keeps a readable token, stops on an
+  unreadable key store before writing anything, and removes only rows that are
+  still the ones copied (KT-1007).
+- A credential store that cannot be written after starting a new key or a
+  locked reset no longer leaves the API open; secrets put back from a
+  locked-secrets file survive a failed reload; the restore reports what it put
+  back and what still waits; and an export warns that locked-secrets files stay
+  on this machine (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
@@ -646,6 +687,50 @@ Release notes for 0.9.3 and earlier are available in the
   and `python -i` count as code.
   An approved Quick Exec now runs from its page, and "Suggest a fix" moves
   shell flags such as `-e` into a `set` line.
+- An Exec line or Quick Exec an agent writes (bridge token or Kronn's agent
+  tools) needs a human's approval for any run value, whatever its shape
+  (KT-1017): the server records who last wrote each line, and an agent can
+  neither approve nor launder a value through a `bash -c` script. Such a line
+  is saved and the run refuses it until a human approves it; the save result
+  names the waiting steps (`notice`, `kronn_notice` for agents), and the
+  workflow page and step editor show "written by an agent: needs your
+  approval" with the line and an approve action. Inline CollectApiData
+  sources get the approval box in the editor.
+- Whatever originates from an agent is agent-written, whatever the transport
+  that carries a bridge token or an agent signal (KT-1017; residual for 0.15:
+  a local agent that drops its bridge token is still trusted as a human through
+  loopback): a `KRONN:WORKFLOW_READY` or `BUNDLE_READY` proposal accepted by a
+  click, and a new or changed line of a `kronn/` file, wait for an approval in
+  the editor; the creation banner and the approve sheet list the Exec lines.
+  The writer is tracked per line (main, setup, stdin, each source) and a line's
+  identity includes its step type and pinned scripts; fields a step type never
+  reads are dropped on save. An agent never supplies a script hash, and an
+  empty hash is pinned only by a human's save of that step. A human can approve
+  an agent-written Quick Exec (writer and approval are stored apart). A config
+  restore keeps approvals only from a backup this instance sealed. Launchers
+  that start a default shell (`su`, `script`, `chroot`, `unshare`, `nsenter`,
+  `sudo -s`, `newgrp`, `sg`) and stdin paths climbing to `/dev` count as code
+  readers, and a script fed by a templated stdin must be a regular file at run
+  time. `date` options are matched in clusters and abbreviations. Option
+  values never hide a default shell (`sudo -u u -s`, `script -t 0 FILE`), an
+  `awk|sed|make|psql -f` or `lua`/`Rscript` program file fed by a templated
+  stdin must be a regular file, script hashes carried by an agent-origin import
+  or an unsealed restore are blanked, the stdin line has its own writer, and
+  the restore seal is compared in constant time. A script
+  shape (`python3 tool.py …`) needs its script pinned in `exec_script_files`,
+  checked at run time to be a regular file; a shell script given to `-c`
+  never starts with `-` or `+`; shells are not trusted shapes on Windows.
+  Only `echo`, `printf` (literal format), `test`, `true`, `false`,
+  `basename`, `dirname`, `seq` and `date` stay data-only: programs reading or
+  writing paths (`cat`, `grep`, `jq`, `cp`, `tee`, `rm`…) or the environment
+  (`printenv`) need the approval. Every import drops an approval except a
+  restore of this instance's own backup; the `kronn/` import keeps only one
+  this instance gave to the very same line. One approval covers the whole
+  step: the editor lists every line it covers and an approval no line needs
+  is dropped on save. Agent background jobs run a saved Quick Exec with the
+  same checks, and a code reader behind `npx`, `kubectl exec -i`,
+  `docker compose run`, `runuser`, `xargs` or `parallel` stays refused when
+  approved.
 
 ### Changed
 

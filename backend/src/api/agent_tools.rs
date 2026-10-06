@@ -381,7 +381,11 @@ pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
 /// Use full declarations by default. Native-model measurements in docs/research/
 /// showed lower success with tiering; keep it opt-in via KRONN_TIERED_TOOLS=1.
 pub(crate) fn tiered_tools_enabled() -> bool {
-    explicit_tiering(std::env::var("KRONN_TIERED_TOOLS").ok().as_deref())
+    explicit_tiering(
+        crate::core::child_env::var("KRONN_TIERED_TOOLS")
+            .ok()
+            .as_deref(),
+    )
 }
 
 fn explicit_tiering(raw: Option<&str>) -> bool {
@@ -1732,13 +1736,17 @@ impl ToolExecutor for KronnToolExecutor {
                         title: call.arguments["title"].as_str().map(str::to_owned),
                         launch: Some(crate::core::launch_context::LaunchContext {
                             discussion_id: self.disc_id.clone(),
-                            project_id,
+                            project_id: project_id.clone(),
                             ..Default::default()
                         }),
                     };
-                    let Json(res) =
-                        crate::api::mcp_remote::qp_run(State(self.state.clone()), Json(request))
-                            .await;
+                    // The estimate counts only the principal's project's launches.
+                    let Json(res) = crate::api::mcp_remote::qp_run_scoped(
+                        &self.state,
+                        Some(project_id),
+                        request,
+                    )
+                    .await;
                     unwrap_api(call, res.success, res.data, res.error)
                 }
             }
@@ -1844,7 +1852,7 @@ impl ToolExecutor for KronnToolExecutor {
                 };
                 let Json(res) =
                     crate::api::quick_execs::create_as(self.state.clone(), request, true).await;
-                unwrap_api(call, res.success, res.data, res.error)
+                unwrap_api_noticed(call, res)
             }
             "qe_update" => {
                 let Some(id) = call.arguments["quick_exec_id"].as_str() else {
@@ -1882,7 +1890,7 @@ impl ToolExecutor for KronnToolExecutor {
                     true,
                 )
                 .await;
-                unwrap_api(call, res.success, res.data, res.error)
+                unwrap_api_noticed(call, res)
             }
             "qe_list" => {
                 let Json(res) = crate::api::quick_execs::list(State(self.state.clone())).await;
@@ -4349,6 +4357,23 @@ pub(crate) fn api_call_extract(
 }
 
 /// Collapse a handler's `ApiResponse` into the payload the model sees.
+/// [`unwrap_api`] for a write that may leave something to a human: the
+/// response's notice reaches the agent as `kronn_notice` (KT-1017).
+pub(super) fn unwrap_api_noticed<T: serde::Serialize>(
+    call: &ToolCall,
+    response: crate::models::ApiResponse<T>,
+) -> ToolOutcome {
+    let notice = response.notice.clone();
+    let data = response.data.map(|data| {
+        let mut value = serde_json::to_value(data).unwrap_or_default();
+        if let (Some(notice), Some(object)) = (notice, value.as_object_mut()) {
+            object.insert("kronn_notice".into(), serde_json::Value::String(notice));
+        }
+        value
+    });
+    unwrap_api(call, response.success, data, response.error)
+}
+
 fn unwrap_api<T: serde::Serialize>(
     call: &ToolCall,
     success: bool,
@@ -4452,6 +4477,22 @@ mod tests {
                 assert_eq!(result.content["messages"][0]["content"], "Own room history");
             }
         }
+    }
+
+    /// KT-1017: the agent tools relay what a save leaves to a human.
+    #[test]
+    fn a_write_notice_reaches_the_agent_as_kronn_notice() {
+        let call = call_with(serde_json::json!({}));
+        let response = crate::models::ApiResponse::ok(serde_json::json!({"id": "w"}))
+            .with_notice(Some("approve plan".into()));
+        let outcome = unwrap_api_noticed(&call, response);
+        assert!(outcome.ok);
+        assert_eq!(outcome.content["kronn_notice"], "approve plan");
+        let quiet = unwrap_api_noticed(
+            &call,
+            crate::models::ApiResponse::ok(serde_json::json!({"id": "w"})),
+        );
+        assert!(quiet.content.get("kronn_notice").is_none());
     }
 
     fn call_with(arguments: serde_json::Value) -> ToolCall {
@@ -5050,7 +5091,8 @@ mod tests {
         catalogue.extend(workspace_tool_catalogue());
         catalogue.extend(orchestration_tool_catalogue());
         catalogue.extend(agent_resume_tool_catalogue());
-        let out = std::env::var("KRONN_CATALOGUE_DUMP").expect("KRONN_CATALOGUE_DUMP");
+        let out =
+            crate::core::child_env::var("KRONN_CATALOGUE_DUMP").expect("KRONN_CATALOGUE_DUMP");
         std::fs::write(&out, serde_json::to_string_pretty(&catalogue).unwrap()).unwrap();
         eprintln!("wrote {} tools to {out}", catalogue.len());
     }
@@ -5271,6 +5313,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         }
     }
 
@@ -5369,6 +5412,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             unmodelled_args_approved: None,
+            agent_written: None,
         };
 
         let merged: crate::models::CreateQuickExecRequest = merged_definition(

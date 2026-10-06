@@ -17,19 +17,19 @@ struct Environment(Vec<(&'static str, Option<OsString>)>);
 impl Environment {
     fn set(&mut self, name: &'static str, value: impl Into<OsString>) {
         if !self.0.iter().any(|(key, _)| *key == name) {
-            self.0.push((name, std::env::var_os(name)));
+            self.0.push((name, kronn::core::child_env::var_os(name)));
         }
         // This integration binary holds one current-thread test.
-        unsafe { std::env::set_var(name, value.into()) };
+        kronn::core::child_env::set_var(name, value.into());
     }
 }
 impl Drop for Environment {
     fn drop(&mut self) {
         for (name, value) in self.0.iter().rev() {
-            unsafe {
+            {
                 match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => kronn::core::child_env::set_var(name, value),
+                    None => kronn::core::child_env::remove_var(name),
                 }
             }
         }

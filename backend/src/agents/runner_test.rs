@@ -144,7 +144,7 @@ mod tests {
         fn capture() -> Self {
             Self(
                 ["KRONN_ACP_ADAPTER_CLAUDE", "KRONN_ACP_ADAPTER_CODEX"]
-                    .map(|name| (name, std::env::var_os(name))),
+                    .map(|name| (name, crate::core::child_env::var_os(name))),
             )
         }
     }
@@ -152,8 +152,8 @@ mod tests {
         fn drop(&mut self) {
             for (name, previous) in &self.0 {
                 match previous {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
                 }
             }
         }
@@ -163,8 +163,8 @@ mod tests {
     #[serial(acp_adapter_env_toggle)]
     fn task_worker_route_policy_covers_every_launch_route() {
         let _restore = RestoreAdapterToggles::capture();
-        std::env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
-        std::env::remove_var("KRONN_ACP_ADAPTER_CODEX");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CLAUDE");
+        crate::core::child_env::remove_var("KRONN_ACP_ADAPTER_CODEX");
         // Native ACP: refused as a worker, an ordinary turn keeps its setting.
         for agent in [
             AgentType::GeminiCli,
@@ -190,7 +190,7 @@ mod tests {
             assert_eq!(task_worker_route_policy(&agent, true, true), Ok(false));
         }
         // Direct CLI compatibility route.
-        std::env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
+        crate::core::child_env::set_var("KRONN_ACP_ADAPTER_CODEX", "0");
         assert_eq!(
             crate::acp::resolve_acp_route(&AgentType::Codex),
             crate::acp::AcpProductionRoute::DirectCliMigration
@@ -492,8 +492,8 @@ mod tests {
     #[serial]
     fn acp_mcp_registry_carries_the_kronn_bridge_with_no_credential_in_the_payload() {
         let script = tempfile::NamedTempFile::new().unwrap();
-        let previous = std::env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
-        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
+        let previous = crate::core::child_env::var("KRONN_DISC_INTROSPECTION_MCP").ok();
+        crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", script.path());
 
         let with_no_project = acp_project_mcp_servers("", false);
         let bridge = with_no_project
@@ -538,8 +538,8 @@ mod tests {
         assert_eq!(own[0], bridge);
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
-            None => std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DISC_INTROSPECTION_MCP", value),
+            None => crate::core::child_env::remove_var("KRONN_DISC_INTROSPECTION_MCP"),
         }
     }
 
@@ -5427,15 +5427,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let previous = std::env::var("KRONN_LITELLM_PROMPT_CACHE").ok();
+        let previous = crate::core::child_env::var("KRONN_LITELLM_PROMPT_CACHE").ok();
         for (switch, model) in [
             (None, "anthropic/claude-sonnet-4-6"),
             (None, "gemini-2.5-flash"),
             (Some("0"), "claude-sonnet-4-6"),
         ] {
             match switch {
-                Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
-                None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+                Some(value) => crate::core::child_env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+                None => crate::core::child_env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
             }
             let mut process = start_ollama_http(
                 &AgentType::LiteLlm,
@@ -5459,8 +5459,8 @@ mod tests {
             assert!(process.child.wait().await.expect("lifeline").success());
         }
         match previous {
-            Some(value) => std::env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
-            None => std::env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
+            Some(value) => crate::core::child_env::set_var("KRONN_LITELLM_PROMPT_CACHE", value),
+            None => crate::core::child_env::remove_var("KRONN_LITELLM_PROMPT_CACHE"),
         }
 
         let requests = server.received_requests().await.expect("request capture");
@@ -8055,8 +8055,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn hosted_audit_step_converges_within_its_input_budget() {
-        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
-        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
         let per_turn = 100_000;
         let (budgeted, captured) = hosted_audit_that_keeps_exploring(per_turn, 0).await;
         let opened = budgeted.expect("the write window must open");
@@ -8085,8 +8085,8 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn hosted_audit_history_pressure_uses_the_bounded_context_budget() {
-        std::env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
-        std::env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_AUDIT_STEP_INPUT_BUDGET");
+        crate::core::child_env::remove_var("KRONN_HTTP_STEP_CTX_BUDGET");
         let (opened, captured) = hosted_audit_that_keeps_exploring(10, 40_000).await;
         let opened = opened.expect("the write window must open");
         assert!(opened <= 30, "opened at request {opened}: {captured}");
@@ -9132,8 +9132,8 @@ Suite de la réponse.";
     fn fix_file_ownership_no_env_vars_does_not_panic() {
         // When KRONN_HOST_UID / KRONN_HOST_GID are not set, fix_file_ownership
         // should return early without error.
-        std::env::remove_var("KRONN_HOST_UID");
-        std::env::remove_var("KRONN_HOST_GID");
+        crate::core::child_env::remove_var("KRONN_HOST_UID");
+        crate::core::child_env::remove_var("KRONN_HOST_GID");
         super::super::fix_file_ownership(std::path::Path::new("/tmp"));
     }
 
@@ -9141,12 +9141,12 @@ Suite de la réponse.";
     #[serial]
     fn fix_file_ownership_with_nonexistent_dir_does_not_panic() {
         // Even with UID/GID set, chown on a nonexistent path should not panic.
-        std::env::set_var("KRONN_HOST_UID", "1000");
-        std::env::set_var("KRONN_HOST_GID", "1000");
+        crate::core::child_env::set_var("KRONN_HOST_UID", "1000");
+        crate::core::child_env::set_var("KRONN_HOST_GID", "1000");
         super::super::fix_file_ownership(std::path::Path::new("/nonexistent/path/for/test"));
         // Clean up
-        std::env::remove_var("KRONN_HOST_UID");
-        std::env::remove_var("KRONN_HOST_GID");
+        crate::core::child_env::remove_var("KRONN_HOST_UID");
+        crate::core::child_env::remove_var("KRONN_HOST_GID");
     }
 
     // ─── agent_command: full_access flags ──────────────────────────────────────
@@ -10111,11 +10111,11 @@ Suite de la réponse.";
     #[tokio::test]
     #[serial]
     async fn claude_step_principal_and_worker_launch_without_the_workstation_memory() {
-        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        let previous = crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
         for opt_in in [None, Some("1")] {
             match opt_in {
-                Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-                None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+                Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+                None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
             }
             let worker = worker_context();
             let principal = room_agent_context();
@@ -10141,8 +10141,8 @@ Suite de la réponse.";
             }
         }
         match previous {
-            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
         }
     }
 
@@ -10150,22 +10150,22 @@ Suite de la réponse.";
     #[tokio::test]
     #[serial]
     async fn claude_native_discussion_drops_the_workstation_memory_unless_opted_in() {
-        let previous = std::env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
-        std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
+        let previous = crate::core::child_env::var("KRONN_CLAUDE_AUTO_MEMORY").ok();
+        crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY");
         assert_eq!(
             auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
             "1",
             "off by default"
         );
-        std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
+        crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", "1");
         assert_eq!(
             auto_memory_switch_seen_by("claude", Some("disc"), None, None, None).await,
             "unset",
             "the operator keeps it for a native discussion"
         );
         match previous {
-            Some(value) => std::env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
-            None => std::env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
+            Some(value) => crate::core::child_env::set_var("KRONN_CLAUDE_AUTO_MEMORY", value),
+            None => crate::core::child_env::remove_var("KRONN_CLAUDE_AUTO_MEMORY"),
         }
     }
 
@@ -10174,8 +10174,8 @@ Suite de la réponse.";
     async fn the_memory_switch_is_only_set_for_claude_code() {
         // Another CLI inherits the parent's value untouched: Kronn neither sets
         // nor clears it (a session launched by Kronn already carries it).
-        let inherited =
-            std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY").unwrap_or_else(|_| "unset".into());
+        let inherited = crate::core::child_env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+            .unwrap_or_else(|_| "unset".into());
         assert_eq!(
             auto_memory_switch_seen_by("codex", Some("disc"), None, None, None).await,
             inherited
@@ -10434,7 +10434,7 @@ Suite de la réponse.";
     #[test]
     fn packaged_project_mcp_config_binds_the_desktop_instance() {
         const PROBE: &str = "KRONN_TEST_PACKAGED_CONFIG";
-        if std::env::var_os(PROBE).is_none() {
+        if crate::core::child_env::var_os(PROBE).is_none() {
             let dir = tempfile::tempdir().expect("temporary installation");
             let bridge = dir.path().join("Kronn MCP é.exe");
             std::fs::write(&bridge, b"bundle fixture").expect("bridge file");
@@ -10465,7 +10465,7 @@ Suite de la réponse.";
             if injected {
                 assert_ne!(
                     config.mcp_servers["kronn-internal"].command.as_deref(),
-                    std::env::var("KRONN_INTERNAL_MCP_EXECUTABLE")
+                    crate::core::child_env::var("KRONN_INTERNAL_MCP_EXECUTABLE")
                         .ok()
                         .as_deref()
                 );
@@ -10477,7 +10477,7 @@ Suite de la réponse.";
         let internal = &json["mcpServers"]["kronn-internal"];
         assert_eq!(
             internal["command"],
-            std::env::var("KRONN_INTERNAL_MCP_EXECUTABLE").expect("bundle path")
+            crate::core::child_env::var("KRONN_INTERNAL_MCP_EXECUTABLE").expect("bundle path")
         );
         assert_eq!(internal["args"], serde_json::json!([]));
         assert_eq!(
@@ -12267,8 +12267,8 @@ Suite de la réponse.";
         // structurally broken in Docker: Codex couldn't read a single file
         // and the plan review emitted a false NEEDS_RETRIAGE. The container
         // + worktree are the isolation boundary; always danger-full-access.
-        std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
-        std::env::set_var("KRONN_HOST_OS", "Linux");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/home/testuser");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "Linux");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
@@ -12276,29 +12276,29 @@ Suite de la réponse.";
             "Docker (any OS) must use danger-full-access — bwrap can't init in the container"
         );
         assert!(!args.contains(&"--sandbox=workspace-write".to_string()));
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("KRONN_HOST_OS");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_OS");
     }
 
     #[test]
     #[serial]
     fn codex_macos_docker_forces_full_access_sandbox() {
-        std::env::set_var("KRONN_HOST_HOME", "/Users/testuser");
-        std::env::set_var("KRONN_HOST_OS", "macOS");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/Users/testuser");
+        crate::core::child_env::set_var("KRONN_HOST_OS", "macOS");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
             args.contains(&"--sandbox=danger-full-access".to_string()),
             "macOS Docker should force danger-full-access sandbox regardless of full_access flag"
         );
-        std::env::remove_var("KRONN_HOST_HOME");
-        std::env::remove_var("KRONN_HOST_OS");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_OS");
     }
 
     #[test]
     #[serial]
     fn codex_native_full_access_uses_danger_sandbox() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", true, "", None);
         assert!(
@@ -12310,7 +12310,7 @@ Suite de la réponse.";
     #[test]
     #[serial]
     fn codex_native_restricted_access_keeps_default_sandbox() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let (_, _, args, _, _, _) =
             super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
         assert!(
@@ -13646,9 +13646,10 @@ sleep 3600
         prompt: &str,
         catalogue: Vec<serde_json::Value>,
     ) -> BenchRun {
-        let base =
-            std::env::var("KRONN_BENCH_OLLAMA").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
-        let model = std::env::var("KRONN_BENCH_MODEL").unwrap_or_else(|_| "qwen3.8:27b-mlx".into());
+        let base = crate::core::child_env::var("KRONN_BENCH_OLLAMA")
+            .unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+        let model = crate::core::child_env::var("KRONN_BENCH_MODEL")
+            .unwrap_or_else(|_| "qwen3.8:27b-mlx".into());
         let catalogue_bytes = serde_json::to_string(&catalogue).unwrap().len();
         let tools_declared = catalogue.len();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -13709,19 +13710,20 @@ sleep 3600
         // The doc pointer and the tools notice are shared by every HTTP agent,
         // not just Ollama, so the same scenario runs against an OpenAI-wire
         // provider when one is configured for the bench.
-        let external = std::env::var("KRONN_BENCH_HTTP_ENDPOINT")
+        let external = crate::core::child_env::var("KRONN_BENCH_HTTP_ENDPOINT")
             .ok()
             .map(|endpoint| ExternalHttpRuntime {
                 display_name: "Bench".into(),
                 mention_alias: "bench".into(),
                 endpoint,
-                api_key: std::env::var("KRONN_BENCH_HTTP_KEY").ok(),
+                api_key: crate::core::child_env::var("KRONN_BENCH_HTTP_KEY").ok(),
             });
         let agent = match external {
             Some(_) => AgentType::Custom,
             None => AgentType::Ollama,
         };
-        let model = std::env::var("KRONN_BENCH_MODEL").unwrap_or_else(|_| "gemma4:e4b".into());
+        let model = crate::core::child_env::var("KRONN_BENCH_MODEL")
+            .unwrap_or_else(|_| "gemma4:e4b".into());
         let catalogue_bytes = serde_json::to_string(&catalogue).unwrap().len();
         let tools_declared = catalogue.len();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -13778,7 +13780,7 @@ sleep 3600
     #[tokio::test]
     #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
     async fn bench_project_doc_inline_against_pointer() {
-        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+        if crate::core::child_env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
             eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
             return;
         }
@@ -13788,11 +13790,12 @@ sleep 3600
         // only that doc answers — a repository nobody wrote for this test, with
         // its own tree for the model to get lost in.
         //   KRONN_BENCH_PROJECT=/path KRONN_BENCH_MARKER=... KRONN_BENCH_QUESTION=...
-        let real_project = std::env::var("KRONN_BENCH_PROJECT")
+        let real_project = crate::core::child_env::var("KRONN_BENCH_PROJECT")
             .ok()
             .filter(|p| !p.is_empty());
         const MARKER: &str = "kronn-registry-7731";
-        let marker = std::env::var("KRONN_BENCH_MARKER").unwrap_or_else(|_| MARKER.to_string());
+        let marker = crate::core::child_env::var("KRONN_BENCH_MARKER")
+            .unwrap_or_else(|_| MARKER.to_string());
         let marker = marker.as_str();
         let project = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(project.path().join("docs")).expect("docs dir");
@@ -13834,28 +13837,29 @@ sleep 3600
         let default_question = "Comment s'appelle le registre de versions de ce projet ? \
                                  Réponds avec son nom exact, tel qu'il est écrit dans la \
                                  documentation.";
-        let question =
-            std::env::var("KRONN_BENCH_QUESTION").unwrap_or_else(|_| default_question.to_string());
+        let question = crate::core::child_env::var("KRONN_BENCH_QUESTION")
+            .unwrap_or_else(|_| default_question.to_string());
         let needs_doc = question.as_str();
         let ignores_doc = "Dis bonjour en une phrase, sans utiliser d'outil.";
         let catalogue =
             crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
 
-        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        let models = crate::core::child_env::var("KRONN_BENCH_MODELS")
+            .unwrap_or_else(|_| "gemma4:e4b".into());
         println!(
             "\n{:<18} {:<12} {:>9} {:>6} {:>9} {:>6}  {:<7} {:<7}",
             "model", "turn", "inline tk", "turns", "ptr tk", "turns", "inline", "pointer"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             for (scenario, prompt, grounded) in [
                 ("needs doc", needs_doc, true),
                 ("ignores doc", ignores_doc, false),
             ] {
-                std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+                crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
                 let inline =
                     bench_doc_run("doc · inline", &project_path, prompt, catalogue.clone()).await;
-                std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+                crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
                 let pointer =
                     bench_doc_run("doc · pointer", &project_path, prompt, catalogue.clone()).await;
 
@@ -13892,7 +13896,7 @@ sleep 3600
     #[tokio::test]
     #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
     async fn bench_two_families_in_one_run() {
-        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+        if crate::core::child_env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
             eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
             return;
         }
@@ -13903,7 +13907,8 @@ sleep 3600
                       du jour, format carré. Ensuite écris un fichier `notes.md` à la racine du \
                       workspace qui dit en une phrase quelle image tu as lancée. Utilise les \
                       outils de Kronn pour les deux.";
-        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        let models = crate::core::child_env::var("KRONN_BENCH_MODELS")
+            .unwrap_or_else(|_| "gemma4:e4b".into());
         println!(
             "\n{:<18} {:>9} {:>6} {:<6} {:<6} {:>9} {:>6} {:<6} {:<6}",
             "model", "full tk", "turns", "image", "file", "tiered tk", "turns", "image", "file"
@@ -13913,7 +13918,7 @@ sleep 3600
             "", "full s", "", "tiered s", ""
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             let full_run = bench_run("two · full", prompt, full.clone()).await;
             let tiered_run = bench_run("two · tiered", prompt, tiered.clone()).await;
             // Both modes are scored. Scoring only the tiered one made the
@@ -14155,11 +14160,11 @@ sleep 3600
     /// The repository the bench works in, or `None` when the operator did not
     /// name one.
     fn depot_du_banc() -> Option<std::path::PathBuf> {
-        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+        if crate::core::child_env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
             eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
             return None;
         }
-        let Ok(project) = std::env::var("KRONN_BENCH_PROJECT") else {
+        let Ok(project) = crate::core::child_env::var("KRONN_BENCH_PROJECT") else {
             eprintln!("skipped: set KRONN_BENCH_PROJECT to a repository to work in");
             return None;
         };
@@ -14201,7 +14206,8 @@ sleep 3600
         }
         let catalogue =
             crate::api::agent_tools::tiered(crate::api::agent_tools::full_discussion_catalogue());
-        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| "gemma4:e4b".into());
+        let models = crate::core::child_env::var("KRONN_BENCH_MODELS")
+            .unwrap_or_else(|_| "gemma4:e4b".into());
         println!("\nrepository: {}", root.display());
         println!(
             "{:<18} {:>6} {:>7} {:>7} {:>5} {:>5} {:>6} {:>7} {:>7} {:>7} {:>9}",
@@ -14218,14 +14224,14 @@ sleep 3600
             "scoré sur"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
-            let external = std::env::var("KRONN_BENCH_HTTP_ENDPOINT")
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
+            let external = crate::core::child_env::var("KRONN_BENCH_HTTP_ENDPOINT")
                 .ok()
                 .map(|endpoint| ExternalHttpRuntime {
                     display_name: "Bench".into(),
                     mention_alias: "bench".into(),
                     endpoint,
-                    api_key: std::env::var("KRONN_BENCH_HTTP_KEY").ok(),
+                    api_key: crate::core::child_env::var("KRONN_BENCH_HTTP_KEY").ok(),
                 });
             let agent_type = match external {
                 Some(_) => AgentType::Custom,
@@ -14422,7 +14428,7 @@ sleep 3600
         let Some(root) = depot_du_banc() else {
             return;
         };
-        let declares = std::env::var("KRONN_BENCH_FACTS").unwrap_or_else(|_| {
+        let declares = crate::core::child_env::var("KRONN_BENCH_FACTS").unwrap_or_else(|_| {
             "version de PHP=8.2,version de Symfony=7.3,\
              image du serveur applicatif=frankenphp:1.8-php8.4-alpine,outil de test=phpunit"
                 .into()
@@ -14598,11 +14604,11 @@ sleep 3600
         // the range, not on one model.
         //   KRONN_OLLAMA_BENCH=1 KRONN_BENCH_MODELS="a,b,c" cargo test --lib \
         //     bench_tiered_catalogue_across_models -- --ignored --nocapture
-        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+        if crate::core::child_env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
             eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
             return;
         }
-        let models = std::env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| {
+        let models = crate::core::child_env::var("KRONN_BENCH_MODELS").unwrap_or_else(|_| {
             "qwen3.5:2b,gemma4:e2b,qwen3.5:4b,gemma4:e4b,gemma4:12b-mlx,qwen3.8:27b-mlx".into()
         });
         let full = crate::api::agent_tools::full_discussion_catalogue();
@@ -14616,7 +14622,7 @@ sleep 3600
             "model", "full tk", "turns", "tiered tk", "turns", "full", "tiered"
         );
         for model in models.split(',').map(str::trim).filter(|m| !m.is_empty()) {
-            std::env::set_var("KRONN_BENCH_MODEL", model);
+            crate::core::child_env::set_var("KRONN_BENCH_MODEL", model);
             let full_run = bench_run("media · full", media_prompt, full.clone()).await;
             let tiered_run = bench_run("media · tiered", media_prompt, tiered.clone()).await;
             println!(
@@ -14645,7 +14651,7 @@ sleep 3600
     #[tokio::test]
     #[ignore = "spends a real local model's time; KRONN_OLLAMA_BENCH=1"]
     async fn bench_tiered_catalogue_against_full() {
-        if std::env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
+        if crate::core::child_env::var("KRONN_OLLAMA_BENCH").as_deref() != Ok("1") {
             eprintln!("skipped: set KRONN_OLLAMA_BENCH=1");
             return;
         }
@@ -14804,11 +14810,11 @@ sleep 3600
     #[test]
     #[serial]
     fn an_operator_can_put_the_whole_project_doc_back() {
-        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+        crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
         assert!(!inline_project_doc_forced());
         assert!(http_agent_reads_its_own_files(true, true));
 
-        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
+        crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "1");
         assert!(inline_project_doc_forced());
         assert!(
             !http_agent_reads_its_own_files(true, true),
@@ -14816,9 +14822,9 @@ sleep 3600
         );
 
         // Une valeur qui n'est pas `1` ne force rien.
-        std::env::set_var("KRONN_INLINE_PROJECT_DOC", "oui");
+        crate::core::child_env::set_var("KRONN_INLINE_PROJECT_DOC", "oui");
         assert!(!inline_project_doc_forced());
-        std::env::remove_var("KRONN_INLINE_PROJECT_DOC");
+        crate::core::child_env::remove_var("KRONN_INLINE_PROJECT_DOC");
     }
 
     /// Vider les caches ne suffisait pas : la garde anti-répétition RETIRE un

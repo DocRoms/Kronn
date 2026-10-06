@@ -200,7 +200,7 @@ pub fn override_machine_token_for_tests(value: Option<Option<&str>>) {
 fn env_machine_token() -> Option<Zeroizing<String>> {
     ["GH_TOKEN", "GITHUB_TOKEN"]
         .iter()
-        .filter_map(|name| std::env::var(name).ok())
+        .filter_map(|name| crate::core::child_env::parent_var_string(name))
         .map(|value| value.trim().to_string())
         .find(|value| !value.is_empty())
         .map(Zeroizing::new)
@@ -380,7 +380,7 @@ pub fn apply_launch_env(cmd: &mut std::process::Command, github_env: &[(String, 
 
 /// `KRONN_GITHUB_API_BASE` lets tests point at a stub; GitHub otherwise.
 pub fn api_base() -> String {
-    std::env::var("KRONN_GITHUB_API_BASE")
+    crate::core::child_env::var("KRONN_GITHUB_API_BASE")
         .ok()
         .map(|base| base.trim().trim_end_matches('/').to_string())
         .filter(|base| !base.is_empty())

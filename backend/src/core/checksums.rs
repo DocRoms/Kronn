@@ -211,7 +211,11 @@ fn manifest_record_path(record: &[u8]) -> &[u8] {
 }
 
 fn trace_source_tree_manifest(observation: &str, records: &[Vec<u8>], fingerprint: &str) {
-    if std::env::var("KRONN_F27_MANIFEST").ok().as_deref() != Some("1") {
+    if crate::core::child_env::var("KRONN_F27_MANIFEST")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
         return;
     }
     // Opaque, per-process salt: a logged per-file digest must not become an

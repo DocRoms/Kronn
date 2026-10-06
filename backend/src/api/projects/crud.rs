@@ -205,7 +205,7 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
     let mut scan_paths = if config.scan.paths.is_empty() {
         // Fallback: Docker host home, or user home
         let mut paths: Vec<String> = Vec::new();
-        if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
             paths.push(host_home);
         }
         if paths.is_empty() {
@@ -519,7 +519,7 @@ pub async fn delete(
 
         // Safety guards
         let path_str = path.to_string_lossy();
-        if path_str == "/" || path_str == std::env::var("HOME").unwrap_or_default() {
+        if path_str == "/" || path_str == crate::core::child_env::var("HOME").unwrap_or_default() {
             return Json(ApiResponse::err(
                 "Refusing to delete root or home directory",
             ));

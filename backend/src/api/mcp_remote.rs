@@ -119,8 +119,11 @@ pub struct McpTriggerWorkflowResponse {
 /// run_id + smart-polling hint synchronously instead of streaming events.
 pub async fn workflow_trigger(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<McpTriggerWorkflowRequest>,
 ) -> Json<ApiResponse<McpTriggerWorkflowResponse>> {
+    // A token's estimate uses only the runs it may see.
+    let visibility = crate::api::workflows::run_visibility(&bridge);
     // Compute the smart-polling hint BEFORE we insert the new run, so
     // the sample count reflects only history (the new pending run
     // doesn't influence its own ETA).
@@ -128,11 +131,12 @@ pub async fn workflow_trigger(
     let history = state
         .db
         .with_conn(move |conn| {
-            crate::db::workflows::list_runs_paginated(
+            crate::db::workflows::list_runs_paginated_visible(
                 conn,
                 &wf_id_for_avg,
                 Some(RUN_AVG_LIMIT),
                 None,
+                visibility.as_ref(),
             )
         })
         .await
@@ -275,8 +279,10 @@ fn is_terminal_status(status: &RunStatus) -> bool {
 /// GET /api/mcp/workflow-run-status/:run_id
 pub async fn workflow_run_status(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Path(run_id): Path<String>,
 ) -> Json<ApiResponse<McpRunStatusResponse>> {
+    let visibility = crate::api::workflows::run_visibility(&bridge);
     let run_id_lookup = run_id.clone();
     let run = match state
         .db
@@ -294,11 +300,12 @@ pub async fn workflow_run_status(
         .with_conn({
             let wf_id = workflow_id.clone();
             move |conn| {
-                crate::db::workflows::list_runs_paginated(
+                crate::db::workflows::list_runs_paginated_visible(
                     conn,
                     &wf_id,
                     Some(RUN_AVG_LIMIT + 1),
                     None,
+                    visibility.as_ref(),
                 )
             }
         })
@@ -434,8 +441,22 @@ fn render_qp_template(template: &str, vars: &HashMap<String, String>) -> String 
 /// nor a separate request to start the agent.
 pub async fn qp_run(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<McpQpRunRequest>,
 ) -> Json<ApiResponse<McpQpRunResponse>> {
+    // A token's estimate counts only its project's launches.
+    qp_run_scoped(&state, bridge.map(|caller| caller.0.project), req).await
+}
+
+/// `qp_run` with the launches its estimate may count: `Some(project)` for an
+/// agent caller (`Some(None)`: a project-less one, which counts none),
+/// `None` for a human.
+pub(crate) async fn qp_run_scoped(
+    state: &AppState,
+    metrics_scope: Option<Option<String>>,
+    req: McpQpRunRequest,
+) -> Json<ApiResponse<McpQpRunResponse>> {
+    let state = state.clone();
     if req.qp_id.is_empty() {
         return Json(ApiResponse::err("qp_id is required"));
     }
@@ -610,7 +631,11 @@ pub async fn qp_run(
     let metrics = state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &qp_id_for_metrics)
+            crate::db::quick_prompts::list_quick_prompt_version_metrics_in(
+                conn,
+                &qp_id_for_metrics,
+                metrics_scope.as_ref().map(|project| project.as_deref()),
+            )
         })
         .await
         .unwrap_or_default();
@@ -702,8 +727,11 @@ fn default_batch_item_title(qp_name: &str, idx: usize, provided: Option<&str>) -
 /// agent semaphore) — the MCP caller reads results via `workflow_run_discussions`.
 pub async fn qp_batch_run(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<McpQpBatchRunRequest>,
 ) -> Json<ApiResponse<McpQpBatchRunResponse>> {
+    // A token's estimate counts only its project's launches.
+    let metrics_scope = bridge.map(|caller| caller.0.project);
     if req.qp_id.is_empty() {
         return Json(ApiResponse::err("qp_id is required"));
     }
@@ -877,7 +905,11 @@ pub async fn qp_batch_run(
     let metrics = state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &qp_id_for_metrics)
+            crate::db::quick_prompts::list_quick_prompt_version_metrics_in(
+                conn,
+                &qp_id_for_metrics,
+                metrics_scope.as_ref().map(|project| project.as_deref()),
+            )
         })
         .await
         .unwrap_or_default();
@@ -1016,8 +1048,10 @@ pub struct McpWaitResponse {
 /// for short runs — one call blocks (up to 60s) and returns the verdict.
 pub async fn workflow_wait_for_completion(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<McpWaitRequest>,
 ) -> Json<ApiResponse<McpWaitResponse>> {
+    let visibility = crate::api::workflows::run_visibility(&bridge);
     if req.run_id.is_empty() {
         return Json(ApiResponse::err("run_id is required"));
     }
@@ -1058,14 +1092,16 @@ pub async fn workflow_wait_for_completion(
             // from this workflow's completed history (current run excluded).
             let wf_id = run.workflow_id.clone();
             let run_id_excl = run.id.clone();
+            let visibility = visibility.clone();
             let history = state
                 .db
                 .with_conn(move |conn| {
-                    crate::db::workflows::list_runs_paginated(
+                    crate::db::workflows::list_runs_paginated_visible(
                         conn,
                         &wf_id,
                         Some(RUN_AVG_LIMIT + 1),
                         None,
+                        visibility.as_ref(),
                     )
                 })
                 .await

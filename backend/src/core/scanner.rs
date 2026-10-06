@@ -36,8 +36,8 @@ pub async fn scan_paths_with_depth(
     // dump — together they make "why is this macOS install broken"
     // questions answerable from a single `make logs | grep kronn::` sweep.
     tracing::info!(target: "kronn::scanner",
-        host_os = %std::env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
-        host_home = %std::env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
+        host_os = %crate::core::child_env::var("KRONN_HOST_OS").unwrap_or_else(|_| "<unset>".into()),
+        host_home = %crate::core::child_env::var("KRONN_HOST_HOME").unwrap_or_else(|_| "<unset>".into()),
         host_home_aliases = ?host_home_aliases(),
         depth = depth,
         paths = ?paths,
@@ -285,7 +285,7 @@ async fn read_git_branch(path: &Path) -> Result<String> {
 pub(crate) fn restore_host_path(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(relative) = s.strip_prefix("/host-home") {
-        if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
             return format!("{}{}", host_home, relative);
         }
     }
@@ -366,7 +366,7 @@ pub fn diagnose_project_write_access(path: &str) -> ProjectWriteAccess {
     }
 
     let roots = writable_repo_roots();
-    let in_docker = std::env::var("KRONN_IN_DOCKER").as_deref() == Ok("1");
+    let in_docker = crate::core::child_env::var("KRONN_IN_DOCKER").as_deref() == Ok("1");
     if in_docker && !roots.is_empty() {
         let writable = roots.iter().any(|root| {
             Path::new(path).starts_with(root) || resolved.starts_with(resolve_host_path(root))
@@ -411,13 +411,13 @@ pub fn diagnose_project_write_access(path: &str) -> ProjectWriteAccess {
 /// already consumed by Makefile's generated override.
 pub fn writable_repo_roots() -> Vec<String> {
     let mut roots = Vec::new();
-    if let Ok(root) = std::env::var("KRONN_REPOS_DIR") {
+    if let Ok(root) = crate::core::child_env::var("KRONN_REPOS_DIR") {
         let root = root.trim();
         if !root.is_empty() {
             roots.push(root.trim_end_matches('/').to_string());
         }
     }
-    if let Ok(extra) = std::env::var("KRONN_EXTRA_REPOS") {
+    if let Ok(extra) = crate::core::child_env::var("KRONN_EXTRA_REPOS") {
         for root in extra
             .split(':')
             .map(str::trim)
@@ -439,7 +439,7 @@ pub fn writable_repo_roots() -> Vec<String> {
 /// Exposed as `pub(crate)` so the scanner tests can sanity-check the
 /// alias expansion logic in isolation.
 pub(crate) fn host_home_aliases() -> Vec<String> {
-    let Ok(host_home) = std::env::var("KRONN_HOST_HOME") else {
+    let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") else {
         return Vec::new();
     };
     if host_home.is_empty() {
@@ -883,8 +883,8 @@ fn shellexpand(path: &str) -> String {
 }
 
 fn dirs_home() -> Option<String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
+    crate::core::child_env::var("HOME")
+        .or_else(|_| crate::core::child_env::var("USERPROFILE"))
         .ok()
 }
 
@@ -904,11 +904,11 @@ mod tests {
     #[test]
     #[serial]
     fn shellexpand_tilde() {
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/home/testuser");
+        let prev = crate::core::child_env::var("HOME").ok();
+        crate::core::child_env::set_var("HOME", "/home/testuser");
         assert_eq!(shellexpand("~/repos"), "/home/testuser/repos");
         if let Some(p) = prev {
-            std::env::set_var("HOME", p);
+            crate::core::child_env::set_var("HOME", p);
         }
     }
 
@@ -920,11 +920,11 @@ mod tests {
     #[test]
     #[serial]
     fn shellexpand_windows_backslash() {
-        let prev = std::env::var("HOME").ok();
-        std::env::set_var("HOME", r"C:\Users\testuser");
+        let prev = crate::core::child_env::var("HOME").ok();
+        crate::core::child_env::set_var("HOME", r"C:\Users\testuser");
         assert_eq!(shellexpand(r"~\repos"), r"C:\Users\testuser\repos");
         if let Some(p) = prev {
-            std::env::set_var("HOME", p);
+            crate::core::child_env::set_var("HOME", p);
         }
     }
 
@@ -979,7 +979,7 @@ mod tests {
     #[test]
     #[serial]
     fn restore_host_path_no_host_home() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let path = Path::new("/some/local/path");
         assert_eq!(restore_host_path(path), "/some/local/path");
     }
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_host_path_passthrough_without_env() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/home/user/repos");
         assert_eq!(result, PathBuf::from("/home/user/repos"));
     }
@@ -1022,10 +1022,10 @@ mod tests {
         // operations fail rather than silently succeeding on the wrong target.
         // #[serial]: this env mutation raced every non-neighbouring #[serial]
         // test reading KRONN_HOST_HOME (the codex_global_sync flaky).
-        std::env::set_var("KRONN_HOST_HOME", "/home/user");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/home/user");
         let result = resolve_host_path("/home/user/../etc/passwd");
         assert_eq!(result, PathBuf::from("/home/user/../etc/passwd"));
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
     }
 
     // ─── host_home_aliases (macOS APFS firmlinks) ──────────────────────────
@@ -1033,16 +1033,16 @@ mod tests {
     #[test]
     #[serial]
     fn host_home_aliases_empty_when_env_unset() {
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         assert!(host_home_aliases().is_empty());
     }
 
     #[test]
     #[serial]
     fn host_home_aliases_empty_when_env_blank() {
-        std::env::set_var("KRONN_HOST_HOME", "");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "");
         assert!(host_home_aliases().is_empty());
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
     }
 
     #[test]
@@ -1051,9 +1051,9 @@ mod tests {
         // Non-macOS homedirs don't match the `/Users/` special-case, so we
         // return just the raw env value. Keeps the WSL/Linux hot path
         // identical to the pre-fix behavior.
-        std::env::set_var("KRONN_HOST_HOME", "/home/john");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/home/john");
         assert_eq!(host_home_aliases(), vec!["/home/john".to_string()]);
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
     }
 
     #[test]
@@ -1062,13 +1062,13 @@ mod tests {
         // `/Users/xxx` paths get the two APFS variants added so a
         // canonicalized path (e.g. `/System/Volumes/Data/Users/xxx/Code`)
         // still maps cleanly to `/host-home/Code` at scan time.
-        std::env::set_var("KRONN_HOST_HOME", "/Users/john");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/Users/john");
         let aliases = host_home_aliases();
         assert_eq!(aliases.len(), 3);
         assert_eq!(aliases[0], "/Users/john");
         assert!(aliases.contains(&"/System/Volumes/Data/Users/john".to_string()));
         assert!(aliases.contains(&"/private/var/Users/john".to_string()));
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
     }
 
     // ─── resolve_host_path with APFS firmlink canonicalized paths ──────────
@@ -1079,10 +1079,10 @@ mod tests {
         // A path entirely outside the configured HOST_HOME is returned
         // unchanged — `exists()` will then fail downstream and the caller
         // (scanner) will filter the entry.
-        std::env::set_var("KRONN_HOST_HOME", "/Users/john");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/Users/john");
         let result = resolve_host_path("/etc/hosts");
         assert_eq!(result, PathBuf::from("/etc/hosts"));
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
     }
 
     #[test]
@@ -1090,7 +1090,7 @@ mod tests {
     fn resolve_host_path_no_mapping_when_env_missing() {
         // If KRONN_HOST_HOME isn't set we can't map anything — path
         // returned as-is. Prevents crashes on native (non-Docker) runs.
-        std::env::remove_var("KRONN_HOST_HOME");
+        crate::core::child_env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/Users/john/Code/proj");
         assert_eq!(result, PathBuf::from("/Users/john/Code/proj"));
     }

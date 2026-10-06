@@ -1744,6 +1744,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
                 created_at: now,
                 updated_at: now,
                 unmodelled_args_approved: None,
+                agent_written: None,
             };
             kronn::db::quick_execs::insert_quick_exec(connection, &quick_exec)?;
 
@@ -3720,7 +3721,7 @@ async fn project_repository_resources_expose_uses_and_used_by_with_missing_refer
                         variables: Vec::new(),
                         pinned: false,
                         created_at: now,
-                        updated_at: now, unmodelled_args_approved: None,
+                        updated_at: now, unmodelled_args_approved: None, agent_written: None,
                     },
                 )?;
                 let workflow: kronn::models::Workflow = serde_json::from_value(serde_json::json!({
@@ -3806,6 +3807,7 @@ async fn repository_resource_publish_align_import_and_hash_approval_round_trip()
                         created_at: now,
                         updated_at: now,
                         unmodelled_args_approved: None,
+                        agent_written: None,
                     },
                 )?;
                 Ok(())
@@ -5036,8 +5038,8 @@ fn isolate_config_dir() {
         let host_home = root.path().join("host-home");
         std::fs::create_dir_all(&data_dir).expect("create API data fixture");
         std::fs::create_dir_all(&host_home).expect("create API host fixture");
-        std::env::set_var("KRONN_DATA_DIR", data_dir);
-        std::env::set_var("KRONN_HOST_HOME", host_home);
+        kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
+        kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
         root
     });
 }
@@ -5571,6 +5573,8 @@ async fn workflow_http_optional_input_preserves_empty_value_in_exec_stdin() {
                 step_type: kronn::models::StepType::Exec,
                 exec_command: Some("cat".into()),
                 exec_stdin: Some("[{{foo}}]".into()),
+                // `cat` reads paths: a human approves the value it receives.
+                exec_unmodelled_args_approved: Some(true),
                 ..Default::default()
             },
         )
@@ -14734,18 +14738,18 @@ async fn ollama_pull_route_proxies_fragmented_ndjson_bounds_failures_and_cancels
         .with_state(mock_state);
     let (upstream_url, upstream_task) = spawn(upstream).await;
 
-    let previous_host = std::env::var("OLLAMA_HOST").ok();
+    let previous_host = kronn::core::child_env::var("OLLAMA_HOST").ok();
     struct RestoreEnv(Option<String>);
     impl Drop for RestoreEnv {
         fn drop(&mut self) {
             match self.0.take() {
-                Some(value) => std::env::set_var("OLLAMA_HOST", value),
-                None => std::env::remove_var("OLLAMA_HOST"),
+                Some(value) => kronn::core::child_env::set_var("OLLAMA_HOST", value),
+                None => kronn::core::child_env::remove_var("OLLAMA_HOST"),
             }
         }
     }
     let _restore_host = RestoreEnv(previous_host);
-    std::env::set_var("OLLAMA_HOST", &upstream_url);
+    kronn::core::child_env::set_var("OLLAMA_HOST", &upstream_url);
     let (kronn_url, kronn_task) = spawn(build_router_with_auth(test_state(), false)).await;
     let client = reqwest::Client::new();
 
@@ -14841,10 +14845,10 @@ async fn ollama_context_override_route_set_reset_and_model_projection() {
         .mount(&server)
         .await;
 
-    let previous_host = std::env::var("OLLAMA_HOST").ok();
-    let previous_cap = std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
-    std::env::set_var("OLLAMA_HOST", server.uri());
-    std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
+    let previous_host = kronn::core::child_env::var("OLLAMA_HOST").ok();
+    let previous_cap = kronn::core::child_env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok();
+    kronn::core::child_env::set_var("OLLAMA_HOST", server.uri());
+    kronn::core::child_env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP");
 
     let state = test_state();
     let app = build_router_with_auth(state, false);
@@ -14879,12 +14883,12 @@ async fn ollama_context_override_route_set_reset_and_model_projection() {
     let (_, listed_after_reset) = get_json(app, "/api/ollama/models").await;
 
     match previous_host {
-        Some(value) => std::env::set_var("OLLAMA_HOST", value),
-        None => std::env::remove_var("OLLAMA_HOST"),
+        Some(value) => kronn::core::child_env::set_var("OLLAMA_HOST", value),
+        None => kronn::core::child_env::remove_var("OLLAMA_HOST"),
     }
     match previous_cap {
-        Some(value) => std::env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
-        None => std::env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
+        Some(value) => kronn::core::child_env::set_var("KRONN_OLLAMA_NUM_CTX_CAP", value),
+        None => kronn::core::child_env::remove_var("KRONN_OLLAMA_NUM_CTX_CAP"),
     }
 
     assert_eq!(set["success"], true, "{set}");
@@ -16701,12 +16705,12 @@ fn test_state_without_fixture() -> AppState {
 #[tokio::test]
 #[serial]
 async fn mcp_host_sync_router_confines_an_inherited_host_home() {
-    if std::env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
+    if kronn::core::child_env::var_os(MCP_HOST_ISOLATION_CHILD).is_none() {
         // Ordinary non-serial router tests can initialize this OnceLock too.
         // Snapshot only after its process-wide environment setup has settled.
         isolate_config_dir();
-        let parent_data_dir = std::env::var_os("KRONN_DATA_DIR");
-        let parent_host_home = std::env::var_os("KRONN_HOST_HOME");
+        let parent_data_dir = kronn::core::child_env::var_os("KRONN_DATA_DIR");
+        let parent_host_home = kronn::core::child_env::var_os("KRONN_HOST_HOME");
         for mode in ["red", "green", "blocked"] {
             let sentinel_root = tempfile::tempdir().expect("create outside sentinel");
             let data_dir = sentinel_root.path().join("data");
@@ -16769,24 +16773,32 @@ async fn mcp_host_sync_router_confines_an_inherited_host_home() {
                     );
                 }
             }
-            assert_eq!(std::env::var_os("KRONN_DATA_DIR"), parent_data_dir);
-            assert_eq!(std::env::var_os("KRONN_HOST_HOME"), parent_host_home);
+            assert_eq!(
+                kronn::core::child_env::var_os("KRONN_DATA_DIR"),
+                parent_data_dir
+            );
+            assert_eq!(
+                kronn::core::child_env::var_os("KRONN_HOST_HOME"),
+                parent_host_home
+            );
         }
         return;
     }
 
-    let sentinel =
-        std::path::PathBuf::from(std::env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"));
-    let red = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
+    let sentinel = std::path::PathBuf::from(
+        kronn::core::child_env::var_os(MCP_HOST_SENTINEL).expect("child sentinel path"),
+    );
+    let red = kronn::core::child_env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("red");
     let state = if red {
         test_state_without_fixture()
     } else {
         test_state()
     };
-    let blocked = std::env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
+    let blocked = kronn::core::child_env::var(MCP_HOST_ISOLATION_MODE).as_deref() == Ok("blocked");
     let host_fixture = (!red).then(|| {
         std::path::PathBuf::from(
-            std::env::var_os("KRONN_HOST_HOME").expect("normal test harness host fixture"),
+            kronn::core::child_env::var_os("KRONN_HOST_HOME")
+                .expect("normal test harness host fixture"),
         )
     });
     if let Some(host_fixture) = &host_fixture {
@@ -19456,7 +19468,7 @@ mod auth_middleware_tests {
     async fn x_real_ip_localhost_bypasses_auth_only_in_docker() {
         // Docker: the bundled nginx OVERWRITES X-Real-IP, so a loopback value
         // really means the host machine — trusted (self-hosted default).
-        std::env::set_var("KRONN_IN_DOCKER", "1");
+        kronn::core::child_env::set_var("KRONN_IN_DOCKER", "1");
         let app = app_with_auth("expected-secret", false);
         let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
         assert_eq!(status_of(app, r).await, StatusCode::OK);
@@ -19464,7 +19476,7 @@ mod auth_middleware_tests {
         // Native: axum faces clients directly, the header is CLIENT-supplied —
         // a LAN peer minting `X-Real-IP: 127.0.0.1` must not gain local trust
         // (passe D: it bypassed the whole destructive gate).
-        std::env::remove_var("KRONN_IN_DOCKER");
+        kronn::core::child_env::remove_var("KRONN_IN_DOCKER");
         let app = app_with_auth("expected-secret", false);
         let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
         assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
@@ -26157,6 +26169,7 @@ async fn quick_exec_refuses_unsafe_inline_interpolation_at_save_time() {
                     created_at: now,
                     updated_at: now,
                     unmodelled_args_approved: None,
+                    agent_written: None,
                 },
             )
         })
@@ -26442,7 +26455,7 @@ mod github_connection_api {
     #[serial(github_machine_token)]
     async fn connect_turn_off_and_stored_token_round_trip_without_leaking_it() {
         let server = github_stub().await;
-        std::env::set_var("KRONN_GITHUB_API_BASE", server.uri());
+        kronn::core::child_env::set_var("KRONN_GITHUB_API_BASE", server.uri());
         let state = state_with_project("r16-api-flow", Some("git@github.com:octo/kronn.git")).await;
         let app = || build_router_with_auth(state.clone(), false);
         let uri = "/api/projects/r16-api-flow/github";
@@ -26575,14 +26588,14 @@ mod github_connection_api {
         .await;
         assert_eq!(body["success"], false);
 
-        std::env::remove_var("KRONN_GITHUB_API_BASE");
+        kronn::core::child_env::remove_var("KRONN_GITHUB_API_BASE");
         kronn::core::github_connection::override_machine_token_for_tests(None);
     }
 
     #[tokio::test]
     #[serial(github_machine_token)]
     async fn an_unreachable_github_reports_an_unverified_scope() {
-        std::env::set_var("KRONN_GITHUB_API_BASE", "http://127.0.0.1:9");
+        kronn::core::child_env::set_var("KRONN_GITHUB_API_BASE", "http://127.0.0.1:9");
         kronn::core::github_connection::override_machine_token_for_tests(Some(Some(MACHINE)));
         let state = state_with_project("r16-api-down", None).await;
         let app = build_router_with_auth(state.clone(), false);
@@ -26600,7 +26613,7 @@ mod github_connection_api {
             .as_str()
             .unwrap()
             .contains("could not be reached"));
-        std::env::remove_var("KRONN_GITHUB_API_BASE");
+        kronn::core::child_env::remove_var("KRONN_GITHUB_API_BASE");
         kronn::core::github_connection::override_machine_token_for_tests(None);
     }
 }

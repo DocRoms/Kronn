@@ -77,17 +77,17 @@ pub struct DiscoveredHostMcp {
 /// Returns `None` only when no env var is set AND `directories` cannot infer
 /// it (extremely unusual — would only happen in heavily sandboxed runtimes).
 pub fn resolve_home() -> Option<PathBuf> {
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         if !host_home.is_empty() {
             return Some(PathBuf::from(host_home));
         }
     }
-    if let Ok(h) = std::env::var("HOME") {
+    if let Ok(h) = crate::core::child_env::var("HOME") {
         if !h.is_empty() {
             return Some(PathBuf::from(h));
         }
     }
-    if let Ok(p) = std::env::var("USERPROFILE") {
+    if let Ok(p) = crate::core::child_env::var("USERPROFILE") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
@@ -799,13 +799,13 @@ ATLASSIAN_TOKEN = "x"
     #[test]
     #[serial]
     fn resolve_home_prefers_kronn_host_home() {
-        let original = std::env::var("KRONN_HOST_HOME").ok();
-        std::env::set_var("KRONN_HOST_HOME", "/host/path");
+        let original = crate::core::child_env::var("KRONN_HOST_HOME").ok();
+        crate::core::child_env::set_var("KRONN_HOST_HOME", "/host/path");
         let resolved = resolve_home();
         assert_eq!(resolved, Some(PathBuf::from("/host/path")));
         match original {
-            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
-            None => std::env::remove_var("KRONN_HOST_HOME"),
+            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
+            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
         }
     }
 }

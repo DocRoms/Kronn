@@ -11278,6 +11278,7 @@ pub async fn task_exec_reassign(
                     .and_then(|view| serde_json::to_value(view).ok()),
                 error: response.error,
                 error_code: response.error_code,
+                notice: None,
             })
         }
         ExecutionAmendment::ReplaceValidations(validations) => match replace_execution_validations(

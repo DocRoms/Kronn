@@ -1273,7 +1273,7 @@ pub(crate) fn host_mcp_command_available(command: &str) -> bool {
     if command.starts_with('/') || command.starts_with('.') {
         return true;
     }
-    match std::env::var("KRONN_HOST_BIN") {
+    match crate::core::child_env::var("KRONN_HOST_BIN") {
         Ok(hb) => std::env::split_paths(&hb).any(|dir| {
             let p = dir.join(command);
             p.exists() || p.symlink_metadata().is_ok()
@@ -1781,7 +1781,7 @@ fn ensure_redirectors(project_path: &str) {
         return;
     }
 
-    let template_dir = std::env::var("KRONN_TEMPLATES_DIR")
+    let template_dir = crate::core::child_env::var("KRONN_TEMPLATES_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("templates"));
 
@@ -2080,13 +2080,13 @@ fn detect_codex_config_drift(active_dir: &Path) {
     }
 
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         candidates.push(PathBuf::from(format!("{}/.codex", host_home)));
     }
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = crate::core::child_env::var("HOME") {
         candidates.push(PathBuf::from(format!("{}/.codex", home)));
     }
-    if let Ok(profile) = std::env::var("USERPROFILE") {
+    if let Ok(profile) = crate::core::child_env::var("USERPROFILE") {
         candidates.push(PathBuf::from(format!("{}/.codex", profile)));
     }
 
@@ -2279,11 +2279,11 @@ impl HostMcpSync for CodexSync {
         // Read existing config.toml and preserve non-MCP settings.
         // Inside Docker the host home is mounted at /root, but we use KRONN_HOST_HOME
         // to support native Linux/macOS execution where /root is not the user's home.
-        let codex_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        let codex_dir = if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
             PathBuf::from(format!("{}/.codex", host_home))
         } else {
-            std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
+            crate::core::child_env::var("HOME")
+                .or_else(|_| crate::core::child_env::var("USERPROFILE"))
                 .map(|h| PathBuf::from(format!("{}/.codex", h)))
                 .unwrap_or_else(|_| directories::BaseDirs::new()
                     .map(|d| d.home_dir().join(".codex"))
@@ -2443,11 +2443,11 @@ impl HostMcpSync for CopilotSync {
         inject_kronn_internal(&mut copilot_file);
         let mcp_servers = copilot_file.mcp_servers;
 
-        let copilot_dir = if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+        let copilot_dir = if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
             PathBuf::from(format!("{}/.copilot", host_home))
         } else {
-            std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
+            crate::core::child_env::var("HOME")
+                .or_else(|_| crate::core::child_env::var("USERPROFILE"))
                 .map(|h| PathBuf::from(format!("{}/.copilot", h)))
                 .unwrap_or_else(|_| directories::BaseDirs::new()
                     .map(|d| d.home_dir().join(".copilot"))
@@ -2796,11 +2796,11 @@ fn ensure_user_only_perms(path: &Path) {
 
 /// Resolve a path under the user's HOME, mirroring `sync_codex_global_config`.
 fn resolve_home_subpath(subpath: &str) -> PathBuf {
-    if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
+    if let Ok(host_home) = crate::core::child_env::var("KRONN_HOST_HOME") {
         return PathBuf::from(format!("{}/{}", host_home, subpath));
     }
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
+    crate::core::child_env::var("HOME")
+        .or_else(|_| crate::core::child_env::var("USERPROFILE"))
         .map(|h| PathBuf::from(format!("{}/{}", h, subpath)))
         .unwrap_or_else(|_| {
             directories::BaseDirs::new()
@@ -4431,7 +4431,7 @@ pub(crate) fn is_command_available(command: &str) -> bool {
     }
     // npx/uvx are launchers that install on demand — always available if the binary exists
     // For other commands, check PATH
-    std::env::var("PATH")
+    crate::core::child_env::var("PATH")
         .unwrap_or_default()
         .split(':')
         .any(|dir| Path::new(dir).join(command).exists())
@@ -4495,7 +4495,7 @@ mod host_sync_tests {
             Self(
                 names
                     .iter()
-                    .map(|name| (*name, std::env::var_os(name)))
+                    .map(|name| (*name, crate::core::child_env::var_os(name)))
                     .collect(),
             )
         }
@@ -4505,8 +4505,8 @@ mod host_sync_tests {
         fn drop(&mut self) {
             for (name, value) in self.0.drain(..) {
                 match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
                 }
             }
         }
@@ -5044,15 +5044,15 @@ mod host_sync_tests {
         // observes it. Nested tests in the same suite are still in different
         // threads — this is a known limitation of std::env, accepted because
         // the alternative (serial_test crate) would balloon dev-only deps.
-        unsafe {
-            std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
+        {
+            crate::core::child_env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
         }
         let mut file = McpJsonFile {
             mcp_servers: HashMap::new(),
         };
         let injected = inject_kronn_internal(&mut file);
-        unsafe {
-            std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        {
+            crate::core::child_env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
         }
         let _ = std::fs::remove_file(&tmp);
         assert!(
@@ -5568,16 +5568,16 @@ Always send emails from contact@example.com
     #[test]
     #[serial]
     fn host_sync_env_restore_returns_the_prior_override() {
-        let before = std::env::var_os("KRONN_HOST_HOME");
+        let before = crate::core::child_env::var_os("KRONN_HOST_HOME");
         {
             let _restore = EnvRestore::capture(&["KRONN_HOST_HOME"]);
-            std::env::set_var("KRONN_HOST_HOME", "/synthetic/host-sync-fixture");
+            crate::core::child_env::set_var("KRONN_HOST_HOME", "/synthetic/host-sync-fixture");
             assert_eq!(
-                std::env::var_os("KRONN_HOST_HOME"),
+                crate::core::child_env::var_os("KRONN_HOST_HOME"),
                 Some("/synthetic/host-sync-fixture".into())
             );
         }
-        assert_eq!(std::env::var_os("KRONN_HOST_HOME"), before);
+        assert_eq!(crate::core::child_env::var_os("KRONN_HOST_HOME"), before);
     }
 
     #[test]
@@ -5596,10 +5596,10 @@ Always send emails from contact@example.com
         std::fs::create_dir_all(&writable_project).unwrap();
         std::fs::create_dir_all(&host_home).unwrap();
 
-        std::env::set_var("KRONN_IN_DOCKER", "1");
-        std::env::set_var("KRONN_REPOS_DIR", &writable_root);
-        std::env::remove_var("KRONN_EXTRA_REPOS");
-        std::env::set_var("KRONN_HOST_HOME", &host_home);
+        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
+        crate::core::child_env::set_var("KRONN_REPOS_DIR", &writable_root);
+        crate::core::child_env::remove_var("KRONN_EXTRA_REPOS");
+        crate::core::child_env::set_var("KRONN_HOST_HOME", &host_home);
 
         let writable_db = project_sync_test_db(&writable_project);
         sync_project_with_report(&writable_db, "sync-project", "test-secret");

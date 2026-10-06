@@ -600,8 +600,8 @@ mod tests {
     #[serial]
     fn update_preserves_the_original_id_and_is_atomic() {
         let dir = scratch_config_dir("profiles-update");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let id = save_custom_profile(&sample_profile_data("Original Name", "prompt v1")).unwrap();
 
@@ -626,8 +626,8 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -635,8 +635,8 @@ mod tests {
     #[serial]
     fn update_of_unknown_id_is_rejected() {
         let dir = scratch_config_dir("profiles-update-missing");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let result = update_custom_profile(
             "custom-does-not-exist",
@@ -645,8 +645,8 @@ mod tests {
         assert!(result.is_err());
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -654,8 +654,8 @@ mod tests {
     #[serial]
     fn colliding_slugs_do_not_overwrite_each_other() {
         let dir = scratch_config_dir("profiles-collision");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let first = save_custom_profile(&sample_profile_data("Foo Bar", "prompt A")).unwrap();
         let second = save_custom_profile(&sample_profile_data("foo-bar", "prompt B")).unwrap();
@@ -665,8 +665,8 @@ mod tests {
         assert_eq!(get_profile(&second).unwrap().persona_prompt, "prompt B");
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -674,8 +674,8 @@ mod tests {
     #[serial]
     fn update_and_delete_reject_a_path_traversal_id() {
         let dir = scratch_config_dir("profiles-traversal");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         // Lives one level above the profiles/ dir the traversal id targets.
         let sentinel = dir.join("sentinel.md");
@@ -697,8 +697,8 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 
@@ -706,8 +706,8 @@ mod tests {
     #[serial]
     fn run_snapshot_keeps_the_loaded_version_even_after_a_change_or_deletion() {
         let dir = scratch_config_dir("profiles-snapshot");
-        let previous = std::env::var_os("KRONN_DATA_DIR");
-        std::env::set_var("KRONN_DATA_DIR", &dir);
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
 
         let id =
             save_custom_profile(&sample_profile_data("Snapshot Profile", "prompt v1")).unwrap();
@@ -733,8 +733,8 @@ mod tests {
         release_profiles_snapshot(&run_id);
 
         match previous {
-            Some(value) => std::env::set_var("KRONN_DATA_DIR", value),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
         }
     }
 

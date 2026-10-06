@@ -833,6 +833,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 unmodelled_args_approved: None,
+                agent_written: None,
             },
         )
         .unwrap();
@@ -1303,6 +1304,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 unmodelled_args_approved: None,
+                agent_written: None,
             },
         )
         .unwrap();
@@ -1377,6 +1379,7 @@ mod tests {
                 created_at: now,
                 updated_at: now,
                 unmodelled_args_approved: None,
+                agent_written: None,
             },
         )
         .unwrap();
