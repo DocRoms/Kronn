@@ -1076,7 +1076,10 @@ fn main() {
                 Ok(resource_dir) => {
                     let mcp_sidecar = bundled_mcp_sidecar_path(&resource_dir);
                     if mcp_sidecar.is_file() || !cfg!(debug_assertions) {
-                        kronn::core::child_env::set_var("KRONN_INTERNAL_MCP_EXECUTABLE", &mcp_sidecar);
+                        kronn::core::child_env::set_var(
+                            "KRONN_INTERNAL_MCP_EXECUTABLE",
+                            &mcp_sidecar,
+                        );
                         if !mcp_sidecar.is_file() {
                             tracing::error!(
                                 "Bundled MCP bridge missing at {}; repair the installation",
