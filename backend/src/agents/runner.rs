@@ -5233,7 +5233,7 @@ pub(crate) fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String 
 
 /// KT-908 — a step that declares its tools gets only Kronn's bridge, narrowed
 /// to them, or no server at all; an undeclared step keeps `servers` as is.
-fn declared_mcp_servers(
+pub(crate) fn declared_mcp_servers(
     servers: Vec<crate::acp::AcpMcpServer>,
     step_tools: Option<&crate::models::StepTools>,
 ) -> Vec<crate::acp::AcpMcpServer> {
