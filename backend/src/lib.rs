@@ -106,6 +106,10 @@ pub async fn resolve_key_and_credentials_in_mode(
                 config.server.auth_locked = true;
                 config.server.auth_enabled = true;
             }
+            // Auth on with no token loaded is never "open": fail closed.
+            if config.server.auth_enabled && config.server.auth_token.is_none() {
+                config.server.auth_locked = true;
+            }
         }
     }
     // A stored token that cannot be read (row under another key) is never

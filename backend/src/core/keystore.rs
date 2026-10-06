@@ -1335,7 +1335,15 @@ pub async fn set_aside_locked_rows(
         Ok(())
     })
     .await
-    .with_context(|| format!("remove the locked rows (kept in {file})"))?;
+    .map_err(|e| {
+        // Every row is still in the database: the copy is not a set-aside.
+        let mut unused = path.clone().into_os_string();
+        unused.push(".unused");
+        let _ = std::fs::rename(&path, &unused);
+        e.context(format!(
+            "remove the locked rows; nothing was removed and {file} was renamed .unused"
+        ))
+    })?;
     tracing::warn!("keystore: {count} encrypted row(s) no key decrypts were set aside in {file}");
     Ok(SetAside { file, rows: count })
 }
@@ -1377,23 +1385,31 @@ pub async fn restore_locked_files(
     dir: &Path,
     keys: &[String],
     to_hex: &str,
-) -> Result<usize> {
+) -> Result<LockedRestore> {
     let to = crypto::parse_secret(to_hex).map_err(anyhow::Error::msg)?;
     let parsed: Vec<_> = keys
         .iter()
         .filter_map(|k| crypto::parse_secret(k).ok())
         .collect();
-    let mut restored = 0;
+    let mut out = LockedRestore::default();
     for path in locked_files(dir) {
         let name = path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let entries: Vec<serde_json::Value> = serde_json::from_str(
-            &std::fs::read_to_string(&path).with_context(|| format!("read {name}"))?,
-        )
-        .with_context(|| format!("parse {name}"))?;
+        // One unreadable file is reported and skipped, never a stop for the others.
+        let entries: Vec<serde_json::Value> = match std::fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|t| serde_json::from_str(&t).map_err(anyhow::Error::from))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("keystore: {name} cannot be read ({e:#}); it is kept as it is");
+                out.unreadable_files += 1;
+                continue;
+            }
+        };
         let mut undecryptable = 0;
         // (column, row object, new ciphertext, plaintext)
         let mut prepared = Vec::new();
@@ -1425,10 +1441,11 @@ pub async fn restore_locked_files(
             continue;
         }
         let to_read = to;
-        let (put_back, unsettled) = db
+        let (put_back, unsettled, credentials) = db
             .with_conn(move |conn| {
                 let tx = conn.unchecked_transaction()?;
                 let (mut put_back, mut unsettled) = (0usize, 0usize);
+                let mut credentials: Vec<(String, String)> = Vec::new();
                 for (col, row, fresh, plain) in &prepared {
                     let pk = primary_key(col.table);
                     let key: Vec<String> = pk
@@ -1519,11 +1536,15 @@ pub async fn restore_locked_files(
                                 rusqlite::params_from_iter(values.iter()),
                             ) {
                                 Ok(_) => true,
-                                // A row whose parent is gone (a deleted project) stays in the file.
-                                Err(_) => {
+                                // A row whose parent is gone (a deleted project)
+                                // stays in the file; any other error stops.
+                                Err(rusqlite::Error::SqliteFailure(e, _))
+                                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                                {
                                     unsettled += 1;
                                     continue;
                                 }
+                                Err(e) => return Err(e.into()),
                             }
                         }
                     };
@@ -1545,26 +1566,52 @@ pub async fn restore_locked_files(
                         "a restored row did not read back; nothing was restored"
                     );
                     put_back += 1;
+                    if col.table == "stored_credentials" {
+                        credentials.push((key[0].clone(), key[1].clone()));
+                    }
                 }
                 tx.commit()?;
-                Ok((put_back, unsettled))
+                Ok((put_back, unsettled, credentials))
             })
             .await
             .with_context(|| format!("restore the rows kept in {name}"))?;
-        restored += put_back;
+        out.rows += put_back;
+        out.credentials.extend(credentials);
+        // Renamed by the caller once the restored rows are loaded.
         if undecryptable == 0 && unsettled == 0 {
-            let done = path.with_file_name(format!("{name}.restored"));
-            if let Err(e) = std::fs::rename(&path, &done) {
-                tracing::warn!("keystore: {name} restored but not renamed: {e}");
-            }
+            out.files_done.push(path.clone());
         }
         tracing::info!("keystore: {put_back} row(s) put back from {name}");
     }
-    Ok(restored)
+    Ok(out)
+}
+
+/// What [`restore_locked_files`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LockedRestore {
+    /// Rows put back under the key in use.
+    pub rows: usize,
+    /// (kind, id) of the stored credentials among them.
+    pub credentials: Vec<(String, String)>,
+    /// Files whose rows are all back: to rename once those rows are loaded.
+    pub files_done: Vec<std::path::PathBuf>,
+    /// Files that could not be read or parsed (kept, reported).
+    pub unreadable_files: usize,
+}
+
+/// Rename the files whose rows are all back to `<name>.restored`.
+pub fn mark_locked_files_restored(files: &[std::path::PathBuf]) {
+    for path in files {
+        let mut done = path.clone().into_os_string();
+        done.push(".restored");
+        if let Err(e) = std::fs::rename(path, &done) {
+            tracing::warn!("keystore: {} restored but not renamed: {e}", path.display());
+        }
+    }
 }
 
 /// What [`reencrypt_rows`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Reencrypted {
     /// Rows moved from the old key to the new one.
     pub rewritten: usize,
@@ -1574,6 +1621,8 @@ pub struct Reencrypted {
     pub untouched: usize,
     /// Rows put back from `locked-secrets-*.json` files.
     pub restored_from_files: usize,
+    /// The detail of that restore (files to rename once loaded).
+    pub locked: LockedRestore,
 }
 
 /// Re-encrypt every registered-column row that `from_hex` decrypts under
@@ -1646,6 +1695,26 @@ pub async fn reencrypt_imported(
     recovery_code: Option<&str>,
     dir: &Path,
 ) -> Result<Reencrypted> {
+    reencrypt_imported_with(
+        config,
+        db,
+        passphrase,
+        recovery_code,
+        dir,
+        &KeyStore::standard(dir),
+    )
+    .await
+}
+
+/// [`reencrypt_imported`] against a given key store ladder (tests).
+pub async fn reencrypt_imported_with(
+    config: &AppConfig,
+    db: &Database,
+    passphrase: &str,
+    recovery_code: Option<&str>,
+    dir: &Path,
+    store: &KeyStore,
+) -> Result<Reencrypted> {
     let active = config.encryption_secret.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "Kronn is locked: restore its own key first (Settings → Recovery), then re-encrypt \
@@ -1687,8 +1756,10 @@ pub async fn reencrypt_imported(
     // Rows set aside when a key was given up come back with any key found
     // since: the unwrapped ones, the key stores and the kept files.
     let mut keys = sources.clone();
-    keys.extend(every_candidate(dir, &KeyStore::standard(dir)).unwrap_or_default());
-    total.restored_from_files = restore_locked_files(db, dir, &keys, active).await?;
+    // An unreadable key store is reported, never silently treated as empty.
+    keys.extend(every_candidate(dir, store)?);
+    total.locked = restore_locked_files(db, dir, &keys, active).await?;
+    total.restored_from_files = total.locked.rows;
     // Counted once over every row after all passes, so nothing is counted twice.
     let columns = collect_encrypted_rows(db).await?;
     let rows: usize = columns.iter().map(|c| c.total).sum();
@@ -4120,13 +4191,103 @@ mod tests {
         let res = set_aside_locked_rows(&db, tmp.path(), &store).await;
         *SET_ASIDE_HOOK.lock().unwrap() = None;
         assert!(res.is_err());
-        assert_eq!(locked_files_in(tmp.path()), 1);
+        // CF-07: the copy of rows never removed is not a set-aside.
+        assert_eq!(locked_files_in(tmp.path()), 0);
+        assert_eq!(locked_file_rows(tmp.path()), 0);
         let cols = collect_encrypted_rows(&db).await.unwrap();
         assert_eq!(
             cols.iter().map(|c| c.total).sum::<usize>(),
             2,
             "nothing removed"
         );
+    }
+
+    // ── final review ────────────────────────────────────────────────────────
+
+    async fn seed_github(db: &Database, project: &str, secret: &str) {
+        let tok =
+            crate::core::github_connection::encrypt_stored_token("github_pat_x", secret).unwrap();
+        let project = project.to_string();
+        db.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at) \
+                 VALUES (?1, ?1, '/nowhere', datetime('now'), datetime('now'))",
+                [&project],
+            )?;
+            crate::db::github_connections::set_mode(
+                conn,
+                &project,
+                crate::models::GithubConnectionMode::StoredToken,
+                Some(&tok),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// CF-03 — a row whose parent is gone stays in its file while the others
+    /// come back, and an unreadable second file does not stop the first.
+    #[tokio::test]
+    async fn restore_skips_orphans_and_unreadable_files() {
+        let db = Database::open_in_memory().unwrap();
+        let lost = crypto::generate_secret();
+        seed_row(&db, &lost).await;
+        seed_github(&db, "gone", &lost).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, _s) = mem_vault("sidecar", None);
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        set_aside_locked_rows(&db, tmp.path(), &store)
+            .await
+            .unwrap();
+        db.with_conn(|c| {
+            c.execute("DELETE FROM projects WHERE id = 'gone'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{LOCKED_SECRETS_PREFIX}zz.json")),
+            "{",
+        )
+        .unwrap();
+        let fresh = crypto::generate_secret();
+        let out = restore_locked_files(&db, tmp.path(), std::slice::from_ref(&lost), &fresh)
+            .await
+            .unwrap();
+        assert_eq!(out.rows, 1, "the MCP secret comes back");
+        assert_eq!(out.unreadable_files, 1);
+        assert!(out.files_done.is_empty(), "the orphan keeps its file");
+        let cols = collect_encrypted_rows(&db).await.unwrap();
+        assert!(cols
+            .iter()
+            .any(|c| c.column.table == "mcp_configs" && decrypts(&c.sample[0], &fresh)));
+    }
+
+    /// CF-03 — an unreadable key store at re-encrypt time is reported, never
+    /// taken as "no key".
+    #[tokio::test]
+    async fn reencrypt_reports_an_unreadable_store() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        recovery::save_blob(tmp.path(), &recovery::wrap_key(&k, "pass").unwrap()).unwrap();
+        config::retain_disk_key(tmp.path(), &k);
+        let store = KeyStore::from_vaults(vec![Box::new(DeniedVault {
+            writes: Default::default(),
+        })]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(crypto::generate_secret());
+        let err = reencrypt_imported_with(&cfg, &db, "pass", None, tmp.path(), &store)
+            .await
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<KeyBootError>()
+                .is_some_and(|e| matches!(e, KeyBootError::VaultUnreadable { .. })),
+            "{err:#}"
+        );
+        config::release_disk_key(tmp.path());
     }
 
     /// C4-10 — every key or credential file write syncs its directory.

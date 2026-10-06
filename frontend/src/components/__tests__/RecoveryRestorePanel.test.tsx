@@ -94,6 +94,21 @@ describe('RecoveryRestorePanel', () => {
     expect(onRestored).toHaveBeenCalled();
   });
 
+  it('counts rows put back from locked-secrets files and names those files (CF-05)', async () => {
+    config.getRecoveryStatus.mockResolvedValue({ key_locked: false });
+    config.reencryptImported.mockResolvedValue({ rewritten: 0, already_current: 1, untouched: 0, restored_from_files: 3 });
+    const tt = (k: string, ...a: (string | number)[]) => a.length ? `${k}:${a.join(',')}` : k;
+    render(<RecoveryRestorePanel toast={toast} t={tt} onRestored={onRestored} lockedFileRows={4} />);
+    await waitFor(() => expect(screen.getByText('mcp.recovery.reencryptCta')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('recovery-restore-cta'));
+    expect(screen.getByTestId('recovery-locked-files-hint').textContent).toContain('lockedFilesHint:4');
+    fireEvent.change(screen.getByTestId('recovery-restore-passphrase'), { target: { value: 'old pass' } });
+    await waitFor(() => expect((screen.getByTestId('recovery-restore-submit') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId('recovery-restore-submit'));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('mcp.recovery.reencrypted:3', 'success'));
+    expect(toast).toHaveBeenCalledWith('mcp.recovery.stillWaiting:1', 'error');
+  });
+
   it('mode restore never asks the backend and starts open when asked', async () => {
     render(<RecoveryRestorePanel toast={toast} t={t} onRestored={onRestored} mode="restore" initiallyOpen />);
     expect(screen.getByTestId('recovery-restore-panel')).toBeTruthy();

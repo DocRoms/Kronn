@@ -1866,8 +1866,17 @@ pub async fn export_data(State(state): State<AppState>) -> Response {
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"kronn-export.zip\"",
         );
-    if let Some(warning) = export_warning {
-        response = response.header("X-Kronn-Export-Warning", warning);
+    // Secrets kept aside when a key was given up stay on this machine only.
+    let locked_rows = config::config_dir()
+        .ok()
+        .map(|d| crate::core::keystore::locked_file_rows(&d))
+        .unwrap_or(0);
+    let warnings: Vec<&str> = export_warning
+        .into_iter()
+        .chain((locked_rows > 0).then_some("locked-secrets-not-exported"))
+        .collect();
+    if !warnings.is_empty() {
+        response = response.header("X-Kronn-Export-Warning", warnings.join(","));
     }
     response.body(Body::from(bytes)).unwrap()
 }
@@ -2583,6 +2592,14 @@ pub(crate) async fn resolve_fresh_key(
         candidate.encryption_secret.is_some(),
         "encrypted data no key decrypts appeared meanwhile; nothing was adopted, retry"
     );
+    // The credentials must be stored too: an unarmed store with auth on and
+    // no token would leave the API open or wrongly locked.
+    anyhow::ensure!(
+        crate::core::credential_store::is_armed(dir)
+            || !candidate.server.auth_enabled
+            || candidate.server.auth_token.is_some(),
+        "the credentials could not be stored; nothing was adopted, retry"
+    );
     *live = candidate;
     Ok(())
 }
@@ -2627,7 +2644,6 @@ pub async fn start_new_key(
             set_aside.file
         )));
     }
-    crate::core::credential_store::record_boot_failure(&dir, None);
     let auth_token = cfg
         .server
         .auth_token
@@ -2919,6 +2935,8 @@ pub async fn reencrypt_imported(
     .await
     {
         Ok(r) => {
+            // Rows put back but not loaded yet: no save may delete them.
+            crate::core::credential_store::preserve_rows(&dir, &r.locked.credentials);
             if r.rewritten > 0 || r.restored_from_files > 0 {
                 // Stored credentials may be among the rewritten rows: reload the
                 // store so they appear now, not after a restart.
@@ -2954,6 +2972,8 @@ pub async fn reencrypt_imported(
                     config.server.auth_locked = false;
                 }
             }
+            // Loaded (or nothing to load): the kept files are done.
+            crate::core::keystore::mark_locked_files_restored(&r.locked.files_done);
             Json(ApiResponse::ok(ReencryptResponse {
                 rewritten: r.rewritten as u32,
                 already_current: r.already_current as u32,

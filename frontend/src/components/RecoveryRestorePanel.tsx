@@ -19,9 +19,11 @@ interface RecoveryRestorePanelProps {
   mode?: 'auto' | 'restore';
   /** Start expanded (the auth-locked screen has nothing else to show). */
   initiallyOpen?: boolean;
+  /** Rows waiting in locked-secrets files (a key given up), for the hint. */
+  lockedFileRows?: number;
 }
 
-export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', initiallyOpen = false }: RecoveryRestorePanelProps) {
+export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', initiallyOpen = false, lockedFileRows = 0 }: RecoveryRestorePanelProps) {
   const [open, setOpen] = useState(initiallyOpen);
   // Restoring another key on a running instance would split the data between
   // two keys; there the imported secrets are re-encrypted under the live key.
@@ -48,7 +50,10 @@ export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', init
     try {
       if (reencrypt) {
         const res = await configApi.reencryptImported(passphrase, code.trim() || undefined);
-        toast(t('mcp.recovery.reencrypted', res.rewritten), 'success');
+        // Rows put back from locked-secrets files count too.
+        toast(t('mcp.recovery.reencrypted', res.rewritten + (res.restored_from_files ?? 0)), 'success');
+        const waiting = lockedFileRows - (res.restored_from_files ?? 0);
+        if (lockedFileRows > 0 && waiting > 0) toast(t('mcp.recovery.stillWaiting', waiting), 'error');
       } else {
         await configApi.restoreRecovery(passphrase, code.trim() || undefined);
         toast(t('mcp.recovery.restored'), 'success');
@@ -82,6 +87,11 @@ export function RecoveryRestorePanel({ toast, t, onRestored, mode = 'auto', init
   return (
     <div className="mcp-recovery-restore" data-testid="recovery-restore-panel">
       <p className="mcp-warning-banner-hint">{t(reencrypt ? 'mcp.recovery.reencryptHint' : 'mcp.recovery.restoreHint')}</p>
+      {reencrypt && lockedFileRows > 0 && (
+        <p className="mcp-warning-banner-hint" data-testid="recovery-locked-files-hint">
+          {t('mcp.recovery.lockedFilesHint', lockedFileRows)}
+        </p>
+      )}
       <input
         type="password"
         className="set-input"

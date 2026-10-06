@@ -175,7 +175,12 @@ export function RecoverySection({ toast, t }: RecoverySectionProps) {
         {status && !status.key_locked
           && ((status.undecryptable_rows ?? 0) > (status.file_key_rows_pending ?? 0)
             || (status.locked_file_rows ?? 0) > 0) && (
-          <RecoveryRestorePanel toast={toast} t={t} onRestored={() => window.location.reload()} />
+          <RecoveryRestorePanel
+            toast={toast}
+            t={t}
+            onRestored={() => window.location.reload()}
+            lockedFileRows={status.locked_file_rows ?? 0}
+          />
         )}
 
         {configured === false && !recoveryCode && (

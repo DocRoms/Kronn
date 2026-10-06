@@ -312,6 +312,23 @@ fn armed_for(dir: &Path) -> Option<Arc<Armed>> {
     armed_map().get(dir).cloned()
 }
 
+/// Keep these rows (just put back, not yet loaded) out of any save's deletes
+/// until the next successful boot replaces the store.
+pub fn preserve_rows(dir: &Path, rows: &[(String, String)]) {
+    if let Some(armed) = armed_for(dir) {
+        armed
+            .preserve
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .extend(rows.iter().cloned());
+    }
+}
+
+/// Test seam: data directories whose next credential boot fails.
+#[cfg(test)]
+pub(crate) static FAIL_BOOT: LazyLock<std::sync::Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(Default::default);
+
 /// Whether credentials of `dir` live in the encrypted store.
 pub fn is_armed(dir: &Path) -> bool {
     armed_for(dir).is_some()
@@ -457,6 +474,14 @@ pub async fn boot(
     env_auth_token: Option<&str>,
     mode: BootMode,
 ) -> Result<Option<CredentialBoot>> {
+    #[cfg(test)]
+    if FAIL_BOOT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(dir)
+    {
+        anyhow::bail!("credential boot failure (test)");
+    }
     // Until armed below, saves may only keep what config.toml holds now.
     note_file_credentials(dir, config);
     if matches!(key_outcome, KeyOutcome::Locked { .. }) {

@@ -2529,3 +2529,169 @@ fn litellm_and_startup_discovery_adopt_only_once_saved() {
         );
     }
 }
+
+// ── final review ────────────────────────────────────────────────────────────
+
+/// CF-01 — a credential boot that fails after the token row went never opens
+/// auth: nothing is adopted and a LAN request is still refused.
+#[tokio::test]
+#[serial]
+async fn a_failed_credential_store_after_a_new_key_keeps_auth_closed() {
+    for (route, session) in [
+        ("/api/config/recovery/start-new-key", None),
+        ("/api/setup/reset", Some("session-token".to_string())),
+    ] {
+        let previous = set_docker(true);
+        let dir = DataDir::new();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        migrated_then_key_lost(&dir, &db).await;
+        let mut cfg = config::load().await.unwrap().unwrap();
+        crate::resolve_key_and_credentials(&mut cfg, &db, session.clone())
+            .await
+            .unwrap();
+        // Only inserts fail: the set-aside and forget_all delete freely.
+        db.with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER garble AFTER INSERT ON stored_credentials BEGIN \
+                 UPDATE stored_credentials SET value_encrypted = 'garbled' WHERE id = NEW.id; END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = state_with(cfg, &db);
+        let router = crate::build_router_with_auth(state.clone(), true);
+        let (_, body) = json_of(router.clone(), "POST", route, serde_json::json!({})).await;
+        restore_docker(previous);
+        {
+            let live = state.config.read().await;
+            if session.is_none() {
+                // No token at all: nothing may be adopted.
+                assert_eq!(body["success"], false, "{route}: {body}");
+                assert!(live.encryption_secret.is_none(), "{route}");
+            } else {
+                // The operator's session token keeps serving: auth stays closed.
+                assert_eq!(live.server.auth_token.as_deref(), Some("session-token"));
+            }
+        }
+        let (status, _) = json_from(
+            router,
+            "GET",
+            "/api/projects",
+            serde_json::json!({}),
+            [192, 168, 1, 9],
+        )
+        .await;
+        assert_ne!(status, axum::http::StatusCode::OK, "{route}");
+    }
+}
+
+/// CF-01 — auth on with no token loaded, after a failed credential boot, is
+/// locked, never open.
+#[tokio::test]
+#[serial]
+async fn a_failed_boot_with_auth_on_and_no_token_locks_auth() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    db.with_conn(|c| Ok(garble_writes(c)?)).await.unwrap();
+    let mut cfg = config::default_config_without_key();
+    cfg.server.auth_enabled = true;
+    cfg.server.auth_token = None;
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    assert!(!is_armed(dir.path()));
+    assert!(cfg.server.auth_locked);
+}
+
+/// CF-02 — rows put back from a locked-secrets file survive a failed reload
+/// and a later save, and their file is not marked restored.
+#[tokio::test]
+#[serial]
+async fn restored_rows_survive_a_failed_reload() {
+    let dir = DataDir::new();
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let old = migrated_then_key_lost(&dir, &db).await;
+    crate::core::recovery::save_blob(
+        dir.path(),
+        &crate::core::recovery::wrap_key(&old, "old passphrase").unwrap(),
+    )
+    .unwrap();
+    let mut cfg = config::load().await.unwrap().unwrap();
+    crate::resolve_key_and_credentials(&mut cfg, &db, None)
+        .await
+        .unwrap();
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, fresh) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/start-new-key",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(fresh["success"], true, "{fresh}");
+    FAIL_BOOT.lock().unwrap().insert(dir.path().to_path_buf());
+    let (_, back) = json_of(
+        router,
+        "POST",
+        "/api/config/recovery/reencrypt",
+        serde_json::json!({"passphrase": "old passphrase"}),
+    )
+    .await;
+    FAIL_BOOT.lock().unwrap().remove(dir.path());
+    assert_eq!(back["success"], false, "{back}");
+    // A save that writes the table (a key added) must not drop the rows.
+    let mut snapshot = state.config.read().await.clone();
+    snapshot.tokens.keys.push(ApiKey {
+        id: "later".into(),
+        name: "later".into(),
+        provider: "openai".into(),
+        value: "sk-later".into(),
+        active: true,
+    });
+    config::save(&snapshot).await.unwrap();
+    let stored = db.with_conn(rows::list).await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|r| r.kind == KIND_PROVIDER_KEY && r.id == "key-anthropic"),
+        "{stored:?}"
+    );
+    assert!(crate::core::keystore::locked_file_rows(dir.path()) > 0);
+}
+
+/// CF-09 — an export says the locked-secrets files stay behind.
+#[tokio::test]
+#[serial]
+async fn an_export_warns_about_locked_secrets_files() {
+    use tower::ServiceExt;
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    std::fs::write(
+        dir.path().join("locked-secrets-20261006T000000Z.json"),
+        r#"[{"table":"mcp_configs","column":"env_encrypted","row":{"id":"x"}}]"#,
+    )
+    .unwrap();
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
+    let mut req = axum::http::Request::builder()
+        .uri("/api/config/export")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
+    let res = router.oneshot(req).await.unwrap();
+    let header = res
+        .headers()
+        .get("X-Kronn-Export-Warning")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(header.contains("locked-secrets-not-exported"), "{header}");
+}
