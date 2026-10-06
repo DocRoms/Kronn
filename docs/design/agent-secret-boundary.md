@@ -467,10 +467,13 @@ initialisation. A per-tool broker or a Kronn-owned config cannot stop that, so
 no restricted mode is offered: `runner::start_agent_with_config`, through which
 every route launches (discussions, rooms, workflow steps, Quick Prompts,
 summaries, audits, resume), refuses such a launch unless the agent's own
-`[agents.<agent>] full_access` setting is on, before anything is spawned, and
-`AcpJsonRpcTransport::spawn_native` refuses a restricted spawn on its own; model
-discovery reads the saved setting before starting the runtime. An audit's
-hard-coded full access does not count for these agents. Kronn never writes the
+`[agents.<agent>] full_access` setting, read from the saved configuration at
+that moment for the agent actually launched, is on, before anything is spawned;
+`AcpJsonRpcTransport::spawn_native` checks the same on its own, and model
+discovery reads it before starting the runtime. No boolean a route passes counts
+for these agents: not an audit's hard-coded full access, not a value cached at
+the start of a run, not a workflow reviewer's author's; a workflow reviewer
+otherwise runs with its own agent's setting. Kronn never writes the
 setting. The ACP broker still answers their permission requests (full access:
 everything inside the project scope, never a real secret file); it trusts
 `rawInput` identities only on opt-in, which no runtime gets, and only the exact

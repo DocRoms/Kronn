@@ -268,9 +268,12 @@ Release notes for 0.9.3 and earlier are available in the
   custom tools, hooks and MCP servers before any permission check, so no
   restricted mode can be promised for them. Every launch (discussion, room,
   workflow step, Quick Prompt, summary, audit, resume, model discovery)
-  requires the agent's own setting in Config › Agents › <agent> › Full access;
-  without it Kronn refuses before starting anything, with a translated message
-  that names the setting, and never turns it on itself. The agent pickers say
+  requires the agent's own setting in Config › Agents › <agent> › Full access,
+  read from the saved configuration at each launch for the agent actually
+  started (a workflow reviewer does not inherit its author's access, and
+  turning the setting off stops the next spawn of a running audit or
+  workflow); without it Kronn refuses before starting anything, with a
+  translated message that names the setting, and never turns it on itself. The agent pickers say
   "requires full access" beforehand. An audit's own full access no longer
   counts for these agents. A per-launch isolated runner is the 0.15 plan.
 - Copilot receives Kronn's bridge through `--additional-mcp-config` under a
