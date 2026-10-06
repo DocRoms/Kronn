@@ -2823,6 +2823,8 @@ const zh: TranslationDict = {
   "ollama.fresh.unknownHint": "Kronn 无法将该模型与 Ollama 官方库比较：它不是来自官方库，或官方库没有响应。",
   "contacts.title": "联系人",
   "contacts.pending": "待处理",
+  "contacts.requested": "请求",
+  "contacts.requestedHint": "希望与您连接。添加其邀请码即可接受。",
   "contacts.inviteCode": "邀请码",
   "contacts.inviteHint": "分享此代码，让其他 Kronn 用户添加您为联系人。",
   "contacts.add": "添加联系人",
