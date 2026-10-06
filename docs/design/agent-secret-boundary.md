@@ -431,12 +431,16 @@ spawn without a route does not compile. `backend/clippy.toml` refuses
 crate's functions (`open::commands`/`with_command` included) and libc's
 `fork`/`clone`/`exec*`/`fexecve`/`posix_spawn*`/`popen`/`system`/`syscall`
 outside `core/cmd.rs` (test code excepted), which also covers aliases and
-function pointers; `desktop/src-tauri/clippy.toml` holds the desktop crate to
+function pointers (`forkpty`, `rfork`, `execveat` and `execvP` included,
+platform-specific ones marked `allow-invalid`); `desktop/src-tauri/clippy.toml` holds the desktop crate to
 the same rule, plus `tauri_plugin_shell::Shell::{command,sidecar,open}`,
 `AppHandle::restart` and `tauri::process::restart` (its `caffeinate` and
 login-shell PATH probe use the Tool route), and CI runs clippy on both
 crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
-`#[allow]` sites of both crates. The system opener goes through `cmd::open_in_system`
+`#[allow]`/`#[expect]` sites of both crates (the lint, its old name
+`disallowed_method`, the `style` and `all` groups, and `warnings`) and
+refuses a crate-wide override in either `Cargo.toml` `[lints]` table or in
+`.cargo/config` rustflags (`-A …`, `--cap-lints`). The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -475,11 +479,24 @@ settings. A credential under a name no list knows (`MYSQL_PWD`,
 `DATABASE_URL` with userinfo, `*_PASSPHRASE`, `SENTRY_DSN`) reaches none of
 them.
 
+*Desktop webview helpers.* On Linux (WebKitGTK) and Windows (WebView2) the
+system webview starts its own helper processes with the desktop's process
+environment, outside `core::cmd`. The desktop therefore moves every credential
+(provider keys, GitHub variables, secret-looking names) out of its process
+environment at start, before any thread or window
+(`child_env::withhold_process_credentials`, after the admin token and the key
+override). The builder and Kronn's own readers still see them through
+`child_env::parent_var`, so a configured route keeps its key; the test
+`kronn_reads_credentials_through_child_env` refuses a direct
+`std::env::var` of a credential-looking name. The helpers get the desktop's
+environment without any credential; the relaunch below gets them back.
+
 One declared exception remains, and only on the desktop: the app relaunching
 itself (`desktop/src-tauri/src/main.rs::self_restart_command`, through
 `cmd::full_env_sync_cmd(program, FullEnvReason::SelfRestart)`). It is Kronn
-itself: it keeps its environment and working directory, loses the forbidden
-names, and gets the operator's key override handed back. The test
+itself: it keeps its environment and working directory (withheld credentials
+included), loses the forbidden names, and gets the operator's key override
+handed back. The test
 `full_env_cmd_sites_are_exactly_the_declared_exceptions` checks it is the only
 call site in either crate, and `both_clippy_files_ban_the_same_spawn_entry_points`
 that every Tauri restart entry point (`AppHandle::restart`,
