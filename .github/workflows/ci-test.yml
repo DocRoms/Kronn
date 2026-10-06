@@ -357,6 +357,28 @@ jobs:
         # reproducibility (output/threshold semantics are stable within v4).
         run: npx --yes jscpd@4 backend/src frontend/src backend/scripts --config .jscpd.json
 
+  # Whitespace errors and conflict markers in Markdown, YAML and other files
+  # no compiler or linter reads. A PR checkout is the merge commit, whose first
+  # parent is the base tip; other triggers compare with the merge base of main.
+  diff-hygiene:
+    if: github.event_name == 'workflow_dispatch' || inputs.ref != '' || contains(github.event.pull_request.labels.*.name, 'ci-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: git diff --check against the base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            scripts/check-diff.sh HEAD^1
+          else
+            scripts/check-diff.sh
+          fi
+
   # ── Python helper tests ────────────────────────────────────────────────
   # `backend/scripts/disc-introspection-mcp.py` powers the kronn-internal
   # MCP server (5+ agent CLIs invoke it). Its 0.8.5 auto-inherit helpers
@@ -814,6 +836,7 @@ jobs:
       - test-backend-quality
       - test-desktop-compile
       - duplication-check
+      - diff-hygiene
       - test-python
       - test-docs-sidecar-windows
       - test-frontend

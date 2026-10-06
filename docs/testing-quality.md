@@ -44,7 +44,7 @@ Run from the repository root unless a working directory is shown.
 | Layer | Command | Required result |
 |---|---|---|
 | Version surfaces | `make check-version` | Every manifest, README, site and the first changelog release agree |
-| Diff hygiene | `git diff --check` | No whitespace errors |
+| Diff hygiene | `make check-diff` (`scripts/check-diff.sh`: `git diff --check` from the merge base with `origin/main`, plus staged and unstaged changes; CI job `diff-hygiene`) | No whitespace errors or conflict markers |
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
 | Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
 | Backend tests | `make test-backend` | Entire Rust suite passes |

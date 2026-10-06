@@ -42,7 +42,7 @@ export function ProjectGitBlock({
     load: async (force, publish) => {
       if (force) return projectsApi.gitStatus(projectId, true);
       publish(await projectsApi.gitStatus(projectId, false, undefined, undefined, true));
-      
+
       return projectsApi.gitStatus(projectId);
     },
   });
