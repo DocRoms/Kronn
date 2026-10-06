@@ -725,6 +725,8 @@ pub fn save_custom_skill(
     validate_skill_fields(name, description)?;
 
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create skills dir: {}", e))?;
 
     let slug = unique_skill_slug(&dir, name)?;
@@ -771,6 +773,7 @@ pub fn update_custom_skill(
         return Err(format!("Invalid skill id '{}'", id));
     }
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid skill id '{}'", id));
@@ -808,6 +811,7 @@ pub fn delete_custom_skill(id: &str) -> Result<bool, String> {
         return Err(format!("Invalid skill id '{}'", id));
     }
     let dir = custom_skills_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid skill id '{}'", id));

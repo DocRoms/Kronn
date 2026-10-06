@@ -22,6 +22,26 @@ pub fn config_dir() -> Result<PathBuf> {
         .context("Cannot determine config directory")
 }
 
+/// Refuses a write into the real data directory from a test binary: a test
+/// without `KRONN_DATA_DIR` would otherwise write into the developer's own
+/// Kronn data (profiles, skills, directives). Same rule as the config.toml guard.
+pub fn refuse_real_data_dir_in_tests() -> Result<(), String> {
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_ok() {
+        return Ok(());
+    }
+    let in_test_binary = cfg!(test)
+        || std::env::current_exe()
+            .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
+            .unwrap_or(false);
+    if in_test_binary {
+        return Err(
+            "test binary attempted to write into the real Kronn data directory; set KRONN_DATA_DIR"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Full path to config.toml
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE))

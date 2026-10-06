@@ -26,6 +26,7 @@ fn load_persona_overrides() -> HashMap<String, String> {
 
 pub fn save_persona_override(profile_id: &str, persona_name: &str) -> Result<(), String> {
     let path = persona_overrides_path().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let dir = path.parent().ok_or("Invalid path")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create config dir: {}", e))?;
 
@@ -498,6 +499,7 @@ fn unique_profile_slug(dir: &std::path::Path, name: &str) -> String {
 /// Save a new custom profile to disk. Returns the generated, stable ID.
 pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
     let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create profiles dir: {}", e))?;
 
     let slug = unique_profile_slug(&dir, data.name);
@@ -523,6 +525,7 @@ pub fn update_custom_profile(id: &str, data: &CustomProfileData) -> Result<Strin
         return Err(format!("Invalid profile id '{}'", id));
     }
     let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid profile id '{}'", id));
@@ -548,6 +551,7 @@ pub fn delete_custom_profile(id: &str) -> Result<bool, String> {
         return Err(format!("Invalid profile id '{}'", id));
     }
     let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid profile id '{}'", id));
@@ -878,9 +882,34 @@ mod tests {
         }
     }
 
+    /// A test that forgets `KRONN_DATA_DIR` gets an error, never a write into
+    /// the developer's own data directory.
     #[test]
+    #[serial]
+    fn a_custom_write_without_a_data_dir_is_refused_in_tests() {
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        let profile = save_custom_profile(&sample_profile_data("Leak", "prompt"));
+        let persona = save_persona_override("builtin-x", "Leak");
+        if let Some(value) = previous {
+            crate::core::child_env::set_var("KRONN_DATA_DIR", value);
+        }
+        assert!(profile.unwrap_err().contains("real Kronn data directory"));
+        assert!(persona.unwrap_err().contains("real Kronn data directory"));
+    }
+
+    #[test]
+    #[serial]
     fn all_persona_names_are_unique() {
+        // Builtins only: an isolated data dir, never the developer's own profiles.
+        let dir = scratch_config_dir("persona-names");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
         let profiles = list_all_profiles();
+        match previous {
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+        }
         let mut names: Vec<&str> = profiles.iter().map(|p| p.persona_name.as_str()).collect();
         let count_before = names.len();
         names.sort();
