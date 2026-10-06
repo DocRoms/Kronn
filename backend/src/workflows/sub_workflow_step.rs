@@ -540,6 +540,42 @@ pub async fn execute_sub_workflow_step(
 /// Phase 3b — cap on per-item fan-out (runaway-manifest backstop).
 const MAX_FOREACH_ITEMS: usize = 30;
 
+/// Save-time shape of `sub_workflow_foreach_file`: a plain path relative to
+/// the worktree. Blank means no fan-out.
+pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.contains('\\') || path.contains('\0') {
+        return Err(format!(
+            "`sub_workflow_foreach_file` `{path}`: use a plain worktree-relative path with `/` separators"
+        ));
+    }
+    crate::core::repository_resources::validate_relative(path).map_err(|_| {
+        format!(
+            "`sub_workflow_foreach_file` `{path}` must be relative to the worktree, without `..`"
+        )
+    })
+}
+
+/// Run-time resolution: the saved shape again (a workflow stored before the
+/// check, or edited by hand), then symlinks followed and kept in the worktree.
+/// The items reach child agents, so a file outside it must never be read.
+fn resolve_foreach_file(worktree: &str, path: &str) -> Result<std::path::PathBuf, String> {
+    validate_foreach_file(path)?;
+    crate::core::fs_guard::resolve_contained_read(
+        std::path::Path::new(worktree),
+        std::path::Path::new(path.trim()),
+    )
+    .map_err(|_| {
+        format!(
+            "foreach file `{}` resolves outside the worktree",
+            path.trim()
+        )
+    })
+}
+
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
 /// Must be a JSON array; empty or oversized arrays are explicit errors (an
 /// empty work-list almost always means the upstream step misfired).
@@ -730,7 +766,10 @@ async fn execute_foreach(
         Some(w) if !w.trim().is_empty() => w,
         _ => return fail(step, start, "SubWorkflow foreach requires the parent to run in a git worktree (the items file lives there).".into()),
     };
-    let items_path = std::path::Path::new(&ws).join(foreach_file);
+    let items_path = match resolve_foreach_file(&ws, foreach_file) {
+        Ok(path) => path,
+        Err(error) => return fail(step, start, error),
+    };
     let content = match std::fs::read_to_string(&items_path) {
         Ok(c) => c,
         Err(e) => {
@@ -1991,6 +2030,77 @@ mod tests {
             "{}",
             secret.result.output
         );
+    }
+
+    // ─── KT-1038 — the foreach file stays inside the worktree ───
+
+    #[test]
+    fn foreach_file_must_be_a_plain_worktree_relative_path() {
+        for ok in ["", "  ", "tasks.json", ".kronn/tasks.json", "a/b/c.json"] {
+            assert!(super::validate_foreach_file(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "/etc/passwd",
+            "../tasks.json",
+            "a/../../x.json",
+            "a\\b.json",
+            "a\0b",
+        ] {
+            assert!(super::validate_foreach_file(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn foreach_refuses_a_file_outside_the_worktree() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("secret.json");
+        std::fs::write(&secret, r#"[{"id":"LEAK","what":"x"}]"#).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, ws.path().join("link.json")).unwrap();
+        let ctx = crate::workflows::template::TemplateContext::new();
+        let mut paths = vec![
+            secret.to_string_lossy().into_owned(),
+            "../secret.json".into(),
+        ];
+        if cfg!(unix) {
+            paths.push("link.json".into());
+        }
+        for path in paths {
+            let mut escaping = step.clone();
+            escaping.sub_workflow_foreach_file = Some(path.clone());
+            let outcome = super::execute_sub_workflow_step(
+                &state,
+                "parent-run",
+                0,
+                &escaping,
+                &tokens,
+                &agents,
+                crate::workflows::runner::SharedBudget::root(50),
+                Some(ws.path().to_string_lossy().to_string()),
+                super::ChildLaunch {
+                    ctx: &ctx,
+                    parent_variables: &[],
+                    parent_project_id: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                outcome.result.status,
+                crate::models::RunStatus::Failed,
+                "{path}"
+            );
+            assert!(
+                outcome.result.output.contains("worktree")
+                    && !outcome.result.output.contains("LEAK"),
+                "{path}: {}",
+                outcome.result.output
+            );
+        }
+        assert_eq!(child_rows_for(&state, "LEAK").await, 0);
+        // The fixture's own relative file still fans out.
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
     }
 
     // ─── KT-1045 — a child goes through its workflow's admission ───
