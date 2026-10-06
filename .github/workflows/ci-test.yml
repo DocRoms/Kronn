@@ -274,6 +274,10 @@ jobs:
         run: |
           python3 scripts/ci/test_mcp_surface_budget.py
           python3 scripts/ci/mcp_surface_budget.py
+      - name: Gateway body caps — nginx carries every axum body limit
+        run: |
+          python3 scripts/ci/test_nginx_body_limits.py
+          python3 scripts/ci/nginx_body_limits.py
       - name: Release body generator — links match attached installers
         run: python3 scripts/ci/test_release_notes.py
       - name: Agent task matrix — every task still reaches its content
