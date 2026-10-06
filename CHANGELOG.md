@@ -263,34 +263,22 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
-- GitHub Copilot CLI, Mistral Vibe and OpenCode, as native ACP agents, can
-  call Kronn's own tools (`bridge_info`, `disc_meta`…) without full access, and
-  nothing else is approved on their behalf. Kronn refused every such call: their
-  permission requests do not name the server as Kronn expected. Each session
-  now declares the bridge under a per-launch name (`kronn-internal-<random>`),
-  so a server another config names `kronn-internal` (a workspace `.mcp.json`,
-  a repository `.vibe/config.toml`) never gets its approval. Copilot receives
-  it through `--additional-mcp-config` with `--disable-mcp-server
-  kronn-internal` and is granted that name only; Vibe's calls are identified by
-  the tool its harness announced for the call id, and an id that is reused or
-  changes kind is refused for good; a step's tool list narrows the grant and
-  the bridge. Shell commands, unknown tools, other servers and project servers
-  without full access stay refused. Not verified for Gemini and Kiro.
-- OpenCode without full access ran any shell command, edit or web fetch
-  without asking Kronn: its default permission is `allow`. Its inline
-  configuration now asks Kronn for everything except reading, listing, the todo
-  list and the bridge's tools, on the top level and on the default `build`
-  agent. An operator's `OPENCODE_CONFIG_CONTENT` keeps its other settings;
-  one that is not a JSON object stops the launch.
-- Mistral Vibe without full access ran some calls without asking Kronn: its
-  default agent profile (`accept-edits`) approves `write_file` and `edit`, the
-  bash allowlist (read-only defaults plus the user's) runs unasked, and a
-  user or project `config.toml` can set any tool to `always`. Kronn now starts
-  Vibe under its own per-launch agent profile, selected through `VIBE_*`
-  variables: every acting tool, and every tool another config names, asks;
-  every allowlist is empty; bypass and smart approve are off; the env-less
-  `kronn-internal` copy from `.vibe/config.toml` is disabled. The user's config
-  is not edited, and with full access it applies unchanged.
+- **Known limitation: OpenCode, Vibe, GitHub Copilot, Gemini CLI and Kiro run
+  only with full access.** These native ACP runtimes load repository plugins,
+  custom tools, hooks and MCP servers before any permission check, so no
+  restricted mode can be promised for them. Every launch (discussion, room,
+  workflow step, Quick Prompt, summary, audit, resume, model discovery)
+  requires the agent's own setting in Config › Agents › <agent> › Full access;
+  without it Kronn refuses before starting anything, with a translated message
+  that names the setting, and never turns it on itself. The agent pickers say
+  "requires full access" beforehand. An audit's own full access no longer
+  counts for these agents. A per-launch isolated runner is the 0.15 plan.
+- Copilot receives Kronn's bridge through `--additional-mcp-config` under a
+  per-launch name, with `--disable-mcp-server kronn-internal`, so a workspace
+  `.mcp.json` server named `kronn-internal` is never loaded in its place; a
+  step's tool list reaches the bridge on every native runtime. A project server
+  named `kronn-internal*` is dropped, and only the exact bridge id the runtime
+  registered is trusted.
 - The ACP broker no longer takes a tool's identity from `rawInput`, which holds
   the model's arguments on every native runtime.
 - A bridge-token request with no body labelled `application/json`, as the
