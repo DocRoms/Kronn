@@ -91,7 +91,9 @@ fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
         started_at: timestamp(r, 6)?,
         finished_at: timestamp(r, 7)?,
         duration_ms: r.get::<_, Option<i64>>(8)?.map(|v| v.max(0) as u64),
-        result: result.and_then(|v| serde_json::from_str(&v).ok()),
+        result: result
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .map(without_legacy_activity_fields),
         diagnostic: r.get(10)?,
         created_at: timestamp(r, 11)?.ok_or_else(|| {
             rusqlite::Error::InvalidColumnType(11, "created_at".into(), rusqlite::types::Type::Null)
@@ -101,6 +103,26 @@ fn row(r: &Row<'_>) -> rusqlite::Result<SharedRun> {
         })?,
     })
 }
+/// A workflow projection stored before 0.14.3 may hold a step's in-flight
+/// activity with the tool's name and target. Every read drops them: an
+/// activity is served as its category and count only.
+fn without_legacy_activity_fields(mut result: serde_json::Value) -> serde_json::Value {
+    if let Some(steps) = result
+        .get_mut("steps")
+        .and_then(|steps| steps.as_array_mut())
+    {
+        for step in steps {
+            if let Some(activity) = step
+                .get_mut("last_activity")
+                .and_then(|activity| activity.as_object_mut())
+            {
+                activity.retain(|key, _| matches!(key.as_str(), "category" | "at" | "calls"));
+            }
+        }
+    }
+    result
+}
+
 pub fn upsert(conn: &Connection, run: &SharedRun) -> Result<()> {
     conn.execute(
         "INSERT INTO shared_runs(id,kind,source_id,project_id,discussion_id,status,started_at,finished_at,duration_ms,result_json,diagnostic,created_at,updated_at,exec_details_json)
@@ -458,6 +480,26 @@ mod tests {
             diagnostic: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    /// A terminal projection written by an older build keeps its activity's
+    /// count; its tool name and target are dropped on every read.
+    #[test]
+    fn a_legacy_activity_in_a_projection_is_never_read_back() {
+        let conn = runs_conn();
+        let mut run = workflow_run_row("legacy", "done");
+        run.result.as_mut().unwrap()["steps"][0]["last_activity"] = serde_json::json!({
+            "tool": "hunter2-tool", "target": "cat hunter2-target",
+            "at": "2026-10-01T00:00:00Z", "calls": 4
+        });
+        upsert(&conn, &run).unwrap();
+        let read = get(&conn, "legacy").unwrap().unwrap();
+        let listed = list(&conn, None, None, None, None, 20, 0).unwrap();
+        for result in [read.result.unwrap(), listed[0].result.clone().unwrap()] {
+            let text = result.to_string();
+            assert!(!text.contains("hunter2"), "{text}");
+            assert_eq!(result["steps"][0]["last_activity"]["calls"], 4);
         }
     }
 

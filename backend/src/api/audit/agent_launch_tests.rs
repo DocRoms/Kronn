@@ -1641,10 +1641,23 @@ fn a_cli_stream_feeds_the_recent_actions_by_category_only() {
         serde_json::json!({}),
     );
 
+    // The drift pipeline's chip reads the category each start returns.
+    assert_eq!(
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_start", "content_block": { "type": "tool_use", "name": "Bash" }
+        }))),
+        Some(crate::models::ActivityCategory::Execute)
+    );
+    assert_eq!(
+        feed.on_stream_event(&stream_line(
+            serde_json::json!({ "type": "content_block_stop" })
+        )),
+        None
+    );
     let shown = feed.moved().expect("the actions show");
     let categories: Vec<_> = shown.entries.iter().map(|e| e.category).collect();
     use crate::models::ActivityCategory::*;
-    assert_eq!(categories, [Mcp, Other, Execute, Search, Read]);
+    assert_eq!(categories, [Execute, Mcp, Other, Execute, Search, Read]);
     let all = serde_json::to_string(&shown).unwrap();
     assert!(
         !all.contains("hunter2") && !all.contains("SENTINEL"),

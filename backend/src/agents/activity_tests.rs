@@ -195,3 +195,40 @@ fn a_legacy_activity_loses_its_name_and_target_when_read() {
         "{served}"
     );
 }
+
+/// Codex's reproductions: identity is tracked apart from the 15 shown.
+#[test]
+fn a_call_is_counted_once_whatever_its_updates_and_the_display_buffer() {
+    let named = |id: &str, name: &str| ToolActivityUpdate::named(Some(id.to_owned()), name);
+    // 16 calls, then an update of the first, which scrolled out of view.
+    let mut recent = RecentActivity::default();
+    for call in 0..16 {
+        assert!(recent.apply(&named(&format!("call-{call}"), "Read")));
+    }
+    assert!(
+        !recent.apply(&named("call-0", "Bash")),
+        "an evicted call is not counted again"
+    );
+    assert_eq!(recent.snapshot().entries.len(), RECENT_MAX_ENTRIES);
+    assert!(recent.snapshot().entries.iter().all(|e| e.category == Read));
+
+    // Two ids sharing their first 128 characters stay two calls.
+    let prefix = "x".repeat(128);
+    let mut recent = RecentActivity::default();
+    assert!(recent.apply(&named(&format!("{prefix}a"), "Read")));
+    assert!(recent.apply(&named(&format!("{prefix}b"), "Read")));
+    assert_eq!(recent.snapshot().entries.len(), 2);
+
+    // An id-only first update counts, as Other; its kind then refines it.
+    let mut recent = RecentActivity::default();
+    let id_only = ToolActivityUpdate::from_acp(&json!({"toolCallId": "t7"})).unwrap();
+    assert!(
+        recent.apply(&id_only),
+        "a call first seen without a kind is counted"
+    );
+    assert_eq!(recent.snapshot().entries[0].category, Other);
+    let kind = ToolActivityUpdate::from_acp(&json!({"toolCallId": "t7", "kind": "edit"})).unwrap();
+    assert!(!recent.apply(&kind));
+    assert_eq!(recent.snapshot().entries[0].category, Edit);
+    assert_eq!(recent.snapshot().entries.len(), 1);
+}

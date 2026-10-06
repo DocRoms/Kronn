@@ -1387,7 +1387,7 @@ pub async fn full_audit(
                         let mut usage_moved = false;
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
-                            recent.on_stream_event(&event);
+                            let _ = recent.on_stream_event(&event);
                             match event {
                                 // A reading that counts nothing is no reading.
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, cost_usd }

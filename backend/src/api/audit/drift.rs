@@ -662,7 +662,17 @@ pub async fn partial_audit(
                         };
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
-                            recent.on_stream_event(&event);
+                            // The chip and its count, as in the Full pipeline:
+                            // the tool's category only.
+                            if let Some(category) = recent.on_stream_event(&event) {
+                                let tool = category.as_str();
+                                if let Ok(mut t) = audit_tracker.lock() {
+                                    t.update_chips(&project_id_for_progress, None, None, Some(tool.to_owned()));
+                                }
+                                yield Event::default().event("tool_call").data(
+                                    serde_json::json!({ "step": step, "tool": tool }).to_string()
+                                );
+                            }
                             let reported_cost = match &event {
                                 runner::StreamJsonEvent::Usage { cost_usd, .. } => *cost_usd,
                                 runner::StreamJsonEvent::TerminalError(failure) => failure.cost_usd,

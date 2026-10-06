@@ -317,6 +317,7 @@ async fn start_native(
         None,
         idle,
         None,
+        None,
     )
     .await
 }
@@ -562,6 +563,7 @@ async fn a_local_tool_running_longer_than_the_idle_delay_is_not_mistaken_for_a_s
         None,
         None,
         Some(idle),
+        None,
         None,
     )
     .await

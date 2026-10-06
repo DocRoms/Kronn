@@ -230,6 +230,23 @@ Security only helps if the user can see it:
   item, with the action that unlocks it.
 - The GitHub connection shows its real scope or "scope not verified" (4.5).
 
+### 4.8 Agent text and activity: the project is the boundary (0.14.3)
+
+- **Activity views show categories only.** The audit Details list, the live
+  tool chip, the audit stream's `tool_call` and `activity` events, an HTTP
+  agent's label and a workflow step's live activity carry a fixed
+  `ActivityCategory`, a count and a time. A tool's name, arguments, targets
+  and runtime titles never reach them. Logs and traces of a tool call the model
+  made up name its category, not the name it chose.
+- **Agent text and tool metadata stay visible inside their project, by
+  design.** Transcripts, the audit stream's `chunk` events and the tool
+  records of workflow runs are readable by the project's humans and by agents
+  holding a bridge token for that project, as in rooms. Whatever an agent
+  writes there, including a secret it read, is visible to them.
+- **Cross-project access is refused.** A bridge token is scoped to its project.
+- **Planned for 0.15:** filtering agent text toward other agents of the same
+  project.
+
 ### Layer C — storage consolidation (KT-1007) — implemented in 0.14.3
 
 Operator view: [`operations/key-management.md`](../operations/key-management.md).

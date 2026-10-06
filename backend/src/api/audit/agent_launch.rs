@@ -365,16 +365,20 @@ impl StepRecentFeed {
     }
 
     /// One parsed stream-json event of a CLI agent: a tool's start counts, by
-    /// its category. Its input and the prose are never read.
-    pub(super) fn on_stream_event(&mut self, event: &runner::StreamJsonEvent) {
-        if let runner::StreamJsonEvent::ToolStart(name) = event {
-            self.calls += 1;
-            self.local
-                .apply(&crate::agents::activity::ToolActivityUpdate::named(
-                    Some(self.calls.to_string()),
-                    name,
-                ));
-        }
+    /// its category, which is returned for the chip. Its input and the prose
+    /// are never read.
+    pub(super) fn on_stream_event(
+        &mut self,
+        event: &runner::StreamJsonEvent,
+    ) -> Option<crate::models::ActivityCategory> {
+        let runner::StreamJsonEvent::ToolStart(name) = event else {
+            return None;
+        };
+        self.calls += 1;
+        let update =
+            crate::agents::activity::ToolActivityUpdate::named(Some(self.calls.to_string()), name);
+        self.local.apply(&update);
+        update.category()
     }
 
     /// The current snapshot when it changed since the last call.

@@ -6,7 +6,8 @@
 //! arguments, targets and titles are never carried: any string an agent
 //! controls can hold a secret.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use serde_json::Value;
 
@@ -17,6 +18,8 @@ pub type AgentActivitySink = tokio::sync::watch::Sender<Option<AgentActivity>>;
 
 /// Entries kept by [`RecentActivity`].
 pub const RECENT_MAX_ENTRIES: usize = 15;
+/// Call ids remembered to count each call once, well past the display buffer.
+const SEEN_CALLS_MAX: usize = 4096;
 
 /// One more tool call of `category`, counted where every call passes: a
 /// reader polling the sink would miss the calls between two reads.
@@ -111,16 +114,32 @@ pub fn category_of_acp_kind(kind: &str) -> ActivityCategory {
 /// Updates carrying the same id refine one call; they never announce another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolActivityUpdate {
-    id: Option<String>,
+    /// The call id's hash: bounded whatever the runtime sends, and two ids
+    /// sharing a long prefix stay apart.
+    id: Option<u64>,
     category: Option<ActivityCategory>,
+}
+
+fn call_identity(id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl ToolActivityUpdate {
     /// A call of the tool named `raw_name` started.
     pub fn named(id: Option<String>, raw_name: &str) -> Self {
         Self {
-            id,
+            id: id.as_deref().map(call_identity),
             category: Some(category_of(raw_name)),
+        }
+    }
+
+    /// A call of a known category, as a runtime that reports kinds gives it.
+    pub fn of_category(id: Option<&str>, category: ActivityCategory) -> Self {
+        Self {
+            id: id.map(call_identity),
+            category: Some(category),
         }
     }
 
@@ -136,7 +155,7 @@ impl ToolActivityUpdate {
             .get("toolCallId")
             .or_else(|| update.get("toolCallId"))
             .and_then(Value::as_str)
-            .map(|id| id.chars().take(128).collect::<String>());
+            .map(call_identity);
         let category = call
             .get("kind")
             .and_then(Value::as_str)
@@ -151,39 +170,63 @@ impl ToolActivityUpdate {
 }
 
 /// The latest tool calls of a running agent, shown to users. In memory only.
+/// Which calls were already counted is tracked apart from the 15 shown, so a
+/// call's later update never counts it again once its entry scrolled away.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RecentActivity {
-    entries: VecDeque<(Option<String>, AuditActivityEntry)>,
+    entries: VecDeque<(Option<u64>, AuditActivityEntry)>,
+    seen: HashSet<u64>,
+    seen_order: VecDeque<u64>,
 }
 
 impl RecentActivity {
-    /// Apply one update; `true` when it announced a call not seen before.
+    /// Apply one update; `true` when it announced a call not seen before. A
+    /// call first seen without a kind counts, as `Other`.
     pub fn apply(&mut self, update: &ToolActivityUpdate) -> bool {
-        if let Some(id) = &update.id {
-            if let Some((_, entry)) = self
-                .entries
-                .iter_mut()
-                .find(|(known, _)| known.as_deref() == Some(id.as_str()))
-            {
-                if let Some(category) = update.category {
+        match update.id {
+            Some(id) if self.seen.contains(&id) => {
+                if let (Some(category), Some((_, entry))) = (
+                    update.category,
+                    self.entries
+                        .iter_mut()
+                        .find(|(known, _)| *known == Some(id)),
+                ) {
                     entry.category = category;
                 }
-                return false;
+                false
             }
-        } else if update.category.is_none() {
-            return false;
+            Some(id) => {
+                if self.seen_order.len() == SEEN_CALLS_MAX {
+                    if let Some(oldest) = self.seen_order.pop_front() {
+                        self.seen.remove(&oldest);
+                    }
+                }
+                self.seen.insert(id);
+                self.seen_order.push_back(id);
+                self.push(Some(id), update.category.unwrap_or_default());
+                true
+            }
+            None => match update.category {
+                Some(category) => {
+                    self.push(None, category);
+                    true
+                }
+                None => false,
+            },
         }
+    }
+
+    fn push(&mut self, id: Option<u64>, category: ActivityCategory) {
         if self.entries.len() == RECENT_MAX_ENTRIES {
             self.entries.pop_front();
         }
         self.entries.push_back((
-            update.id.clone(),
+            id,
             AuditActivityEntry {
-                category: update.category.unwrap_or_default(),
+                category,
                 at: chrono::Utc::now(),
             },
         ));
-        true
     }
 
     /// Newest first.

@@ -248,6 +248,8 @@ enum CodexLineEvent {
         name: String,
         trace: Option<crate::agents::tool_trace::ToolTraceUpdate>,
         ended: bool,
+        /// The item's start or end, by category for the live views.
+        activity: crate::agents::activity::ToolActivityUpdate,
     },
     Usage {
         input_tokens: u64,
@@ -295,6 +297,18 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                 | "web_search"),
             ) => {
                 let trace = crate::agents::tool_trace::from_codex(&json["item"]);
+                use crate::models::ActivityCategory;
+                let category = match kind {
+                    "command_execution" => ActivityCategory::Execute,
+                    "file_change" => ActivityCategory::Edit,
+                    "mcp_tool_call" => ActivityCategory::Mcp,
+                    "web_search" => ActivityCategory::Web,
+                    _ => ActivityCategory::Other,
+                };
+                let activity = crate::agents::activity::ToolActivityUpdate::of_category(
+                    json.pointer("/item/id").and_then(Value::as_str),
+                    category,
+                );
                 CodexLineEvent::ToolCall {
                     name: trace
                         .as_ref()
@@ -302,6 +316,7 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                         .unwrap_or_else(|| kind.to_owned()),
                     trace,
                     ended: json["type"] == "item.completed",
+                    activity,
                 }
             }
             _ => CodexLineEvent::Skip,
@@ -527,7 +542,13 @@ impl AcpTransport for CodexAcpAdapter {
                     CodexLineEvent::Text(text) => {
                         let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                     }
-                    CodexLineEvent::ToolCall { name, trace, ended } => {
+                    CodexLineEvent::ToolCall {
+                        name,
+                        trace,
+                        ended,
+                        activity,
+                    } => {
+                        let _ = events.send(AcpSessionEvent::ToolActivity(activity)).await;
                         let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
                         if let Some(trace) = trace {
                             let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
@@ -608,6 +629,35 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    /// R24 — a Codex item reaches the live views as its category, once per
+    /// item id from its start to its end, never by its command or tool name.
+    #[test]
+    fn a_codex_item_feeds_the_live_views_by_category_once() {
+        use crate::models::ActivityCategory;
+        let lines = [
+            r#"{"type":"item.started","item":{"id":"i9","type":"command_execution","command":"mysql -phunter2","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i9","type":"command_execution","command":"mysql -phunter2","aggregated_output":"","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.started","item":{"id":"i10","type":"mcp_tool_call","server":"hunter2","tool":"hunter2_tool","status":"in_progress"}}"#,
+        ];
+        let mut recent = crate::agents::activity::RecentActivity::default();
+        let mut counted = 0;
+        for line in lines {
+            let CodexLineEvent::ToolCall { activity, .. } = parse_codex_line(line) else {
+                panic!("a tool item: {line}");
+            };
+            assert!(!format!("{activity:?}").contains("hunter2"));
+            counted += usize::from(recent.apply(&activity));
+        }
+        assert_eq!(counted, 2, "one count per item id");
+        let shown: Vec<_> = recent
+            .snapshot()
+            .entries
+            .iter()
+            .map(|e| e.category)
+            .collect();
+        assert_eq!(shown, [ActivityCategory::Mcp, ActivityCategory::Execute]);
     }
 
     #[test]

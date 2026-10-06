@@ -1798,7 +1798,7 @@ impl ToolActivityProbe {
     /// One HTTP tool call, recorded as the tool loop records it.
     #[cfg(test)]
     pub fn record_http_call(&self, call: &crate::agents::tools::ToolCall) {
-        record_http_tool_call(&self.0, call);
+        record_http_tool_call(&self.0, None, call);
     }
 
     /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
@@ -1824,7 +1824,11 @@ impl ToolActivityProbe {
 
 /// An HTTP agent's tool call on its run: the last tool, the count and the
 /// recent actions, read from outside the run by `ToolActivityProbe`.
-fn record_http_tool_call(usage: &Mutex<AgentUsage>, call: &crate::agents::tools::ToolCall) {
+fn record_http_tool_call(
+    usage: &Mutex<AgentUsage>,
+    activity: Option<&super::activity::AgentActivitySink>,
+    call: &crate::agents::tools::ToolCall,
+) {
     // Its category only: the name and arguments are the model's own strings.
     let update = super::activity::ToolActivityUpdate::named(None, &call.name);
     if let Ok(mut usage) = usage.lock() {
@@ -1832,6 +1836,8 @@ fn record_http_tool_call(usage: &Mutex<AgentUsage>, call: &crate::agents::tools:
         usage.tool_calls = usage.tool_calls.saturating_add(1);
         usage.recent.apply(&update);
     }
+    // The launch's own sink: a workflow step stores it as its live activity.
+    super::activity::tool_started(activity, update.category().unwrap_or_default());
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -4024,6 +4030,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.provenance.clone(),
             config.idle_timeout,
             config.context_images,
+            config.activity,
         )
         .await;
     }
@@ -5050,8 +5057,11 @@ async fn run_acp_session(
                             .lock()
                             .map(|mut usage| usage.recent.apply(&update))
                             .unwrap_or(false);
-                        if let (true, Some(category)) = (started, update.category()) {
-                            super::activity::tool_started(activity.as_ref(), category);
+                        if started {
+                            super::activity::tool_started(
+                                activity.as_ref(),
+                                update.category().unwrap_or_default(),
+                            );
                         }
                     }
                     AcpSessionEvent::ToolTrace(trace) => {
@@ -7445,6 +7455,31 @@ fn push_http_turn_trace(stderr: &Arc<Mutex<Vec<String>>>, trace: HttpTurnTrace) 
     }
 }
 
+/// A tool name for logs and traces: the run's own declared name as is, a name
+/// the model made up only as its category.
+fn logged_tool_name(name: &str, declared: &std::collections::HashSet<String>) -> String {
+    if declared.contains(name) {
+        name.to_owned()
+    } else {
+        format!("undeclared {}", super::activity::category_of(name).as_str())
+    }
+}
+
+/// A refusal as its trace line may show it: an undeclared call keeps neither
+/// its name nor its arguments.
+fn logged_refusal(
+    refusal: &crate::agents::tools::ToolOutcome,
+    declared: &std::collections::HashSet<String>,
+) -> crate::agents::tools::ToolOutcome {
+    if declared.contains(&refusal.call.name) {
+        return refusal.clone();
+    }
+    let mut logged = refusal.clone();
+    logged.call.name = logged_tool_name(&refusal.call.name, declared);
+    logged.call.arguments = serde_json::json!({});
+    logged
+}
+
 fn push_http_tool_exec_trace(stderr: &Arc<Mutex<Vec<String>>>, turn: u32, name: &str, ok: bool) {
     let trace = HttpToolExecTrace {
         version: 1,
@@ -8179,6 +8214,7 @@ async fn start_ollama_http(
         provenance,
         None,
         None,
+        None,
     )
     .await
 }
@@ -8220,6 +8256,7 @@ async fn start_ollama_http_with_idle(
     provenance: Option<AgentProvenanceCapture>,
     idle_timeout: Option<Duration>,
     images: Option<&super::vision::ContextImages>,
+    activity: Option<super::activity::AgentActivitySink>,
 ) -> Result<AgentProcess, String> {
     let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
@@ -9106,7 +9143,13 @@ async fn start_ollama_http_with_idle(
                     requested_tools: calls
                         .iter()
                         .take(MAX_HTTP_TELEMETRY_TOOLS_PER_TURN)
-                        .map(|call| bounded_http_tool_name(&call.name))
+                        // A made-up name is traced by its category only.
+                        .map(|call| {
+                            bounded_http_tool_name(&logged_tool_name(
+                                &call.name,
+                                &declared_tools_for_turn,
+                            ))
+                        })
                         .collect(),
                 },
             );
@@ -9931,7 +9974,9 @@ async fn start_ollama_http_with_idle(
             let mut repair_edit_succeeded = false;
             for call in &calls {
                 if round_ceiling_reached {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -9946,7 +9991,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                     }
                     results.push(refusal);
                     budget_refusals += 1;
@@ -9961,10 +10009,14 @@ async fn start_ollama_http_with_idle(
                     {
                         refused_finalization_read_this_turn = true;
                     }
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
+                    // The model chose this name: only its category is logged.
+                    let logged = logged_tool_name(&call.name, &declared_tools_for_turn);
                     tracing::warn!(
                         target: "kronn::agent::tools",
-                        tool = %call.name,
+                        tool = %logged,
                         turn,
                         "undeclared tool call refused before executor"
                     );
@@ -9980,10 +10032,12 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
-                            "{backend} refused undeclared tool `{}` at turn {turn}; it was absent from the request catalogue and the executor was not called",
-                            call.name
+                            "{backend} refused an undeclared tool ({logged}) at turn {turn}; it was absent from the request catalogue and the executor was not called"
                         ));
                     }
                     results.push(refusal);
@@ -10003,7 +10057,9 @@ async fn start_ollama_http_with_idle(
                         if worker_repair_stage_for_turn == WorkerRepairStage::Edit {
                             failed_edit_this_turn = true;
                         }
-                        *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                        *refusals_per_tool
+                            .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                            .or_insert(0) += 1;
                         let refusal = crate::agents::tools::ToolOutcome {
                             call: call.clone(),
                             ok: false,
@@ -10013,7 +10069,10 @@ async fn start_ollama_http_with_idle(
                             }),
                         };
                         if let Ok(mut se) = stderr_clone.lock() {
-                            se.push(trace_line(&refusal));
+                            se.push(trace_line(&logged_refusal(
+                                &refusal,
+                                &declared_tools_for_turn,
+                            )));
                             se.push(format!(
                                 "{backend} refused a prelocalized {} call outside its frozen target at turn {turn}",
                                 worker_repair_stage_for_turn.label()
@@ -10040,7 +10099,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused syntax repair outside its preconstructed target at turn {turn}"
                         ));
@@ -10057,7 +10119,9 @@ async fn start_ollama_http_with_idle(
                     && worker_finalization_read_calls >= WORKER_FINALIZATION_READ_FILE_CALLS
                 {
                     refused_finalization_read_this_turn = true;
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10070,7 +10134,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused finalization read_file beyond the {}-call refresh budget at turn {turn}",
                             WORKER_FINALIZATION_READ_FILE_CALLS
@@ -10100,7 +10167,9 @@ async fn start_ollama_http_with_idle(
                     && worker_finalization_git_inspection_calls
                         >= WORKER_FINALIZATION_GIT_INSPECTION_CALLS
                 {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10113,7 +10182,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused finalization `{}` beyond the {}-call combined Git inspection budget at turn {turn}",
                             call.name, WORKER_FINALIZATION_GIT_INSPECTION_CALLS
@@ -10149,7 +10221,9 @@ async fn start_ollama_http_with_idle(
                 *used += 1;
                 let call_index = *used;
                 if open_tool_circuits.contains(&call.name) {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10168,7 +10242,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                     }
                     results.push(refusal);
                     budget_refusals += 1;
@@ -10186,7 +10263,9 @@ async fn start_ollama_http_with_idle(
                     )
                 };
                 if *used > tool_limit {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     withdrawn_tools.insert(call.name.clone());
                     if ceiling_allowance.ask_on_ceiling
                         || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
@@ -10227,7 +10306,9 @@ async fn start_ollama_http_with_idle(
                         let repeats = repeated_calls.entry(signature.clone()).or_insert(0);
                         *repeats += 1;
                         if *repeats > 1 {
-                            *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                            *refusals_per_tool
+                                .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                                .or_insert(0) += 1;
                             tracing::warn!(
                                 target: "kronn::agent::tools",
                                 tool = %call.name, turn, repeats = *repeats,
@@ -10545,7 +10626,7 @@ async fn start_ollama_http_with_idle(
                     tool = %call.name, ok = outcome.ok, turn,
                     "HTTP agent tool call"
                 );
-                record_http_tool_call(&task_usage, call);
+                record_http_tool_call(&task_usage, activity.as_ref(), call);
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }

@@ -30,8 +30,14 @@ Release notes for 0.9.3 and earlier are available in the
   or runtime. The same categories replace the tool name and target in the live
   tool chip, the audit stream's events, an HTTP agent's label and a workflow
   step's live activity; an activity a workflow run stored before keeps its
-  count only when read. Agents' bridge tokens get the counts, not the list.
-  The open state is remembered per project for the session.
+  count only when read, in workflow runs and their shared-run projections.
+  Agents' bridge tokens get the counts, not the list. Logs and traces of a
+  tool call the model made up name its category, never the name it chose. The
+  open state is remembered per project for the session. Known limitation: the
+  boundary is the project. Agent text and tool metadata in transcripts, audit
+  streams and run records stay visible to the project's humans and to agents
+  holding a bridge token for that project; filtering them toward other agents
+  of the same project is planned for 0.15.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).
