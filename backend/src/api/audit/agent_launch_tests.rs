@@ -1598,12 +1598,12 @@ fn stream_line(event: serde_json::Value) -> runner::StreamJsonEvent {
     )
 }
 
-/// A CLI's stream-json feeds the details panel: each tool with its short
-/// target, newest first, and the last line of prose; a Bash command's secret
-/// and a written file's contents never reach it.
+/// A CLI's stream-json feeds the details panel: each tool with a target built
+/// from its input, newest first. Prose, a command's arguments and a written
+/// file's contents never reach it.
 #[test]
 fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
-    let mut feed = StepRecentFeed::new(None, false);
+    let mut feed = StepRecentFeed::new(None);
     assert_eq!(
         feed.moved(),
         None,
@@ -1624,8 +1624,13 @@ fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
             serde_json::json!({ "type": "content_block_stop" }),
         ));
     };
+    // 600 characters and more of prose, a password and a bearer token in it.
+    let prose = format!(
+        "{} the db password: hunter2 and Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 then",
+        "filler ".repeat(100)
+    );
     feed.on_stream_event(&stream_line(serde_json::json!({
-        "type": "content_block_delta", "delta": { "type": "text_delta", "text": "Looking at the docs first." }
+        "type": "content_block_delta", "delta": { "type": "text_delta", "text": prose }
     })));
     tool(
         &mut feed,
@@ -1640,19 +1645,18 @@ fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
     tool(
         &mut feed,
         "Bash",
-        serde_json::json!({ "command": "curl -H 'x: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' https://api.example.com/v1?key=ghp_abcdefghijklmnopqrstuvwxyz0123456789 && npm test" }),
+        serde_json::json!({ "command": "curl -u admin:hunter2 -H 'x: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' https://api.example.com/v1?key=ghp_abcdefghijklmnopqrstuvwxyz0123456789 && npm test" }),
     );
     tool(
         &mut feed,
         "Write",
         serde_json::json!({ "file_path": "docs/AGENTS.md", "content": "TOP SECRET CONTENT" }),
     );
-    feed.on_stream_event(&stream_line(serde_json::json!({
-        "type": "content_block_delta", "delta": { "type": "text_delta", "text": "Now checking the tests" }
-    })));
-    feed.on_stream_event(&stream_line(
-        serde_json::json!({ "type": "content_block_stop" }),
-    ));
+    for _ in 0..50 {
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_delta", "delta": { "type": "text_delta", "text": "w " }
+        })));
+    }
 
     let shown = feed.moved().expect("the actions show");
     let entries: Vec<_> = shown
@@ -1660,36 +1664,62 @@ fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
         .iter()
         .map(|e| (e.tool.as_str(), e.target.as_deref().unwrap_or("")))
         .collect();
-    assert_eq!(entries[0], ("Write", "docs/AGENTS.md"));
-    assert_eq!(entries[2], ("Grep", "\"useAuth\" src/"));
-    assert_eq!(entries[3], ("Read", "docs/architecture.md"));
-    let bash = entries[1].1;
-    assert!(bash.starts_with("curl"), "{bash}");
-    assert!(bash.contains("https://api.example.com/v1"), "{bash}");
+    assert_eq!(
+        entries,
+        [
+            ("Write", "docs/AGENTS.md"),
+            ("Bash", "curl && npm"),
+            ("Grep", "in src/"),
+            ("Read", "docs/architecture.md"),
+        ]
+    );
     let all = serde_json::to_string(&shown).unwrap();
-    for leaked in ["abcdefghijklmnopqrstuvwxyz0123", "TOP SECRET", "key="] {
+    for leaked in [
+        "hunter2",
+        "abcdefghij",
+        "TOP SECRET",
+        "useAuth",
+        "filler",
+        "Bearer",
+        "admin",
+    ] {
         assert!(!all.contains(leaked), "{leaked} leaked: {all}");
     }
-    assert_eq!(shown.thought.as_deref(), Some("Now checking the tests"));
     assert_eq!(feed.moved(), None, "unchanged, nothing new to send");
 }
 
-/// An HTTP agent's run feeds the same panel through its probe.
+/// An HTTP agent's run feeds the same panel through its probe, with the same
+/// rules, recorded the way its tool loop records each call.
 #[test]
 fn an_http_run_feeds_the_recent_actions_through_its_probe() {
     let http = runner::ToolActivityProbe::scripted();
-    let mut feed = StepRecentFeed::new(Some(http.clone()), true);
+    let mut feed = StepRecentFeed::new(Some(http.clone()));
     assert_eq!(feed.moved(), None);
     for turn in 0..20 {
-        http.record_turn(1, 1, Some(&format!("read_file{turn}")));
+        http.record_http_call(&ToolCall {
+            id: format!("c{turn}"),
+            name: "read_file".into(),
+            arguments: json!({ "path": format!("src/{turn}.rs") }),
+        });
     }
-    feed.on_text_line("Reading the ");
-    feed.on_text_line("manifests\n");
+    http.record_http_call(&ToolCall {
+        id: "bash".into(),
+        name: "run_command".into(),
+        arguments: json!({ "command": "mysql -u root -phunter2 mydb" }),
+    });
     let shown = feed.moved().expect("the run's calls show");
     assert_eq!(
         shown.entries.len(),
         crate::agents::activity::RECENT_MAX_ENTRIES
     );
-    assert_eq!(shown.entries[0].tool, "read_file19");
-    assert_eq!(shown.thought.as_deref(), Some("Reading the manifests"));
+    assert_eq!(
+        (
+            shown.entries[0].tool.as_str(),
+            shown.entries[0].target.as_deref()
+        ),
+        ("run_command", Some("mysql"))
+    );
+    assert_eq!(shown.entries[1].target.as_deref(), Some("src/19.rs"));
+    assert_eq!(http.read(), Some(("run_command · mysql".to_string(), 21)));
+    assert!(!serde_json::to_string(&shown).unwrap().contains("hunter2"));
 }

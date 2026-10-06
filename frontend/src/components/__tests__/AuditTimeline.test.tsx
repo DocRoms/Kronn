@@ -418,6 +418,18 @@ describe('AuditTimeline', () => {
     expect(total).toHaveTextContent(/1/);
   });
 
+  it('says the cache split is unknown for an agent pricing does not know', async () => {
+    mockTimeline([{ id: 'run-1' }], [
+      step(1, { step_tokens: 1_500, breakdown: { input_as_reported: 1_000, output: 500, cache_read: 300 } }),
+    ]);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expandAll(container);
+    const figure = await screen.findByTestId('audit-timeline-step-tokens-1');
+    expect(figure.getAttribute('title')).toMatch(/inconnue|unknown/);
+    expect(figure.getAttribute('title')).not.toMatch(/total/i);
+  });
+
   it('shows an estimated cost apart from a reported one, and why a cost is unknown', async () => {
     const steps = [
       step(1, { cost_usd_micros: 420_000 }),

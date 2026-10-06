@@ -609,7 +609,6 @@ pub async fn partial_audit(
                     });
                     let mut recent = super::agent_launch::StepRecentFeed::new(
                         (!is_stream_json).then(|| process.tool_activity_probe()),
-                        process.raw_token_stream(),
                     );
                     let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
                     activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -661,9 +660,6 @@ pub async fn partial_audit(
                                 continue;
                             }
                         };
-                        if !is_stream_json {
-                            recent.on_text_line(&line);
-                        }
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
                             recent.on_stream_event(&event);
@@ -687,6 +683,7 @@ pub async fn partial_audit(
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        accounting: Default::default(),
                                     }.inclusive_for(&agent_type);
                                 }
                             }

@@ -78,8 +78,6 @@
 .audit-tl-activity-toggle:focus-visible { outline: 2px solid var(--kr-accent); outline-offset: 2px; border-radius: var(--kr-r-xs); }
 .audit-tl-activity-body { display: flex; flex-direction: column; gap: var(--kr-sp-2); padding: var(--kr-sp-3) var(--kr-sp-4);
   border: 1px solid var(--kr-border-subtle); border-radius: var(--kr-r-md); background: var(--kr-bg-subtle); min-width: 0; }
-.audit-tl-activity-thought { margin: 0; font-size: var(--kr-fs-sm); font-style: italic; color: var(--kr-text-secondary);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audit-tl-activity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--kr-sp-1); }
 .audit-tl-activity-list li { display: flex; justify-content: space-between; gap: var(--kr-sp-4); align-items: baseline; min-width: 0; }
 .audit-tl-activity-action { font-family: var(--kr-font-mono); font-size: var(--kr-fs-sm); min-width: 0;

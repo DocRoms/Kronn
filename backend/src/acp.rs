@@ -474,8 +474,10 @@ pub enum AcpSessionEvent {
     /// inactivity delay; this is what hands the clock back to the model the
     /// moment the tool is actually done.
     ToolCallEnded,
-    /// The informative input of the latest `ToolCall`, once that input is complete.
-    ToolTarget(String),
+    /// A tool call's start or target for the live views, built from its
+    /// structured fields only (`agents::activity`). Updates carrying the same
+    /// call id refine one call; they never announce another.
+    ToolActivity(crate::agents::activity::ToolActivityUpdate),
     /// Correlated tool metadata for the durable transcript, redacted and bounded.
     ToolTrace(crate::agents::tool_trace::ToolTraceUpdate),
     Usage {
@@ -1474,7 +1476,8 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                 // is still running: the watchdog must hand the clock back to
                 // the model, not restart the tool's own wider bound again.
                 let status = update.get("status").and_then(Value::as_str);
-                if matches!(status, Some("completed" | "failed" | "cancelled")) {
+                let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
+                if terminal {
                     events.push(AcpSessionEvent::ToolCallEnded);
                 } else {
                     events.push(AcpSessionEvent::ToolCall {
@@ -1484,6 +1487,12 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                             .unwrap_or("tool")
                             .to_owned(),
                     });
+                }
+                // A terminal update refines a call; it never announces one.
+                if let Some(activity) = crate::agents::activity::acp_tool_update(update)
+                    .filter(|activity| !terminal || activity.carries_detail())
+                {
+                    events.push(AcpSessionEvent::ToolActivity(activity));
                 }
                 if let Some(trace) = crate::agents::tool_trace::from_acp(update) {
                     events.push(AcpSessionEvent::ToolTrace(trace));
@@ -3132,6 +3141,7 @@ mod tests {
             ],
             "vibe-session",
         );
+        let events = without_activity(events);
         assert_eq!(
             events,
             vec![
@@ -3154,6 +3164,52 @@ mod tests {
         );
     }
 
+    /// Generic ACP: the live-view activity is built from the kind and the raw
+    /// input; the title, often the command line itself, never reaches it.
+    #[test]
+    fn a_generic_tool_call_feeds_the_live_views_from_its_structured_fields() {
+        let events = events_from_notifications(
+            vec![
+                json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "call-9", "kind": "execute",
+                    "title": "PGPASSWORD=hunter2 psql -h db", "status": "pending",
+                    "rawInput": {"command": "PGPASSWORD=hunter2 psql -h db"}
+                }}}),
+                json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-9",
+                    "title": "PGPASSWORD=hunter2 psql -h db...", "status": "in_progress"
+                }}}),
+            ],
+            "s1",
+        );
+        let activity: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AcpSessionEvent::ToolActivity(update) => Some(update.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(activity.len(), 2, "{events:?}");
+        let mut recent = crate::agents::activity::RecentActivity::default();
+        let started: Vec<bool> = activity.iter().map(|update| recent.apply(update)).collect();
+        assert_eq!(started, [true, false], "one call, one entry");
+        let shown = recent.snapshot();
+        assert_eq!(shown.entries[0].tool, "Execute");
+        assert_eq!(
+            shown.entries[0].target.as_deref(),
+            Some("PGPASSWORD=***REDACTED*** psql")
+        );
+        assert!(!format!("{activity:?}").contains("hunter2"));
+    }
+
+    /// The events other than the live-view activity, which its own tests pin.
+    fn without_activity(events: Vec<AcpSessionEvent>) -> Vec<AcpSessionEvent> {
+        events
+            .into_iter()
+            .filter(|event| !matches!(event, AcpSessionEvent::ToolActivity(_)))
+            .collect()
+    }
+
     /// KT-932 follow-up — a `tool_call_update` reaching a terminal status is
     /// the tool ending, a distinct event from every other update on it (which
     /// still just prove the tool call is alive).
@@ -3166,6 +3222,7 @@ mod tests {
                 }}})],
                 "s1",
             );
+            let events = without_activity(events);
             assert_eq!(
                 events,
                 vec![
@@ -3189,6 +3246,7 @@ mod tests {
                 }}})],
                 "s1",
             );
+            let events = without_activity(events);
             assert_eq!(
                 events,
                 vec![
@@ -3214,6 +3272,7 @@ mod tests {
             }}})],
             "s1",
         );
+        let events = without_activity(events);
         assert_eq!(
             events,
             vec![

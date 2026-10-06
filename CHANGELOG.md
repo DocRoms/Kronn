@@ -24,11 +24,14 @@ Release notes for 0.9.3 and earlier are available in the
   fine-grained token when the gh token reaches every repository. Turning it
   off applies to new launches; agents already running keep what they received.
 - A running audit step now has a "Details" toggle listing the agent's latest
-  actions, newest first, with their age and its last line of prose: the tool
-  and a short path, pattern or truncated command, never file contents, other
-  arguments, environment values or secrets (redacted before display). It works
-  for CLI, HTTP and ACP agents in Full and drift audits, is kept in memory
-  only, and the open state is remembered per project for the session.
+  tool calls, newest first, with their age. What is shown is built from each
+  call's structured input, never copied from free text: a shell command shows
+  only its program names (`curl | jq`, `PGPASSWORD=… psql`, `cat > ~/.pgpass`),
+  a URL its scheme and host, a file tool its path, a search where it looks.
+  Model prose and runtime titles are never shown, a progress update replaces
+  its call's entry, and the panel is kept in memory only and withheld from
+  agents' bridge tokens. It works for CLI, HTTP and ACP agents in Full and
+  drift audits; the open state is remembered per project for the session.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).
@@ -537,13 +540,16 @@ Release notes for 0.9.3 and earlier are available in the
   timeline shows a step whose agent reported nothing as unknown instead of
   hiding it.
 - An audit step's token figure is now its fresh traffic, uncached input plus
-  output, counted the same way for Claude, Codex and the OpenAI-compatible
-  providers; hovering it lists uncached input, output, cache read, cache write
-  and the total with cache. The live counter, the run's total and the audit
-  recap use the same figure. A step whose agent reported no cost gets an
-  estimate from Kronn's rate table for the model its run served (shown "≈",
-  with the reason when even that is impossible), and one estimated step makes
-  the run's total estimated.
+  output, for the agents whose cache accounting Kronn's pricing knows (Claude,
+  Codex); for the others it stays input plus output as reported, and the hover
+  says the cache split is unknown. Hovering lists uncached input, output,
+  cache read, cache write and the total with cache. The live counter, the
+  run's total and the audit recap use the same figure; rows recorded before
+  this keep the figure they were stored with, without a breakdown. A step whose
+  agent reported no cost gets an estimate from Kronn's rate table for the model
+  its run served (shown "≈"), only where that split is known; otherwise the
+  reason is shown in the user's language. One estimated step makes the run's
+  total estimated.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its

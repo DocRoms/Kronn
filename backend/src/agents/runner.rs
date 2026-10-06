@@ -1795,6 +1795,12 @@ impl ToolActivityProbe {
         })
     }
 
+    /// One HTTP tool call, recorded as the tool loop records it.
+    #[cfg(test)]
+    pub fn record_http_call(&self, call: &crate::agents::tools::ToolCall) {
+        record_http_tool_call(&self.0, call);
+    }
+
     /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
     #[cfg(test)]
     pub fn scripted() -> Self {
@@ -1810,24 +1816,27 @@ impl ToolActivityProbe {
         if let Some(tool) = tool {
             usage.last_tool = Some(tool.to_owned());
             usage.tool_calls = usage.tool_calls.saturating_add(1);
-            usage.recent.tool_started(tool);
+            usage
+                .recent
+                .apply(&super::activity::ToolActivityUpdate::call(None, tool, None));
         }
     }
 }
 
-/// `read_file · src/main.rs`: the tool, and the path it works on when it has one.
-fn tool_activity_label(call: &crate::agents::tools::ToolCall) -> String {
-    match ["path", "pattern", "query"]
-        .iter()
-        .find_map(|key| call.arguments.get(*key).and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(target) => {
-            let target: String = target.chars().take(80).collect();
-            format!("{} · {target}", call.name)
-        }
+/// An HTTP agent's tool call on its run: the last tool, the count and the
+/// recent actions, read from outside the run by `ToolActivityProbe`.
+fn record_http_tool_call(usage: &Mutex<AgentUsage>, call: &crate::agents::tools::ToolCall) {
+    // Built outside the lock: the target's parse is bounded but not free.
+    let target = super::activity::input_target(&call.arguments);
+    let label = match &target {
+        Some(target) => format!("{} · {}", call.name, target.as_str()),
         None => call.name.clone(),
+    };
+    let update = super::activity::ToolActivityUpdate::call(None, &call.name, target);
+    if let Ok(mut usage) = usage.lock() {
+        usage.last_tool = Some(label);
+        usage.tool_calls = usage.tool_calls.saturating_add(1);
+        usage.recent.apply(&update);
     }
 }
 
@@ -5032,10 +5041,6 @@ async fn run_acp_session(
                         if let Ok(mut capture) = forwarder_stderr.lock() {
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
-                        super::activity::tool_started(activity.as_ref(), &name);
-                        if let Ok(mut usage) = task_usage.lock() {
-                            usage.recent.tool_started(&name);
-                        }
                         // KT-932 follow-up — a tool call is open: measure
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
@@ -5045,11 +5050,18 @@ async fn run_acp_session(
                         // Back to watching the model itself.
                         forwarder_idle.end_tool();
                     }
-                    AcpSessionEvent::ToolTarget(target) => {
-                        if let Ok(mut usage) = task_usage.lock() {
-                            usage.recent.tool_target(&target);
+                    AcpSessionEvent::ToolActivity(update) => {
+                        // Counted once per call, whatever its progress updates.
+                        let started = task_usage
+                            .lock()
+                            .map(|mut usage| usage.recent.apply(&update))
+                            .unwrap_or(false);
+                        if let (true, Some(tool)) = (started, update.tool()) {
+                            super::activity::tool_started(activity.as_ref(), tool);
                         }
-                        super::activity::tool_target(activity.as_ref(), target);
+                        if let Some(target) = update.target_text() {
+                            super::activity::tool_target(activity.as_ref(), target.to_owned());
+                        }
                     }
                     AcpSessionEvent::ToolTrace(trace) => {
                         if let Ok(mut capture) = forwarder_stderr.lock() {
@@ -10542,12 +10554,7 @@ async fn start_ollama_http_with_idle(
                     tool = %call.name, ok = outcome.ok, turn,
                     "HTTP agent tool call"
                 );
-                if let Ok(mut usage) = task_usage.lock() {
-                    usage.last_tool = Some(tool_activity_label(call));
-                    usage.tool_calls = usage.tool_calls.saturating_add(1);
-                    usage.recent.tool_started(&call.name);
-                    usage.recent.tool_input(&call.arguments);
-                }
+                record_http_tool_call(&task_usage, call);
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }

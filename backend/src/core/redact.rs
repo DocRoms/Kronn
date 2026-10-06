@@ -250,6 +250,34 @@ const RAW_PATTERNS: &[(&str, &str, Gate)] = &[
         "${1}_${2}_***REDACTED***",
         Gate::Contains(&["rk_live_", "rk_test_", "pk_live_", "pk_test_"]),
     ),
+    // Stripe secret keys.
+    (
+        r"\bsk_(live|test)_[A-Za-z0-9]{16,}\b",
+        "sk_${1}_***REDACTED***",
+        Gate::Contains(&["sk_live_", "sk_test_"]),
+    ),
+    // GitLab personal tokens, npm and Hugging Face tokens.
+    (
+        r"\bglpat-[A-Za-z0-9_-]{16,}",
+        "glpat-***REDACTED***",
+        Gate::Contains(&["glpat-"]),
+    ),
+    (
+        r"\bnpm_[A-Za-z0-9]{30,}\b",
+        "npm_***REDACTED***",
+        Gate::Contains(&["npm_"]),
+    ),
+    (
+        r"\bhf_[A-Za-z0-9]{30,}\b",
+        "hf_***REDACTED***",
+        Gate::Contains(&["hf_"]),
+    ),
+    // Kronn's own bridge tokens (`core::bridge_token`).
+    (
+        r"\bkbt_[A-Za-z0-9]{16,}\b",
+        "kbt_***REDACTED***",
+        Gate::Contains(&["kbt_"]),
+    ),
 ];
 
 static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
@@ -1029,6 +1057,33 @@ mod tests {
     }
 
     #[test]
+    fn redacts_the_r24_vendor_tokens() {
+        for (raw, secret) in [
+            (
+                "git clone https://oauth2:glpat-AbCdEfGhIjKlMnOpQrSt@gitlab.com/o/r.git",
+                "AbCdEfGh",
+            ),
+            ("echo sk_live_abcdefghijklmnopqrstuvwx", "abcdefghijklmnop"),
+            (
+                "token npm_abcdefghijklmnopqrstuvwxyz0123456789",
+                "abcdefghijklmnop",
+            ),
+            (
+                "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+                "abcdefghijklmnop",
+            ),
+            (
+                "KRONN kbt_0123456789abcdef0123456789abcdef",
+                "0123456789abcdef",
+            ),
+        ] {
+            let out = redact_secrets(raw);
+            assert!(!out.contains(secret), "{raw:?} -> {out:?}");
+            assert_eq!(redact_secrets(&out), out, "idempotent on {raw:?}");
+        }
+    }
+
+    #[test]
     fn gates_admit_every_shape_their_pattern_matches() {
         for sample in [
             "Authorization: Bearer abc123def456ghi789jkl",
@@ -1048,6 +1103,12 @@ mod tests {
             "AKIAABCDEFGHIJKLMNOP",
             "rk_live_abcdefghijklmnopqrstuv",
             "pk_test_abcdefghijklmnopqrstuv",
+            "https://oauth2:glpat-AbCdEfGhIjKlMnOpQrSt@gitlab.com/o/r.git",
+            "sk_live_abcdefghijklmnopqrstuvwx",
+            "glpat-AbCdEfGhIjKlMnOpQrSt",
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "kbt_0123456789abcdef0123456789abcdef",
             "APP_SECRET=61cc954cdeadbeef0123456789abcdef",
             "iris_token: Ab3xZ9Qw7Lm2Ns5Pt8Rv",
             "session_token=\"Ab3xZ9Qw7Lm2Ns5Pt8Rv\"",

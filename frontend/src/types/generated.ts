@@ -631,8 +631,8 @@ path: string,
 format?: string | null, };
 
 /**
- * One tool call: its name and a short path, pattern or truncated command,
- * never its other arguments.
+ * One tool call: its name and a target built from its structured input
+ * (`agents::activity`): program names, a path, a URL's host.
  */
 export type AuditActivityEntry = { tool: string, target?: string, at: string, };
 
@@ -761,9 +761,10 @@ step_breakdown?: AuditTokenBreakdown, };
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
 
 /**
- * The running step's latest actions, newest first, and its last line of prose.
+ * The running step's latest tool calls, newest first. Model prose is never
+ * included: it can quote anything the agent read.
  */
-export type AuditRecentActivity = { entries: Array<AuditActivityEntry>, thought?: string, };
+export type AuditRecentActivity = { entries: Array<AuditActivityEntry>, };
 
 /**
  * Recommendation emitted by the completion-time cluster detector. Lives in
@@ -909,7 +910,8 @@ estimated_cost_usd_micros?: number,
  */
 cost_unknown_reason?: string,
 /**
- * The headline's parts, computed on read.
+ * The headline's parts, computed on read. Absent for a row stored before
+ * its accounting was recorded: its headline is then the one it was stored with.
  */
 breakdown?: AuditTokenBreakdown, };
 
@@ -952,11 +954,13 @@ finished: boolean, archived: boolean, };
 export type AuditTodo = { file: string, line: number, text: string, };
 
 /**
- * What a step's headline (`step_tokens`, the fresh traffic: uncached input
- * plus output) is made of, and the vendor's full traffic with the cache.
- * Each part is absent when unknown, never 0.
+ * What a step's headline (`step_tokens`) is made of. When the cache split is
+ * known (`uncached_input` set), the headline is the fresh traffic — uncached
+ * input plus output — and `total_with_cache` the vendor's full traffic. When
+ * it is not, the headline is `input_as_reported` plus output. Each part is
+ * absent when unknown, never 0.
  */
-export type AuditTokenBreakdown = { uncached_input?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
+export type AuditTokenBreakdown = { uncached_input?: number, input_as_reported?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.

@@ -13,7 +13,7 @@ import { projects as projectsApi, externalApi, type ExternalApiConnectionView } 
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
-import { costReasonKey, formatUsd, summarizeAuditCost } from '../lib/audit-cost';
+import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
 import { AuditStepActivity } from './AuditStepActivity';
 import type {
@@ -540,16 +540,13 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                 );
                               }
                               if (tokens == null || (r.status === 'running' && tokens <= 0)) return null;
-                              const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
                               const breakdown = r.status === 'running' ? props.liveStepBreakdown : r.row?.breakdown;
                               return (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-tokens-${r.index}`}
                                   title={[
-                                    breakdown ? t('auditTimeline.tokens.detail',
-                                      part(breakdown.uncached_input), part(breakdown.output), part(breakdown.cache_read),
-                                      part(breakdown.cache_write), part(breakdown.total_with_cache)) : '',
+                                    tokenBreakdownTitle(breakdown, t, locale),
                                     r.status !== 'running' && r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
                                   ].filter(Boolean).join(' · ') || undefined}
                                 >

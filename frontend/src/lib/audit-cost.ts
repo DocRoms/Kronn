@@ -1,3 +1,5 @@
+import type { AuditTokenBreakdown } from '../types/generated';
+
 /**
  * KT-997 — what an audit cost, as its agents reported it, else as Kronn
  * estimated it from its rate table. A step with neither is unknown: it is never
@@ -68,4 +70,20 @@ const COST_REASON_KEYS: Record<string, string> = {
 /** The i18n key of a known reason, or `null` to show the server's text as is. */
 export function costReasonKey(reason: string): string | null {
   return COST_REASON_KEYS[reason.trim()] ?? null;
+}
+
+/** The hover text of a step's token figure: its parts, or that the cache split is unknown. */
+export function tokenBreakdownTitle(
+  b: AuditTokenBreakdown | null | undefined,
+  t: (key: string, ...args: (string | number)[]) => string,
+  locale: string,
+): string {
+  if (!b) return '';
+  const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
+  if (b.uncached_input == null && b.input_as_reported != null) {
+    return t('auditTimeline.tokens.detailUnknownSplit', part(b.input_as_reported), part(b.output),
+      part(b.cache_read), part(b.cache_write));
+  }
+  return t('auditTimeline.tokens.detail', part(b.uncached_input), part(b.output), part(b.cache_read),
+    part(b.cache_write), part(b.total_with_cache));
 }

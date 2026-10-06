@@ -972,7 +972,7 @@ pub(crate) fn timeout_routing(
 /// Build the suffix that closes a `🔧 ToolName` live-progress line.
 /// Tries to parse `raw_input` (the assembled JSON the model emitted as the
 /// tool's input) and surface the most informative field for the operator
-/// watching the live view: file path, command, pattern, URL.
+/// watching the live view, built by `agents::activity::tool_input_target`.
 ///
 /// Returns either ` · <detail>\n` (parseable JSON with a known field) or
 /// just `\n` (unparseable input or unknown shape — keeps the tool name
@@ -2661,22 +2661,23 @@ mod tests {
         let s = format_tool_input_suffix(
             r#"{"command": "cargo test --lib", "description": "run tests"}"#,
         );
-        assert_eq!(s, " · cargo test --lib\n");
+        // A command shows its program names, never its arguments.
+        assert_eq!(s, " · cargo\n");
     }
 
     #[test]
     fn tool_suffix_extracts_pattern_for_grep() {
         let s = format_tool_input_suffix(r#"{"pattern": "TODO", "path": "."}"#);
-        // priority list checks file_path → path before pattern, so `path: "."`
-        // wins. Fine: directory is what matters for the operator's mental model.
-        assert_eq!(s, " · .\n");
+        // A search shows where it looks, never its pattern.
+        assert_eq!(s, " · in .\n");
     }
 
     #[test]
     fn tool_suffix_extracts_url_for_webfetch() {
         let s =
             format_tool_input_suffix(r#"{"url": "https://example.com/foo", "prompt": "summary"}"#);
-        assert_eq!(s, " · https://example.com/foo\n");
+        // A URL shows its scheme and host only.
+        assert_eq!(s, " · https://example.com\n");
     }
 
     #[test]
@@ -2694,13 +2695,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_suffix_truncates_long_command_with_ellipsis() {
-        let long_cmd = "echo ".to_string() + &"x".repeat(200);
-        let s = format_tool_input_suffix(&format!(r#"{{"command": "{}"}}"#, long_cmd));
+    fn tool_suffix_truncates_long_path_with_ellipsis() {
+        let long_path = "src/".to_string() + &"x".repeat(200);
+        let s = format_tool_input_suffix(&format!(r#"{{"file_path": "{}"}}"#, long_path));
         assert!(s.ends_with("…\n"), "got: {:?}", s);
-        // 120 char body + " · " prefix + "…\n" suffix → ≤ 130 bytes is the
-        // ASCII case, but we just verify the truncation happened.
-        assert!(s.chars().count() < long_cmd.chars().count() + 5);
+        assert!(s.chars().count() < long_path.chars().count() + 5);
     }
 
     #[test]
@@ -2862,7 +2861,7 @@ mod drive_agent_to_output_tests {
     async fn stream_json_reports_cache_usage_and_the_latest_tool_call() {
         let proc = ScriptedProcess::stream_json([
             tool_start("Grep"),
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"StepProgress\"}"}}}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"StepProgress\",\"path\":\"src\"}"}}}"#.to_string(),
             r#"{"type":"stream_event","event":{"type":"content_block_stop"}}"#.to_string(),
             text_delta("done"),
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}"#.to_string(),
@@ -2889,7 +2888,8 @@ mod drive_agent_to_output_tests {
         let latest = activity_rx.borrow().clone().expect("tool call recorded");
         assert_eq!(
             (latest.tool.as_str(), latest.target.as_deref()),
-            ("Grep", Some("StepProgress"))
+            // A search shows where it looks, never its pattern.
+            ("Grep", Some("in src"))
         );
     }
 

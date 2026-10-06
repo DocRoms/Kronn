@@ -6573,8 +6573,14 @@ mod tests {
                 })
                 .await;
             let _ = events
-                .send(AcpSessionEvent::ToolTarget(
-                    "cargo test --no-fail-fast".into(),
+                .send(AcpSessionEvent::ToolActivity(
+                    crate::agents::activity::ToolActivityUpdate::call(
+                        Some("1".into()),
+                        "Bash",
+                        crate::agents::activity::input_target(
+                            &serde_json::json!({"command": "cargo test --no-fail-fast"}),
+                        ),
+                    ),
                 ))
                 .await;
             self.release.notified().await;
@@ -6671,7 +6677,7 @@ mod tests {
         let activity = status.current_activity.unwrap();
         assert_eq!(
             (activity.tool.as_str(), activity.target.as_deref()),
-            ("Bash", Some("cargo test --no-fail-fast"))
+            ("Bash", Some("cargo"))
         );
         let axum::Json(detail) = crate::api::workflows::get_run(
             axum::extract::State(state.clone()),

@@ -351,33 +351,38 @@ const TOOL_INPUT_MAX_BYTES: usize = 256 * 1024;
 
 /// The running step's latest actions for the details panel, fed by whichever
 /// pipeline runs the agent: a CLI's stream-json lines here, an HTTP or ACP
-/// run's calls through its probe. Only sanitized, bounded text leaves it.
+/// run's calls through its probe.
 pub(super) struct StepRecentFeed {
     local: crate::agents::activity::RecentActivity,
     probe: Option<runner::ToolActivityProbe>,
     tool_input: Option<String>,
-    fragments: bool,
+    calls: u64,
     seen: Option<crate::models::AuditRecentActivity>,
 }
 
 impl StepRecentFeed {
-    /// `probe` is the run's, for an agent whose tool calls are not in its
-    /// lines; `fragments` when its lines are raw token fragments.
-    pub(super) fn new(probe: Option<runner::ToolActivityProbe>, fragments: bool) -> Self {
+    /// `probe` is the run's, for an agent whose tool calls are not in its lines.
+    pub(super) fn new(probe: Option<runner::ToolActivityProbe>) -> Self {
         Self {
             local: Default::default(),
             probe,
             tool_input: None,
-            fragments,
+            calls: 0,
             seen: None,
         }
     }
 
-    /// One parsed stream-json event of a CLI agent.
+    /// One parsed stream-json event of a CLI agent. Text is never kept.
     pub(super) fn on_stream_event(&mut self, event: &runner::StreamJsonEvent) {
+        use crate::agents::activity::ToolActivityUpdate;
         match event {
             runner::StreamJsonEvent::ToolStart(name) => {
-                self.local.tool_started(name);
+                self.calls += 1;
+                self.local.apply(&ToolActivityUpdate::call(
+                    Some(self.calls.to_string()),
+                    name,
+                    None,
+                ));
                 self.tool_input = Some(String::new());
             }
             runner::StreamJsonEvent::ToolInputDelta(delta) => {
@@ -389,23 +394,21 @@ impl StepRecentFeed {
                     }
                 }
             }
-            runner::StreamJsonEvent::ToolEnd => match self.tool_input.take() {
-                Some(input) => {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) {
-                        self.local.tool_input(&value);
-                    }
+            runner::StreamJsonEvent::ToolEnd => {
+                let target = self.tool_input.take().and_then(|input| {
+                    serde_json::from_str::<serde_json::Value>(&input)
+                        .ok()
+                        .and_then(|value| crate::agents::activity::input_target(&value))
+                });
+                if let Some(target) = target {
+                    self.local.apply(&ToolActivityUpdate::target(
+                        Some(self.calls.to_string()),
+                        target,
+                    ));
                 }
-                // The end of a text block ends its sentence.
-                None => self.local.push_prose("\n", true),
-            },
-            runner::StreamJsonEvent::Text(text) => self.local.push_prose(text, true),
+            }
             _ => {}
         }
-    }
-
-    /// One text line of an agent without stream-json.
-    pub(super) fn on_text_line(&mut self, line: &str) {
-        self.local.push_prose(line, self.fragments);
     }
 
     /// The current snapshot when it changed since the last call.
@@ -413,10 +416,10 @@ impl StepRecentFeed {
         let mut current = self.local.snapshot();
         if current.entries.is_empty() {
             if let Some(remote) = self.probe.as_ref().and_then(|probe| probe.recent()) {
-                current.entries = remote.entries;
+                current = remote;
             }
         }
-        if current.entries.is_empty() && current.thought.is_none() {
+        if current.entries.is_empty() {
             return None;
         }
         (self.seen.as_ref() != Some(&current)).then(|| {

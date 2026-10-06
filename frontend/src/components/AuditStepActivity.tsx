@@ -64,11 +64,6 @@ export function AuditStepActivity({ projectId, recent }: { projectId: string; re
       </button>
       {open && (
         <div id={listId} className="audit-tl-activity-body">
-          {recent?.thought && (
-            <p className="audit-tl-activity-thought" title={recent.thought}>
-              {t('auditTimeline.activity.thought', recent.thought)}
-            </p>
-          )}
           {entries.length === 0 ? (
             <p className="audit-tl-muted" data-testid="audit-step-activity-empty">{t('auditTimeline.activity.empty')}</p>
           ) : (

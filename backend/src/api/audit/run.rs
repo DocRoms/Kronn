@@ -25,11 +25,19 @@ use crate::AppState;
 pub async fn audit_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
 ) -> Json<ApiResponse<Option<AuditProgress>>> {
-    let snapshot = match state.audit_tracker.lock() {
+    let mut snapshot = match state.audit_tracker.lock() {
         Ok(t) => t.get_progress(&id),
         Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
     };
+    // An agent keeps the counts-only view: the audit agent's recent actions
+    // are for the user's panel.
+    if bridge.is_some() {
+        if let Some(progress) = snapshot.as_mut() {
+            progress.recent_activity = None;
+        }
+    }
     Json(ApiResponse::ok(snapshot))
 }
 
@@ -357,5 +365,64 @@ mod audit_steps_tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_status_tests {
+    use super::*;
+
+    /// An agent's bridge token reads the counts, never the recent actions.
+    #[tokio::test]
+    async fn a_bridge_caller_never_reads_the_recent_actions() {
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap()),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        {
+            let mut tracker = state.audit_tracker.lock().unwrap();
+            tracker.start_progress("p1", 16, "full_audit");
+            tracker.update_chips("p1", None, None, Some("Bash".into()));
+            tracker.set_recent_activity(
+                "p1",
+                crate::models::AuditRecentActivity {
+                    entries: vec![crate::models::AuditActivityEntry {
+                        tool: "Bash".into(),
+                        target: Some("psql".into()),
+                        at: chrono::Utc::now(),
+                    }],
+                },
+            );
+        }
+        let read = |bridge: bool| {
+            let state = state.clone();
+            async move {
+                let caller = bridge.then(|| {
+                    axum::Extension(crate::core::bridge_token::BridgeCaller {
+                        token_id: "t".into(),
+                        project: Some("p1".into()),
+                        own_discussions: Vec::new(),
+                        own_run: None,
+                    })
+                });
+                audit_status(State(state), Path("p1".into()), caller)
+                    .await
+                    .0
+                    .data
+                    .flatten()
+                    .unwrap()
+            }
+        };
+        let user = read(false).await;
+        assert!(
+            user.recent_activity.is_some(),
+            "the user's panel reads them"
+        );
+        let agent = read(true).await;
+        assert_eq!(agent.recent_activity, None);
+        assert_eq!(agent.current_tool_call_count, Some(1), "the counts stay");
     }
 }

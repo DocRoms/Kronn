@@ -977,18 +977,16 @@ pub struct AuditProgress {
     pub step_breakdown: Option<AuditTokenBreakdown>,
 }
 
-/// The running step's latest actions, newest first, and its last line of prose.
+/// The running step's latest tool calls, newest first. Model prose is never
+/// included: it can quote anything the agent read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditRecentActivity {
     pub entries: Vec<AuditActivityEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub thought: Option<String>,
 }
 
-/// One tool call: its name and a short path, pattern or truncated command,
-/// never its other arguments.
+/// One tool call: its name and a target built from its structured input
+/// (`agents::activity`): program names, a path, a URL's host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditActivityEntry {
@@ -1154,21 +1152,32 @@ pub struct AuditRunStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub cost_unknown_reason: Option<String>,
-    /// The headline's parts, computed on read.
+    /// The headline's parts, computed on read. Absent for a row stored before
+    /// its accounting was recorded: its headline is then the one it was stored with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub breakdown: Option<AuditTokenBreakdown>,
+    /// What the row's input contains (`db::audit_runs::TokenAccounting`);
+    /// `None` for a row stored before it was recorded. Not sent.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub token_accounting: Option<String>,
 }
 
-/// What a step's headline (`step_tokens`, the fresh traffic: uncached input
-/// plus output) is made of, and the vendor's full traffic with the cache.
-/// Each part is absent when unknown, never 0.
+/// What a step's headline (`step_tokens`) is made of. When the cache split is
+/// known (`uncached_input` set), the headline is the fresh traffic — uncached
+/// input plus output — and `total_with_cache` the vendor's full traffic. When
+/// it is not, the headline is `input_as_reported` plus output. Each part is
+/// absent when unknown, never 0.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AuditTokenBreakdown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub uncached_input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_as_reported: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub output: Option<u64>,
@@ -1181,29 +1190,6 @@ pub struct AuditTokenBreakdown {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub total_with_cache: Option<u64>,
-}
-
-impl AuditTokenBreakdown {
-    /// From the fresh headline and the other parts: derived from the headline
-    /// so the parts always add up to what is shown.
-    pub fn new(
-        fresh: Option<u64>,
-        output: Option<u64>,
-        cache_read: Option<u64>,
-        cache_write: Option<u64>,
-    ) -> Self {
-        Self {
-            uncached_input: fresh.map(|fresh| fresh.saturating_sub(output.unwrap_or(0))),
-            output,
-            cache_read,
-            cache_write,
-            total_with_cache: fresh.map(|fresh| {
-                fresh
-                    .saturating_add(cache_read.unwrap_or(0))
-                    .saturating_add(cache_write.unwrap_or(0))
-            }),
-        }
-    }
 }
 
 /// Recommendation emitted by the completion-time cluster detector. Lives in

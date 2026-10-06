@@ -14,7 +14,6 @@ const recent: AuditRecentActivity = {
     { tool: 'Grep', target: '"useAuth" src/', at: new Date(Date.now() - 65_000).toISOString() },
     { tool: 'TodoWrite', at: new Date(Date.now() - 70_000).toISOString() },
   ],
-  thought: 'Checking how the auth hook is used',
 };
 
 describe('AuditStepActivity', () => {
@@ -36,7 +35,6 @@ describe('AuditStepActivity', () => {
     expect(entries[2]).toHaveTextContent('TodoWrite');
     expect(entries[0].querySelector('time')?.textContent).toMatch(/5/);
     expect(screen.getByRole('list')).toBeInTheDocument();
-    expect(screen.getByText(/Checking how the auth hook is used/)).toBeInTheDocument();
   });
 
   it('shows a waiting state before the first action', () => {
