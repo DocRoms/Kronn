@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo } from '../types/generated';
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -598,6 +598,8 @@ interface AuditSseEvent {
   /** Terminal status carried by the done event (`complete` | `interrupted` | `no_change`). */
   status?: string;
   audit_run_id?: string;
+  /** `activity` event: the running step's latest actions, already sanitized. */
+  recent?: AuditRecentActivity;
   succeeded_steps?: number[];
   unchanged_steps?: number[];
   failed_steps?: number[];
@@ -1318,6 +1320,8 @@ export const projects = {
       /** A step whose target did not change after all gates passed —
        * additive; the step still closes with its own step_done. */
       onStepUnchanged?: (step: number, file: string) => void;
+      /** The running step's latest actions, at most once a second. */
+      onActivity?: (step: number, recent: AuditRecentActivity) => void;
       /** NON-terminal per-step failure: the step closes with its own
        * `step_done failed` and the loop continues — never terminal cleanup. */
       onStepError?: (error: string, step?: number) => void;
@@ -1366,6 +1370,9 @@ export const projects = {
             case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
             case 'validation_created': handlers.onValidationCreated?.(p.discussion_id as string); break;
             case 'step_unchanged': handlers.onStepUnchanged?.(p.step as number, p.file as string); break;
+            case 'activity':
+              if (typeof p.step === 'number' && p.recent && Array.isArray(p.recent.entries)) handlers.onActivity?.(p.step, p.recent);
+              break;
             // NON-terminal: the step closes with its own `step_done failed`
             // and the pipeline continues — terminal cleanup here would race
             // the `done interrupted` that follows.
@@ -1441,6 +1448,8 @@ export const projects = {
        * step. Optional for backwards compat.
        */
       onToolCall?: (step: number, tool: string, calls?: number) => void;
+      /** The running step's latest actions, at most once a second. */
+      onActivity?: (step: number, recent: AuditRecentActivity) => void;
       /**
        * 0.8.3 root-cause fix — backend detected that this step's
        * `target_file` is empty / truncated despite the CLI exiting 0.
@@ -1541,6 +1550,9 @@ export const projects = {
                 if (typeof p.calls === 'number') handlers.onToolCall?.(p.step, p.tool, p.calls);
                 else handlers.onToolCall?.(p.step, p.tool);
               }
+              break;
+            case 'activity':
+              if (typeof p.step === 'number' && p.recent && Array.isArray(p.recent.entries)) handlers.onActivity?.(p.step, p.recent);
               break;
             case 'step_warning':
               // 0.8.3 root-cause fix — emitted when the step's

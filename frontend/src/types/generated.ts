@@ -630,6 +630,12 @@ path: string,
  */
 format?: string | null, };
 
+/**
+ * One tool call: its name and a short path, pattern or truncated command,
+ * never its other arguments.
+ */
+export type AuditActivityEntry = { tool: string, target?: string, at: string, };
+
 export type AuditEntry = {
 /**
  * ISO date `YYYY-MM-DD` — when the audit completed.
@@ -741,9 +747,19 @@ agent?: AgentType, tier?: ModelTier,
 /**
  * The named external connection, for an HTTP agent that uses one.
  */
-connection_id?: string, };
+connection_id?: string,
+/**
+ * The running step's latest actions, for users who think a long step is
+ * stuck. In memory only, already sanitized and bounded.
+ */
+recent_activity?: AuditRecentActivity, };
 
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
+
+/**
+ * The running step's latest actions, newest first, and its last line of prose.
+ */
+export type AuditRecentActivity = { entries: Array<AuditActivityEntry>, thought?: string, };
 
 /**
  * Recommendation emitted by the completion-time cluster detector. Lives in

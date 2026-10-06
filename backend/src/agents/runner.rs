@@ -1778,6 +1778,12 @@ impl ToolActivityProbe {
         usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
     }
 
+    /// The run's latest tool calls, newest first; prose is not recorded here.
+    pub fn recent(&self) -> Option<crate::models::AuditRecentActivity> {
+        let usage = self.0.lock().ok()?;
+        Some(usage.recent.snapshot())
+    }
+
     /// The run's usage so far: an HTTP agent adds each tool turn, an ACP session
     /// each report, without any text line having to arrive.
     pub fn usage(&self) -> Option<ReportedUsage> {
@@ -1804,6 +1810,7 @@ impl ToolActivityProbe {
         if let Some(tool) = tool {
             usage.last_tool = Some(tool.to_owned());
             usage.tool_calls = usage.tool_calls.saturating_add(1);
+            usage.recent.tool_started(tool);
         }
     }
 }
@@ -1839,6 +1846,8 @@ struct AgentUsage {
     /// one) and how many it has called: what a CLI's stream-json shows.
     last_tool: Option<String>,
     tool_calls: u32,
+    /// The run's latest tool calls, for an audit's details panel.
+    recent: super::activity::RecentActivity,
 }
 
 /// Prompt-cache tokens a runtime reported beside its input and output.
@@ -5024,6 +5033,9 @@ async fn run_acp_session(
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
                         super::activity::tool_started(activity.as_ref(), &name);
+                        if let Ok(mut usage) = task_usage.lock() {
+                            usage.recent.tool_started(&name);
+                        }
                         // KT-932 follow-up — a tool call is open: measure
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
@@ -5034,6 +5046,9 @@ async fn run_acp_session(
                         forwarder_idle.end_tool();
                     }
                     AcpSessionEvent::ToolTarget(target) => {
+                        if let Ok(mut usage) = task_usage.lock() {
+                            usage.recent.tool_target(&target);
+                        }
                         super::activity::tool_target(activity.as_ref(), target);
                     }
                     AcpSessionEvent::ToolTrace(trace) => {
@@ -5053,6 +5068,7 @@ async fn run_acp_session(
                             prompt_cache,
                             cost_usd_micros: usage.cost_usd_micros,
                             cost_incomplete: usage.cost_incomplete,
+                            recent: std::mem::take(&mut usage.recent),
                             ..AgentUsage::default()
                         };
                     }
@@ -10529,6 +10545,8 @@ async fn start_ollama_http_with_idle(
                 if let Ok(mut usage) = task_usage.lock() {
                     usage.last_tool = Some(tool_activity_label(call));
                     usage.tool_calls = usage.tool_calls.saturating_add(1);
+                    usage.recent.tool_started(&call.name);
+                    usage.recent.tool_input(&call.arguments);
                 }
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));

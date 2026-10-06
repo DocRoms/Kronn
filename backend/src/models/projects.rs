@@ -966,6 +966,33 @@ pub struct AuditProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connection_id: Option<String>,
+    /// The running step's latest actions, for users who think a long step is
+    /// stuck. In memory only, already sanitized and bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recent_activity: Option<AuditRecentActivity>,
+}
+
+/// The running step's latest actions, newest first, and its last line of prose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRecentActivity {
+    pub entries: Vec<AuditActivityEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thought: Option<String>,
+}
+
+/// One tool call: its name and a short path, pattern or truncated command,
+/// never its other arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditActivityEntry {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
 }
 
 /// One row in the `audit_runs` table — one record per audit invocation.

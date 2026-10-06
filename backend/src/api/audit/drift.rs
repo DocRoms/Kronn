@@ -607,19 +607,30 @@ pub async fn partial_audit(
                             agent_type.clone(),
                         )
                     });
+                    let mut recent = super::agent_launch::StepRecentFeed::new(
+                        (!is_stream_json).then(|| process.tool_activity_probe()),
+                        process.raw_token_stream(),
+                    );
                     let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
                     activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut stream_cost: Option<u64> = None;
                     loop {
                         let wake = tokio::select! {
                             maybe_line = process.next_line() => super::agent_launch::StepWake::Line(maybe_line),
-                            _ = activity_tick.tick(), if activity.is_some() => super::agent_launch::StepWake::Tick,
+                            _ = activity_tick.tick() => super::agent_launch::StepWake::Tick,
                         };
                         let line = match wake {
                             super::agent_launch::StepWake::Line(Some(line)) => line,
                             super::agent_launch::StepWake::Line(None) => break,
                             super::agent_launch::StepWake::Idle => continue,
                             super::agent_launch::StepWake::Tick => {
+                                if let Some(snapshot) = recent.moved() {
+                                    let payload = serde_json::json!({ "step": step, "recent": &snapshot });
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.set_recent_activity(&project_id_for_progress, snapshot);
+                                    }
+                                    yield Event::default().event("activity").data(payload.to_string());
+                                }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
                                     if let Ok(mut t) = audit_tracker.lock() {
@@ -648,8 +659,12 @@ pub async fn partial_audit(
                                 continue;
                             }
                         };
+                        if !is_stream_json {
+                            recent.on_text_line(&line);
+                        }
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
+                            recent.on_stream_event(&event);
                             let reported_cost = match &event {
                                 runner::StreamJsonEvent::Usage { cost_usd, .. } => *cost_usd,
                                 runner::StreamJsonEvent::TerminalError(failure) => failure.cost_usd,

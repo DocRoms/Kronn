@@ -236,6 +236,7 @@ impl AuditTracker {
                 agent: None,
                 tier: None,
                 connection_id: None,
+                recent_activity: None,
             },
         );
     }
@@ -294,6 +295,18 @@ impl AuditTracker {
         }
     }
 
+    /// The running step's latest actions, replaced whole: the step's feed owns
+    /// the bounds and the sanitizing.
+    pub fn set_recent_activity(
+        &mut self,
+        project_id: &str,
+        recent: crate::models::AuditRecentActivity,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.recent_activity = Some(recent);
+        }
+    }
+
     /// 0.8.3 — clear the per-step ephemeral chips when a step ends.
     /// Keeps `total_tokens_so_far` intact (it's cumulative across steps).
     pub fn clear_step_chips(&mut self, project_id: &str) {
@@ -304,6 +317,7 @@ impl AuditTracker {
             // not cumulative across the audit. Reset on every
             // `step_start` so chip reads `🔧 Tool (1)` then `(2)` etc.
             entry.current_tool_call_count = None;
+            entry.recent_activity = None;
         }
     }
 

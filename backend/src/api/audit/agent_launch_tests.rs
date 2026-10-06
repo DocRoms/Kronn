@@ -1591,3 +1591,105 @@ fn the_activity_probe_reads_the_acp_sink_when_the_http_run_is_silent() {
     http.record_turn(1, 1, Some("write_file"));
     assert_eq!(probe.tool(), Some(("write_file".to_string(), 1)));
 }
+
+fn stream_line(event: serde_json::Value) -> runner::StreamJsonEvent {
+    runner::parse_claude_stream_line(
+        &serde_json::json!({ "type": "stream_event", "event": event }).to_string(),
+    )
+}
+
+/// A CLI's stream-json feeds the details panel: each tool with its short
+/// target, newest first, and the last line of prose; a Bash command's secret
+/// and a written file's contents never reach it.
+#[test]
+fn a_cli_stream_feeds_the_recent_actions_without_secrets_or_contents() {
+    let mut feed = StepRecentFeed::new(None, false);
+    assert_eq!(
+        feed.moved(),
+        None,
+        "nothing to show before the first action"
+    );
+    let tool = |feed: &mut StepRecentFeed, name: &str, input: serde_json::Value| {
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_start", "content_block": { "type": "tool_use", "name": name }
+        })));
+        let raw = input.to_string();
+        let (head, tail) = raw.split_at(raw.len() / 2);
+        for part in [head, tail] {
+            feed.on_stream_event(&stream_line(serde_json::json!({
+                "type": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": part }
+            })));
+        }
+        feed.on_stream_event(&stream_line(
+            serde_json::json!({ "type": "content_block_stop" }),
+        ));
+    };
+    feed.on_stream_event(&stream_line(serde_json::json!({
+        "type": "content_block_delta", "delta": { "type": "text_delta", "text": "Looking at the docs first." }
+    })));
+    tool(
+        &mut feed,
+        "Read",
+        serde_json::json!({ "file_path": "docs/architecture.md" }),
+    );
+    tool(
+        &mut feed,
+        "Grep",
+        serde_json::json!({ "pattern": "useAuth", "path": "src/" }),
+    );
+    tool(
+        &mut feed,
+        "Bash",
+        serde_json::json!({ "command": "curl -H 'x: sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123' https://api.example.com/v1?key=ghp_abcdefghijklmnopqrstuvwxyz0123456789 && npm test" }),
+    );
+    tool(
+        &mut feed,
+        "Write",
+        serde_json::json!({ "file_path": "docs/AGENTS.md", "content": "TOP SECRET CONTENT" }),
+    );
+    feed.on_stream_event(&stream_line(serde_json::json!({
+        "type": "content_block_delta", "delta": { "type": "text_delta", "text": "Now checking the tests" }
+    })));
+    feed.on_stream_event(&stream_line(
+        serde_json::json!({ "type": "content_block_stop" }),
+    ));
+
+    let shown = feed.moved().expect("the actions show");
+    let entries: Vec<_> = shown
+        .entries
+        .iter()
+        .map(|e| (e.tool.as_str(), e.target.as_deref().unwrap_or("")))
+        .collect();
+    assert_eq!(entries[0], ("Write", "docs/AGENTS.md"));
+    assert_eq!(entries[2], ("Grep", "\"useAuth\" src/"));
+    assert_eq!(entries[3], ("Read", "docs/architecture.md"));
+    let bash = entries[1].1;
+    assert!(bash.starts_with("curl"), "{bash}");
+    assert!(bash.contains("https://api.example.com/v1"), "{bash}");
+    let all = serde_json::to_string(&shown).unwrap();
+    for leaked in ["abcdefghijklmnopqrstuvwxyz0123", "TOP SECRET", "key="] {
+        assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+    }
+    assert_eq!(shown.thought.as_deref(), Some("Now checking the tests"));
+    assert_eq!(feed.moved(), None, "unchanged, nothing new to send");
+}
+
+/// An HTTP agent's run feeds the same panel through its probe.
+#[test]
+fn an_http_run_feeds_the_recent_actions_through_its_probe() {
+    let http = runner::ToolActivityProbe::scripted();
+    let mut feed = StepRecentFeed::new(Some(http.clone()), true);
+    assert_eq!(feed.moved(), None);
+    for turn in 0..20 {
+        http.record_turn(1, 1, Some(&format!("read_file{turn}")));
+    }
+    feed.on_text_line("Reading the ");
+    feed.on_text_line("manifests\n");
+    let shown = feed.moved().expect("the run's calls show");
+    assert_eq!(
+        shown.entries.len(),
+        crate::agents::activity::RECENT_MAX_ENTRIES
+    );
+    assert_eq!(shown.entries[0].tool, "read_file19");
+    assert_eq!(shown.thought.as_deref(), Some("Reading the manifests"));
+}

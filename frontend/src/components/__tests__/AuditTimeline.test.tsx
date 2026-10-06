@@ -101,6 +101,27 @@ describe('AuditTimeline', () => {
     expect(screen.getByTestId('audit-timeline-step-tokens-2')).toHaveTextContent(/1[.,]31 M tk/);
   });
 
+  it('offers the running step, and only it, the agent\'s latest actions', async () => {
+    const steps = [
+      step(1, { started_at: '2026-10-03T09:46:30Z' }),
+      step(2, { ended_at: null, duration_ms: null, step_tokens: null, started_at: '2026-10-03T09:50:00Z' }),
+    ];
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-03T09:46:00Z' }], steps);
+    const p = props({
+      auditActive: true, liveStep: 2, liveTotal: 16, liveFile: 'docs/step-2.md',
+      liveStartedAt: Date.parse('2026-10-03T09:46:00Z'),
+      liveActivity: { entries: [{ tool: 'Read', target: 'docs/architecture.md', at: new Date().toISOString() }] },
+    });
+    wrap(<AuditTimeline {...p} />);
+
+    const running = await screen.findByTestId('audit-timeline-step-2');
+    expect(screen.getByTestId('audit-timeline-step-1').querySelector('[data-testid="audit-step-activity"]')).toBeNull();
+    const toggle = running.querySelector('button[aria-expanded]') as HTMLButtonElement;
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(running).toHaveTextContent('Read docs/architecture.md');
+  });
+
   it('does not present its own choice as the running agent when the server does not say (KT-994)', async () => {
     const p = props({ auditActive: true, liveStep: 1, liveTotal: 16, selectedAgent: 'ClaudeCode', liveAuditor: null });
     wrap(<AuditTimeline {...p} />);

@@ -345,6 +345,87 @@ impl StepActivityWatch {
     }
 }
 
+/// Largest tool input buffered to find its target; a bigger one (a long file
+/// written) is dropped rather than held.
+const TOOL_INPUT_MAX_BYTES: usize = 256 * 1024;
+
+/// The running step's latest actions for the details panel, fed by whichever
+/// pipeline runs the agent: a CLI's stream-json lines here, an HTTP or ACP
+/// run's calls through its probe. Only sanitized, bounded text leaves it.
+pub(super) struct StepRecentFeed {
+    local: crate::agents::activity::RecentActivity,
+    probe: Option<runner::ToolActivityProbe>,
+    tool_input: Option<String>,
+    fragments: bool,
+    seen: Option<crate::models::AuditRecentActivity>,
+}
+
+impl StepRecentFeed {
+    /// `probe` is the run's, for an agent whose tool calls are not in its
+    /// lines; `fragments` when its lines are raw token fragments.
+    pub(super) fn new(probe: Option<runner::ToolActivityProbe>, fragments: bool) -> Self {
+        Self {
+            local: Default::default(),
+            probe,
+            tool_input: None,
+            fragments,
+            seen: None,
+        }
+    }
+
+    /// One parsed stream-json event of a CLI agent.
+    pub(super) fn on_stream_event(&mut self, event: &runner::StreamJsonEvent) {
+        match event {
+            runner::StreamJsonEvent::ToolStart(name) => {
+                self.local.tool_started(name);
+                self.tool_input = Some(String::new());
+            }
+            runner::StreamJsonEvent::ToolInputDelta(delta) => {
+                if let Some(input) = self.tool_input.as_mut() {
+                    if input.len() + delta.len() <= TOOL_INPUT_MAX_BYTES {
+                        input.push_str(delta);
+                    } else {
+                        self.tool_input = None;
+                    }
+                }
+            }
+            runner::StreamJsonEvent::ToolEnd => match self.tool_input.take() {
+                Some(input) => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) {
+                        self.local.tool_input(&value);
+                    }
+                }
+                // The end of a text block ends its sentence.
+                None => self.local.push_prose("\n", true),
+            },
+            runner::StreamJsonEvent::Text(text) => self.local.push_prose(text, true),
+            _ => {}
+        }
+    }
+
+    /// One text line of an agent without stream-json.
+    pub(super) fn on_text_line(&mut self, line: &str) {
+        self.local.push_prose(line, self.fragments);
+    }
+
+    /// The current snapshot when it changed since the last call.
+    pub(super) fn moved(&mut self) -> Option<crate::models::AuditRecentActivity> {
+        let mut current = self.local.snapshot();
+        if current.entries.is_empty() {
+            if let Some(remote) = self.probe.as_ref().and_then(|probe| probe.recent()) {
+                current.entries = remote.entries;
+            }
+        }
+        if current.entries.is_empty() && current.thought.is_none() {
+            return None;
+        }
+        (self.seen.as_ref() != Some(&current)).then(|| {
+            self.seen = Some(current.clone());
+            current
+        })
+    }
+}
+
 /// What woke a step's read loop: a line (or the end of the stream), the idle
 /// deadline, or the activity tick.
 pub(super) enum StepWake {

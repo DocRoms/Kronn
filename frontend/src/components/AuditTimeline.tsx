@@ -15,8 +15,9 @@ import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
 import { formatUsd, summarizeAuditCost } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
+import { AuditStepActivity } from './AuditStepActivity';
 import type {
-  AgentDetection, AgentType, AuditEntry, AuditTimelineValidation, ModelTier, ModelTiersConfig,
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, ModelTier, ModelTiersConfig,
 } from '../types/generated';
 import './AuditTimeline.css';
 
@@ -61,6 +62,8 @@ export interface AuditTimelineProps {
   /** Wall-clock start of the live audit, to tell its steps from older runs'. */
   liveStartedAt: number | null;
   liveToolCalls: number | null;
+  /** The running step's latest actions, for its details panel. */
+  liveActivity?: AuditRecentActivity | null;
   liveStepTokens: number | null;
   liveTotalTokens: number | null;
   /** Who runs the live audit, as the server reports it: shown and frozen in
@@ -480,6 +483,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             </span>
                             {r.descriptionKey && (
                               <span className="audit-tl-step-desc">{t(r.descriptionKey)}</span>
+                            )}
+                            {r.status === 'running' && (
+                              <AuditStepActivity projectId={projectId} recent={props.liveActivity ?? null} />
                             )}
                             {r.row?.step_warning ? (
                               <span className={`audit-tl-reason is-${r.status}`} title={r.row.step_warning}>

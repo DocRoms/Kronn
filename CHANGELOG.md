@@ -23,6 +23,12 @@ Release notes for 0.9.3 and earlier are available in the
   fine-grained token, or why it could not be verified) and recommends a
   fine-grained token when the gh token reaches every repository. Turning it
   off applies to new launches; agents already running keep what they received.
+- A running audit step now has a "Details" toggle listing the agent's latest
+  actions, newest first, with their age and its last line of prose: the tool
+  and a short path, pattern or truncated command, never file contents, other
+  arguments, environment values or secrets (redacted before display). It works
+  for CLI, HTTP and ACP agents in Full and drift audits, is kept in memory
+  only, and the open state is remembered per project for the session.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).

@@ -656,6 +656,10 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         progress().is_some_and(|p| {
             p.current_tool_call_count == Some(CALLS)
                 && p.step_tokens == Some(u64::from(CALLS) * 110)
+                && p.recent_activity.as_ref().is_some_and(|recent| {
+                    recent.entries.first().and_then(|e| e.target.as_deref())
+                        == Some(format!("src/é{CALLS}.rs").as_str())
+                })
         })
     })
     .await;
@@ -665,6 +669,18 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         Some(format!("Read · src/é{CALLS}.rs").as_str()),
         "{pipeline:?}"
     );
+    // The details panel: the latest calls, newest first, bounded.
+    let recent = shown.recent_activity.expect("the step's recent actions");
+    let targets: Vec<_> = recent
+        .entries
+        .iter()
+        .map(|e| (e.tool.as_str(), e.target.clone().unwrap_or_default()))
+        .collect();
+    let expected: Vec<_> = (CALLS - 14..=CALLS)
+        .rev()
+        .map(|call| ("Read", format!("src/é{call}.rs")))
+        .collect();
+    assert_eq!(targets, expected, "{pipeline:?}");
 
     let response = crate::api::audit::full::cancel_audit(
         axum::extract::State(state.clone()),
@@ -684,6 +700,16 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         .find(|(name, _)| name == "tool_call")
         .unwrap_or_else(|| panic!("{pipeline:?}: no tool_call: {body}"));
     assert_eq!(tool.1["calls"], json!(CALLS), "{pipeline:?}");
+    let activity = events
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "activity")
+        .unwrap_or_else(|| panic!("{pipeline:?}: no activity: {body}"));
+    assert_eq!(
+        activity.1["recent"]["entries"][0]["target"],
+        json!(format!("src/é{CALLS}.rs")),
+        "{pipeline:?}"
+    );
     let progress_event = events
         .iter()
         .rev()

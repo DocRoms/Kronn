@@ -1263,6 +1263,10 @@ pub async fn full_audit(
                             agent_type.clone(),
                         )
                     });
+                    let mut recent = super::agent_launch::StepRecentFeed::new(
+                        (!is_stream_json).then(|| process.tool_activity_probe()),
+                        process.raw_token_stream(),
+                    );
                     let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
                     activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     // The cost Claude's stream-json states on its `result` line.
@@ -1294,7 +1298,7 @@ pub async fn full_audit(
                         let wake = tokio::select! {
                             maybe_line = process.next_line() => super::agent_launch::StepWake::Line(maybe_line),
                             _ = tokio::time::sleep_until(idle_deadline) => super::agent_launch::StepWake::Idle,
-                            _ = activity_tick.tick(), if activity.is_some() => super::agent_launch::StepWake::Tick,
+                            _ = activity_tick.tick() => super::agent_launch::StepWake::Tick,
                         };
                         let next = match wake {
                             super::agent_launch::StepWake::Line(line) => {
@@ -1325,6 +1329,14 @@ pub async fn full_audit(
                                 }
                             }
                             super::agent_launch::StepWake::Tick => {
+                                // Once a second at most: prose moves on every token.
+                                if let Some(snapshot) = recent.moved() {
+                                    let payload = serde_json::json!({ "step": step, "recent": &snapshot });
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.set_recent_activity(&project_id, snapshot);
+                                    }
+                                    yield Event::default().event("activity").data(payload.to_string());
+                                }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
                                     if let Ok(mut t) = audit_tracker.lock() {
@@ -1372,8 +1384,13 @@ pub async fn full_audit(
                         // Ollama) skip this branch — their chips stay
                         // empty rather than show stale 0 values.
                         let mut usage_moved = false;
+                        if !is_stream_json {
+                            recent.on_text_line(&line);
+                        }
                         if is_stream_json {
-                            match runner::parse_claude_stream_line(&line) {
+                            let event = runner::parse_claude_stream_line(&line);
+                            recent.on_stream_event(&event);
+                            match event {
                                 // A reading that counts nothing is no reading.
                                 runner::StreamJsonEvent::Usage { input_tokens, output_tokens, prompt_cache, cost_usd }
                                     if input_tokens + output_tokens > 0 =>
