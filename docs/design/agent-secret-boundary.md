@@ -551,7 +551,10 @@ kind, never the other project's id. Then:
 - *shared resources* (project-less, serving every project, or several projects)
   may be read, never written; a write needs a resource that belongs to the
   token's project and to no other; a project-less discussion or workflow run is
-  private to its own launch (run lists are typed and filtered the same way); an
+  private to its own launch (a run's project is its own, never its workflow's
+  current home); run lists, their state filter and pages, and a workflow's
+  `last_run` only consider runs of the token's project or its own run, in SQL
+  before any limit; an
   MCP config linked to projects and opted into General serves those projects
   and project-less tokens, as the plugin overview shows;
 - *effects* need the token's project, or a shared resource on a route whose

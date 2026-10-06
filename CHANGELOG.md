@@ -212,7 +212,9 @@ Release notes for 0.9.3 and earlier are available in the
   an agent's; a plan proposal from a room only touches tasks of that room's
   project alone, creates its tasks there and names the project on its card. A
   token's workflow may publish only into its own project's pages and rooms; a
-  workflow run without a project is private to its launch; peer-join cannot
+  workflow run without a project is private to its launch, even after its
+  workflow moves into a project, and a token's run lists, run filters and
+  `last_run` only consider runs it may see; peer-join cannot
   end a session another project's room holds; a config opted into General is
   usable by project-less tokens as the plugin overview shows; a page slug can
   no longer look like a page id, a page resolves by id first, and a token's
