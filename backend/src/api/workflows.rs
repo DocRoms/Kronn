@@ -3110,6 +3110,18 @@ pub(crate) fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> 
     validate_workflow_for_import_keeping(wf, &[])
 }
 
+/// The foreach file of every SubWorkflow step stays a plain worktree-relative
+/// path, for write paths that do not run the full step checks.
+pub(crate) fn validate_foreach_files(wf: &Workflow) -> Result<(), String> {
+    for step in wf.steps.iter().chain(wf.on_failure.iter()) {
+        if let Some(file) = step.sub_workflow_foreach_file.as_deref() {
+            crate::workflows::sub_workflow_step::validate_foreach_file(file)
+                .map_err(|e| format!("Step SubWorkflow « {} » : {e}", step.name))?;
+        }
+    }
+    Ok(())
+}
+
 /// The Exec rules of a workflow definition (allowlist, commands, inline-code
 /// interpolation), for write paths that do not run the full import checks.
 pub(crate) fn validate_exec_definition(wf: &Workflow) -> Result<(), String> {
@@ -8965,6 +8977,22 @@ mod tests {
         s.sub_workflow_id = Some("child".into());
         s.sub_workflow_foreach_file = Some(".kronn/tasks.json".into());
         validate_required_fields_per_type(&[s]).expect("a relative path is accepted");
+    }
+
+    #[test]
+    fn foreach_files_are_checked_on_every_step_list() {
+        let mut wf = mk_workflow_for_export("wf");
+        let mut fanout = mk_step("fanout", StepType::SubWorkflow);
+        fanout.sub_workflow_foreach_file = Some("tasks.json".into());
+        wf.steps = vec![fanout.clone()];
+        validate_foreach_files(&wf).expect("relative path");
+        fanout.sub_workflow_foreach_file = Some("../tasks.json".into());
+        wf.on_failure = vec![fanout];
+        let err = validate_foreach_files(&wf).expect_err("escaping path");
+        assert!(
+            err.contains("fanout") && err.contains("relative to the worktree"),
+            "{err}"
+        );
     }
 
     #[test]

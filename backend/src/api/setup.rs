@@ -2082,7 +2082,9 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let mut workflows = Vec::new();
     for wf in &restored_workflows {
         let mut w = wf.clone();
-        if let Err(reason) = crate::api::workflows::validate_exec_definition(&w) {
+        if let Err(reason) = crate::api::workflows::validate_exec_definition(&w)
+            .and_then(|()| crate::api::workflows::validate_foreach_files(&w))
+        {
             w.enabled = false;
             warnings.push(format!(
                 "Workflow « {} » importé désactivé, à revoir avant de le réactiver : {reason}",

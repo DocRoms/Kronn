@@ -26587,3 +26587,37 @@ async fn bundle_and_import_refuse_a_script_path_leaving_the_repository() {
     .await;
     assert_refused(&body, "workflow import");
 }
+
+/// KT-1038 — the bundle refuses a SubWorkflow foreach file outside the
+/// worktree, like the workflow editor does.
+#[tokio::test]
+async fn bundle_refuses_a_foreach_file_leaving_the_worktree() {
+    let app = test_app();
+    let mut child = workflow_request(serde_json::json!([{
+        "name": "noop", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}
+    }]));
+    child["bundle_id"] = serde_json::json!("child");
+    for file in ["/etc/hosts", "../tasks.json"] {
+        let (_, body) = post_json(
+            app.clone(),
+            "/api/workflows/bundle",
+            serde_json::json!({
+                "child_workflows": [child.clone()],
+                "workflow": workflow_request(serde_json::json!([{
+                    "name": "fanout", "step_type": {"type": "SubWorkflow"},
+                    "sub_workflow_id": "@bundle:child",
+                    "sub_workflow_foreach_file": file
+                }]))
+            }),
+        )
+        .await;
+        assert_eq!(body["success"], false, "{file}: {body}");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("relative to the worktree"),
+            "{file}: {body}"
+        );
+    }
+}

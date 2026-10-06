@@ -559,21 +559,16 @@ pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
     })
 }
 
-/// Run-time resolution: the saved shape again (a workflow stored before the
-/// check, or edited by hand), then symlinks followed and kept in the worktree.
+/// Run-time read: the saved shape again (a workflow stored before the check,
+/// or edited by hand), then a worktree-rooted read that follows no symlink.
 /// The items reach child agents, so a file outside it must never be read.
-fn resolve_foreach_file(worktree: &str, path: &str) -> Result<std::path::PathBuf, String> {
+fn read_foreach_file(worktree: &str, path: &str) -> Result<String, String> {
     validate_foreach_file(path)?;
-    crate::core::fs_guard::resolve_contained_read(
-        std::path::Path::new(worktree),
-        std::path::Path::new(path.trim()),
-    )
-    .map_err(|_| {
-        format!(
-            "foreach file `{}` resolves outside the worktree",
-            path.trim()
-        )
-    })
+    let path = path.trim();
+    let bytes =
+        crate::core::rooted_io::read(std::path::Path::new(worktree), std::path::Path::new(path))
+            .map_err(|e| format!("Cannot read foreach file `{path}` inside the worktree: {e}"))?;
+    String::from_utf8(bytes).map_err(|_| format!("foreach file `{path}` is not UTF-8"))
 }
 
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
@@ -766,19 +761,9 @@ async fn execute_foreach(
         Some(w) if !w.trim().is_empty() => w,
         _ => return fail(step, start, "SubWorkflow foreach requires the parent to run in a git worktree (the items file lives there).".into()),
     };
-    let items_path = match resolve_foreach_file(&ws, foreach_file) {
-        Ok(path) => path,
+    let content = match read_foreach_file(&ws, foreach_file) {
+        Ok(content) => content,
         Err(error) => return fail(step, start, error),
-    };
-    let content = match std::fs::read_to_string(&items_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return fail(
-                step,
-                start,
-                format!("Cannot read foreach file `{foreach_file}` in the worktree: {e}"),
-            )
-        }
     };
     let items = match parse_foreach_items(&content) {
         Ok(i) => i,
@@ -906,11 +891,11 @@ async fn execute_foreach(
             .unwrap_or_default()
     };
 
-    let task_file = std::path::Path::new(&ws).join(".kronn/current_task.json");
-    // `.kronn/` is usually untracked, so a fresh isolated worktree lacks it.
-    if let Some(parent) = task_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Written through rooted_io: a symlink planted at `.kronn` or at the file
+    // must not redirect the write outside the worktree. Missing `.kronn/`
+    // (untracked, so absent from a fresh worktree) is created on the way.
+    let ws_root = std::path::Path::new(&ws).to_path_buf();
+    let task_file = std::path::Path::new(".kronn/current_task.json");
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
@@ -981,11 +966,11 @@ async fn execute_foreach(
                 Ok(files) => {
                     let mut write_err = None;
                     for (rel, content) in &files {
-                        let p = std::path::Path::new(&ws).join(rel);
-                        if let Some(parent) = p.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if let Err(e) = std::fs::write(&p, content) {
+                        if let Err(e) = crate::core::rooted_io::write(
+                            &ws_root,
+                            std::path::Path::new(rel),
+                            content.as_bytes(),
+                        ) {
                             write_err = Some(format!("{rel}: {e}"));
                             break;
                         }
@@ -995,14 +980,12 @@ async fn execute_foreach(
                     } else {
                         // Journal + commit (deterministic, mirrors the child's commit step).
                         let what = item.get("what").and_then(|w| w.as_str()).unwrap_or("");
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(std::path::Path::new(&ws).join(".kronn/decisions.md"))
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                writeln!(f, "\n[{item_id}] engine-applied (mechanical): {what}")
-                            });
+                        let _ = crate::core::rooted_io::append(
+                            &ws_root,
+                            std::path::Path::new(".kronn/decisions.md"),
+                            format!("\n[{item_id}] engine-applied (mechanical): {what}\n")
+                                .as_bytes(),
+                        );
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
                         let _ = crate::core::cmd::async_git_cmd()
@@ -1052,9 +1035,12 @@ async fn execute_foreach(
         }
 
         // Expose the item to the child via the shared worktree.
-        if let Err(e) = std::fs::write(
-            &task_file,
-            serde_json::to_string_pretty(item).unwrap_or_default(),
+        if let Err(e) = crate::core::rooted_io::write(
+            &ws_root,
+            task_file,
+            serde_json::to_string_pretty(item)
+                .unwrap_or_default()
+                .as_bytes(),
         ) {
             // A per-item infra hiccup (transient FS error on ONE item) must NOT
             // abort the whole sweep — record it as a failed item and move on so
@@ -1268,7 +1254,7 @@ async fn execute_foreach(
                 json!({"idx": idx, "id": item_id, "status": "Success", "child_run_id": child_run.id})).await;
         }
     }
-    let _ = std::fs::remove_file(&task_file); // best-effort cleanup
+    let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
     let (status_str, signal) = aggregate_foreach(succeeded, failed);
     let summary = format!(
@@ -2101,6 +2087,43 @@ mod tests {
         // The fixture's own relative file still fans out.
         let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
         assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreach_never_writes_through_a_planted_symlink() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let outside = tempfile::TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, ws.path().join(".kronn/current_task.json")).unwrap();
+        let ctx = crate::workflows::template::TemplateContext::new();
+        let outcome = super::execute_sub_workflow_step(
+            &state,
+            "parent-run",
+            0,
+            &step,
+            &tokens,
+            &agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            Some(ws.path().to_string_lossy().to_string()),
+            super::ChildLaunch {
+                ctx: &ctx,
+                parent_variables: &[],
+                parent_project_id: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "the outside file is untouched"
+        );
+        assert!(
+            outcome.result.output.contains("SkippedWriteError"),
+            "{}",
+            outcome.result.output
+        );
     }
 
     // ─── KT-1045 — a child goes through its workflow's admission ───
