@@ -72,7 +72,7 @@ struct ModelListResult {
 /// `codex app-server`, run outside any repository (design note §9).
 fn discovery_command() -> tokio::process::Command {
     let mut command =
-        crate::core::cmd::full_env_cmd("codex", crate::core::cmd::FullEnvReason::ModelDiscovery);
+        crate::core::cmd::discovery_cmd("codex", crate::core::child_env::AgentFamily::Codex);
     command
         .arg("app-server")
         .current_dir(std::env::temp_dir())

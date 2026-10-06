@@ -1770,3 +1770,170 @@ async fn a_failed_read_back_commits_nothing() {
         "rolled back"
     );
 }
+
+// ── review round 5 ──────────────────────────────────────────────────────────
+
+/// C4-07 — one unreadable backup copy does not stop the others from being
+/// scrubbed; the error is still returned.
+#[test]
+fn every_backup_copy_is_scrubbed_even_when_one_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = crypto::generate_secret();
+    let text = write_0142_config_text(&key);
+    std::fs::create_dir(dir.path().join("config.toml.backup.20261001T000000Z")).unwrap();
+    std::fs::write(
+        dir.path().join("config.toml.backup.20261002T000000Z"),
+        &text,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("config.toml.backup.20260930T000000Z"),
+        &text,
+    )
+    .unwrap();
+    let err = scrub_migration_backup(dir.path(), &key).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("could not scrub every config backup"),
+        "{err}"
+    );
+    for name in [
+        "config.toml.backup.20261002T000000Z",
+        "config.toml.backup.20260930T000000Z",
+    ] {
+        let scrubbed = std::fs::read_to_string(dir.path().join(name)).unwrap();
+        assert!(
+            !scrubbed.contains(ANTHROPIC) && !scrubbed.contains(AUTH_TOKEN),
+            "{name}"
+        );
+    }
+}
+
+/// C4-04 — after "Re-encrypt imported secrets", re-encrypted stored
+/// credentials appear at once and no longer count as locked.
+#[tokio::test]
+#[serial]
+async fn reencrypted_stored_credentials_load_at_once() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    boot_like_main(&dir, &db).await;
+    // A provider key imported under another machine's key A.
+    let a = crypto::generate_secret();
+    let enc = crypto::encrypt("sk-imported", &crypto::parse_secret(&a).unwrap()).unwrap();
+    db.with_conn(move |conn| {
+        rows::upsert_all(
+            conn,
+            &[StoredCredential {
+                kind: KIND_PROVIDER_KEY.into(),
+                id: "imported".into(),
+                name: "imported".into(),
+                provider: "openai".into(),
+                active: true,
+                position: 9,
+                value_encrypted: enc,
+            }],
+        )
+    })
+    .await
+    .unwrap();
+    dir.restart();
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    assert_eq!(locked_credential_count(dir.path()), 1);
+    crate::core::recovery::save_imported_blob(
+        dir.path(),
+        &crate::core::recovery::wrap_key(&a, "source pass").unwrap(),
+    )
+    .unwrap();
+    let state = state_with(cfg, &db);
+    let router = crate::build_router_with_auth(state.clone(), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/reencrypt",
+        serde_json::json!({"passphrase": "source pass"}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let (_, status) = json_of(
+        router.clone(),
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status["data"]["locked_credentials"], 0, "{status}");
+    let (_, tokens) = json_of(router, "GET", "/api/config/tokens", serde_json::json!({})).await;
+    assert!(tokens.to_string().contains("imported"), "{tokens}");
+}
+
+/// C4-11 — a restore with the key in use clears a failure recorded at start.
+#[tokio::test]
+#[serial]
+async fn a_restore_clears_a_recorded_credential_failure() {
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    disarm(dir.path());
+    record_boot_failure(dir.path(), Some("disk full".into()));
+    let code = crate::core::recovery::to_code(
+        &crate::core::recovery::wrap_key(&key, "pass phrase").unwrap(),
+    );
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
+    let (_, body) = json_of(
+        router.clone(),
+        "POST",
+        "/api/config/recovery/restore",
+        serde_json::json!({"passphrase": "pass phrase", "recovery_code": code}),
+    )
+    .await;
+    assert_eq!(body["success"], true, "{body}");
+    let (_, status) = json_of(
+        router,
+        "GET",
+        "/api/config/recovery/status",
+        serde_json::json!({}),
+    )
+    .await;
+    assert!(
+        status["data"]["credentials_unavailable"].is_null(),
+        "{status}"
+    );
+}
+
+/// C4-06 — an export carrying encrypted MCP secrets with no recovery
+/// passphrase says so in its warning header.
+#[tokio::test]
+#[serial]
+async fn an_export_of_secrets_without_recovery_warns() {
+    use tower::ServiceExt;
+    let dir = DataDir::new();
+    let key = crypto::generate_secret();
+    write_0142_config(dir.path(), &key);
+    let db = Arc::new(Database::open_in_memory().unwrap());
+    seed_ciphertext(&db, &key).await;
+    let (cfg, _, _) = boot_like_main(&dir, &db).await;
+    let router = crate::build_router_with_auth(state_with(cfg, &db), true);
+    let mut req = axum::http::Request::builder()
+        .uri("/api/config/export")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))));
+    let res = router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get("X-Kronn-Export-Warning")
+            .and_then(|v| v.to_str().ok()),
+        Some("no-recovery-passphrase")
+    );
+}

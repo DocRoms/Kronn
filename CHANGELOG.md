@@ -202,7 +202,23 @@ Release notes for 0.9.3 and earlier are available in the
   that bundles another project's resource is refused; refusals no longer name
   another project's ids; the bearer scheme is read case-insensitively and a
   token never reaches the peer-only routes; a token's media discussion and
-  learning proposal land in its project.
+  learning proposal land in its project. A page or room a workflow step names
+  through a template must, once rendered, belong to the run's project (a
+  literal id still works whatever its project), whoever triggered the run;
+  the keys of a caller's own maps (variables, an external API's path, query
+  and headers) are no longer read as Kronn ids; the plugin overview and a
+  page's feeding workflows show a token only its project's; any discussion the
+  token owns, deleted or moved, ends it; its planning writes are recorded as
+  an agent's; a plan proposal from a room only touches tasks of that room's
+  project alone, creates its tasks there and names the project on its card. A
+  token's workflow may publish only into its own project's pages and rooms; a
+  workflow run without a project is private to its launch, even after its
+  workflow moves into a project, and a token's run lists, run filters and
+  `last_run` only consider runs it may see; peer-join cannot
+  end a session another project's room holds; a config opted into General is
+  usable by project-less tokens as the plugin overview shows; a page slug can
+  no longer look like a page id, a page resolves by id first, and a token's
+  slug conflict names no other project.
 - Processes Kronn starts for a caller no longer inherit the backend's
   environment: agent CLIs on all three routes, the project and discussion
   terminal, workflow Exec steps and workspace hooks, Quick Exec (task
@@ -235,9 +251,10 @@ Release notes for 0.9.3 and earlier are available in the
   directory, never in a repository. The desktop app follows the same rule:
   its sleep inhibitor and its login-shell PATH probe no longer pass the
   desktop's whole environment on, and its restart relaunches it without the
-  admin token or the raw key in its environment. The declared exceptions
-  (document sidecar, model and version discovery) no longer receive any
-  secret, and testing an MCP server, which may come from a repository's
+  admin token or the raw key in its environment. Model and version
+  discovery and the document sidecar now get a built environment too (their
+  CLI's own login and settings, no credential under any name), and testing
+  an MCP server, which may come from a repository's
   `.mcp.json`, starts it with only its own configured values. An
   operator-set `KRONN_ENCRYPTION_KEK` leaves the process environment at
   start, like the admin token. npm registry credentials
@@ -290,6 +307,13 @@ Release notes for 0.9.3 and earlier are available in the
   token is ever written to `config.toml` in clear: such changes are refused,
   key auto-discovery waits, and an operator's `KRONN_AUTH_TOKEN` serves the
   session only (KT-1007).
+- A key kept only in a `config.toml` backup or a set-aside file is now found
+  when it still decrypts some rows, instead of leaving them unreadable; a
+  recovery passphrase that protects another key can be replaced without it;
+  re-encrypted provider keys appear without a restart; an export of secrets
+  without a recovery passphrase warns; a `config.toml` set aside at start is
+  shown in the setup wizard; every backup copy is scrubbed even when one
+  fails; and key files are synced to disk with their directory (KT-1007).
 - The same key written in upper and lower case is one key (it used to stop
   the start-up as "several keys"), a damaged key value no longer crashes the
   start-up, and an older `config.toml.backup` is kept under a timestamped
@@ -610,6 +634,18 @@ Release notes for 0.9.3 and earlier are available in the
   `{{run.id}}` / `{{time.now}}` always resolve to Kronn's own values
   (KT-1017). An approved CollectApiData source is no longer refused at run
   time.
+- Kronn now trusts a run value without a human only in five exact shapes,
+  `bash|sh -c SCRIPT NAME ARGS…`, `python3 -c CODE ARGS…`,
+  `python3 SCRIPT ARGS…`, `node -e CODE -- ARGS…` and `node SCRIPT ARGS…`,
+  with no other option and no value in the code or script, and in data-only
+  programs (KT-1017). Every other line, `git`, `make`, `docker`, `npx`,
+  `bash -ec` and wrappers included, needs a human's approval; code, option
+  and program positions stay refused, approved or not. A templated
+  `exec_stdin` is trusted only by data-only programs and those shapes; a
+  shell reading its program from stdin, `/dev/stdin`-style scripts, `-f -`
+  and `python -i` count as code.
+  An approved Quick Exec now runs from its page, and "Suggest a fix" moves
+  shell flags such as `-e` into a `set` line.
 
 ### Changed
 

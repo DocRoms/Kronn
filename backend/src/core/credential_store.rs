@@ -726,10 +726,18 @@ fn strip_credential_fields(table: &mut toml::Table) -> bool {
 /// `encryption_secret` goes only when it is the key in use and config.toml no
 /// longer needs one; any other key is kept, since rows may depend on it.
 fn scrub_migration_backup(dir: &Path, key_hex: &str) -> Result<()> {
-    for path in migration_backup_paths(dir) {
-        scrub_one_backup(dir, &path, key_hex)?;
+    // Every file is attempted: one unreadable copy must not leave the others
+    // with their credentials in clear. The failures are reported together.
+    let errors: Vec<String> = migration_backup_paths(dir)
+        .iter()
+        .filter_map(|path| scrub_one_backup(dir, path, key_hex).err())
+        .map(|e| format!("{e:#}"))
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("could not scrub every config backup: {}", errors.join("; "))
     }
-    Ok(())
 }
 
 /// config.toml.backup and every rotated `config.toml.backup.<ts>` copy (those

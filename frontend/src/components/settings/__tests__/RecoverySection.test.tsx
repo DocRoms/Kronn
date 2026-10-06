@@ -119,7 +119,24 @@ describe('RecoverySection', () => {
   const fullStatus = (over: Record<string, unknown>) => ({
     configured: true, matches_key: true, key_locked: false, key_copies_kept: false,
     config_holds_key: false, copies: 2, stale_sources: [], invalid_sources: [],
-    locked_credentials: 0, kept_recovery_blobs: 0, ...over,
+    locked_credentials: 0, kept_recovery_blobs: 0, recovery_other_key: false, config_set_aside: null, ...over,
+  });
+
+  it('replaces a recovery.key for another key without asking its passphrase', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ matches_key: false, recovery_other_key: true }));
+    config.setRecovery.mockResolvedValue({ recovery_code: 'KRECOV1.new' });
+    render(<RecoverySection toast={toast} t={t} />);
+    fireEvent.change(await screen.findByTestId('recovery-passphrase'), { target: { value: 'long-enough-pass' } });
+    fireEvent.change(screen.getByTestId('recovery-confirm'), { target: { value: 'long-enough-pass' } });
+    expect(screen.queryByTestId('recovery-current')).toBeNull();
+    fireEvent.click(screen.getByTestId('recovery-save'));
+    await waitFor(() => expect(config.setRecovery).toHaveBeenCalledWith('long-enough-pass'));
+  });
+
+  it('still asks the current passphrase for a recovery.key it cannot verify', async () => {
+    config.getRecoveryStatus.mockResolvedValue(fullStatus({ matches_key: false, recovery_other_key: false }));
+    render(<RecoverySection toast={toast} t={t} />);
+    expect(await screen.findByTestId('recovery-current')).toBeTruthy();
   });
 
   it('offers the restore form, not the set form, when the key is locked', async () => {

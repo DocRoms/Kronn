@@ -135,7 +135,8 @@ impl KronnToolExecutor {
                 Err(error) => fail(call, error),
             },
             "workflow_list" => {
-                let Json(response) = crate::api::workflows::list(State(self.state.clone())).await;
+                let Json(response) =
+                    crate::api::workflows::list(State(self.state.clone()), None).await;
                 match (response.success, response.data) {
                     (true, Some(items)) => ok(
                         call,

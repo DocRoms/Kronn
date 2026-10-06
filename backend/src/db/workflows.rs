@@ -1381,10 +1381,21 @@ pub fn list_runs_paginated(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<Vec<WorkflowRun>> {
+    list_runs_paginated_visible(conn, workflow_id, limit, offset, None)
+}
+
+pub fn list_runs_paginated_visible(
+    conn: &Connection,
+    workflow_id: &str,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    visibility: Option<&RunVisibility>,
+) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
-        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1{}
          ORDER BY started_at DESC{}",
         workflow_run_cols_without_outputs(),
+        visible_clause(visibility, 2),
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
@@ -1392,11 +1403,20 @@ pub fn list_runs_paginated(
         }
     );
     let mut stmt = conn.prepare(&sql)?;
+    let (project, own) = visibility
+        .map(|v| (v.project.clone(), v.own_run.clone()))
+        .unwrap_or_default();
+    let rows = if visibility.is_some() {
+        stmt.query_map(params![workflow_id, project, own], |row| {
+            Ok(row_to_run(row))
+        })?
+        .collect::<Vec<_>>()
+    } else {
+        stmt.query_map(params![workflow_id], |row| Ok(row_to_run(row)))?
+            .collect::<Vec<_>>()
+    };
 
-    let mut runs: Vec<WorkflowRun> = stmt
-        .query_map(params![workflow_id], |row| Ok(row_to_run(row)))?
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut runs: Vec<WorkflowRun> = rows.into_iter().filter_map(|r| r.ok()).collect();
 
     enrich_parent_provenance(conn, &mut runs)?;
     Ok(runs)
@@ -1412,20 +1432,63 @@ pub fn list_runs_by_state(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<WorkflowRun>> {
+    list_runs_by_state_visible(conn, workflow_id, key, value, limit, offset, None)
+}
+
+/// The runs a bridge token may see: its project's, or its own run. Applied in
+/// SQL, before any filter or page, so hidden runs neither answer a filter nor
+/// take a page's place.
+#[derive(Debug, Clone, Default)]
+pub struct RunVisibility {
+    pub project: Option<String>,
+    pub own_run: Option<String>,
+}
+
+const VISIBLE_RUN_CLAUSE: &str = " AND (project_id = ?{p} OR id = ?{r})";
+
+fn visible_clause(visibility: Option<&RunVisibility>, first: usize) -> String {
+    match visibility {
+        Some(_) => VISIBLE_RUN_CLAUSE
+            .replace("{p}", &first.to_string())
+            .replace("{r}", &(first + 1).to_string()),
+        None => String::new(),
+    }
+}
+
+pub fn list_runs_by_state_visible(
+    conn: &Connection,
+    workflow_id: &str,
+    key: &str,
+    value: Option<&str>,
+    limit: u32,
+    offset: u32,
+    visibility: Option<&RunVisibility>,
+) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
-        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1{}
            AND EXISTS (SELECT 1 FROM json_each(workflow_runs.state)
                        WHERE json_each.key = ?2 AND (?3 IS NULL OR json_each.value = ?3))
          ORDER BY started_at DESC LIMIT ?4 OFFSET ?5",
-        workflow_run_cols_without_outputs()
+        workflow_run_cols_without_outputs(),
+        visible_clause(visibility, 6)
     );
     let mut stmt = conn.prepare(&sql)?;
-    let mut runs: Vec<WorkflowRun> = stmt
-        .query_map(params![workflow_id, key, value, limit, offset], |row| {
+    let (project, own) = visibility
+        .map(|v| (v.project.clone(), v.own_run.clone()))
+        .unwrap_or_default();
+    let rows = if visibility.is_some() {
+        stmt.query_map(
+            params![workflow_id, key, value, limit, offset, project, own],
+            |row| Ok(row_to_run(row)),
+        )?
+        .collect::<Vec<_>>()
+    } else {
+        stmt.query_map(params![workflow_id, key, value, limit, offset], |row| {
             Ok(row_to_run(row))
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Vec<_>>()
+    };
+    let mut runs: Vec<WorkflowRun> = rows.into_iter().filter_map(|r| r.ok()).collect();
     enrich_parent_provenance(conn, &mut runs)?;
     Ok(runs)
 }
@@ -1440,7 +1503,18 @@ pub fn list_runs_page_complete_group(
     minimum: u32,
     offset: u32,
 ) -> Result<Vec<WorkflowRun>> {
-    let mut runs = list_runs_paginated(conn, workflow_id, Some(minimum), Some(offset))?;
+    list_runs_page_complete_group_visible(conn, workflow_id, minimum, offset, None)
+}
+
+pub fn list_runs_page_complete_group_visible(
+    conn: &Connection,
+    workflow_id: &str,
+    minimum: u32,
+    offset: u32,
+    visibility: Option<&RunVisibility>,
+) -> Result<Vec<WorkflowRun>> {
+    let mut runs =
+        list_runs_paginated_visible(conn, workflow_id, Some(minimum), Some(offset), visibility)?;
     let Some(boundary) = runs.last() else {
         return Ok(runs);
     };
@@ -1451,15 +1525,28 @@ pub fn list_runs_page_complete_group(
 
     let sql = format!(
         "SELECT {} FROM workflow_runs
-         WHERE workflow_id = ?1 AND parent_run_id = ?2
+         WHERE workflow_id = ?1 AND parent_run_id = ?2{}
          ORDER BY started_at DESC",
-        workflow_run_cols_without_outputs()
+        workflow_run_cols_without_outputs(),
+        visible_clause(visibility, 3)
     );
     let mut stmt = conn.prepare(&sql)?;
-    let tail: Vec<WorkflowRun> = stmt
-        .query_map(params![workflow_id, parent_run_id], |row| {
+    let (project, own) = visibility
+        .map(|v| (v.project.clone(), v.own_run.clone()))
+        .unwrap_or_default();
+    let rows = if visibility.is_some() {
+        stmt.query_map(params![workflow_id, parent_run_id, project, own], |row| {
             Ok(row_to_run(row))
         })?
+        .collect::<Vec<_>>()
+    } else {
+        stmt.query_map(params![workflow_id, parent_run_id], |row| {
+            Ok(row_to_run(row))
+        })?
+        .collect::<Vec<_>>()
+    };
+    let tail: Vec<WorkflowRun> = rows
+        .into_iter()
         .filter_map(|run| run.ok())
         .filter(|run| run.started_at <= boundary_started_at)
         .collect();
@@ -2171,8 +2258,36 @@ pub const LAST_RUN_SUMMARIES_SQL: &str = "SELECT wr.workflow_id, wr.id, wr.statu
 pub fn get_last_run_summaries(
     conn: &Connection,
 ) -> Result<std::collections::HashMap<String, crate::models::WorkflowRunSummary>> {
-    let mut stmt = conn.prepare(LAST_RUN_SUMMARIES_SQL)?;
-    let rows = stmt.query_map([], |row| {
+    get_last_run_summaries_visible(conn, None)
+}
+
+/// The last run of every workflow among the runs `visibility` admits.
+pub fn get_last_run_summaries_visible(
+    conn: &Connection,
+    visibility: Option<&RunVisibility>,
+) -> Result<std::collections::HashMap<String, crate::models::WorkflowRunSummary>> {
+    let sql = match visibility {
+        None => LAST_RUN_SUMMARIES_SQL.to_string(),
+        Some(_) => "SELECT wr.workflow_id, wr.id, wr.status, wr.started_at,
+                wr.finished_at, wr.tokens_used
+         FROM workflow_runs wr
+         INNER JOIN (
+             SELECT workflow_id, MAX(started_at) AS max_started
+             FROM workflow_runs WHERE (project_id = ?1 OR id = ?2) GROUP BY workflow_id
+         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started
+         WHERE (wr.project_id = ?1 OR wr.id = ?2)"
+            .to_string(),
+    };
+    let (project, own) = visibility
+        .map(|v| (v.project.clone(), v.own_run.clone()))
+        .unwrap_or_default();
+    let mut stmt = conn.prepare(&sql)?;
+    let bound: Vec<Option<String>> = if visibility.is_some() {
+        vec![project, own]
+    } else {
+        Vec::new()
+    };
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound.iter()), |row| {
         let status: String = row.get(2)?;
         Ok((
             row.get::<_, String>(0)?,

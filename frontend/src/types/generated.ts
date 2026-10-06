@@ -5332,7 +5332,12 @@ export type PlanningPlanStats = { ready: number, blocked: number, in_progress: n
 /**
  * A durable proposal: one `kronn-plan-action` fence from an Agent message.
  */
-export type PlanningProposal = { id: string, discussion_id: string, source_message_id: string, fence_index: number, aggregate_state: ProposalAggregateState, items: Array<PlanningProposalItem>, created_at: string, updated_at: string, };
+export type PlanningProposal = { id: string, discussion_id: string, source_message_id: string, fence_index: number, aggregate_state: ProposalAggregateState, items: Array<PlanningProposalItem>,
+/**
+ * The project the room's tasks live in (`None` for a General room):
+ * every item is checked against it, and a created task lands in it.
+ */
+project_id: string | null, project_name: string | null, created_at: string, updated_at: string, };
 
 /**
  * One item of a proposal, with its validation state + idempotent result.
@@ -6163,7 +6168,16 @@ kept_recovery_blobs: number,
  * The key is in use but the stored credentials could not be loaded at
  * start (disk full, unreadable config.toml): why, to fix before a restart.
  */
-credentials_unavailable: string | null, };
+credentials_unavailable: string | null,
+/**
+ * recovery.key is verified for ANOTHER key: it can be replaced without
+ * its passphrase (it is kept as recovery.previous-<ts>).
+ */
+recovery_other_key: boolean,
+/**
+ * config.toml could not be read at start and was kept aside: what and why.
+ */
+config_set_aside: string | null, };
 
 export type RedactedField = {
 /**
@@ -7146,7 +7160,12 @@ export type SetupStatus = { is_first_run: boolean, current_step: SetupStep, agen
 /**
  * Paths actually scanned, exposed to diagnose empty results and missing mounts.
  */
-scan_paths_explored: Array<string>, };
+scan_paths_explored: Array<string>,
+/**
+ * config.toml could not be read at this start and was kept aside: the
+ * notice the wizard shows (where it is, key and data intact).
+ */
+config_set_aside: string | null, };
 
 export type SetupStep = "Agents" | "ScanPaths" | "Detection" | "Complete";
 

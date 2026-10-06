@@ -52,7 +52,8 @@ pub fn list_live_page_publications(
 ) -> Result<Option<Vec<LivePagePublication>>> {
     let canonical_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id_or_slug],
             |row| row.get(0),
         )
@@ -280,7 +281,8 @@ pub fn update_live_page(
 ) -> Result<Option<LivePageDetail>> {
     let canonical_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             |row| row.get(0),
         )
@@ -308,7 +310,7 @@ pub fn update_live_page(
 
 pub fn delete_live_page(conn: &Connection, page_id: &str) -> Result<bool> {
     Ok(conn.execute(
-        "DELETE FROM live_pages WHERE id = ?1 OR slug = ?1",
+        "DELETE FROM live_pages WHERE id = (SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1 ORDER BY (id = ?1) DESC LIMIT 1)",
         [page_id],
     )? > 0)
 }
@@ -319,7 +321,8 @@ pub fn list_live_page_discussions(
 ) -> Result<Option<Vec<LivePageDiscussionLink>>> {
     let canonical_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id_or_slug],
             |row| row.get(0),
         )
@@ -361,7 +364,8 @@ pub fn link_live_page_discussion(
 ) -> Result<bool> {
     let canonical_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id_or_slug],
             |row| row.get(0),
         )
@@ -390,7 +394,7 @@ pub fn unlink_live_page_discussion(
 ) -> Result<bool> {
     Ok(conn.execute(
         "DELETE FROM live_page_discussion_links
-          WHERE page_id = (SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1)
+          WHERE page_id = (SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1 ORDER BY (id = ?1) DESC LIMIT 1)
             AND discussion_id = ?2",
         params![page_id_or_slug, discussion_id],
     )? > 0)
@@ -399,7 +403,8 @@ pub fn unlink_live_page_discussion(
 pub fn list_live_page_revisions(conn: &Connection, page_id: &str) -> Result<Vec<LivePageRevision>> {
     let canonical_page_id: Option<String> = conn
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             |row| row.get(0),
         )
@@ -426,7 +431,8 @@ pub fn update_live_page_html(
     let tx = conn.unchecked_transaction()?;
     let canonical_page_id: String = tx
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             |row| row.get(0),
         )
@@ -479,7 +485,8 @@ pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<
         .query_row(
             "SELECT id, project_id, title, slug, current_revision_id, data_revision,
                     created_at, updated_at, last_published_at, pinned, archived
-               FROM live_pages WHERE id = ?1 OR slug = ?1",
+               FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             map_page,
         )
@@ -570,7 +577,8 @@ pub fn add_live_page_dataset(
     let tx = conn.unchecked_transaction()?;
     let canonical_page_id: String = tx
         .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             |row| row.get(0),
         )
@@ -693,14 +701,16 @@ pub fn publish_live_page(
     let tx = conn.unchecked_transaction()?;
     let current_revision: i64 = tx
         .query_row(
-            "SELECT data_revision FROM live_pages WHERE id = ?1 OR slug = ?1",
+            "SELECT data_revision FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
             [page_id],
             |row| row.get(0),
         )
         .optional()?
         .ok_or_else(|| anyhow!("Page not found"))?;
     let canonical_page_id: String = tx.query_row(
-        "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1",
+        "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
+             ORDER BY (id = ?1) DESC LIMIT 1",
         [page_id],
         |row| row.get(0),
     )?;
@@ -1136,6 +1146,79 @@ mod tests {
             assert_eq!(get_live_page(&conn, &page.id).unwrap().is_some(), commit);
             assert_eq!(pages_capability(&conn).unwrap().activated, commit);
         }
+    }
+
+    /// B5-10 — when one page's slug is another page's id, the id wins.
+    #[test]
+    fn an_id_resolves_before_a_colliding_slug() {
+        let conn = test_connection();
+        let now = Utc::now();
+        // Created first, so a scan without an order would meet it first.
+        create_live_page(
+            &conn,
+            &LivePage {
+                id: "page-0".into(),
+                project_id: None,
+                title: "Squatter".into(),
+                slug: "page-1".into(),
+                current_revision_id: "rev-0".into(),
+                data_revision: 0,
+                created_at: now,
+                updated_at: now,
+                last_published_at: None,
+                pinned: false,
+                archived: false,
+            },
+            &LivePageRevision {
+                id: "rev-0".into(),
+                page_id: "page-0".into(),
+                revision: 1,
+                html: "<!doctype html><h1>Squatter</h1>".into(),
+                created_by_agent: None,
+                created_at: now,
+            },
+            &[CreateLivePageDataset {
+                name: "summary".into(),
+                kind: LivePageDatasetKind::Snapshot,
+                initial: None,
+                schema: None,
+                max_points: None,
+                max_age_days: None,
+            }],
+            None,
+        )
+        .unwrap();
+        fixture(&conn);
+        let result = publish_live_page(
+            &conn,
+            "page-1",
+            &PublishLivePageRequest {
+                workflow_id: None,
+                workflow_run_id: None,
+                writes: vec![LivePageWrite {
+                    dataset: "summary".into(),
+                    operation: LivePageWriteOperation::Replace,
+                    value: serde_json::json!({"value": 1}),
+                    observed_at: None,
+                    dedupe_key: None,
+                    key_field: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(result.page_id, "page-1");
+        let squatter: i64 = conn
+            .query_row(
+                "SELECT data_revision FROM live_pages WHERE id = 'page-0'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(squatter, 0);
+        assert_eq!(
+            get_live_page_summary(&conn, "page-1").unwrap().unwrap().id,
+            "page-1"
+        );
     }
 
     #[test]

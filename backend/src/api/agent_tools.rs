@@ -1595,7 +1595,7 @@ impl ToolExecutor for KronnToolExecutor {
         }
         match call.name.as_str() {
             "mcp_list" => {
-                let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
+                let Json(res) = crate::api::mcps::overview(State(self.state.clone()), None).await;
                 match (res.success, res.data) {
                     (true, Some(d)) => match serde_json::to_value(d) {
                         Ok(v) => {
@@ -1611,7 +1611,7 @@ impl ToolExecutor for KronnToolExecutor {
                 let Some(slug) = call.arguments["api_plugin_slug"].as_str() else {
                     return fail(call, "missing required field `api_plugin_slug`");
                 };
-                let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
+                let Json(res) = crate::api::mcps::overview(State(self.state.clone()), None).await;
                 match (res.success, res.data) {
                     (true, Some(d)) => {
                         let project_id = self.effective_project_id().await;
@@ -3666,7 +3666,7 @@ impl KronnToolExecutor {
     async fn resolve_config_id(&self, slug: &str) -> Option<String> {
         use axum::extract::State;
         use axum::Json;
-        let Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
+        let Json(res) = crate::api::mcps::overview(State(self.state.clone()), None).await;
         let v = serde_json::to_value(res.data?).ok()?;
         let project_id = self.effective_project_id().await;
         v["configs"]
@@ -3678,7 +3678,7 @@ impl KronnToolExecutor {
 
     async fn config_id_in_scope(&self, slug: &str, config_id: &str) -> bool {
         use axum::extract::State;
-        let axum::Json(res) = crate::api::mcps::overview(State(self.state.clone())).await;
+        let axum::Json(res) = crate::api::mcps::overview(State(self.state.clone()), None).await;
         let Some(v) = res.data.and_then(|data| serde_json::to_value(data).ok()) else {
             return false;
         };

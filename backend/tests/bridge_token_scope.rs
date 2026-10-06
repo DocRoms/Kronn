@@ -173,8 +173,9 @@ async fn fixture_with_db() -> (Router, tempfile::TempDir, Arc<kronn::db::Databas
                 rusqlite::params![format!("wf-{suffix}"), project, now],
             )?;
             conn.execute(
-                "INSERT INTO workflow_runs(id, workflow_id, started_at) VALUES (?1, ?2, ?3)",
-                rusqlite::params![format!("run-{suffix}"), format!("wf-{suffix}"), now],
+                "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![format!("run-{suffix}"), format!("wf-{suffix}"), project, now],
             )?;
             conn.execute(
                 "INSERT INTO planning_tasks(id, task_number, title, created_at, updated_at) \
@@ -2154,4 +2155,638 @@ async fn a_write_without_a_content_type_is_refused() {
     )
     .await;
     assert_eq!(appended.as_deref(), Some("0"));
+}
+
+// ─── Layer B round 4 (review-layer-b4) ──────────────────────────────────────
+
+/// B4-02 — the plugin overview shows a token only what its project may use.
+#[tokio::test]
+async fn the_plugin_overview_is_scoped_to_the_token_s_project() {
+    let (app, repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        for (id, general) in [("cfg-general", 1), ("cfg-unlinked", 0), ("cfg-a", 0)] {
+            conn.execute(
+                "INSERT INTO mcp_configs(id, server_id, label, include_general) \
+                 VALUES (?1, 'synthetic-api', ?1, ?2)",
+                rusqlite::params![id, general],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-a', 'p1')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for (project, slug) in [("p2", "cfg-b"), ("p2", "c"), ("p1", "c")] {
+        let path = repos.path().join(project);
+        kronn::core::mcp_scanner::write_mcp_context(
+            path.to_str().unwrap(),
+            slug,
+            "A rule written for this project.",
+        )
+        .unwrap();
+    }
+    let guard = bridge_for("room-a");
+    let (status, response) = call(&app, "GET", "/api/mcps", Some(guard.value()), None).await;
+    assert_eq!(status, 200, "{response}");
+    let mut ids: Vec<&str> = response["data"]["configs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|config| config["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["c", "cfg-a"], "{response}");
+    let contexts = response["data"]["customized_contexts"].to_string();
+    assert!(!contexts.contains(":p2"), "{contexts}");
+    assert!(contexts.contains("c:p1"), "{contexts}");
+    assert!(!response.to_string().contains("\"p2\""), "{response}");
+}
+
+/// B4-03 — the workflows feeding a page are scoped like any workflow list.
+#[tokio::test]
+async fn a_page_s_feeding_workflows_are_scoped() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, current_revision_id, \
+             created_at, updated_at) VALUES ('page-shared', NULL, 'shared', 'page-shared', \
+             'rev-shared', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO live_page_revisions(id, page_id, revision, html, created_by_agent, \
+             created_at) VALUES ('rev-shared', 'page-shared', 1, '<p></p>', NULL, \
+             '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        let steps = json!([{"name": "publish", "step_type": {"type": "PublishPageData"},
+            "page_publish": {"page_id": "page-shared", "writes": []}}])
+        .to_string();
+        conn.execute(
+            "UPDATE workflows SET steps_json = ?1 WHERE id IN ('wf-a', 'wf-b')",
+            [&steps],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (_, all) = call(&app, "GET", "/api/pages/page-shared/workflows", None, None).await;
+    assert_eq!(all["data"].as_array().map(Vec::len), Some(2), "{all}");
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/pages/page-shared/workflows",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let ids: Vec<&str> = response["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workflow| workflow["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["wf-a"], "{response}");
+}
+
+/// B4-06 — a discussion the token created and a human moved kills the token.
+#[tokio::test]
+async fn an_adopted_discussion_moved_to_another_project_kills_the_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, created) = call(
+        &app,
+        "POST",
+        "/api/disc/create",
+        Some(&token),
+        Some(json!({"title": "child", "agent": "ClaudeCode"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{created}");
+    let child = created["data"]["disc_id"].as_str().unwrap().to_owned();
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append(&child, "one")),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let moved = child.clone();
+    db.with_conn(move |conn| {
+        conn.execute(
+            "UPDATE discussions SET project_id = 'p2' WHERE id = ?1",
+            [&moved],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        Some(&token),
+        Some(append(&child, "two")),
+    )
+    .await;
+    assert_eq!(status, 401, "{response}");
+}
+
+/// B4-06 — with several scope discussions, deleting any one kills the token.
+#[tokio::test]
+async fn deleting_any_scope_discussion_kills_the_token() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into(), "room-a2".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let token = guard.value().to_owned();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    db.with_conn(|conn| {
+        conn.execute("DELETE FROM discussions WHERE id = 'room-a2'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 401);
+}
+
+/// B4-07 — a token's planning write is recorded as an agent's.
+#[tokio::test]
+async fn a_token_s_planning_write_is_an_agent_s() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "PATCH",
+        "/api/planning/tasks/task-a",
+        Some(guard.value()),
+        Some(json!({"title": "renamed", "actor": {"kind": "human", "id": "romu"}})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["success"], true, "{response}");
+    let kind = query_one(
+        &db,
+        "SELECT actor_kind FROM planning_task_events WHERE task_id = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+        "task-a".into(),
+    )
+    .await;
+    assert_eq!(kind.as_deref(), Some("agent"));
+}
+
+/// B4-10 — keys of a caller's own maps are names, not Kronn fields.
+#[tokio::test]
+async fn keys_of_a_caller_s_own_maps_are_not_id_fields() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(&token),
+        Some(
+            json!({"api_plugin_slug": "synthetic-api", "api_config_id": "c",
+            "endpoint_path": "/projects/{project_id}", "method": "GET",
+            "path_params": {"project_id": "123"}, "query": {"issue_ref": "x"}}),
+        ),
+    )
+    .await;
+    assert_ne!(status, 403, "{response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/mcp/workflow-trigger",
+        Some(&token),
+        Some(json!({"workflow_id": "wf-a", "variables": {"ticket_id": "X"}})),
+    )
+    .await;
+    assert_ne!(status, 403, "{response}");
+}
+
+// ─── Layer B round 5 (review-layer-b5) ──────────────────────────────────────
+
+/// B5-01 — joining ends the named session elsewhere: a token cannot evict a
+/// session active in another project's room.
+#[tokio::test]
+async fn peer_join_cannot_evict_a_session_from_another_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussion_invite_tokens(token_hash, disc_id, created_at, expires_at) \
+             VALUES (?1, 'room-a', '2026-01-01T00:00:00Z', '2999-01-01T00:00:00Z')",
+            [sha256_hex("kr-join-room-a")],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/discussions/peer-join",
+        Some(guard.value()),
+        Some(json!({"token": "kr-join-room-a", "agent_type": "Codex", "session_id": "sess-b"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let state = query_one(
+        &db,
+        "SELECT status FROM discussion_sessions WHERE id = CAST(?1 AS INTEGER)",
+        "901".into(),
+    )
+    .await;
+    assert_eq!(state.as_deref(), Some("active"));
+}
+
+/// B5-02 — a page a token's workflow will publish into must be its project's.
+#[tokio::test]
+async fn a_token_s_workflow_publishes_only_into_its_project_s_pages() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, created_at, updated_at) \
+             VALUES ('page-shared', NULL, 'shared', 'page-shared', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let workflow = |page: &str| {
+        json!({"name": "publish", "trigger": {"type": "Manual"},
+            "steps": [{"name": "publish", "step_type": {"type": "PublishPageData"},
+                "page_publish": {"page_id": page, "writes": []}}]})
+    };
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows",
+        Some(guard.value()),
+        Some(workflow("page-shared")),
+    )
+    .await;
+    assert_eq!(status, 403, "a shared page: {response}");
+    let (status, response) = call(
+        &app,
+        "PUT",
+        "/api/workflows/wf-a",
+        Some(guard.value()),
+        Some(workflow("page-shared")),
+    )
+    .await;
+    assert_eq!(status, 403, "a shared page on update: {response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows",
+        Some(guard.value()),
+        Some(workflow("page-a")),
+    )
+    .await;
+    assert_eq!(status, 200, "its own project's page: {response}");
+}
+
+/// B5-03 — a project-less run is private to its launch, like a General
+/// discussion.
+#[tokio::test]
+async fn a_project_less_run_is_private_to_its_launch() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) VALUES \
+             ('run-general', 'wf-global', NULL, '2026-01-01T00:00:00Z'), \
+             ('run-global-p1', 'wf-global', 'p1', '2026-01-01T00:00:01Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, response) = call(
+        &app,
+        "GET",
+        "/api/workflows/wf-global/runs",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let listed = response["data"].to_string();
+    assert!(listed.contains("run-global-p1"), "{response}");
+    assert!(!listed.contains("run-general"), "{response}");
+    for path in [
+        "/api/workflows/wf-global/runs/run-general",
+        "/api/mcp/workflow-run-status/run-general",
+    ] {
+        let (status, _) = call(&app, "GET", path, Some(&token), None).await;
+        assert_eq!(status, 403, "{path}");
+    }
+    let own = mint(BridgeScope {
+        workflow_run_id: Some("run-general".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/workflows/wf-global/runs/run-general",
+        Some(own.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "its own launch reads it");
+}
+
+/// B5-09 — a config linked to a project and opted into General is usable by
+/// a project-less token, as the overview says, and not by another project.
+#[tokio::test]
+async fn a_config_opted_into_general_follows_one_rule_everywhere() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO mcp_configs(id, server_id, label, include_general) \
+             VALUES ('cfg-b-general', 'synthetic-api', 'cfg-b-general', 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO mcp_config_projects(config_id, project_id) VALUES ('cfg-b-general', 'p2')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let call_body = json!({"api_plugin_slug": "synthetic-api", "api_config_id": "cfg-b-general",
+        "endpoint_path": "/anything", "method": "GET"});
+    let general = bridge_for("room-g");
+    let (_, overview) = call(&app, "GET", "/api/mcps", Some(general.value()), None).await;
+    assert!(overview.to_string().contains("cfg-b-general"), "{overview}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(general.value()),
+        Some(call_body.clone()),
+    )
+    .await;
+    assert_ne!(status, 403, "{response}");
+    let p1 = bridge_for("room-a");
+    let (_, overview) = call(&app, "GET", "/api/mcps", Some(p1.value()), None).await;
+    assert!(
+        !overview.to_string().contains("cfg-b-general"),
+        "{overview}"
+    );
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/agent-api/call",
+        Some(p1.value()),
+        Some(call_body),
+    )
+    .await;
+    assert_eq!(status, 403);
+}
+
+/// B5-10 — a token learns that a slug is taken, never that another project
+/// holds it.
+#[tokio::test]
+async fn a_slug_conflict_names_no_other_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, created_at, updated_at) \
+             VALUES ('page-taken', 'p2', 'taken', 'taken', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/pages",
+        Some(guard.value()),
+        Some(json!({"title": "Mine", "slug": "taken", "html": "<p>x</p>"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let error = response["error"].as_str().unwrap_or_default();
+    assert_eq!(
+        error, "This Page slug is not available; choose another",
+        "{response}"
+    );
+    let (_, uuid_slug) = call(
+        &app,
+        "POST",
+        "/api/pages",
+        Some(guard.value()),
+        Some(
+            json!({"title": "Mine", "slug": "0b8f5c2e-3a7d-4f1e-9c6b-2d4e8a1f7c3b",
+            "html": "<p>x</p>"}),
+        ),
+    )
+    .await;
+    assert_eq!(uuid_slug["success"], false, "{uuid_slug}");
+}
+
+// ─── Layer B round 6 (review-layer-b6) ──────────────────────────────────────
+
+/// A project-less workflow with an older p1 run and a newer p2 run, both
+/// carrying `state.k = "v"`.
+async fn shared_workflow_runs(db: &Arc<kronn::db::Database>) {
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, status, state, started_at) VALUES \
+             ('run-old-p1', 'wf-global', 'p1', 'Success', '{\"k\":\"v\"}', '2026-01-01T00:00:00Z'), \
+             ('run-new-p2', 'wf-global', 'p2', 'Success', '{\"k\":\"v\"}', '2026-01-02T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+/// B6-01 — a token's `last_run` is one it may see.
+#[tokio::test]
+async fn a_workflow_s_last_run_is_one_the_token_may_see() {
+    let (app, _repos, db) = fixture_with_db().await;
+    shared_workflow_runs(&db).await;
+    let guard = bridge_for("room-a");
+    let (status, response) = call(&app, "GET", "/api/workflows", Some(guard.value()), None).await;
+    assert_eq!(status, 200, "{response}");
+    let shared = response["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workflow| workflow["id"] == "wf-global")
+        .expect("the shared workflow is listed");
+    assert_eq!(shared["last_run"]["id"], "run-old-p1", "{shared}");
+    assert!(!response.to_string().contains("run-new-p2"), "{response}");
+}
+
+/// B6-02 — hidden runs neither answer a state filter nor take a page's place.
+#[tokio::test]
+async fn hidden_runs_never_answer_a_run_list_query() {
+    let (app, _repos, db) = fixture_with_db().await;
+    shared_workflow_runs(&db).await;
+    let guard = bridge_for("room-a");
+    for path in [
+        "/api/workflows/wf-global/runs?state_key=k&state_value=v&limit=1",
+        "/api/workflows/wf-global/runs?limit=1",
+        "/api/workflows/wf-global/runs?limit=1&complete_group=true",
+    ] {
+        let (status, response) = call(&app, "GET", path, Some(guard.value()), None).await;
+        assert_eq!(status, 200, "{path}: {response}");
+        let ids: Vec<&str> = response["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["run-old-p1"], "{path}");
+    }
+}
+
+/// B6-03 — a run without a project stays private after its workflow moves.
+#[tokio::test]
+async fn a_project_less_run_stays_private_after_its_workflow_moves() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO workflow_runs(id, workflow_id, project_id, started_at) \
+             VALUES ('run-before-move', 'wf-global', NULL, '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE workflows SET project_id = 'p1' WHERE id = 'wf-global'",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, _) = call(
+        &app,
+        "GET",
+        "/api/workflows/wf-global/runs/run-before-move",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (_, list) = call(
+        &app,
+        "GET",
+        "/api/workflows/wf-global/runs",
+        Some(guard.value()),
+        None,
+    )
+    .await;
+    assert!(!list.to_string().contains("run-before-move"), "{list}");
+}
+
+/// B6-06 — an import's unbundled literal page and a save's foreign room are
+/// write targets; a bundled page lands in the token's project.
+#[tokio::test]
+async fn imported_and_saved_targets_stay_in_the_token_s_project() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, created_at, updated_at) \
+             VALUES ('page-shared', NULL, 'shared', 'page-shared', '2026-01-01T00:00:00Z', \
+             '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let token = guard.value().to_owned();
+    let (status, mut envelope) = call(&app, "GET", "/api/workflows/wf-a/export", None, None).await;
+    assert_eq!(status, 200, "{envelope}");
+    envelope["version"] = json!(2);
+    envelope["workflow"]["steps"] = json!([
+        {"name": "seed", "step_type": {"type": "JsonData"}, "json_data_payload": {"v": 1}},
+        {"name": "publish", "step_type": {"type": "PublishPageData"},
+         "page_publish": {"page_id": "page-shared", "writes": [
+             {"dataset": "summary", "operation": "replace", "value_from": "steps.seed.data"}]}}]);
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/import",
+        Some(&token),
+        Some(json!({"content": envelope.to_string()})),
+    )
+    .await;
+    assert_eq!(status, 403, "an unbundled shared page: {response}");
+    envelope["referenced_pages"] = json!([{"id": "page-shared", "slug": "bundled-page",
+        "title": "Bundled", "html": "<p>x</p>", "created_by_agent": null,
+        "datasets": [{"name": "summary", "kind": "snapshot", "schema": null,
+            "max_points": 100, "max_age_days": null}]}]);
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/import",
+        Some(&token),
+        Some(json!({"content": envelope.to_string()})),
+    )
+    .await;
+    assert_eq!(status, 200, "a bundled page: {response}");
+    let project = query_one(
+        &db,
+        "SELECT project_id FROM live_pages WHERE slug = ?1",
+        "bundled-page".into(),
+    )
+    .await;
+    assert_eq!(project.as_deref(), Some("p1"), "{response}");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows",
+        Some(&token),
+        Some(json!({"name": "room", "trigger": {"type": "Manual"},
+            "steps": [{"name": "agent", "step_type": {"type": "Agent"},
+                "prompt_template": "go", "room_id": "room-b"}]})),
+    )
+    .await;
+    assert_eq!(status, 403, "another project's room: {response}");
 }

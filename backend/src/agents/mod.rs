@@ -1007,8 +1007,10 @@ async fn probe_runtime(def: &AgentDef) -> bool {
 
     // Probe: npx --yes <pkg> --version with 15s timeout
     tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
-    let mut cmd =
-        crate::core::cmd::full_env_cmd("npx", crate::core::cmd::FullEnvReason::VersionDiscovery);
+    let mut cmd = crate::core::cmd::discovery_cmd(
+        "npx",
+        crate::core::child_env::AgentFamily::from_agent_type(&def.agent_type),
+    );
     cmd.args(["--yes", pkg, "--version"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1242,6 +1244,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
     None
 }
 
+/// The agent family whose own settings a version probe of `binary_path` reads.
+fn version_probe_family(binary_path: &str) -> crate::core::child_env::AgentFamily {
+    crate::core::child_env::AgentFamily::from_launch(binary_path, None, "")
+}
+
 /// Try to get the version of an agent from its full path.
 /// On Windows, if the path is a WSL Linux path (starts with /), run via wsl.exe.
 async fn get_version_from(binary_path: &str) -> Result<String> {
@@ -1250,32 +1257,23 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
         {
             if binary_path.starts_with('/') {
                 // WSL path — run via wsl.exe with login shell for correct PATH
-                crate::core::cmd::full_env_cmd(
-                    "wsl.exe",
-                    crate::core::cmd::FullEnvReason::VersionDiscovery,
-                )
-                .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
-                .output()
-                .await?
+                crate::core::cmd::discovery_cmd("wsl.exe", version_probe_family(binary_path))
+                    .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
+                    .output()
+                    .await?
             } else {
-                crate::core::cmd::full_env_cmd(
-                    binary_path,
-                    crate::core::cmd::FullEnvReason::VersionDiscovery,
-                )
-                .arg("--version")
-                .output()
-                .await?
+                crate::core::cmd::discovery_cmd(binary_path, version_probe_family(binary_path))
+                    .arg("--version")
+                    .output()
+                    .await?
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            crate::core::cmd::full_env_cmd(
-                binary_path,
-                crate::core::cmd::FullEnvReason::VersionDiscovery,
-            )
-            .arg("--version")
-            .output()
-            .await?
+            crate::core::cmd::discovery_cmd(binary_path, version_probe_family(binary_path))
+                .arg("--version")
+                .output()
+                .await?
         }
     };
 

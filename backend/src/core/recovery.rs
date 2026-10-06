@@ -216,8 +216,7 @@ pub fn save_blob_as(dir: &Path, filename: &str, blob: &RecoveryBlob) -> std::io:
     let path = dir.join(filename);
     // One temp per write: two concurrent writers never share a half-written file.
     let tmp = dir.join(format!(".{filename}.{}.{seq}.tmp", std::process::id()));
-    crate::core::keyvault::write_private_temp(&tmp, to_code(blob).as_bytes())?;
-    std::fs::rename(&tmp, &path)
+    crate::core::keyvault::write_private_atomic(&tmp, &path, to_code(blob).as_bytes())
 }
 
 /// File-name prefix of blobs carried by imported backups (another machine's key).

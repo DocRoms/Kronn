@@ -857,7 +857,7 @@ async fn bridge_gate(
     let binding = state
         .db
         // Re-read on every call: a deleted discussion or run kills the token.
-        .with_read_conn(move |conn| bridge_token::resolve_scope_project(conn, &resolver.scope))
+        .with_read_conn(move |conn| bridge_token::resolve_grant_project(conn, &resolver))
         .await;
     let project = match binding {
         Ok(bridge_token::ScopeBinding::Bound(project)) => match grant.freeze(project) {
@@ -952,6 +952,7 @@ async fn bridge_gate(
         token_id: grant.id.clone(),
         project: project.clone(),
         own_discussions: grant.own_discussions(),
+        own_run: grant.scope.workflow_run_id.clone(),
     });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))

@@ -213,6 +213,12 @@ export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Pro
           <p className="setup-subtitle">{t('setup.subtitle')}</p>
         </div>
 
+        {initialStatus?.config_set_aside && (
+          <div className="setup-error" role="alert" data-testid="setup-config-set-aside">
+            {initialStatus.config_set_aside}
+          </div>
+        )}
+
         {/* Step indicator */}
         <div className="setup-steps">
           {STEPS.map((s, i) => {

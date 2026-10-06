@@ -747,6 +747,59 @@ async fn quick_exec_crud_and_csv_run_round_trip() {
     assert!(empty["data"].as_array().unwrap().is_empty());
 }
 
+/// A saved Quick Exec runs with its stored approval: approved by a human,
+/// its unmodelled program receives the value; without it, the run refuses.
+#[tokio::test]
+async fn an_approved_quick_exec_runs_and_an_unapproved_one_is_refused() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let body = |approved: bool| {
+        serde_json::json!({
+            "name": "Greet", "description": "", "project_id": null,
+            "command": "expr", "args": ["{{name}}"], "timeout_secs": 10,
+            "output_format": "text",
+            "variables": [{"name": "name", "label": "Name", "placeholder": ""}],
+            "unmodelled_args_approved": approved
+        })
+    };
+    let (_, refused) = post_json(app.clone(), "/api/quick-execs", body(false)).await;
+    assert_eq!(refused["success"], false, "{refused}");
+    let (_, created) = post_json(app.clone(), "/api/quick-execs", body(true)).await;
+    assert_eq!(created["success"], true, "{created}");
+    let id = created["data"]["id"].as_str().unwrap().to_string();
+    let run = |id: String| {
+        let app = app.clone();
+        async move {
+            post_json(
+                app,
+                &format!("/api/quick-execs/{id}/run"),
+                serde_json::json!({"variables": {"name": "hello"}}),
+            )
+            .await
+            .1
+        }
+    };
+    let approved = run(id.clone()).await;
+    assert_eq!(approved["data"]["success"], true, "{approved}");
+    assert_eq!(approved["data"]["data"], "hello", "{approved}");
+
+    let stored = id.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE quick_execs SET unmodelled_args_approved = 0 WHERE id = ?1",
+                [stored],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let unapproved = run(id).await;
+    assert_ne!(unapproved["data"]["success"], true, "{unapproved}");
+    assert!(unapproved.to_string().contains("expr"), "{unapproved}");
+}
+
 #[tokio::test]
 async fn quick_exec_failures_keep_measured_process_diagnostics_on_reload() {
     let state = test_state();

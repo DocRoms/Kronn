@@ -17,9 +17,11 @@
 //!   "Empty" covers every column of [`ENCRYPTED_COLUMNS`], not only MCP configs.
 //! - A vault that cannot be read stops the boot ([`KeyBootError`]): it may hold
 //!   the key, so neither minting nor mirroring over it is safe.
-//! - Mirror the resolved key into every writable vault so it survives a
+//! - Mirror the resolved key into every EMPTY writable vault so it survives a
 //!   `config.toml` rewrite / keychain reset. The `config.toml` copy is dropped
-//!   only once a vault reads the key back and it decrypts every column.
+//!   only when two independent copies remain (two vaults, or one plus a
+//!   verified recovery passphrase) and the key decrypts every column; another
+//!   value found in `config.toml` goes to `config.toml.retired-key.<ts>`.
 
 use std::path::Path;
 
@@ -337,8 +339,7 @@ fn set_aside_retired_key(dir: &Path, value: &str) -> std::io::Result<String> {
         toml::Value::String(value.to_string())
     );
     let tmp = dir.join(format!(".{name}.tmp"));
-    crate::core::keyvault::write_private_temp(&tmp, content.as_bytes())?;
-    std::fs::rename(&tmp, dir.join(&name))?;
+    crate::core::keyvault::write_private_atomic(&tmp, &dir.join(&name), content.as_bytes())?;
     Ok(name)
 }
 
@@ -349,6 +350,15 @@ fn ensure_durable_copy(dir: &Path, store: &KeyStore, config: &AppConfig, key: &s
         return Ok(());
     }
     config::retain_disk_key(dir, key);
+    // config.toml already holding it on disk is a durable copy: no rewrite
+    // (which could fail on a full disk) is needed.
+    if config::read_disk_key(dir)
+        .ok()
+        .flatten()
+        .is_some_and(|on_disk| crate::core::keyvault::same_key(&on_disk, key))
+    {
+        return Ok(());
+    }
     config::write_key_copy_now(dir, config)
         .and_then(|()| config::read_disk_key(dir))
         .ok()
@@ -443,31 +453,28 @@ pub async fn reconcile_with(
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|(v, _)| seen.insert(v.clone()));
 
-    let mut columns = collect_encrypted_rows(db).await?;
-    let mut decision = decide(&candidates, &columns);
-    if let Decision::Lock(_) = decision {
-        // Last resort before locking: keys still sitting in config.toml backups,
-        // read-only; the decrypt self-test decides as for any candidate.
-        let mut extended = candidates.clone();
-        for key in backup_file_keys(dir) {
-            if !extended.iter().any(|(k, _)| *k == key) {
-                extended.push((key, "config-backup"));
-            }
-        }
-        if extended.len() > candidates.len() {
-            let retry = decide(&extended, &columns);
-            if !matches!(retry, Decision::Lock(_)) {
-                candidates = extended;
-                decision = retry;
-            }
+    // Keys kept in files (config.toml backups, set-aside values) are the
+    // lowest-priority, read-only candidates of every decision: rows under such
+    // a key are then seen (SeveralKeys, retirable), never silently orphaned.
+    for (key, source) in file_keys(dir) {
+        if !candidates.iter().any(|(k, _)| *k == key) {
+            candidates.push((key, source));
         }
     }
+    let mut columns = collect_encrypted_rows(db).await?;
+    let mut decision = decide(&candidates, &columns);
     if let Decision::Conflict(found) = &decision {
         if let Some((from, to)) = reencrypt_request(found) {
             // The operator named the key to retire: move its rows, then decide again.
             let report = reencrypt_rows(db, &from, &to).await?;
-            // The encrypted config.toml backup follows the rows.
-            crate::core::credential_store::reencrypt_backup(dir, &from, &to)?;
+            // The encrypted config.toml backup follows the rows; a failure here
+            // is retried at the next start (reencrypt_backup_to below).
+            if let Err(e) = crate::core::credential_store::reencrypt_backup(dir, &from, &to) {
+                tracing::warn!(
+                    "keystore: the encrypted config.toml backup stays under the retired key for \
+                     now ({e:#}); the next start moves it. Free disk space if this repeats."
+                );
+            }
             tracing::warn!(
                 "keystore: rows re-encrypted on request (KRONN_REENCRYPT_FROM): {report:?}"
             );
@@ -550,18 +557,26 @@ pub async fn reconcile_with(
     Ok(outcome)
 }
 
-/// `encryption_secret` values found in config.toml.backup and its rotated
-/// copies, canonical and de-duplicated.
-fn backup_file_keys(dir: &Path) -> Vec<String> {
-    let mut keys = Vec::new();
+/// Sources whose keys sit in files kept by Kronn, read-only candidates.
+const FILE_SOURCES: &[&str] = &["config-backup", "retired-key"];
+
+/// `encryption_secret` values found in config.toml.backup, its rotated copies
+/// and the set-aside `config.toml.retired-key.<ts>` files, canonical and
+/// de-duplicated, with their source name.
+fn file_keys(dir: &Path) -> Vec<(String, &'static str)> {
+    let mut keys: Vec<(String, &'static str)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return keys;
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !(name == "config.toml.backup" || name.starts_with("config.toml.backup.")) {
+        let source = if name == "config.toml.backup" || name.starts_with("config.toml.backup.") {
+            "config-backup"
+        } else if name.starts_with(RETIRED_KEY_PREFIX) {
+            "retired-key"
+        } else {
             continue;
-        }
+        };
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
@@ -571,12 +586,29 @@ fn backup_file_keys(dir: &Path) -> Vec<String> {
                 .map(str::to_string)
         });
         if let Some(key) = value.and_then(|v| crypto::canonical_secret(&v).ok()) {
-            if !keys.contains(&key) {
-                keys.push(key);
+            if !keys.iter().any(|(k, _)| *k == key) {
+                keys.push((key, source));
             }
         }
     }
     keys
+}
+
+/// The canonical keys the stores hold now, and the stores holding a non-key.
+fn store_sources(store: &KeyStore) -> (Vec<(String, &'static str)>, Vec<&'static str>) {
+    let mut keys = Vec::new();
+    let mut invalid = Vec::new();
+    for (name, value) in store.snapshot().unwrap_or_default() {
+        let Some(v) = value.filter(|v| !v.trim().is_empty()) else {
+            continue;
+        };
+        match crypto::canonical_secret(&v) {
+            Ok(k) if !keys.iter().any(|(x, _): &(String, &str)| *x == k) => keys.push((k, name)),
+            Ok(_) => {}
+            Err(_) => invalid.push(name),
+        }
+    }
+    (keys, invalid)
 }
 
 /// What the last boot found in the key stores of a data directory.
@@ -605,9 +637,10 @@ fn record_report(
     copies: usize,
     file_keeps_key: bool,
 ) {
+    // Files Kronn keeps are not key stores an older version would adopt.
     let stale_sources: Vec<&'static str> = candidates
         .iter()
-        .filter(|(cand, _)| key != Some(cand.as_str()))
+        .filter(|(cand, src)| key != Some(cand.as_str()) && !FILE_SOURCES.contains(src))
         .map(|(_, src)| *src)
         .collect();
     if !stale_sources.is_empty() {
@@ -706,14 +739,27 @@ pub(crate) fn set_recovery_passphrase_in(
     let key_hex = config.encryption_secret.clone().ok_or_else(|| {
         anyhow::anyhow!("no active encryption key to protect (token subsystem is locked?)")
     })?;
-    if recovery::is_configured(dir) {
+    let current = current_passphrase.unwrap_or_default();
+    if recovery::is_configured(dir)
+        && current.is_empty()
+        && recovery::matches_key(dir, &key_hex) == recovery::RecoveryMatch::OtherKey
+    {
+        // A blob verified (checksummed fingerprint) for ANOTHER key cannot
+        // protect the key in use; replacing it loses nothing, since it is kept.
+        if let Some(existing) = recovery::load_blob(dir) {
+            let kept = recovery::save_previous_blob(dir, &existing)
+                .context("keep the replaced recovery.key, which wraps another key")?;
+            tracing::warn!(
+                "keystore: recovery.key wrapped another key; it is kept as {kept} and replaced"
+            );
+        }
+    } else if recovery::is_configured(dir) {
         let existing = recovery::load_blob(dir).ok_or_else(|| {
             anyhow::anyhow!(
                 "the existing recovery.key cannot be read, so it cannot be replaced from here — \
                  move it out of the Kronn data directory first if you no longer need it"
             )
         })?;
-        let current = current_passphrase.unwrap_or_default();
         if current.is_empty() {
             anyhow::bail!(
                 "A recovery passphrase is already set: enter the current one to replace it"
@@ -801,12 +847,14 @@ pub async fn recover_with_passphrase(
         config.encryption_secret = None;
         return Err(e);
     }
-    // The status now describes the restored key, not the locked boot.
+    // The status now describes the restored key, with what the key stores
+    // still hold (a stale value is never overwritten, so it still warns).
+    let (sources, invalid) = store_sources(store);
     record_report(
         dir,
-        &[],
+        &sources,
         Some(&key),
-        &[],
+        &invalid,
         store.copies_of(&key),
         file_keeps_key,
     );
@@ -2775,6 +2823,194 @@ mod tests {
             crate::core::credential_store::read_backup(&backup, &to).unwrap(),
             "old config"
         );
+    }
+
+    // ── review round 5 ──────────────────────────────────────────────────────
+
+    /// C4-01 — rows under a key that survives only in a config backup or a
+    /// set-aside file are seen: two decrypting keys, SeveralKeys names it.
+    #[tokio::test]
+    async fn a_key_kept_only_in_a_file_that_decrypts_rows_is_seen() {
+        for file in [
+            "config.toml.backup.20261005T000000Z",
+            "config.toml.retired-key.20261005T000000Z",
+        ] {
+            let db = Database::open_in_memory().unwrap();
+            let k = crypto::generate_secret();
+            let k1 = crypto::generate_secret();
+            seed_row(&db, &k).await;
+            seed_snapshot(&db, &k1).await;
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                tmp.path().join(file),
+                format!("encryption_secret = \"{k1}\"\n"),
+            )
+            .unwrap();
+            let (sidecar, _s) = mem_vault("sidecar", Some(&k));
+            let store = KeyStore::from_vaults(vec![sidecar]);
+            let mut cfg = config::default_config();
+            cfg.encryption_secret = None;
+            let err = reconcile_with(&mut cfg, &db, &store, tmp.path())
+                .await
+                .unwrap_err()
+                .to_string();
+            let source = if file.contains("retired") {
+                "retired-key"
+            } else {
+                "config-backup"
+            };
+            assert!(
+                err.contains(&format!("{source} holds key")),
+                "{file}: {err}"
+            );
+        }
+    }
+
+    /// C4-02 — a recovery.key verified for ANOTHER key is replaced without its
+    /// passphrase, the old blob kept as previous.
+    #[test]
+    fn a_recovery_key_for_another_key_is_replaced_without_its_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let k_old = crypto::generate_secret();
+        let k = crypto::generate_secret();
+        recovery::save_blob(
+            dir.path(),
+            &recovery::wrap_key(&k_old, "forgotten").unwrap(),
+        )
+        .unwrap();
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(k.clone());
+        set_recovery_passphrase_in(dir.path(), &cfg, "new long pass", None).unwrap();
+        assert_eq!(
+            recovery::matches_key(dir.path(), &k),
+            recovery::RecoveryMatch::Matches
+        );
+        let kept = recovery::previous_blobs(dir.path());
+        assert_eq!(recovery::unwrap_key(&kept[0], "forgotten").unwrap(), k_old);
+        // A blob that matches (or cannot be verified) still needs the current one.
+        assert!(set_recovery_passphrase_in(dir.path(), &cfg, "another long pass", None).is_err());
+    }
+
+    /// C4-03 — after a restore, a store still holding another value is reported.
+    #[tokio::test]
+    async fn the_report_after_a_restore_names_the_stale_store() {
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        let w = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let (sidecar, _s) = mem_vault("sidecar", Some(&w));
+        let store = KeyStore::from_vaults(vec![sidecar]);
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        let code = recovery::to_code(&recovery::wrap_key(&k, "pw").unwrap());
+        recover_with_passphrase(&mut cfg, &db, &store, "pw", Some(&code), tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(boot_report(tmp.path()).stale_sources, vec!["sidecar"]);
+    }
+
+    /// C4-05 — config.toml already holding the key is the durable copy: no
+    /// rewrite, so a read-only data directory does not stop the boot.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_existing_config_copy_is_accepted_without_rewriting() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = Database::open_in_memory().unwrap();
+        let k = crypto::generate_secret();
+        seed_row(&db, &k).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        std::fs::create_dir(&dir).unwrap();
+        let text = format!("encryption_secret = \"{k}\"\n\n[server]\nport = 1\n");
+        std::fs::write(dir.join("config.toml"), &text).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = Some(k.clone());
+        let res = reconcile_with(&mut cfg, &db, &KeyStore::from_vaults(vec![]), &dir).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        res.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            text
+        );
+    }
+
+    /// C4-08 — a retirement whose backup move fails still boots (rows moved);
+    /// the next start moves the backup.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_failed_backup_move_during_retirement_does_not_stop_the_boot() {
+        let db = Database::open_in_memory().unwrap();
+        let k1 = crypto::generate_secret();
+        let k2 = crypto::generate_secret();
+        seed_row(&db, &k1).await;
+        seed_snapshot(&db, &k2).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let backup = tmp
+            .path()
+            .join(crate::core::credential_store::BACKUP_FILENAME);
+        std::fs::write(
+            &backup,
+            crypto::encrypt("old config", &crypto::parse_secret(&k2).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let blocked = tmp.path().join(format!(
+            ".{}.reencrypt.tmp",
+            crate::core::credential_store::BACKUP_FILENAME
+        ));
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("x"), "x").unwrap();
+        let (keychain, _a) = mem_vault("keychain", Some(&k1));
+        let (sidecar, _b) = mem_vault("sidecar", Some(&k2));
+        let store = KeyStore::from_vaults(vec![keychain, sidecar]);
+        std::env::set_var(
+            ENV_REENCRYPT_FROM,
+            crypto::key_fingerprint_hex(&k2).unwrap(),
+        );
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        let outcome = reconcile_with(&mut cfg, &db, &store, tmp.path()).await;
+        std::env::remove_var(ENV_REENCRYPT_FROM);
+        outcome.unwrap();
+        assert!(decrypts_every_column(
+            &k1,
+            &collect_encrypted_rows(&db).await.unwrap()
+        ));
+        std::fs::remove_dir_all(&blocked).unwrap();
+        let mut cfg = config::default_config();
+        cfg.encryption_secret = None;
+        reconcile_with(&mut cfg, &db, &store, tmp.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::core::credential_store::read_backup(&backup, &k1).unwrap(),
+            "old config"
+        );
+    }
+
+    /// C4-10 — every key or credential file write syncs its directory.
+    #[test]
+    fn every_key_file_writer_syncs_its_directory() {
+        use crate::core::keyvault::{SidecarFile, DIR_SYNCS};
+        let dir = tempfile::tempdir().unwrap();
+        let count = || DIR_SYNCS.with(|c| c.get());
+        let before = count();
+        SidecarFile::in_dir(dir.path())
+            .store(&crypto::generate_secret())
+            .unwrap();
+        assert_eq!(count(), before + 1, "sidecar");
+        recovery::save_blob(
+            dir.path(),
+            &recovery::wrap_key(&crypto::generate_secret(), "pw").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(count(), before + 2, "recovery.key");
+        set_aside_retired_key(dir.path(), "old").unwrap();
+        assert_eq!(count(), before + 3, "retired-key");
     }
 
     /// C3-21 — a refused set (too short) leaves no recovery.previous-* copy.
