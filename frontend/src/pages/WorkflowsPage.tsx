@@ -722,7 +722,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [importing, setImporting] = useState<{
     kind: AutomationImportKind | null;
     content: string;
-    preview: { name: string; stepCount?: number; qpVarsCount?: number };
+    preview: { name: string; stepCount?: number; qpVarsCount?: number; trigger?: string; execSteps?: number; execAllowlist?: string[] };
     targetProjectId: string;
   } | null>(null);
   const [importingSubmit, setImportingSubmit] = useState(false);
@@ -4503,7 +4503,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   const detection = detectAutomationImport(parsed);
                   if (!detection.ok) return;
                   if (detection.kind === 'workflow') {
-                    const env = parsed as { workflow?: { name?: string; steps?: unknown[] }; referenced_quick_prompts?: unknown[] };
+                    const env = parsed as {
+                      workflow?: {
+                        name?: string;
+                        steps?: { step_type?: { type?: string } }[];
+                        trigger?: { type?: string; schedule?: string };
+                        exec_allowlist?: string[];
+                      };
+                      referenced_quick_prompts?: unknown[];
+                    };
+                    const trigger = env.workflow?.trigger;
                     setImporting({
                       ...importing,
                       kind: detection.kind,
@@ -4512,6 +4521,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         name: env.workflow?.name ?? '?',
                         stepCount: env.workflow?.steps?.length ?? 0,
                         qpVarsCount: env.referenced_quick_prompts?.length ?? 0,
+                        trigger: trigger?.type
+                          ? [trigger.type, trigger.schedule].filter(Boolean).join(' — ')
+                          : undefined,
+                        execSteps: env.workflow?.steps?.filter(step => step?.step_type?.type === 'Exec').length ?? 0,
+                        execAllowlist: env.workflow?.exec_allowlist ?? [],
                       },
                     });
                   } else if (detection.kind === 'qp') {
@@ -4569,6 +4583,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           {importing.preview.qpVarsCount}
                         </div>
                       )}
+                      {importing.preview.trigger && (
+                        <div className="text-sm">
+                          <span className="text-muted">{t('imp.previewTrigger')}:</span>{' '}
+                          <code>{importing.preview.trigger}</code>
+                        </div>
+                      )}
+                      {((importing.preview.execSteps ?? 0) > 0 || (importing.preview.execAllowlist?.length ?? 0) > 0) && (
+                        <div className="text-sm">
+                          <span className="text-muted">{t('imp.previewExec')}:</span>{' '}
+                          {importing.preview.execSteps ?? 0}
+                          {(importing.preview.execAllowlist?.length ?? 0) > 0 && (
+                            <> — <code>{importing.preview.execAllowlist?.join(', ')}</code></>
+                          )}
+                        </div>
+                      )}
+                      <p className="text-sm text-muted mt-4" role="note" data-testid="import-disabled-note">
+                        {t('imp.workflowDisabledNote')}
+                      </p>
                     </>
                   )}
                   {(importing.kind === 'qp' || importing.kind === 'qa' || importing.kind === 'qe')

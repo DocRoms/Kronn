@@ -2470,6 +2470,33 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(await screen.findByText(/Export Kronn ambigu/)).toBeInTheDocument();
   });
 
+  it('previews a workflow import as disabled, with its trigger and Exec steps', async () => {
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />,
+    );
+    chooseAutomationAction('Importer');
+    const content = JSON.stringify({
+      kind: 'kronn.workflow',
+      version: 3,
+      workflow: {
+        name: 'Nightly',
+        trigger: { type: 'Cron', schedule: '* * * * *' },
+        exec_allowlist: ['bash'],
+        steps: [{ step_type: { type: 'Exec' } }, { step_type: { type: 'Agent' } }],
+      },
+    });
+    const file = new File([content], 'workflow.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    await act(async () => {
+      fireEvent.change(container.querySelector<HTMLInputElement>('input[type="file"]')!, {
+        target: { files: [file] },
+      });
+    });
+    expect(await screen.findByTestId('import-disabled-note')).toHaveTextContent(/importé désactivé/);
+    expect(screen.getByText('Cron — * * * * *')).toBeInTheDocument();
+    expect(screen.getByText('bash')).toBeInTheDocument();
+  });
+
   it('dispatches the Pages capability reconciliation after a workflow import', async () => {
     mockWorkflowsApi.importWorkflow.mockResolvedValueOnce({ id: 'wf-imported' });
     mockWorkflowsApi.get.mockResolvedValueOnce({

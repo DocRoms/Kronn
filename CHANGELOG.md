@@ -301,6 +301,11 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
+- A workflow imported from a `.kronn-workflow.json` file now lands disabled,
+  as ADR-005 and the Artifact import already required: a shared file's Cron or
+  Tracker trigger no longer fires on the next tick. The import preview shows
+  the trigger, the Exec steps and the Exec allowlist and says the workflow
+  must be enabled after review (KT-1037).
 - ApiCall and Notify steps no longer follow an HTTP redirect blindly: each hop
   (at most 5) goes through the same checks as the first URL — the plugin's
   host for ApiCall, a public address for both — so a 302 to the cloud metadata

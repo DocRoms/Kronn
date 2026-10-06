@@ -151,6 +151,16 @@ impl WorkflowEngine {
         Ok(())
     }
 
+    /// One scheduler tick over `(since, now]`, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) async fn check_triggers_since(
+        &self,
+        since: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        *self.last_trigger_check.lock().await = since;
+        self.check_triggers().await
+    }
+
     /// Check all enabled workflows and fire triggers.
     async fn check_triggers(&self) -> anyhow::Result<()> {
         // Claim this tick's evaluation window (see `last_trigger_check`).

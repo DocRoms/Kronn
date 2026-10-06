@@ -3516,7 +3516,9 @@ async fn import_workflow_written(
         w.project_id = req.project_id.clone();
         w.created_at = now;
         w.updated_at = now;
-        w.enabled = true;
+        // ADR-005: a shared file must not arm its Cron/Tracker trigger on this
+        // instance; the operator enables it after review.
+        w.enabled = false;
         prepared.push(w);
     }
 
@@ -8315,6 +8317,74 @@ mod tests {
             "empty QP vec should be omitted; got: {}",
             json
         );
+    }
+
+    /// KT-1037: a JSON import lands disabled, so its Cron never fires until
+    /// the operator enables it.
+    #[tokio::test]
+    async fn json_import_lands_disabled_and_the_scheduler_skips_it() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("cron-import");
+        wf.project_id = None;
+        wf.trigger = WorkflowTrigger::Cron {
+            schedule: "* * * * *".into(),
+        };
+        let mut emit = mk_step("emit", StepType::JsonData);
+        emit.json_data_payload = Some(serde_json::json!({"a": 1}));
+        wf.steps = vec![emit];
+        let content = serde_json::to_string(&WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: wf,
+            referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
+            referenced_workflows: vec![],
+            redacted_fields: vec![],
+        })
+        .unwrap();
+        let imported = import_workflow(
+            State(state.clone()),
+            None,
+            Json(ImportWorkflowRequest {
+                content,
+                project_id: None,
+            }),
+        )
+        .await
+        .0;
+        assert!(imported.success, "{:?}", imported.error);
+        let imported = imported.data.unwrap();
+        assert!(!imported.enabled, "an import must land disabled");
+
+        let engine = crate::workflows::WorkflowEngine::new(state.clone());
+        let runs = |id: String| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .with_conn(move |conn| crate::db::workflows::list_runs(conn, &id))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        let window = || chrono::Utc::now() - chrono::Duration::minutes(3);
+        engine.check_triggers_since(window()).await.unwrap();
+        assert_eq!(runs(imported.id.clone()).await, 0);
+
+        // Control: the same workflow, once enabled, is fired by the same tick.
+        let mut enabled = imported.clone();
+        enabled.enabled = true;
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &enabled))
+            .await
+            .unwrap();
+        engine.check_triggers_since(window()).await.unwrap();
+        assert_eq!(runs(imported.id.clone()).await, 1);
     }
 
     /// B and R5-05: a human import never carries an approval, an import
