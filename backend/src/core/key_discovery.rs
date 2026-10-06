@@ -67,7 +67,7 @@ pub async fn discover_keys() -> Vec<RawDiscoveredKey> {
     ];
 
     for (env_var, provider, source) in env_sources {
-        if let Ok(val) = std::env::var(env_var) {
+        if let Some(val) = crate::core::child_env::parent_var_string(env_var) {
             if !val.is_empty() && seen_values.insert(val.clone()) {
                 keys.push(RawDiscoveredKey {
                     provider: provider.to_string(),

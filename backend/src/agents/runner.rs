@@ -13505,7 +13505,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         "OPENAI_API_KEY" => "openai",
         "GEMINI_API_KEY" => "google",
         "MISTRAL_API_KEY" => "mistral",
-        "OLLAMA_HOST" => return std::env::var(env_key).ok(), // Ollama: no API key, just host URL
+        "OLLAMA_HOST" => return crate::core::child_env::parent_var_string(env_key), // Ollama: no API key, just host URL
         _ => return None,
     };
 
@@ -13513,7 +13513,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     if tokens.disabled_overrides.iter().any(|d| d == provider) {
         // For Google specifically, also try the gemini-cli settings.json
         // fallback before giving up — see comment in the main return below.
-        return std::env::var(env_key).ok().or_else(|| {
+        return crate::core::child_env::parent_var_string(env_key).or_else(|| {
             if provider == "google" {
                 read_gemini_settings_api_key()
             } else {
@@ -13538,7 +13538,7 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     tokens
         .active_key_for(provider)
         .map(|s| s.to_string())
-        .or_else(|| std::env::var(env_key).ok())
+        .or_else(|| crate::core::child_env::parent_var_string(env_key))
         .or_else(|| {
             if provider == "google" {
                 read_gemini_settings_api_key()

@@ -645,12 +645,14 @@ struct GeminiAuthSignals {
     compute_adc: bool,
 }
 
+// Through `child_env`: on the desktop, credentials are withheld from the
+// process environment but still count.
 fn env_present(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+    crate::core::child_env::parent_var(name).is_some_and(|value| !value.is_empty())
 }
 
 fn env_is_true(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| value == "true")
+    crate::core::child_env::parent_var(name).is_some_and(|value| value == "true")
 }
 
 fn application_default_credentials_exist(
@@ -678,7 +680,7 @@ fn gemini_auth_signals(config: &AppConfig) -> GeminiAuthSignals {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(std::path::PathBuf::from);
     let application_default_credentials = application_default_credentials_exist(
-        std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS"),
+        crate::core::child_env::parent_var("GOOGLE_APPLICATION_CREDENTIALS"),
         home,
     );
     GeminiAuthSignals {

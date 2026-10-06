@@ -294,7 +294,9 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<Authentic
     }
 
     // Environment variable fallbacks
-    if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
+    if let Some(token) = crate::core::child_env::parent_var_string("GITHUB_TOKEN")
+        .or_else(|| crate::core::child_env::parent_var_string("GH_TOKEN"))
+    {
         // Only add env source if there's no MCP config for GitHub already
         let has_gh = sources
             .iter()
@@ -355,7 +357,7 @@ fn gitlab_credentials(
 fn gitlab_token_from_process_env() -> Option<String> {
     ["GITLAB_TOKEN", "GITLAB_PERSONAL_ACCESS_TOKEN"]
         .iter()
-        .find_map(|key| std::env::var(key).ok())
+        .find_map(|key| crate::core::child_env::parent_var_string(key))
         .filter(|value| !value.trim().is_empty())
 }
 

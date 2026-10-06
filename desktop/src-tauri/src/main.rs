@@ -967,6 +967,9 @@ fn main() {
     // or child starts; the backend stores or uses it (KT-1006, KT-1007).
     let env_token = kronn::core::config::take_env_auth_token();
     kronn::core::keyvault::take_env_kek();
+    // The system webview starts its own helpers (WebKitGTK, WebView2) with
+    // this process's environment: credentials stay in memory instead.
+    kronn::core::child_env::withhold_process_credentials();
     // Initialize tracing
     // stdout plus the data directory's kronn.log, the log the user can read.
     {

@@ -627,3 +627,92 @@ fn an_approved_script_step_gets_its_launch_values_on_the_built_environment() {
         }
     });
 }
+
+/// On the desktop, credentials leave the process environment (the system
+/// webview helpers inherit it) but still reach the builder (B6-07).
+#[test]
+#[serial_test::serial]
+fn withheld_credentials_leave_the_process_but_reach_the_builder() {
+    std::env::set_var("KRONN_WITHHOLD_SENTINEL_API_KEY", "sentinel");
+    std::env::set_var("KRONN_WITHHOLD_SENTINEL_PLAIN", "plain");
+    let held = take_process_credentials();
+    assert!(std::env::var_os("KRONN_WITHHOLD_SENTINEL_API_KEY").is_none());
+    assert_eq!(
+        std::env::var_os("KRONN_WITHHOLD_SENTINEL_PLAIN").as_deref(),
+        Some(OsStr::new("plain"))
+    );
+    std::env::remove_var("KRONN_WITHHOLD_SENTINEL_PLAIN");
+    for (name, value) in &held {
+        std::env::set_var(name, value); // give the test process its own back
+    }
+    assert!(held
+        .iter()
+        .any(|(name, _)| name == "KRONN_WITHHOLD_SENTINEL_API_KEY"));
+    std::env::remove_var("KRONN_WITHHOLD_SENTINEL_API_KEY");
+
+    let live = vec![(OsString::from("PATH"), OsString::from("/usr/bin"))];
+    let withheld = vec![(
+        OsString::from("ANTHROPIC_API_KEY"),
+        OsString::from("sk-ant"),
+    )];
+    let parent = with_withheld(live, &withheld);
+    let claude = names(&inherited_from(
+        ChildRoute::Agent(AgentFamily::Claude),
+        parent.clone(),
+    ));
+    assert!(claude.contains(&"ANTHROPIC_API_KEY".to_string()));
+    let tool = names(&inherited_from(ChildRoute::Tool, parent));
+    assert!(!tool.contains(&"ANTHROPIC_API_KEY".to_string()));
+}
+
+/// The desktop withholds credentials before Tauri starts its webview.
+#[test]
+fn the_desktop_withholds_credentials_before_the_webview_starts() {
+    let main = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/src-tauri/src/main.rs"),
+    )
+    .unwrap();
+    let withhold = main
+        .find("child_env::withhold_process_credentials()")
+        .expect("the desktop never withholds credentials");
+    assert!(withhold < main.find("tauri::Builder::default()").unwrap());
+    assert!(withhold < main.find("tracing_subscriber::").unwrap());
+}
+
+/// Kronn reads a credential-looking variable through `child_env`, never
+/// from the live process environment the desktop has emptied of them.
+#[test]
+fn kronn_reads_credentials_through_child_env() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.ends_with(".rs") || name.ends_with("_test.rs") || name.ends_with("_tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let production = text.split("#[cfg(test)]").next().unwrap();
+            for opener in ["env::var(\"", "env::var_os(\""] {
+                for (at, _) in production.match_indices(opener) {
+                    let rest = &production[at + opener.len()..];
+                    let var = &rest[..rest.find('"').unwrap()];
+                    // Taken out of the environment before anything else runs.
+                    if var == "KRONN_AUTH_TOKEN" {
+                        continue;
+                    }
+                    if is_credential(var) {
+                        offenders.push(format!("{}: {var}", path.display()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:?}");
+}

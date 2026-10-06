@@ -260,7 +260,8 @@ impl WorkflowEngine {
     ) -> anyhow::Result<()> {
         let tracker: Box<dyn tracker::TrackerSource> = match source {
             TrackerSourceConfig::GitHub { owner, repo } => {
-                let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+                let token =
+                    crate::core::child_env::parent_var_string("GITHUB_TOKEN").unwrap_or_default();
                 if token.is_empty() {
                     tracing::warn!(
                         "Workflow '{}' tracker trigger skipped: no GITHUB_TOKEN",

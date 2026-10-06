@@ -145,6 +145,8 @@ pub fn full_env_sync_cmd<S: AsRef<OsStr>>(
 ) -> std::process::Command {
     let FullEnvReason::SelfRestart = reason;
     let mut cmd = raw_sync(program.as_ref());
+    // Kronn relaunched gets back the credentials the desktop withheld.
+    cmd.envs(crate::core::child_env::withheld_credentials());
     for name in crate::core::child_env::FORBIDDEN {
         cmd.env_remove(name);
     }
@@ -351,43 +353,10 @@ mod tests {
     /// The places allowed to bypass clippy's spawn ban are exactly these.
     #[test]
     fn clippy_spawn_ban_bypasses_are_exactly_these() {
-        // Any `allow`/`expect` list (plain, inner, combined or under
-        // `cfg_attr`) naming the lint or a group that holds it.
-        let lints = [
-            concat!("clippy::", "disallowed_methods"),
-            concat!("clippy::", "style"),
-            concat!("clippy::", "all"),
-        ];
-        let bypasses = |text: &str| -> usize {
-            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-            let mut count = 0;
-            for opener in [concat!("allow", "("), concat!("expect", "(")] {
-                for (start, _) in compact.match_indices(opener) {
-                    let rest = &compact[start + opener.len()..];
-                    let mut depth = 1usize;
-                    let end = rest
-                        .char_indices()
-                        .find(|(_, c)| {
-                            match c {
-                                '(' => depth += 1,
-                                ')' => depth -= 1,
-                                _ => {}
-                            }
-                            depth == 0
-                        })
-                        .map_or(rest.len(), |(index, _)| index);
-                    let list = &rest[..end];
-                    if list.split(',').any(|item| lints.contains(&item)) {
-                        count += 1;
-                    }
-                }
-            }
-            count
-        };
         let found: std::collections::BTreeMap<String, usize> = rust_sources()
             .into_iter()
             .map(|(rel, text)| {
-                let count = bypasses(&text);
+                let count = source_bypasses(&text);
                 (rel, count)
             })
             .filter(|(_, n)| *n > 0)
@@ -403,6 +372,164 @@ mod tests {
         .map(|(file, n)| (file.to_string(), n))
         .collect();
         assert_eq!(found, expected);
+
+        // Crate-wide overrides: manifests and Cargo configurations.
+        let backend = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for manifest in [
+            backend.join("Cargo.toml"),
+            backend.join("../desktop/src-tauri/Cargo.toml"),
+        ] {
+            let text = std::fs::read_to_string(&manifest).unwrap();
+            assert!(!manifest_lowers_lints(&text), "{}", manifest.display());
+        }
+        for dir in [
+            backend.join(".."),
+            backend.to_path_buf(),
+            backend.join("../desktop/src-tauri"),
+        ] {
+            for name in ["config.toml", "config"] {
+                let file = dir.join(".cargo").join(name);
+                if let Ok(text) = std::fs::read_to_string(&file) {
+                    assert!(!rustflags_lower_lints(&text), "{}", file.display());
+                }
+            }
+        }
+    }
+
+    /// Lints whose `allow` would silence the spawn ban: the lint, its old
+    /// name, the groups holding it, and every warning.
+    const SPAWN_BAN_LINTS: &[&str] = &[
+        concat!("clippy::", "disallowed_methods"),
+        concat!("clippy::", "disallowed_method"),
+        concat!("clippy::", "style"),
+        concat!("clippy::", "all"),
+        "warnings",
+    ];
+
+    /// `allow`/`expect` lists (plain, inner, combined or under `cfg_attr`)
+    /// naming one of [`SPAWN_BAN_LINTS`].
+    fn source_bypasses(text: &str) -> usize {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut count = 0;
+        for opener in [concat!("allow", "("), concat!("expect", "(")] {
+            for (start, _) in compact.match_indices(opener) {
+                let rest = &compact[start + opener.len()..];
+                let mut depth = 1usize;
+                let end = rest
+                    .char_indices()
+                    .find(|(_, c)| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth == 0
+                    })
+                    .map_or(rest.len(), |(index, _)| index);
+                if rest[..end]
+                    .split(',')
+                    .any(|item| SPAWN_BAN_LINTS.contains(&item))
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// A `[lints]` / `[workspace.lints]` table lowering one of the lints.
+    fn manifest_lowers_lints(text: &str) -> bool {
+        let mut table = String::new();
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap().trim();
+            if line.starts_with('[') {
+                table = line.trim_matches(|c| c == '[' || c == ']').to_string();
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let full = format!("{table}.{}", key.trim().trim_matches('"'));
+            if !(full.starts_with("lints") || full.starts_with("workspace.lints")) {
+                continue;
+            }
+            let lowered = value.contains("allow") || value.contains("warn");
+            let names: Vec<&str> = full.split('.').collect();
+            let lint = names.last().unwrap().trim_matches('"');
+            let touches = [
+                "disallowed_methods",
+                "disallowed_method",
+                "style",
+                "all",
+                "warnings",
+            ]
+            .contains(&lint)
+                || value.contains("disallowed_method");
+            if lowered && touches {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Rustflags allowing one of the lints, or capping every lint.
+    fn rustflags_lower_lints(text: &str) -> bool {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains("--cap-lints") {
+            return true;
+        }
+        SPAWN_BAN_LINTS.iter().any(|lint| {
+            [
+                format!("-A{lint}"),
+                format!("\"-A\",\"{lint}\""),
+                format!("--allow={lint}"),
+                format!("\"--allow\",\"{lint}\""),
+                format!("-W{lint}"),
+            ]
+            .iter()
+            .any(|form| compact.contains(form.as_str()))
+        })
+    }
+
+    /// Every way to lower the spawn ban is caught (B6-05).
+    #[test]
+    fn each_form_of_spawn_ban_bypass_is_caught() {
+        // Built at run time so this file's own text holds no bypass.
+        let (allow, expect) = (concat!("allow", "("), concat!("expect", "("));
+        for source in [
+            format!("#[{allow}warnings)] fn f() {{}}"),
+            format!("#![{allow}unused, warnings)]"),
+            format!("#[{allow}renamed_and_removed_lints, clippy::disallowed_method)] fn f() {{}}"),
+            format!("#[cfg_attr(test, {expect}clippy::style))] fn f() {{}}"),
+            format!("#[{allow} clippy :: all )] fn f() {{}}"),
+        ] {
+            assert_eq!(source_bypasses(&source), 1, "{source}");
+        }
+        assert_eq!(
+            source_bypasses(&format!("#[{allow}dead_code)] fn f() {{}}")),
+            0
+        );
+        for manifest in [
+            "[lints.clippy]\nstyle = \"allow\"\n",
+            "[lints.clippy]\ndisallowed_methods = { level = \"allow\", priority = 1 }\n",
+            "[lints.rust]\nwarnings = \"allow\"\n",
+            "[workspace.lints.clippy]\nall = \"warn\"\n",
+            "[lints]\nclippy.disallowed_methods = \"allow\"\n",
+        ] {
+            assert!(manifest_lowers_lints(manifest), "{manifest}");
+        }
+        assert!(!manifest_lowers_lints(
+            "[lints.clippy]\npedantic = \"warn\"\n[dependencies]\nstyle = \"1\"\n"
+        ));
+        for config in [
+            "[build]\nrustflags = [\"-A\", \"clippy::disallowed_methods\"]\n",
+            "[build]\nrustflags = [\"-Awarnings\"]\n",
+            "[target.x86_64-unknown-linux-gnu]\nrustflags = [\"--cap-lints\", \"allow\"]\n",
+            "[build]\nrustflags = [\"--allow=clippy::all\"]\n",
+        ] {
+            assert!(rustflags_lower_lints(config), "{config}");
+        }
+        assert!(!rustflags_lower_lints("[build]\ntarget-dir = \"target\"\n"));
     }
 
     /// Both clippy files ban the same entry points, every way Tauri can
@@ -421,12 +548,46 @@ mod tests {
         let backend_paths = paths(backend.join("clippy.toml"));
         let desktop_paths = paths(backend.join("../desktop/src-tauri/clippy.toml"));
         assert_eq!(backend_paths, desktop_paths);
-        for restart in [
+        let required = [
+            "std::process::Command::new",
+            "tokio::process::Command::new",
+            "open::that",
+            "open::that_detached",
+            "open::that_in_background",
+            "open::with",
+            "open::with_detached",
+            "open::with_in_background",
+            "open::commands",
+            "open::with_command",
+            "tauri_plugin_shell::Shell::command",
+            "tauri_plugin_shell::Shell::sidecar",
+            "tauri_plugin_shell::Shell::open",
             "tauri::AppHandle::restart",
             "tauri::AppHandle::request_restart",
             "tauri::process::restart",
-        ] {
-            assert!(desktop_paths.contains(restart), "{restart} is not banned");
+            "libc::fork",
+            "libc::vfork",
+            "libc::forkpty",
+            "libc::rfork",
+            "libc::clone",
+            "libc::syscall",
+            "libc::system",
+            "libc::popen",
+            "libc::execv",
+            "libc::execve",
+            "libc::execvp",
+            "libc::execvpe",
+            "libc::execveat",
+            "libc::execvP",
+            "libc::execl",
+            "libc::execle",
+            "libc::execlp",
+            "libc::fexecve",
+            "libc::posix_spawn",
+            "libc::posix_spawnp",
+        ];
+        for entry in required {
+            assert!(desktop_paths.contains(entry), "{entry} is not banned");
         }
     }
 

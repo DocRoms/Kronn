@@ -496,14 +496,74 @@ fn parent_env() -> Vec<(OsString, OsString)> {
     if let Some(parent) = PARENT_OVERRIDE.with(|cell| cell.borrow().clone()) {
         return parent;
     }
-    std::env::vars_os().collect()
+    with_withheld(
+        std::env::vars_os().collect(),
+        WITHHELD.get().map(Vec::as_slice).unwrap_or_default(),
+    )
 }
 
-/// One variable of the backend's environment, as the builder sees it.
+/// One variable of the backend's environment, as the builder sees it
+/// (credentials withheld from the process environment included).
 pub fn parent_var(name: &str) -> Option<OsString> {
     parent_env()
         .into_iter()
         .find_map(|(key, value)| (key == name).then_some(value))
+}
+
+/// [`parent_var`] as a string, `None` when absent or not Unicode.
+pub fn parent_var_string(name: &str) -> Option<String> {
+    parent_var(name).and_then(|value| value.into_string().ok())
+}
+
+/// Credentials moved out of the process environment, kept for the builder
+/// and for Kronn's own readers (see [`withhold_process_credentials`]).
+static WITHHELD: std::sync::OnceLock<Vec<(OsString, OsString)>> = std::sync::OnceLock::new();
+
+/// The live environment plus the withheld credentials it no longer holds.
+fn with_withheld(
+    mut live: Vec<(OsString, OsString)>,
+    withheld: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    for (name, value) in withheld {
+        if !live.iter().any(|(key, _)| key == name) {
+            live.push((name.clone(), value.clone()));
+        }
+    }
+    live
+}
+
+/// Whether a process-environment name is a credential to withhold.
+fn is_credential(name: &str) -> bool {
+    name_in(name, FORBIDDEN)
+        || name_in(name, PROVIDER_KEYS)
+        || name_in(name, GITHUB_ENV)
+        || looks_secret(name)
+}
+
+/// Remove every credential from this process's environment and return them.
+fn take_process_credentials() -> Vec<(OsString, OsString)> {
+    let held: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(name, _)| name.to_str().is_some_and(is_credential))
+        .collect();
+    for (name, _) in &held {
+        std::env::remove_var(name);
+    }
+    held
+}
+
+/// The credentials [`withhold_process_credentials`] moved out (none elsewhere).
+pub fn withheld_credentials() -> Vec<(OsString, OsString)> {
+    WITHHELD.get().cloned().unwrap_or_default()
+}
+
+/// Desktop: move every credential (provider keys, GitHub variables,
+/// secret-looking names) out of the process environment, so processes the
+/// system starts for the app (WebKitGTK and WebView2 helpers) never inherit
+/// them, while child routes and Kronn's own readers still see them through
+/// [`parent_var`]. Call before any thread exists: removing a variable is not
+/// thread-safe.
+pub fn withhold_process_credentials() {
+    let _ = WITHHELD.set(take_process_credentials());
 }
 
 /// Remove from a built command every credential it carries: provider keys,
@@ -513,14 +573,7 @@ pub fn drop_credentials(command: &mut std::process::Command) {
         .get_envs()
         .filter(|(_, value)| value.is_some())
         .map(|(name, _)| name.to_os_string())
-        .filter(|name| {
-            name.to_str().is_none_or(|name| {
-                name_in(name, FORBIDDEN)
-                    || name_in(name, PROVIDER_KEYS)
-                    || name_in(name, GITHUB_ENV)
-                    || looks_secret(name)
-            })
-        })
+        .filter(|name| name.to_str().is_none_or(is_credential))
         .collect();
     for name in names {
         command.env_remove(name);

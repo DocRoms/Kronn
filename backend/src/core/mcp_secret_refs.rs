@@ -24,9 +24,9 @@ static VALUES: LazyLock<RwLock<HashMap<PathBuf, BTreeMap<String, String>>>> =
 /// Whether project MCP files carry references instead of values: under Docker,
 /// unless `KRONN_MCP_SECRET_REFERENCES` says otherwise (`1` / `0`).
 pub fn enabled() -> bool {
-    match std::env::var("KRONN_MCP_SECRET_REFERENCES").as_deref() {
-        Ok("1") => true,
-        Ok("0") => false,
+    match crate::core::child_env::parent_var_string("KRONN_MCP_SECRET_REFERENCES").as_deref() {
+        Some("1") => true,
+        Some("0") => false,
         _ => crate::core::env::is_docker(),
     }
 }
