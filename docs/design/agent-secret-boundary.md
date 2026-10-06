@@ -45,6 +45,15 @@ in 0.14.3 is in §9.
 | Docker (Linux host) | Sidecar in `/data`, `0700` to the backend UID | Same; the container spawn path uses the same env builder | Agents run under a second UID without access to `/data` (KT-969) | Second UID for every agent-influenced execution | Repositories writable by agents; SSH agent socket usable while an agent runs |
 | Docker on macOS | Same as Docker | Same | Same, plus masks over the native data directory | Same | Same; the native install is no longer readable from the container |
 
+Every native line also carries the exec-time environment block residual: a
+`KRONN_AUTH_TOKEN` or `KRONN_ENCRYPTION_KEK` pinned through the environment
+leaves the variable list at start, but the original environment block stays in
+the process image, readable by any same-user process for the process lifetime
+(`/proc/<pid>/environ` on Linux and WSL, `ps eww <pid>` on macOS). Pinning the
+key that way defeats the Keychain on macOS. The keychain, the data-directory
+key file and `config.toml` avoid it; Kronn logs a warning at start when either
+came from the environment.
+
 Only the Docker lines give a boundary against an agent that reads files or runs
 code. The native lines close the API and environment paths and, on macOS, the
 key itself; the advisory states the rest plainly, and the UI shows the current
@@ -449,7 +458,8 @@ crates. The test `clippy_spawn_ban_bypasses_are_exactly_these` lists the
 refuses a crate-wide override in either `Cargo.toml` `[lints]` table or in
 `.cargo/config` (rustflags `-A`, `--allow`, `--warn`, `--force-warn`,
 `--cap-lints`, an `[alias]` named `clippy`, an `[env]` key starting with
-`CLIPPY_`), with `-` read as `_` in lint names. The system opener goes through `cmd::open_in_system`
+`CLIPPY_`, a `build.rustc-wrapper`), parsing both files as TOML the way Cargo
+does, with `-` read as `_` in lint names. The system opener goes through `cmd::open_in_system`
 (Tool route). A caller that adds values after construction seals again.
 Routes beyond the agent and exec ones:
 
@@ -507,9 +517,14 @@ Every environment read in Kronn goes through `child_env::var` / `var_os` /
 `vars_os` (live value, else the withheld one) and every write through
 `child_env::set_var` / `remove_var`: once the desktop withholds, a name off
 the allow-list is set into the withheld set, never live, and a removal drops
-it from both. Both clippy files refuse `std::env::var`, `var_os`, `vars`,
+it from both. A live write is allowed only before any thread exists (`setenv`
+races C readers such as glib and `getaddrinfo`): the desktop enriches `PATH`
+in `main` before withholding, and values set once threads run
+(`KRONN_BACKEND_URL`, the sidecar paths) go through `child_env::set_overlay_var`,
+which never writes the live environment. Both clippy files refuse `std::env::var`, `var_os`, `vars`,
 `vars_os`, `set_var` and `remove_var` outside `child_env`, and libc's
-`getenv`, `secure_getenv` and `_NSGetEnviron`, so no read can miss a withheld
+`getenv`, `secure_getenv`, `_NSGetEnviron`, `setenv`, `unsetenv`, `putenv`
+and `clearenv`, so no read can miss a withheld
 variable. Child routes see
 withheld variables through the same overlay; names compare case-insensitively
 on Windows. The relaunch below gets them all back.
@@ -530,7 +545,14 @@ repository's `.mcp.json`, so the probe starts it with a built environment (base
 allow-list plus that server's configured values, `api/mcps.rs::mcp_probe_command`).
 An operator-set `KRONN_ENCRYPTION_KEK` (and the legacy `KRONN_KEK`) leaves the
 process environment at start, like `KRONN_AUTH_TOKEN`; the key is kept in
-memory (`keyvault::take_env_kek`).
+memory (`keyvault::take_env_kek`). Residual: removing a variable edits only the
+variable list, not the exec-time environment block, which keeps both values
+readable by same-user processes for the process lifetime (see §2); the desktop
+relaunch re-creates the key override in the new process's block. Kronn warns at
+start when either came from the environment (`config::warn_secrets_taken_from_env`).
+Scrubbing the block in place was not done: it needs a raw pointer write into
+memory libc owns, and it can only be proven on Linux, which this release's
+tests do not run on a Linux host.
 
 The exec routes run without a shell (no variable, `~` or glob expansion), drop
 `env`, refuse `find -exec/-delete/…` and `git --no-index/--output`, and refuse
