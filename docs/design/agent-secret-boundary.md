@@ -446,13 +446,23 @@ contexts (KT-1013).
 answers each `session/request_permission`, deny by default. Without full access
 it allows read-like kinds inside the project and the tools of Kronn's own
 bridge, never a project server's tool: a project `.mcp.json` is
-agent-writable (section 3, row 9). The bridge is identified by structured
-fields only, never by the title, which can be model text: `rawInput.server/tool`
-(adapters), or for Vibe the `_meta.tool_name` of the `tool_call` its harness
-announced for that call id (`mcp_kronn_internal.<tool>`). Copilot's request
-names the tool without its server, so the broker cannot tell the bridge apart;
-Copilot is launched with `--allow-tool=kronn-internal` when the session's broker
-authorized the bridge, and every other request still reaches the broker.
+agent-writable (section 3, row 9). The bridge is identified by harness fields
+only, never by the title or `rawInput` (the model's text and arguments). Vibe:
+the `_meta.tool_name` of the `tool_call` announced for that call id; the id is
+the model's, so an id announced twice, or whose kind or tool changes in a
+`tool_call_update`, is refused for good, and a spent id is never re-armed.
+Copilot's request names the tool without its server, so the broker cannot tell
+the bridge apart: Copilot gets the bridge through `--additional-mcp-config`,
+`kronn-internal` disabled, and a launch grant for the bridge alone (audited as
+`session/launch_grant`). OpenCode asks Kronn for every permission but reading,
+listing and the bridge's tools. Copilot, Vibe and OpenCode receive the bridge
+under a per-launch name (`kronn-internal-<random>`), so a server from the
+user's or the repository's own MCP config cannot claim its approval; a step's
+tool list narrows the grant, the broker and the bridge. Residuals: a
+repository's own CLI config (workspace MCP servers, OpenCode plugins and agent
+permissions for keys Kronn does not set) still loads as repository content;
+the launch decision is reused at `initialize` (an audit starting in between
+is not seen).
 
 *Spawn inventory.* The compiler enforces it. `core::cmd::{async_cmd,sync_cmd}`
 take a `ChildRoute` and build the environment before returning the command

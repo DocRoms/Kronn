@@ -254,16 +254,27 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
-- GitHub Copilot CLI and Mistral Vibe, as native ACP agents, can call Kronn's
-  own tools (`kronn-internal`: `bridge_info`, `disc_meta`…) without full
-  access. Kronn refused every such call: their permission requests do not name
-  the server the way the Claude/Codex adapters do. Copilot is now launched with
-  `--allow-tool=kronn-internal` when the session authorizes the bridge (Copilot
-  loads the bridge from its own MCP config and rejects client-declared stdio
-  servers). Vibe's calls are identified by the tool its harness announced
-  before asking, never by the title, which the model can write. Shell commands,
-  unknown tools, other servers and project servers without full access stay
-  refused. Not verified for Gemini, Kiro and OpenCode.
+- GitHub Copilot CLI, Mistral Vibe and OpenCode, as native ACP agents, can
+  call Kronn's own tools (`bridge_info`, `disc_meta`…) without full access, and
+  nothing else is approved on their behalf. Kronn refused every such call: their
+  permission requests do not name the server as Kronn expected. Each session
+  now declares the bridge under a per-launch name (`kronn-internal-<random>`),
+  so a server another config names `kronn-internal` (a workspace `.mcp.json`,
+  a repository `.vibe/config.toml`) never gets its approval. Copilot receives
+  it through `--additional-mcp-config` with `--disable-mcp-server
+  kronn-internal` and is granted that name only; Vibe's calls are identified by
+  the tool its harness announced for the call id, and an id that is reused or
+  changes kind is refused for good; a step's tool list narrows the grant and
+  the bridge. Shell commands, unknown tools, other servers and project servers
+  without full access stay refused. Not verified for Gemini and Kiro.
+- OpenCode without full access ran any shell command, edit or web fetch
+  without asking Kronn: its default permission is `allow`. Its inline
+  configuration now asks Kronn for everything except reading, listing, the todo
+  list and the bridge's tools, on the top level and on the default `build`
+  agent. An operator's `OPENCODE_CONFIG_CONTENT` keeps its other settings;
+  one that is not a JSON object stops the launch.
+- The ACP broker no longer takes a tool's identity from `rawInput`, which holds
+  the model's arguments on every native runtime.
 - A bridge-token request with no body labelled `application/json`, as the
   bridge sends every GET, was refused with "invalid JSON body": every reading
   tool (`disc_meta`…) failed under a bridge token.
