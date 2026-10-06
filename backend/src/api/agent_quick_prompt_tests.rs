@@ -643,3 +643,51 @@ async fn quick_prompt_native_run_captures_the_saved_cli_effort_before_dispatch()
         .unwrap();
     assert_eq!(effort.as_deref(), Some("high"));
 }
+
+/// B8-02 — an in-process principal's Quick Prompt estimate counts only its
+/// project's launches; a human call through the route counts them all.
+#[tokio::test]
+async fn qp_run_estimates_count_only_the_principal_s_project() {
+    let state = state_with_prompts().await;
+    state
+        .db
+        .with_conn(|conn| {
+            for n in 0..3 {
+                let disc = format!("launch-b-{n}");
+                conn.execute(
+                    "INSERT INTO discussions (id, title, project_id, originating_qp_id, \
+                     originating_qp_version, created_at, updated_at) \
+                     VALUES (?1, ?1, 'b', 'global', 1, '2026-09-22T00:00:00Z', '2026-09-22T00:00:00Z')",
+                    [&disc],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp, sort_order, \
+                     duration_ms) VALUES (?1, ?2, 'Agent', 'done', '2026-09-22T00:00:00Z', 0, 60000)",
+                    rusqlite::params![format!("{disc}-m"), disc],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let executor = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
+    let run = call(
+        &executor,
+        "qp_run",
+        json!({"qp_id":"global","vars":{"topic":"fixture"}}),
+    )
+    .await;
+    assert!(run.ok, "{}", run.content);
+    assert_eq!(run.content["samples"], 0, "{}", run.content);
+    assert!(
+        run.content["expected_duration_ms"].is_null(),
+        "{}",
+        run.content
+    );
+    let request: crate::api::mcp_remote::McpQpRunRequest =
+        serde_json::from_value(json!({"qp_id":"global","vars":{"topic":"fixture"}})).unwrap();
+    let axum::Json(human) =
+        crate::api::mcp_remote::qp_run(axum::extract::State(state), None, axum::Json(request))
+            .await;
+    assert_eq!(human.data.expect("a human launch").samples, 3);
+}

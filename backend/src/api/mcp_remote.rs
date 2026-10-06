@@ -445,7 +445,18 @@ pub async fn qp_run(
     Json(req): Json<McpQpRunRequest>,
 ) -> Json<ApiResponse<McpQpRunResponse>> {
     // A token's estimate counts only its project's launches.
-    let metrics_scope = bridge.map(|caller| caller.0.project);
+    qp_run_scoped(&state, bridge.map(|caller| caller.0.project), req).await
+}
+
+/// `qp_run` with the launches its estimate may count: `Some(project)` for an
+/// agent caller (`Some(None)`: a project-less one, which counts none),
+/// `None` for a human.
+pub(crate) async fn qp_run_scoped(
+    state: &AppState,
+    metrics_scope: Option<Option<String>>,
+    req: McpQpRunRequest,
+) -> Json<ApiResponse<McpQpRunResponse>> {
+    let state = state.clone();
     if req.qp_id.is_empty() {
         return Json(ApiResponse::err("qp_id is required"));
     }

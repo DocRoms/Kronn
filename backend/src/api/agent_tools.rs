@@ -1736,14 +1736,15 @@ impl ToolExecutor for KronnToolExecutor {
                         title: call.arguments["title"].as_str().map(str::to_owned),
                         launch: Some(crate::core::launch_context::LaunchContext {
                             discussion_id: self.disc_id.clone(),
-                            project_id,
+                            project_id: project_id.clone(),
                             ..Default::default()
                         }),
                     };
-                    let Json(res) = crate::api::mcp_remote::qp_run(
-                        State(self.state.clone()),
-                        None,
-                        Json(request),
+                    // The estimate counts only the principal's project's launches.
+                    let Json(res) = crate::api::mcp_remote::qp_run_scoped(
+                        &self.state,
+                        Some(project_id),
+                        request,
                     )
                     .await;
                     unwrap_api(call, res.success, res.data, res.error)
