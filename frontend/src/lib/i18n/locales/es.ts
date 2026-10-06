@@ -5608,7 +5608,6 @@ Termina con [SIGNAL: OK].`,
   'migration.successToast': 'Migración exitosa ({0} archivos movidos)',
   'migration.alreadyToast': 'Proyecto ya migrado',
   'migration.failedToast': 'Migración fallida para {0}',
-  'migration.failedGeneric': 'Migración fallida — revisa los logs del servidor',
 
   // ── User context (cross-project agent prompts) ──
   'userContext.title': 'Mis contextos',

@@ -5402,7 +5402,6 @@ const zh: TranslationDict = {
   "migration.successToast": "迁移成功（{0}个文件已移动）",
   "migration.alreadyToast": "项目已迁移",
   "migration.failedToast": "{0}个文件迁移失败",
-  "migration.failedGeneric": "迁移失败——请检查服务器日志",
   "userContext.title": "我的上下文",
   "userContext.subtitle": "Markdown笔记将注入到每个代理中，与项目或CLI无关。存储在~/.kronn/user-context/。",
   "userContext.newNamePlaceholder": "文件名（将附加.md）",

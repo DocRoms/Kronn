@@ -264,7 +264,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { AgentFilesPolicy, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
+import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
   DeleteManualModelRequest,
@@ -950,16 +950,9 @@ export const contacts = {
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
-/** Response shape of `POST /api/projects/:id/migrate-docs`. Backend
- *  returns one of NotApplicable / AlreadyMigrated / Migrated / Failed,
- *  with optional counters (files moved, refs rewritten, symlink). */
-export interface MigrateDocsResponse {
-  status: 'NotApplicable' | 'AlreadyMigrated' | 'Migrated' | 'Failed';
-  files_moved?: number;
-  refs_rewritten?: number;
-  symlink_created?: boolean;
-  reason?: string;
-}
+// `POST /api/projects/:id/migrate-docs` answers with the generated
+// MigrateDocsResponse; a failed migration is an API error, not a status.
+export type { MigrateDocsResponse, MigrateDocsStatus } from '../types/generated';
 
 export const projects = {
   list: () => api<Project[]>('GET', '/projects'),
@@ -1019,7 +1012,7 @@ export const projects = {
   /** Migrate the project's legacy `ai/` directory to the new `docs/`
    *  convention (`ai/index.md` → `docs/AGENTS.md`, internal refs rewritten,
    *  optional symlink for retro-compat). Idempotent — re-running on an
-   *  already-migrated project returns `status: "AlreadyMigrated"`. */
+   *  already-migrated project returns `status: "already_migrated"`. */
   migrateDocs: (id: string, req: { create_symlink?: boolean }) =>
     api<MigrateDocsResponse>('POST', `/projects/${id}/migrate-docs`, req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
