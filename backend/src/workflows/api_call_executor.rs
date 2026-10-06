@@ -1804,10 +1804,14 @@ async fn send_with_retry(
             Ok(r) => r,
             Err(GuardedSendError::Refused(msg)) => return Err(msg),
             Err(GuardedSendError::Transport(e)) => {
-                let detail = e
-                    .source()
-                    .map(|source| format!("{e}: {source}"))
-                    .unwrap_or_else(|| e.to_string());
+                // reqwest's Display carries the full URL, auth query included.
+                let e = e.without_url();
+                let detail = scrub_auth_values(
+                    &e.source()
+                        .map(|source| format!("{e}: {source}"))
+                        .unwrap_or_else(|| e.to_string()),
+                    auth,
+                );
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
                     return Err(format!(
@@ -1848,7 +1852,8 @@ async fn send_with_retry(
         // Non-success. Retry only on 5xx + 429, never 4xx.
         let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         if !retryable || attempt >= max_retries {
-            let excerpt = response.text().await.unwrap_or_default();
+            // An upstream error body may echo the credential it rejected.
+            let excerpt = scrub_auth_values(&response.text().await.unwrap_or_default(), auth);
             let redacted_url = redact_url_query(url);
             return Err(format!(
                 "HTTP {} on {} {} — {}",
@@ -1861,6 +1866,29 @@ async fn send_with_retry(
         sleep_backoff(attempt).await;
         attempt += 1;
     }
+}
+
+/// Replaces every resolved auth value found in `text` with `***`.
+fn scrub_auth_values(text: &str, auth: &ResolvedAuth) -> String {
+    let mut out = text.to_string();
+    let values = auth
+        .bearer
+        .iter()
+        .chain(auth.headers.values())
+        .chain(auth.query.values());
+    for value in values {
+        // Very short values would mask ordinary words, not secrets.
+        if value.chars().count() >= 4 {
+            out = out.replace(value.as_str(), "***");
+        }
+        // A Basic header holds `Basic <b64>`; its encoded part may be echoed alone.
+        if let Some(encoded) = value.strip_prefix("Basic ") {
+            if encoded.len() >= 4 {
+                out = out.replace(encoded, "***");
+            }
+        }
+    }
+    out
 }
 
 /// Parse every header before constructing the request. Besides producing a
@@ -4692,6 +4720,107 @@ mod tests {
             api_body: None,
             ..Default::default()
         }
+    }
+
+    // ─── Secrets in error text (KT-1035) ────────────────────────────
+
+    const QUERY_KEY: &str = "Qk7SecretValue9";
+
+    fn query_key_plugin(base: &str) -> McpServer {
+        mk_plugin(
+            base,
+            ApiAuthKind::ApiKeyQuery {
+                param_name: "apikey".into(),
+                env_key: "KEY".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        )
+    }
+
+    async fn logged_error(
+        state: &crate::AppState,
+        step: &WorkflowStep,
+        outcome: &StepOutcome,
+    ) -> String {
+        record_api_call_log(state, step, None, outcome, &ApiCallLogContext::workflow()).await;
+        let rows = state
+            .db
+            .with_conn(|conn| {
+                crate::db::api_call_logs::list(conn, Default::default())
+                    .map_err(|e| anyhow::anyhow!("list: {e}"))
+            })
+            .await
+            .unwrap();
+        rows[0].error_message.clone().expect("error row")
+    }
+
+    #[tokio::test]
+    async fn transport_error_keeps_the_query_key_out_of_output_and_log() {
+        // Port 1 on loopback refuses the connection: a reqwest transport error.
+        let plugin = query_key_plugin("http://127.0.0.1:1");
+        let step = mk_step("/items");
+        let env = HashMap::from([("KEY".to_string(), QUERY_KEY.to_string())]);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("HTTP request failed"),
+            "got: {}",
+            outcome.result.output
+        );
+        assert!(
+            !outcome.result.output.contains(QUERY_KEY),
+            "{}",
+            outcome.result.output
+        );
+        let state = test_app_state();
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(!stored.contains(QUERY_KEY), "{stored}");
+    }
+
+    #[tokio::test]
+    async fn an_error_body_echoing_the_key_is_scrubbed_in_output_and_log() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string(format!("invalid api key {QUERY_KEY} for this account")),
+            )
+            .mount(&server)
+            .await;
+        let plugin = query_key_plugin(&server.uri());
+        let step = mk_step("/items");
+        let env = HashMap::from([("KEY".to_string(), QUERY_KEY.to_string())]);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("HTTP 401"),
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            !outcome.result.output.contains(QUERY_KEY),
+            "{}",
+            outcome.result.output
+        );
+        let state = test_app_state();
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(stored.contains("HTTP 401"), "{stored}");
+        assert!(!stored.contains(QUERY_KEY), "{stored}");
     }
 
     #[tokio::test]

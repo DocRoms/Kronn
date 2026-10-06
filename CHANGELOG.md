@@ -301,6 +301,12 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
+- The API call log no longer stores a credential in `error_message`: it gets
+  the same redaction as the excerpts plus the bare `apikey=…` shape, and every
+  URL in it loses its query string and userinfo. A transport error no longer
+  carries reqwest's full URL (with the merged auth query), and an upstream
+  error body that echoes the rejected key has it masked, in the step output
+  as well. Rows written before the fix are redacted when read (KT-1035).
 - A workflow imported from a `.kronn-workflow.json` file now lands disabled,
   as ADR-005 and the Artifact import already required: a shared file's Cron or
   Tracker trigger no longer fires on the next tick. The import preview shows

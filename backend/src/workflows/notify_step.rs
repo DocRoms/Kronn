@@ -157,7 +157,12 @@ pub async fn execute_notify_step_with_policy(
             return fail(step, start, msg)
         }
         Err(super::api_call_security::GuardedSendError::Transport(e)) => {
-            return fail(step, start, format!("HTTP request failed: {}", e))
+            // Without the URL: a webhook's secret often sits in its path.
+            return fail(
+                step,
+                start,
+                format!("HTTP request failed: {}", e.without_url()),
+            );
         }
     };
 
