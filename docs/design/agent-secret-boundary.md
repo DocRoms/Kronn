@@ -455,14 +455,21 @@ Copilot's request names the tool without its server, so the broker cannot tell
 the bridge apart: Copilot gets the bridge through `--additional-mcp-config`,
 `kronn-internal` disabled, and a launch grant for the bridge alone (audited as
 `session/launch_grant`). OpenCode asks Kronn for every permission but reading,
-listing and the bridge's tools. Copilot, Vibe and OpenCode receive the bridge
+listing and the bridge's tools. Vibe runs under a per-launch Kronn agent
+profile (`acp/vibe_policy.rs`): the agent-profile layer sits above the user's
+and the project's `config.toml`, so its `ask` permissions and empty
+allowlists win over Vibe's `accept-edits` default and the user's allowlist; its
+directory is searched first, so no other profile file can take its name. Copilot, Vibe and OpenCode receive the bridge
 under a per-launch name (`kronn-internal-<random>`), so a server from the
 user's or the repository's own MCP config cannot claim its approval; a step's
 tool list narrows the grant, the broker and the bridge. Residuals: a
 repository's own CLI config (workspace MCP servers, OpenCode plugins and agent
 permissions for keys Kronn does not set) still loads as repository content;
 the launch decision is reused at `initialize` (an audit starting in between
-is not seen).
+is not seen); Kronn's model choice for Vibe goes through ACP
+`session/set_config_option`, which Vibe persists as `active_model` in the
+user's own `config.toml` (`acp/agent.py`, `config.update`); an admin-enforced
+Vibe config stays above Kronn's profile.
 
 *Spawn inventory.* The compiler enforces it. `core::cmd::{async_cmd,sync_cmd}`
 take a `ChildRoute` and build the environment before returning the command

@@ -273,6 +273,15 @@ Release notes for 0.9.3 and earlier are available in the
   list and the bridge's tools, on the top level and on the default `build`
   agent. An operator's `OPENCODE_CONFIG_CONTENT` keeps its other settings;
   one that is not a JSON object stops the launch.
+- Mistral Vibe without full access ran some calls without asking Kronn: its
+  default agent profile (`accept-edits`) approves `write_file` and `edit`, the
+  bash allowlist (read-only defaults plus the user's) runs unasked, and a
+  user or project `config.toml` can set any tool to `always`. Kronn now starts
+  Vibe under its own per-launch agent profile, selected through `VIBE_*`
+  variables: every acting tool, and every tool another config names, asks;
+  every allowlist is empty; bypass and smart approve are off; the env-less
+  `kronn-internal` copy from `.vibe/config.toml` is disabled. The user's config
+  is not edited, and with full access it applies unchanged.
 - The ACP broker no longer takes a tool's identity from `rawInput`, which holds
   the model's arguments on every native runtime.
 - A bridge-token request with no body labelled `application/json`, as the
