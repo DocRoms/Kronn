@@ -332,9 +332,9 @@ Release notes for 0.9.3 and earlier are available in the
   enables it again, and so does its change to what a Quick API sends or what a
   Quick Prompt runs (prompt, variables, agent, connection, tier, skills,
   profiles, directives, agent settings), or its name's slug or its project,
-  and so does an agent's (or an import's) creation of a Quick API or Prompt
-  that shadows a shared `ref:` such a workflow uses, for every enabled
-  workflow, in any project, that names it by id or holds a
+  and so does an agent's (or an import's, Artifact imports included) creation
+  of a Quick API or Prompt that shadows a shared `ref:` such a workflow uses,
+  for every enabled workflow, in any project, that names it by id or holds a
   `ref:qa:`/`ref:prompt:` (any field, fan-out or rollback position) with its
   old or new slug or any slug it was published or imported under: no reference
   is resolved, so the rule is a conservative superset that ambiguity can never

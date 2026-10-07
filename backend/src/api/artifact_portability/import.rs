@@ -820,9 +820,14 @@ fn commit_plan(
         value["created_at"] = json!(now);
         value["updated_at"] = json!(now);
         value["pinned"] = json!(false);
+        // An imported Prompt/API may shadow a shared `ref:` an enabled
+        // workflow uses: those workflows are disabled once its alias is in.
+        let mut shadowing: Option<(&str, &str, String)> = None;
         match item.source.kind {
             ResourceKind::QuickPrompt => {
-                crate::db::quick_prompts::insert_quick_prompt(tx, &serde_json::from_value(value)?)?
+                let prompt: QuickPrompt = serde_json::from_value(value)?;
+                crate::db::quick_prompts::insert_quick_prompt(tx, &prompt)?;
+                shadowing = Some(("prompt", "Quick Prompt", prompt.name));
             }
             ResourceKind::QuickApi => {
                 // Retarget to a local API config for the same plugin, reusing
@@ -833,7 +838,8 @@ fn commit_plan(
                     &mut api,
                     request.project_id.as_deref(),
                 );
-                crate::db::quick_apis::insert_quick_api(tx, &api)?
+                crate::db::quick_apis::insert_quick_api(tx, &api)?;
+                shadowing = Some(("qa", "Quick API", api.name));
             }
             ResourceKind::QuickExec => {
                 crate::db::quick_execs::insert_quick_exec(tx, &serde_json::from_value(value)?)?
@@ -872,6 +878,17 @@ fn commit_plan(
             ResourceKind::Artifact => unreachable!("filtered above"),
         }
         record_origin(tx, &project_key, item)?;
+        if let Some((kind, label, name)) = shadowing {
+            crate::core::resource_refs::disable_workflows_naming(
+                tx,
+                kind,
+                &item.target_id,
+                &[crate::core::repository_resources::ascii_slug(&name)],
+                crate::models::AutoDisableReason::Imported,
+                "import",
+                &format!("{label} « {name} » created by import (shadows a shared reference)"),
+            )?;
+        }
     }
     let mut root = None;
     for (index, item) in plan.resources.iter().enumerate() {
