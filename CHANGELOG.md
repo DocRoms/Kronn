@@ -301,18 +301,6 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
-- An API call's credentials are scrubbed by value from everything it hands
-  on: the step output (successful JSON included), URL summaries, errors and
-  the call log, through one set built from every value the call takes from
-  the env or the credential store, wherever it lands (base URL included: no
-  plugin metadata marks a value public, so a summary may show a masked base
-  URL) plus the resolved auth and default headers. Each value is masked raw, URL-encoded,
-  hex, base64 and JSON-escaped, case-insensitively from 8 characters, before
-  any truncation; shorter ones only as whole tokens. Notify scrubs its whole
-  response before cutting the excerpt, a token-exchange error loses every
-  `${ENV.*}` its body used (the same parser as substitution, so
-  `${env.password}` counts), and a successful token response is never
-  quoted. Stored text (call log, run detail in the UI and through MCP
 - An API call's credentials are scrubbed by value from everything it hands on:
   the step output (successful JSON included), URL summaries, errors and the
   call log, through one set built from every value the call takes from the env
@@ -357,24 +345,24 @@ Release notes for 0.9.3 and earlier are available in the
   (0.15, KT-1034). The import preview shows the trigger, the Exec steps and
   the Exec allowlist, and the agent banners say the workflow is created
   disabled (KT-1037).
-- Outbound requests to a URL a user, a plugin, a provider or an agent
-  supplies go through one guarded transport (`core::safe_http`): ApiCall
-  (every page, retry and redirect), OAuth and token exchange, Notify, gate
-  webhooks, media asset downloads, remote MCP probes, page `web_fetch` and
-  the GitHub tracker. Its resolver checks every DNS answer and connects only
-  to the checked addresses, so a rebinding answer cannot reach the socket;
-  IPv4-mapped IPv6 forms such as `[::ffff:127.0.0.1]` are refused like their
-  IPv4 host. Each redirect hop is re-checked; an https→http downgrade and a
-  cross-origin 307/308 are refused, as is any cross-origin hop that would
-  resend a body (a 301/302 on PUT included); a cross-origin hop drops every
-  header and query key the plugin, the step or the webhook supplied. IPv6
-  addresses are classified against the IANA special-purpose registry (the
-  local-use NAT64 `64:ff9b:1::/48`, `2001:2::/48`, `3fff::/20`, `5f00::/16`
-  and everything outside `2000::/3` are refused). Peer attachment fetches,
-  remote joins and repository discovery use the guarded client with
-  same-origin redirects, and an imported GitLab host never receives the
-  process `GITLAB_TOKEN`: a token only goes to the host it was configured
-  with (KT-1039).
+- Outbound requests to a URL a user, a plugin, a provider or an agent supplies
+  go through one guarded transport (`core::safe_http`): ApiCall (every page,
+  retry and redirect), OAuth and token exchange, Notify, gate webhooks, media
+  asset downloads, remote MCP probes, page `web_fetch` and the GitHub tracker.
+  Its resolver checks every DNS answer and connects only to the checked
+  addresses, so a rebinding answer cannot reach the socket; IPv4-mapped IPv6
+  forms such as `[::ffff:127.0.0.1]` are refused like their IPv4 host. Each
+  redirect hop is re-checked; an https→http downgrade and a cross-origin
+  307/308 are refused, as is any cross-origin hop that would resend a body (a
+  301/302 on PUT included); a cross-origin hop drops every header and query
+  key the plugin, the step or the webhook supplied. IPv6 addresses are
+  classified against the IANA special-purpose registry (the local-use NAT64
+  `64:ff9b:1::/48`, `2001:2::/48`, `3fff::/20`, `5f00::/16` and everything
+  outside `2000::/3` are refused). Peer attachment fetches and remote joins
+  use the guarded client and never follow a redirect; repository discovery
+  uses it with same-origin redirects, and an imported GitLab host never
+  receives the process `GITLAB_TOKEN`: a token only goes to the host it was
+  configured with (KT-1039).
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

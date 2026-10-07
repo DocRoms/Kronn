@@ -798,7 +798,7 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 | Remote MCP probe, SSE and streamable (`api/mcps.rs`) | configured (the operator's URL may be local); same-origin only |
 | Page `web_fetch` (`api/agent_workspace_tools.rs`) | public; redirects reported, not followed |
 | GitHub tracker (`workflows/tracker/github.rs`) | public; same-origin only |
-| Peer attachment fetch and remote join (`api/federation.rs`, `api/disc_invite.rs`) | configured (the contact's LAN or Tailscale address); same-origin only |
+| Peer attachment fetch and remote join (`api/federation.rs`, `api/disc_invite.rs`) | configured (the contact's LAN or Tailscale address); redirects never followed |
 | Repository discovery, GitHub and GitLab (`api/discover.rs`) | configured (a self-hosted GitLab may be local); same-origin only; a token only goes to the host it was configured with, never an imported host with the process token |
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an

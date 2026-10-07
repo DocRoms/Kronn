@@ -296,11 +296,11 @@ pub fn client(policy: SafeHttpPolicy, options: ClientOptions) -> Result<SafeClie
 }
 
 /// A contact's Kronn: its configured address may be on the LAN or Tailscale,
-/// so any address is allowed, but no redirect leaves that origin.
+/// so any address is allowed; a redirect is returned, never followed.
 pub fn peer_client(timeout: Duration) -> Result<SafeClient, String> {
     client(
         SafeHttpPolicy::Configured,
-        ClientOptions::new(Redirects::SameOrigin).timeout(timeout),
+        ClientOptions::new(Redirects::Manual).timeout(timeout),
     )
 }
 

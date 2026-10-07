@@ -368,19 +368,24 @@ async fn a_cross_origin_302_that_would_resend_a_put_body_is_refused() {
 #[tokio::test]
 async fn a_peer_client_does_not_follow_a_redirect_off_the_peer() {
     let peer = MockServer::start().await;
+    let other = MockServer::start().await;
     Mock::given(path("/api/disc/claim-by-token"))
         .respond_with(
-            ResponseTemplate::new(307)
-                .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            ResponseTemplate::new(307).insert_header("location", format!("{}/steal", other.uri())),
         )
         .mount(&peer)
         .await;
-    let err = peer_client(Duration::from_secs(5))
+    Mock::given(path("/steal"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&other)
+        .await;
+    let response = peer_client(Duration::from_secs(5))
         .unwrap()
         .post(url(&format!("{}/api/disc/claim-by-token", peer.uri())))
         .json(&serde_json::json!({"from_invite_code": "code"}))
         .send()
         .await
-        .unwrap_err();
-    assert!(err.is_blocked(), "{err}");
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
 }
