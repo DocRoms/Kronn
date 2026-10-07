@@ -26,74 +26,59 @@
 > **Statut : 0.14.3 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.14.2
+## Nouveautés de la 0.14.3
 
-- **AI & automatisation, dépôt par dépôt :** l'onglet d'un projet montre ses
-  skills, automatisations et Artifacts côte à côte, dépôt et Kronn, avec ce qui
-  demande votre attention en tête, une fiche Comparer, une approbation par
-  version et le contenu de chaque ressource en mode Dépôt / Kronn / Diff. Il
-  charge environ 40 fois plus vite sur un gros projet.
-- **De vrais skills dans `.agents/skills` :** Kronn écrit ses skills au format
-  standard Agent Skills, peut regrouper les dossiers de skills éparpillés dans
-  `.agents/skills`, et un skill du dépôt se choisit pour une discussion : son
-  `SKILL.md` est lu, masqué et transmis à l'agent à chaque message.
-- **Des pages Automatisation et Plugins plus nettes :** la sidebar
-  Automatisation se groupe par type, par projet ou pas du tout, avec des
-  filtres en puces et un nouveau type Skills ; la page Plugins liste chaque
-  plugin une seule fois, avec projet, santé et synchro en filtres. Les
-  ressources montrent ce qu'elles utilisent et ce qui les utilise.
-- **Une orchestration des tâches plus fiable :** un worker peut finaliser une
-  fusion, une validation qui ne pourra jamais tourner est refusée au lancement,
-  une validation rouge renvoie le travail au worker et prévient le principal, et
-  un quota partagé se réarme d'un geste.
-- **Des coûts justes, des sessions plus légères :** le coût se calcule sur
-  l'entrée, le cache et la sortie au tarif du modèle qui a répondu, les
-  sessions Claude Code lancées par Kronn ne chargent plus la mémoire automatique
-  du poste, et un test de connexion HTTP signale une erreur de facturation comme
-  telle.
-- **Des audits sur modèle local :** un audit peut tourner sur Ollama ou
-  LiteLLM. Le modèle ne lit et n'écrit que dans le projet, par des outils
-  fichiers que Kronn exécute pour lui, sans shell, sans web ni commit, et une
-  étape qui n'écrit rien échoue. Avec OpenCode, les gabarits d'environnement
-  sont lisibles, l'arrêt prend quelques secondes et chaque étape compte ses
-  tokens.
-- **Des modèles locaux qui vont au bout :** un agent HTTP peut demander
-  seulement la partie utile d'une grosse réponse d'API, une réponse raccourcie
-  dit ce qu'elle contient, et les modèles OpenCode déclarés dans un projet
-  apparaissent dans les sélecteurs. La carte Ollama replie son bloc de
-  téléchargement, signale qu'un modèle installé a une mise à jour et propose
-  d'abord les versions MLX sur Apple Silicon.
-- **Des audits et des modèles locaux plus fiables :** une étape d'audit ratée
-  n'invalide plus le run (les étapes réussies sont validées, une reprise ne
-  refait que ce qui a échoué), les sections que vous possédez restent
-  intactes, un modèle local qui se tait est arrêté avec une raison claire, et
-  tester une connexion LiteLLM fonctionne de nouveau.
-- **Des prompts qui restent privés :** aucun prompt envoyé à un modèle ne liste
-  vos autres projets Kronn ; seuls les dépôts liés à un projet sont nommés.
-- **Des rooms qui s'ouvrent toujours :** un CLI que le bridge ne sait pas
-  identifier ne rend plus sa room illisible, OpenCode est reconnu quand il la
-  rejoint, et une discussion qui ne se charge pas dit pourquoi, avec un bouton
-  Réessayer.
-- **Un mode Docker plus sûr :** les agents ne voient plus les fichiers
-  d'identifiants de votre home, ni le socket Docker de l'hôte, ni les jetons MCP
-  dans les dépôts et dans la config des CLI ; le dossier de données de Kronn
-  n'est lisible que par vous. Lisez l'avis de sécurité et régénérez les jetons
-  configurés.
-- **Rapide sur un gros espace de travail :** les pages Discussions et Projets
-  s'ouvrent en moins d'une seconde sur une base de 10 Go, un clic sur une
-  discussion ne redessine plus que deux cartes, et un seul écran de chargement
-  Kronn couvre le démarrage et les redémarrages, sans page d'erreur.
-- **Modèles LiteLLM vérifiés :** tester une connexion signale en direct chaque
-  modèle qui répond 404, et un modèle refusé ne peut plus être enregistré.
-- **Les installeurs desktop sont de retour :** chaque release porte à nouveau
-  ses installeurs Windows, macOS et Linux, et la bannière de mise à jour ne
-  propose qu'une version installable.
+La 0.14.3 est une version de sécurité. Lisez les notes de mise à jour du
+[CHANGELOG](CHANGELOG.md) avant de mettre à jour : certains agents et le P2P
+demandent un clic pour continuer à fonctionner.
+
+- **Un environnement étanche pour les agents :** chaque processus lancé par
+  Kronn, agents compris, reçoit un environnement construit au lieu de celui du
+  backend : aucun enfant ne voit le jeton admin de Kronn, sa clé de
+  chiffrement ni la clé fournisseur d'un autre agent. Chaque lancement d'agent
+  reçoit son propre jeton à durée limitée, borné à son projet, au lieu du
+  jeton admin, et GitHub se connecte projet par projet.
+- **Les clés quittent `config.toml` :** clés fournisseurs, clés de connexion
+  et jeton d'API passent dans la base chiffrée au premier démarrage, et la clé
+  de chiffrement ne peut plus se perdre sur un trousseau verrouillé ou une
+  mauvaise restauration : Kronn s'arrête, se verrouille ou propose une
+  récupération au lieu de l'écraser.
+- **La confiance Exec suit l'auteur :** une valeur issue d'un run (titre
+  d'issue, sortie d'étape) ne peut plus s'exécuter comme du code dans une
+  étape Exec. Seules quelques formes sûres tournent sans humain, et toute
+  ligne écrite par un agent attend votre approbation, avec une correction
+  proposée en diff.
+- **WebSocket et P2P verrouillés :** une page web visitée ne peut plus lire ni
+  écrire dans le bus d'événements de Kronn, le jeton quitte l'URL, et le P2P
+  est désactivé par défaut ; activé, il n'admet que les contacts acceptés, et
+  une discussion partagée ne circule qu'entre ses membres.
+- **HTTP sortant gardé, secrets masqués par valeur :** toute requête vers une
+  URL fournie par un utilisateur, un plugin ou un agent passe par un seul
+  transport qui bloque les adresses privées, le DNS rebinding et les
+  redirections dangereuses, et les identifiants d'un appel d'API sont masqués
+  de sa sortie, de ses erreurs et de ses logs, sous toutes leurs formes.
+- **Vous seul activez un workflow :** les workflows importés et les
+  modifications d'un agent arrivent désactivés, et un bandeau de la page
+  Automatisations les liste, avec la raison, l'auteur, la date et un bouton
+  Réactiver.
+- **Les agents natifs exigent l'accès complet :** OpenCode, Vibe, Copilot,
+  Gemini et Kiro ne tournent qu'une fois leur case d'accès complet cochée,
+  faute de mode restreint garanti ; un exécuteur isolé est prévu en 0.15.
+- **Des audits qu'on peut suivre :** une étape en cours a un panneau Détails
+  qui liste les dernières actions de l'agent par catégorie, les tokens ne
+  comptent que le trafic frais (le cache au survol), et chaque étape affiche
+  son coût, ou une estimation quand l'agent n'en donne pas.
+- **Les quick wins de l'audit :** imports jusqu'à 512 Mio sous Docker, plus de
+  double import, des sous-workflows qui respectent leur limite de
+  concurrence, des fichiers foreach confinés au worktree, et une sauvegarde
+  avant migration qui inclut le journal WAL. La rétention des runs est sur
+  option, avec un bouton pour compacter la base.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.14.2](#nouveautés-de-la-0142)
+- [Nouveautés de la 0.14.3](#nouveautés-de-la-0143)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)

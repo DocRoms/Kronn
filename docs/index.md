@@ -9,6 +9,22 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 
 ## Current release: 0.14.3
 
+- Every process Kronn starts gets a built environment, each agent launch gets
+  its own bridge token scoped to its project, and secrets leave `config.toml`
+  for the encrypted database. See the
+  [agent secret boundary](design/agent-secret-boundary.md) and
+  [key management](operations/key-management.md).
+- Exec trust follows authorship: a run value reaches code only in a few safe
+  shapes, and a line an agent writes waits for a human's approval. See
+  [workflow agent provenance](operations/workflow-agent-provenance.md).
+- The WebSocket checks `Origin`, P2P is off by default, outbound HTTP goes
+  through one guarded transport, and only a human turns a workflow on. See
+  [auth and TLS](operations/auth-and-tls.md) and the
+  [0.14.3 release notes](../CHANGELOG.md), with their upgrade notes and known
+  limitations.
+
+## Earlier releases
+
 - An audit on OpenCode or another ACP agent reads the versioned environment
   templates (`.env.dist`, `.env.example`), is stopped by "Cancel" in seconds,
   and records the tokens its steps consumed — in the Full audit and in the
@@ -36,8 +52,6 @@ This folder is the project's living knowledge base, shared by humans and AI agen
   `server.interrupted_worktree_ttl_days`. See the
   [0.14.1 release notes](../CHANGELOG.md), including the dark-theme
   accessibility pass and its validation limits.
-
-## Earlier releases
 
 - HTTP agents can discover, launch and edit Quick Prompts, and author disabled
   workflow drafts. See [HTTP-agent capabilities](architecture/http-agent-capabilities.md)
