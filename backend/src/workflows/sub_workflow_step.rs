@@ -574,37 +574,12 @@ fn capacity_margin(timeout_seconds: u64) -> chrono::Duration {
 }
 
 /// Until when a foreach item may wait for capacity: a margin before the
-/// earliest timeout guard of the run executing the foreach and of every run
-/// above it (each runner drops its whole subtree at its own deadline). An
-/// unreadable run gives no wait at all.
-async fn capacity_deadline(state: &crate::AppState, parent_run_id: &str) -> chrono::DateTime<Utc> {
-    let id = parent_run_id.to_string();
-    let found = state
-        .db
-        .with_conn(move |conn| {
-            let mut earliest: Option<chrono::DateTime<Utc>> = None;
-            let mut next = Some(id);
-            for _ in 0..=MAX_SUBWORKFLOW_DEPTH {
-                let Some(run_id) = next.take() else { break };
-                let Some(run) = crate::db::workflows::get_run(conn, &run_id)? else {
-                    return Ok(None);
-                };
-                let guards = crate::db::workflows::get_workflow(conn, &run.workflow_id)?
-                    .and_then(|workflow| workflow.guards);
-                let timeout = crate::models::WorkflowGuards::resolve_optional(guards.as_ref())
-                    .timeout_seconds;
-                let deadline = run.started_at
-                    + chrono::Duration::seconds(i64::try_from(timeout).unwrap_or(i64::MAX / 4))
-                    - capacity_margin(timeout);
-                earliest = Some(earliest.map_or(deadline, |e| e.min(deadline)));
-                next = run.parent_run_id;
-            }
-            Ok(earliest)
-        })
-        .await;
-    match found {
-        Ok(Some(deadline)) => deadline,
-        _ => Utc::now(),
+/// earliest deadline the runners above it enforce, as captured when each run
+/// started. A budget without one (a caller outside a runner) gives no wait.
+fn capacity_deadline(budget: &super::runner::SharedBudget) -> chrono::DateTime<Utc> {
+    match budget.deadline() {
+        Some((deadline, timeout_seconds)) => deadline - capacity_margin(timeout_seconds),
+        None => Utc::now(),
     }
 }
 
@@ -985,7 +960,7 @@ async fn execute_foreach(
     // (untracked, so absent from a fresh worktree) is created on the way.
     let ws_root = std::path::Path::new(&ws).to_path_buf();
     let task_file = std::path::Path::new(".kronn/current_task.json");
-    let capacity_deadline = capacity_deadline(state, parent_run_id).await;
+    let capacity_deadline = capacity_deadline(&budget);
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
@@ -1671,7 +1646,7 @@ mod tests {
             step,
             tokens,
             agents,
-            crate::workflows::runner::SharedBudget::root(50),
+            budget_with_timeout(3600),
             Some(ws.path().to_string_lossy().to_string()),
             super::ChildLaunch {
                 ctx: &ctx,
@@ -2266,21 +2241,13 @@ mod tests {
     }
 
     // ─── KT-1045 — a child goes through its workflow's admission ───
-    /// Bounds a foreach wait for capacity through the parent's timeout guard.
-    async fn set_parent_timeout(state: &crate::AppState, seconds: Option<u64>) {
-        state
-            .db
-            .with_conn(move |c| {
-                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
-                parent.guards = Some(crate::models::WorkflowGuards {
-                    timeout_seconds: seconds,
-                    ..Default::default()
-                });
-                crate::db::workflows::update_workflow(c, &parent)?;
-                Ok(())
-            })
-            .await
-            .unwrap();
+    /// A budget bounded like a runner whose timeout guard of `seconds`
+    /// started now: the foreach waits for capacity until just before it.
+    fn budget_with_timeout(seconds: u64) -> crate::workflows::runner::SharedBudget {
+        crate::workflows::runner::SharedBudget::root(50).within_deadline(
+            chrono::Utc::now() + chrono::Duration::seconds(seconds as i64),
+            seconds,
+        )
     }
 
     async fn finish_run_later(state: &crate::AppState, run_id: &'static str, after_ms: u64) {
@@ -2379,8 +2346,7 @@ mod tests {
             "no child row was inserted"
         );
 
-        // The wait for capacity ends at the parent's timeout guard.
-        set_parent_timeout(&state, Some(1)).await;
+        // The wait for capacity ends just before the runner's timeout.
         let foreach = super::execute_sub_workflow_step(
             &state,
             "parent-run",
@@ -2388,7 +2354,7 @@ mod tests {
             &foreach_step,
             &tokens,
             &agents,
-            crate::workflows::runner::SharedBudget::root(50),
+            budget_with_timeout(1),
             Some(ws.path().to_string_lossy().to_string()),
             launch(),
         )
@@ -2532,6 +2498,27 @@ mod tests {
     async fn the_runner_records_skipped_items_before_its_timeout() {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;
         let (parent, mut outer) = outer_foreach_run(&state, &step, 2, &ws).await;
+        // A later edit of the saved guard must not move the running deadline.
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                state
+                    .db
+                    .with_conn(|c| {
+                        let mut parent =
+                            crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                        parent.guards = Some(crate::models::WorkflowGuards {
+                            timeout_seconds: Some(3600),
+                            ..Default::default()
+                        });
+                        crate::db::workflows::update_workflow(c, &parent)?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+        }
         let _ = crate::workflows::runner::execute_run(
             state.clone(),
             &parent,
@@ -2660,7 +2647,7 @@ mod tests {
             "sub_workflow_foreach_file": "tasks.json",
             "sub_workflow_variables": {"ticketKey": "{{current_task.id}}"},
         }));
-        let run = |state: crate::AppState| {
+        let run = |state: crate::AppState, timeout: u64| {
             let (tokens, agents, ws, step) = (
                 tokens.clone(),
                 agents.clone(),
@@ -2676,7 +2663,7 @@ mod tests {
                     &step,
                     &tokens,
                     &agents,
-                    crate::workflows::runner::SharedBudget::root(50),
+                    budget_with_timeout(timeout),
                     Some(ws.to_string_lossy().to_string()),
                     super::ChildLaunch {
                         ctx: &ctx,
@@ -2697,8 +2684,7 @@ mod tests {
         };
 
         // The rendered key T1 is held: the old child does not slip through.
-        set_parent_timeout(&state, Some(1)).await;
-        let refused = run(state.clone()).await;
+        let refused = run(state.clone(), 1).await;
         assert!(
             refused.result.output.contains("SkippedConcurrencyLimit"),
             "{}",
@@ -2710,9 +2696,8 @@ mod tests {
         );
 
         // Once T1 is free, it resumes and keeps the rendered key.
-        set_parent_timeout(&state, None).await;
         finish_run_later(&state, "t1-holder", 0).await;
-        let resumed = run(state.clone()).await;
+        let resumed = run(state.clone(), 3600).await;
         assert!(
             resumed.result.output.contains("\"old-child\""),
             "{}",

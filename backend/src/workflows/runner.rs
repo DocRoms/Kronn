@@ -265,6 +265,10 @@ fn uncertain_side_effect_intent(run: &WorkflowRun) -> Option<SideEffectIntent> {
 pub struct SharedBudget {
     llm_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     max_llm_calls: u32,
+    /// The earliest timeout any runner of this tree enforces on the current
+    /// branch, with that runner's timeout: guards captured when each run
+    /// started, never re-read from saved config.
+    deadline: Option<(chrono::DateTime<Utc>, u64)>,
 }
 
 impl SharedBudget {
@@ -273,7 +277,24 @@ impl SharedBudget {
         Self {
             llm_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_llm_calls,
+            deadline: None,
         }
+    }
+    /// The same budget, bounded also by a runner whose timeout guard of
+    /// `timeout_seconds` ends at `deadline`; the earlier deadline wins.
+    pub fn within_deadline(&self, deadline: chrono::DateTime<Utc>, timeout_seconds: u64) -> Self {
+        let mut bounded = self.clone();
+        if bounded
+            .deadline
+            .is_none_or(|(current, _)| deadline < current)
+        {
+            bounded.deadline = Some((deadline, timeout_seconds));
+        }
+        bounded
+    }
+    /// The earliest enforced deadline and the timeout it comes from.
+    pub fn deadline(&self) -> Option<(chrono::DateTime<Utc>, u64)> {
+        self.deadline
     }
     pub fn llm_calls(&self) -> u32 {
         self.llm_calls.load(std::sync::atomic::Ordering::Relaxed)
@@ -286,6 +307,32 @@ impl SharedBudget {
     /// descendant — a child's own `max_llm_calls` is ignored when nested).
     pub fn max_llm_calls(&self) -> u32 {
         self.max_llm_calls
+    }
+}
+
+#[cfg(test)]
+mod shared_budget_deadline_tests {
+    use super::SharedBudget;
+
+    #[test]
+    fn the_earliest_runner_deadline_wins_down_the_tree() {
+        let now = chrono::Utc::now();
+        let root = SharedBudget::root(5).within_deadline(now + chrono::Duration::seconds(60), 60);
+        let child = root.within_deadline(now + chrono::Duration::seconds(3600), 3600);
+        assert_eq!(
+            child.deadline(),
+            Some((now + chrono::Duration::seconds(60), 60))
+        );
+        let tighter = child.within_deadline(now + chrono::Duration::seconds(10), 10);
+        assert_eq!(
+            tighter.deadline(),
+            Some((now + chrono::Duration::seconds(10), 10))
+        );
+        assert_eq!(
+            root.deadline(),
+            Some((now + chrono::Duration::seconds(60), 60))
+        );
+        assert_eq!(SharedBudget::root(5).deadline(), None);
     }
 }
 
@@ -1541,7 +1588,15 @@ async fn execute_run_body(
     // Phase 1b-ii — shared LLM-calls budget. A child inherits the parent
     // tree's (same counter + cap); a top-level run gets a fresh one capped at
     // its own resolved limit. The whole tree is then governed by ONE quota.
-    let budget = shared_budget.unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls));
+    let budget = shared_budget
+        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls))
+        .within_deadline(
+            run.started_at
+                + chrono::Duration::seconds(
+                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4),
+                ),
+            resolved_guards.timeout_seconds,
+        );
     let mut step_revisits: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     // 0.7.0 Phase 6 — per-Goto-edge counter. Keyed by `(source, target)`
