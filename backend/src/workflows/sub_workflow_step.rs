@@ -2794,9 +2794,20 @@ mod tests {
             run.workspace_path = None;
             run
         };
+        // A → B → C: the grandchild must not survive A's timeout either.
+        let grandchild = {
+            let mut run = orphan.clone();
+            run.id = "orphan-grandchild".into();
+            run.parent_run_id = Some("orphan-child".into());
+            run.status = crate::models::RunStatus::Running;
+            run
+        };
         state
             .db
-            .with_conn(move |c| crate::db::workflows::insert_run(c, &orphan))
+            .with_conn(move |c| {
+                crate::db::workflows::insert_run(c, &orphan)?;
+                crate::db::workflows::insert_run(c, &grandchild)
+            })
             .await
             .unwrap();
         let _ = crate::workflows::runner::execute_run(
@@ -2816,13 +2827,20 @@ mod tests {
             "{:?}",
             outer.step_results
         );
-        let orphan = state
+        let live: i64 = state
             .db
-            .with_conn(|c| crate::db::workflows::get_run(c, "orphan-child"))
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs
+                      WHERE id IN ('orphan-child', 'orphan-grandchild')
+                        AND status IN ('Pending', 'Running')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(orphan.status, crate::models::RunStatus::Cancelled);
+        assert_eq!(live, 0, "no Running or Pending descendant is left");
     }
 
     #[tokio::test]
