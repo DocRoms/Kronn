@@ -50,6 +50,9 @@ pub struct ChildLaunch<'a> {
     pub ctx: &'a TemplateContext,
     pub parent_variables: &'a [PromptVariable],
     pub parent_project_id: Option<&'a str>,
+    /// The parent runner's own cancellation token. The registry entry is
+    /// removed before the token is cancelled, so it cannot be looked up.
+    pub cancel: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// A mapping may not read a parent variable resolved from the project
@@ -589,21 +592,15 @@ fn capacity_deadline(budget: &super::runner::SharedBudget) -> chrono::DateTime<U
     }
 }
 
-fn parent_cancelled(state: &crate::AppState, parent_run_id: &str) -> bool {
-    state
-        .cancel_registry
-        .lock()
-        .ok()
-        .and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
-        .unwrap_or(false)
+fn parent_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) -> bool {
+    cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
 }
 
 /// Retries `attempt` while the child workflow's concurrency limit refuses it,
 /// until `deadline` or a parent cancel. A restart meanwhile interrupts the
 /// parent, and its resume retries the item: nothing was inserted yet.
 async fn wait_for_capacity<F, Fut>(
-    state: &crate::AppState,
-    parent_run_id: &str,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
     deadline: chrono::DateTime<Utc>,
     mut attempt: F,
 ) -> anyhow::Result<Result<(), String>>
@@ -616,7 +613,7 @@ where
         match attempt().await? {
             Ok(()) => return Ok(Ok(())),
             Err(reason) => {
-                if Utc::now() >= deadline || parent_cancelled(state, parent_run_id) {
+                if Utc::now() >= deadline || parent_cancelled(cancel) {
                     return Ok(Err(format!(
                         "{reason} Waited {} s for capacity, until the run's timeout or cancel.",
                         started.elapsed().as_secs()
@@ -979,13 +976,7 @@ async fn execute_foreach(
 
     for (idx, item) in items.iter().enumerate() {
         // Parent cancel between items — stop fan-out, keep what's done.
-        let cancelled = state
-            .cancel_registry
-            .lock()
-            .ok()
-            .and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
-            .unwrap_or(false);
-        if cancelled {
+        if parent_cancelled(launch.cancel) {
             tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, "foreach cancelled at item {idx}");
             break;
         }
@@ -1184,7 +1175,7 @@ async fn execute_foreach(
             // before keys were stored must not resume outside its bucket.
             child.concurrency_key = concurrency_key;
             let claim = std::sync::Arc::new(tokio::sync::Mutex::new(child));
-            let claimed = wait_for_capacity(state, parent_run_id, capacity_deadline, || {
+            let claimed = wait_for_capacity(launch.cancel, capacity_deadline, || {
                 let claim = claim.clone();
                 async move {
                     let mut child = claim.lock().await;
@@ -1248,7 +1239,7 @@ async fn execute_foreach(
             };
             // Another run of the child workflow may hold its slot: wait for it
             // (bounded by the parent's timeout) rather than skip the item.
-            let admitted = wait_for_capacity(state, parent_run_id, capacity_deadline, || {
+            let admitted = wait_for_capacity(launch.cancel, capacity_deadline, || {
                 let to_insert = child.clone();
                 let admission = child_wf.clone();
                 async move {
@@ -1668,6 +1659,7 @@ mod tests {
                 ctx: &ctx,
                 parent_variables: &[],
                 parent_project_id: None,
+                cancel: None,
             },
         )
         .await;
@@ -2046,6 +2038,7 @@ mod tests {
                         ctx: &ctx,
                         parent_variables: &variables,
                         parent_project_id: None,
+                        cancel: None,
                     },
                 )
                 .await
@@ -2196,6 +2189,7 @@ mod tests {
                     ctx: &ctx,
                     parent_variables: &[],
                     parent_project_id: None,
+                    cancel: None,
                 },
             )
             .await;
@@ -2239,6 +2233,7 @@ mod tests {
                 ctx: &ctx,
                 parent_variables: &[],
                 parent_project_id: None,
+                cancel: None,
             },
         )
         .await;
@@ -2329,6 +2324,7 @@ mod tests {
             ctx: &ctx,
             parent_variables: &[],
             parent_project_id: None,
+            cancel: None,
         };
         let single = step_json(serde_json::json!({
             "name": "child", "step_type": {"type": "SubWorkflow"},
@@ -2830,6 +2826,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_retained_token_ends_a_capacity_wait() {
+        // Cancellation removes the registry entry first: only the token the
+        // runner kept can tell the wait to stop.
+        let token = tokio_util::sync::CancellationToken::new();
+        let far = chrono::Utc::now() + chrono::Duration::hours(1);
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let refuse = || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(Err("Concurrency limit reached (1/1)".to_string())) }
+        };
+        let canceller = async {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            token.cancel();
+        };
+        let (waited, ()) = tokio::join!(
+            super::wait_for_capacity(Some(&token), far, refuse),
+            canceller
+        );
+        assert!(waited.unwrap().is_err());
+        assert!(attempts.load(std::sync::atomic::Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test]
     async fn a_pre_upgrade_child_resumes_under_its_rendered_key() {
         let (state, tokens, agents, ws, _) = foreach_fixture().await;
         std::fs::write(ws.path().join("tasks.json"), r#"[{"id":"T1"}]"#).unwrap();
@@ -2897,6 +2916,7 @@ mod tests {
                         ctx: &ctx,
                         parent_variables: &[],
                         parent_project_id: None,
+                        cancel: None,
                     },
                 )
                 .await
@@ -2993,6 +3013,7 @@ mod tests {
                     ctx: &ctx,
                     parent_variables: &parent_variables,
                     parent_project_id: None,
+                    cancel: None,
                 },
             )
             .await;

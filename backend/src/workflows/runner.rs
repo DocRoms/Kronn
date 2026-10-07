@@ -2362,6 +2362,7 @@ async fn execute_run_body(
                             ctx: &ctx,
                             parent_variables: &workflow.variables,
                             parent_project_id: workflow.project_id.as_deref(),
+                            cancel: Some(&cancel_token),
                         },
                     )
                     .await
