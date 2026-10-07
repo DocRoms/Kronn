@@ -841,5 +841,7 @@ sidecar (`api/docs.rs`); the gate auto-approve self-call to `127.0.0.1`
 agent's lines wait for a human), an agent never arms a trigger: a bridge
 token's create lands disabled and its `enabled: true` is refused
 (`api/workflows.rs` `AGENT_ENABLE_REFUSAL`), its update cannot enable and
-its trigger change on an enabled workflow disables it; JSON imports, accepted
+any change it makes to what an enabled workflow executes (steps, rollback,
+trigger, Exec allowlist, actions, workspace, guards, variables, project)
+disables it; JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.

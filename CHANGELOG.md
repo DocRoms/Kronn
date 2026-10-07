@@ -325,7 +325,13 @@ Release notes for 0.9.3 and earlier are available in the
   fires on the next tick. An agent's token can no longer enable a workflow
   through create, `workflow_update` or `workflow_set_enabled` (`force`
   included): the backend refuses and tells it to ask the user; an agent's
-  new trigger on an enabled workflow disables it. The import preview shows
+  change to what an enabled workflow executes (steps, rollback, trigger, Exec
+  allowlist, actions, workspace, guards, variables, project) disables it
+  until the user enables it again. With localhost trust on (auth off, or
+  `auth_strict_localhost = false`) a local process without a bridge token
+  still counts as the user, the trust model already documented for the HTTP
+  API; strict localhost is the mitigation until positive human authorization
+  (0.15, KT-1034). The import preview shows
   the trigger, the Exec steps and the Exec allowlist, and the agent banners
   say the workflow is created disabled (KT-1037).
 - Outbound requests to a URL a user, a plugin, a provider or an agent

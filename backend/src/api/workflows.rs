@@ -2116,6 +2116,24 @@ pub async fn create_agent_proposal(
     create_as(state, req, WorkflowWriter::Agent).await
 }
 
+/// Everything that decides what a workflow runs, where and when.
+fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
+    serde_json::json!({
+        "steps": wf.steps,
+        "on_failure": wf.on_failure,
+        "trigger": wf.trigger,
+        "exec_allowlist": wf.exec_allowlist,
+        "actions": wf.actions,
+        "safety": wf.safety,
+        "workspace_config": wf.workspace_config,
+        "guards": wf.guards,
+        "artifacts": wf.artifacts,
+        "variables": wf.variables,
+        "project_id": wf.project_id,
+        "project_scope": wf.project_scope,
+    })
+}
+
 /// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
 /// Tracker trigger would then run its content with no human in the loop.
 pub(crate) const AGENT_ENABLE_REFUSAL: &str = "Enabling a workflow is a human decision: \
@@ -2481,19 +2499,13 @@ async fn update_written(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
-    if writer == WorkflowWriter::Agent {
-        if req.enabled == Some(true) && !existing.enabled {
-            return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
-        }
-        // A new trigger on an enabled workflow would arm the agent's choice
-        // (Manual → Cron) without a human: it goes back to disabled.
-        let trigger_changes = req.trigger.as_ref().is_some_and(|t| {
-            serde_json::to_value(t).ok() != serde_json::to_value(&existing.trigger).ok()
-        });
-        if existing.enabled && trigger_changes {
-            req.enabled = Some(false);
-        }
+    if writer == WorkflowWriter::Agent && req.enabled == Some(true) && !existing.enabled {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
     }
+    // An agent's change to what an enabled workflow executes would run under
+    // the human's earlier activation: compared below, it disables the workflow.
+    let agent_guard = (writer == WorkflowWriter::Agent && existing.enabled)
+        .then(|| execution_fingerprint(&existing));
     if let Some(steps) = req.steps.as_mut() {
         drop_foreign_fields(steps);
     }
@@ -2678,7 +2690,7 @@ async fn update_written(
         }
     }
 
-    let updated = Workflow {
+    let mut updated = Workflow {
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -2703,6 +2715,9 @@ async fn update_written(
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
+    if agent_guard.is_some_and(|before| before != execution_fingerprint(&updated)) {
+        updated.enabled = false;
+    }
 
     if let Err(e) = crate::workflows::concurrency::validate_key(
         updated.concurrency_key.as_deref(),
@@ -8461,6 +8476,48 @@ mod tests {
         assert!(
             !edited.data.unwrap().enabled,
             "an agent's new trigger is not armed"
+        );
+
+        // Re-enabled by the human, then the agent swaps the steps: the
+        // schedule must not run the new content under the old activation.
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(human) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(human.data.unwrap().enabled);
+        let rename: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"name": "renamed by agent"})).unwrap();
+        let Json(renamed) = update_as(
+            state.clone(),
+            created.id.clone(),
+            rename,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(
+            renamed.data.unwrap().enabled,
+            "a rename changes nothing that runs"
+        );
+        let swap: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"swapped": true}}]
+        }))
+        .unwrap();
+        let Json(swapped) = update_as(
+            state.clone(),
+            created.id.clone(),
+            swap,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(swapped.success, "{:?}", swapped.error);
+        assert!(
+            !swapped.data.unwrap().enabled,
+            "an agent's new steps on an enabled workflow need a human again"
         );
     }
 
