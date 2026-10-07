@@ -211,6 +211,9 @@ Release notes for 0.9.3 and earlier are available in the
 - An audit step retried after an attempt that did not report a token counter
   no longer shows a cost estimate: the counter stays unknown in the step's
   total instead of reading as complete (KT-1094).
+- The taller model menu no longer runs past the bottom of the window: it
+  opens on the side where it fits, or the roomier one, and is never taller than
+  that side's room (KT-1032).
 - Audit quick wins:
   - Translations with a repeated placeholder (for example "2 dossiers
     sélectionnés") no longer show a literal `{1}` (KT-1053).
