@@ -223,8 +223,8 @@ Release notes for 0.9.3 and earlier are available in the
     set when each run started), with a SKIPPED signal that the run keeps. A
     resumed child keeps its concurrency key, and no child is started or
     resumed once its parent's cancellation has settled or its run's timeout
-    has passed; a timeout guard stop cancels every child it left behind
-    (KT-1045).
+    has passed; every guard stop, and every cancellation, settles the run's
+    whole subtree of children (KT-1045).
   - Run retention and a bridge token's workflow list read indexes instead of
     whole tables (migrations 221 and 222, KT-1048, KT-1050).
   - A SubWorkflow foreach file must be a relative path inside the worktree:
