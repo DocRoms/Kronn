@@ -26,8 +26,6 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Size of the response snippet recorded in the step output (characters).
 const RESPONSE_EXCERPT_LIMIT: usize = 512;
-/// How much of the body is scrubbed before the excerpt is cut.
-const RESPONSE_SCRUB_WINDOW: usize = 64 * 1024;
 
 /// A webhook's credentials: its header values, its query values and the
 /// path segments after the first (Slack-style tokens live there).
@@ -205,8 +203,9 @@ pub async fn execute_notify_step_with_policy(
     let secrets = notify_secrets(&parsed_url, &config.headers);
     let excerpt = match response.bytes().await {
         Ok(bytes) => {
-            let window = bytes.len().min(RESPONSE_SCRUB_WINDOW);
-            let scrubbed = secrets.scrub(&String::from_utf8_lossy(&bytes[..window]));
+            // The whole buffered body: a window cut first could split a
+            // secret and let its prefix survive into the excerpt.
+            let scrubbed = secrets.scrub(&String::from_utf8_lossy(&bytes));
             scrubbed.chars().take(RESPONSE_EXCERPT_LIMIT).collect()
         }
         Err(_) => String::new(),
@@ -807,6 +806,34 @@ mod tests {
         );
         assert!(
             !out.result.output.contains("Bsecretpathtoken99"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_never_lets_a_long_repeated_secret_reach_the_excerpt() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let secret: String = "S".to_string() + &"k9Q".repeat(341);
+        assert_eq!(secret.len(), 1024);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string(format!("x{}", secret.repeat(64))),
+            )
+            .mount(&server)
+            .await;
+        let step = make_step(NotifyConfig {
+            url: format!("{}/hook", server.uri()),
+            method: "POST".into(),
+            headers: HashMap::from([("X-Token".to_string(), secret.clone())]),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
+        assert!(
+            !out.result.output.contains("k9Qk9Q"),
             "{}",
             out.result.output
         );

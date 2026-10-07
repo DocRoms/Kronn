@@ -303,17 +303,21 @@ Release notes for 0.9.3 and earlier are available in the
   a bare host and port, requested without following redirects.
 - An API call's credentials are scrubbed by value from everything it hands
   on: the step output (successful JSON included), URL summaries, errors and
-  the call log. Each credential the call resolved (auth slots, env values
-  named as credentials, OAuth and exchanged tokens, the Basic `user:pass`) is
-  masked raw, URL-encoded, base64 and JSON-escaped, before any truncation;
-  a `${ENV.API_KEY}` placed in a harmless query parameter no longer shows in
-  the summary. Secrets under 8 characters are masked as whole tokens only.
-  Notify excerpts drop the webhook's header, query and path credentials, and
-  a token endpoint's error body loses the submitted secret; a successful
-  token response is never quoted (only its field names and content type). The
-  call log and MCP run status apply URL query/userinfo stripping and the
-  secret heuristics to stored text, which is all that can be done for rows
-  written before (KT-1035).
+  the call log, through one set built from every value the call takes from
+  the env or the credential store (nothing marks a config value public, so
+  only a value used solely in the plugin's base URL stays readable) plus the
+  resolved auth and default headers. Each value is masked raw, URL-encoded,
+  hex, base64 and JSON-escaped, case-insensitively from 8 characters, before
+  any truncation; shorter ones only as whole tokens. Notify scrubs its whole
+  response before cutting the excerpt, a token-exchange error loses every
+  `${ENV.*}` its body used (the same parser as substitution, so
+  `${env.password}` counts), and a successful token response is never
+  quoted. Stored text (call log, run detail in the UI and through MCP
+  `workflow_run_get`, MCP run status) gets URL query/userinfo stripping and
+  the secret heuristics, the most that can be done for output written before.
+  Known limits: an endpoint that transforms what it echoes defeats any finite
+  list of forms, and a short secret glued inside another token stays visible
+  (KT-1035).
 - Turning a workflow on is a human decision. A workflow imported from a
   `.kronn-workflow.json` file, an accepted agent bundle (parent and children)
   and an accepted agent proposal land disabled, as ADR-005 and the Artifact

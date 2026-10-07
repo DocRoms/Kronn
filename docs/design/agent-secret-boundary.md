@@ -802,14 +802,28 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 | Repository discovery, GitHub and GitLab (`api/discover.rs`) | configured (a self-hosted GitLab may be local); same-origin only; a token only goes to the host it was configured with, never an imported host with the process token |
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
-API call collects every credential it resolved (auth slots, env values
-named as credentials, OAuth and exchanged tokens, Basic `user:pass`) and
-masks it raw, URL-encoded, base64 and JSON-escaped in the step output,
-summaries and errors before truncation; secrets under 8 characters are masked
-as whole tokens only. Non-credential config is not scrubbed, because the
-output feeds later steps. A successful token response is never quoted.
-Stored text from before this (call log, MCP run status) gets URL
-query/userinfo stripping and the heuristics of `core/redact.rs` only.
+API call builds one set from every value it takes from the env or the
+credential store (no field marks a config value public, so only a value used
+solely in the plugin's base URL is left out), the resolved auth (Basic
+decoded) and its default headers, and carries it through the success
+output, summaries, errors and the call log. Each value is masked raw,
+URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
+characters, before truncation; shorter ones only as whole tokens. A
+successful token response is never quoted. Stored text from before this (call
+log, run detail and MCP `workflow_run_get`, MCP run status) gets URL
+query/userinfo stripping and the heuristics of `core/redact.rs` only;
+value-based scrubbing of legacy rows is impossible because their credential
+context is gone.
+
+*Known residuals.* An endpoint that transforms what it echoes (another
+encoding, a split, a cipher) defeats any finite list of forms, and a secret
+under 8 characters glued inside another token is not masked. With localhost
+trust on (auth off, or `auth_strict_localhost = false`), a local process
+without a bridge token is indistinguishable from the human, so it can enable
+a workflow as the human can: the same trust model as the HTTP API and the
+WebSocket (section 3, row 2). `server.auth_strict_localhost = true` is the
+mitigation; positive human authorization for such actions is a 0.15 item
+with KT-1034.
 
 Deliberately left on plain reqwest, because the destination is set by the
 operator in Settings or in code, never by a request or an agent: HTTP agents

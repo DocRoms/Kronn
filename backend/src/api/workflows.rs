@@ -5193,7 +5193,14 @@ pub async fn get_run(
         .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
         .await
     {
-        Ok(Some(run)) => Json(ApiResponse::ok(run)),
+        Ok(Some(mut run)) => {
+            // Stored output may predate value-based scrubbing; the MCP
+            // `workflow_run_get` reads this route too.
+            for step in &mut run.step_results {
+                step.output = crate::core::redact::redact_stored_text(&step.output);
+            }
+            Json(ApiResponse::ok(run))
+        }
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Run not found",
@@ -8342,6 +8349,49 @@ mod tests {
             "empty QP vec should be omitted; got: {}",
             json
         );
+    }
+
+    /// The run detail (REST and MCP `workflow_run_get`) serves stored step
+    /// output through the stored-text redaction.
+    #[tokio::test]
+    async fn run_detail_redacts_stored_step_output() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("history");
+        wf.project_id = None;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let (_, mut run) = create_manual_run(
+            &state,
+            &wf.id,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        run.step_results = vec![serde_json::from_value(serde_json::json!({
+            "step_name": "call",
+            "status": "Failed",
+            "output": "HTTP 401 on GET https://u:pw0rdValue@api.example.com/x?credential=Qk7SecretValue9 — token=rawTokenValue42",
+            "duration_ms": 1
+        }))
+        .unwrap()];
+        let stored = run.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_run(conn, &stored))
+            .await
+            .unwrap();
+        let Json(served) =
+            get_run(State(state.clone()), Path((wf.id.clone(), run.id.clone()))).await;
+        let output = served.data.unwrap().step_results[0].output.clone();
+        for leaked in ["pw0rdValue", "Qk7SecretValue9", "rawTokenValue42"] {
+            assert!(!output.contains(leaked), "{leaked}: {output}");
+        }
     }
 
     /// KT-1037 / KT-1017: only a human turns a workflow on. An agent's

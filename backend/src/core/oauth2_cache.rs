@@ -87,15 +87,10 @@ fn exchange_secrets(
     env: &HashMap<String, String>,
 ) -> SecretSet {
     let mut secrets = SecretSet::new();
-    let template = body_template.to_string();
-    let mut rest = template.as_str();
-    while let Some(start) = rest.find("${ENV.") {
-        let after = &rest[start + 6..];
-        let Some(end) = after.find('}') else { break };
-        if let Some(value) = env.get(&after[..end]) {
+    for key in env_ref_keys(&body_template.to_string()) {
+        if let Some(value) = env.get(&key) {
             secrets.add(value);
         }
-        rest = &after[end..];
     }
     for key in creds_env_keys {
         if let Some(value) = env.get(key) {
@@ -467,45 +462,52 @@ fn substitute_env_in_value(
 /// `${ENV.X}` placeholders in endpoint paths, query params, headers, and
 /// body string leaves. Same syntax everywhere = predictable for users
 /// (Didomi-style: `?organization_id=${ENV.ORGANIZATION_ID}`).
+/// The next `${ENV.KEY}` reference in `text`, prefix matched without regard
+/// to case, key normalised to upper case: `(start, end_exclusive, KEY)`.
+/// The one parser behind substitution and secret collection.
+fn next_env_ref(text: &str) -> Option<(usize, usize, String)> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("${env.")?;
+    let after_open = &text[start + 6..];
+    let end = after_open.find('}')?;
+    Some((
+        start,
+        start + 6 + end + 1,
+        after_open[..end].to_ascii_uppercase(),
+    ))
+}
+
+/// Every env key `text` references, as substitution reads them.
+pub fn env_ref_keys(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = text;
+    while let Some((_, end, key)) = next_env_ref(rest) {
+        keys.push(key);
+        rest = &rest[end..];
+    }
+    keys
+}
+
 pub fn substitute_env_in_string(
     template: &str,
     env: &HashMap<String, String>,
 ) -> Result<String, String> {
+    // 0.8.6 — accept both `${ENV.X}` and `${env.X}`; the key is upper-cased
+    // because stored keys are UPPER_SNAKE (cf. `slug_env_key`).
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
-    loop {
-        // 0.8.6 — accept both `${ENV.X}` and `${env.X}` (case-insensitive
-        // prefix) — agents naturally type lowercase. The KEY itself is
-        // normalised to UPPER for the env lookup since the storage slug
-        // convention is UPPER_SNAKE (cf. `slug_env_key` in api/mcps.rs).
-        // Without this, `${env.organization_id}` ended up percent-encoded
-        // as `%24%7Benv.organization_id%7D` and broke the agent's URL.
-        // Caught live 2026-05-20 on Didomi audit.
-        let lower = rest.to_ascii_lowercase();
-        let Some(start) = lower.find("${env.") else {
-            break;
-        };
+    while let Some((start, end, key)) = next_env_ref(rest) {
         out.push_str(&rest[..start]);
-        let after_open = &rest[start + 6..]; // skip "${env." / "${ENV."
-        if let Some(end) = after_open.find('}') {
-            let raw_key = &after_open[..end];
-            let normalised_key = raw_key.to_ascii_uppercase();
-            let value = env.get(&normalised_key).ok_or_else(|| {
-                format!(
-                    "missing env var ${{ENV.{normalised_key}}} (also accepted as ${{env.{}}})",
-                    raw_key.to_ascii_lowercase()
-                )
-            })?;
-            out.push_str(value);
-            rest = &after_open[end + 1..];
-        } else {
-            // Unclosed `${ENV.…}` — pass the rest through literally
-            // (defensive against user typos; the exchange will fail
-            // downstream with a clear vendor error).
-            out.push_str(&rest[start..]);
-            break;
-        }
+        let value = env.get(&key).ok_or_else(|| {
+            format!(
+                "missing env var ${{ENV.{key}}} (also accepted as ${{env.{}}})",
+                key.to_ascii_lowercase()
+            )
+        })?;
+        out.push_str(value);
+        rest = &rest[end..];
     }
+    // An unclosed `${ENV.…}` passes through literally.
     out.push_str(rest);
     Ok(out)
 }
@@ -1212,5 +1214,36 @@ mod tests {
         .await
         .unwrap_err();
         assert!(!err.contains("SECRETVALUE"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_lowercase_env_reference_in_an_exchange_body_is_scrubbed_from_errors() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/sessions"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("bad password Lp5LowerRefSecret"),
+            )
+            .mount(&server)
+            .await;
+        let auth = ApiAuthKind::TokenExchange {
+            endpoint: "/sessions".into(),
+            method: "POST".into(),
+            body_template: serde_json::json!({"secret": "${env.password}"}),
+            body_format: crate::models::TokenExchangeBodyFormat::Json,
+            token_jsonpath: "$.access_token".into(),
+            ttl_seconds: 0,
+            inject: crate::models::TokenInjection::BearerHeader,
+            creds_env_keys: vec![],
+        };
+        let env = HashMap::from([("PASSWORD".to_string(), "Lp5LowerRefSecret".to_string())]);
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let err =
+            resolve_token_exchange(&cache, "cfg-lower", &auth, &server.uri(), &env, TEST_POLICY)
+                .await
+                .unwrap_err();
+        assert!(err.contains("token exchange failed"), "{err}");
+        assert!(!err.contains("Lp5LowerRefSecret"), "{err}");
     }
 }

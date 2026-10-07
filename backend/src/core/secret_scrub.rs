@@ -5,7 +5,10 @@
 //! Name-based redaction (`core::redact`) cannot see a secret placed in a
 //! harmless slot (`?q=${ENV.API_KEY}`) or echoed bare by a server; this can.
 //! It cannot help with text stored before it existed: history only gets the
-//! heuristics.
+//! heuristics. Known limits: an endpoint that transforms what it echoes
+//! (another encoding, a split, a cipher) defeats any finite list of forms,
+//! and a secret under [`MIN_ANYWHERE_LEN`] glued inside another token is not
+//! masked.
 
 use base64::Engine as _;
 
@@ -64,8 +67,10 @@ impl SecretSet {
             .and_then(|s| s.strip_suffix('"'))
             .unwrap_or("")
             .to_string();
+        let hex: String = secret.bytes().map(|b| format!("{b:02x}")).collect();
         let mut forms = vec![
             secret.to_string(),
+            hex,
             percent_encode(secret, false, false),
             percent_encode(secret, false, true),
             percent_encode(secret, true, false),
@@ -106,13 +111,32 @@ impl SecretSet {
         let mut out = text.to_string();
         for form in forms {
             if form.len() >= MIN_ANYWHERE_LEN {
-                out = out.replace(form.as_str(), MASK);
+                // ASCII case folded: covers upper-case hex, mixed-case
+                // percent escapes and a raw value echoed in another case.
+                out = replace_ascii_case_insensitive(&out, form);
             } else {
                 out = replace_whole_tokens(&out, form);
             }
         }
         out
     }
+}
+
+fn replace_ascii_case_insensitive(text: &str, needle: &str) -> String {
+    let haystack = text.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(&needle) {
+        let index = from + found;
+        out.push_str(&text[last..index]);
+        out.push_str(MASK);
+        last = index + needle.len();
+        from = last;
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 /// Replaces `needle` only where it is not glued to other alphanumerics.
@@ -161,6 +185,23 @@ mod tests {
         let out = set.scrub(&format!("Basic {header} / ATATT-pass"));
         assert!(!out.contains(&header), "{out}");
         assert!(!out.contains("ATATT-pass"), "{out}");
+    }
+
+    #[test]
+    fn hex_mixed_case_escapes_and_another_case_are_masked() {
+        let mut set = SecretSet::new();
+        set.add("Abc/Def+Secret9");
+        let hex_upper: String = "Abc/Def+Secret9"
+            .bytes()
+            .map(|b| format!("{b:02X}"))
+            .collect();
+        let out = set.scrub(&format!(
+            "{hex_upper} | Abc%2fDef%2BSecret9 | ABC/DEF+SECRET9 | {}",
+            hex_upper.to_ascii_lowercase()
+        ));
+        assert!(!out.contains("Def"), "{out}");
+        assert!(!out.contains("DEF"), "{out}");
+        assert!(!out.contains(&hex_upper), "{out}");
     }
 
     #[test]

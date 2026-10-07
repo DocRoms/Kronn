@@ -152,67 +152,132 @@ pub async fn execute_api_call_step_core(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
-    let secrets = call_secrets(plugin, env);
-    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &secrets).await;
+    let mut secrets = call_secrets(plugin, step, env);
+    // The inner call adds what it resolves (default headers) to the same set,
+    // so errors, the summary and the success output share one complete set.
+    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets).await;
     // Every byte the step hands on (success JSON, summary, error) loses the
     // credentials this call resolved, in every wire form.
     outcome.result.output = secrets.scrub(&outcome.result.output);
     outcome
 }
 
-/// Every credential value this call can send: the auth slots' env values,
-/// any env value whose name marks it as a credential, the dynamic tokens and
-/// the resolved header/query values (Basic decoded to its password).
-/// Non-credential config (a base URL part, an id) is left alone because the
-/// output feeds later steps.
+/// Every value this call takes from the env or the credential store is a
+/// secret: no field marks a config value public, so the only exception is a
+/// value used solely to build the plugin's base URL (the host the summary
+/// names anyway). The resolved auth adds its wire forms (Basic decoded to
+/// its password, bearer and header tokens).
 pub(crate) fn call_secrets(
     plugin: &McpServer,
+    step: &WorkflowStep,
     env: &HashMap<String, String>,
 ) -> crate::core::secret_scrub::SecretSet {
-    use super::api_call_security::looks_like_secret_key;
     let mut set = crate::core::secret_scrub::SecretSet::new();
     let Some(spec) = plugin.api_spec.as_ref() else {
         return set;
     };
-    let mut slot_keys: Vec<&str> = match &spec.auth {
-        ApiAuthKind::ApiKeyQuery { env_key, .. }
-        | ApiAuthKind::ApiKeyHeader { env_key, .. }
-        | ApiAuthKind::Bearer { env_key }
-        | ApiAuthKind::BasicApiKey { env_key } => vec![env_key.as_str()],
-        ApiAuthKind::Basic {
-            user_env,
-            password_env,
-        } => {
-            if let (Some(user), Some(password)) = (env.get(user_env), env.get(password_env)) {
-                set.add_basic(user, password);
-            }
-            vec![password_env.as_str()]
-        }
-        ApiAuthKind::OAuth2ClientCredentials {
-            client_secret_env, ..
-        } => vec![client_secret_env.as_str()],
-        ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
-            creds_env_keys.iter().map(String::as_str).collect()
-        }
-        ApiAuthKind::CliToken {
-            fallback_env_key, ..
-        } => fallback_env_key.iter().map(String::as_str).collect(),
-        ApiAuthKind::None => vec![],
-    };
-    slot_keys.extend(["__access_token__", "__cli_token__"]);
+    let base_only = base_url_only_keys(spec, step);
     for (key, value) in env {
         // `__token_error__` and friends carry a diagnostic, not a credential.
         if key.starts_with("__") && key.ends_with("_error__") {
             continue;
         }
-        if slot_keys.contains(&key.as_str()) || looks_like_secret_key(key) {
-            set.add(value);
+        if base_only.contains(key.as_str()) {
+            continue;
+        }
+        set.add(value);
+    }
+    if let ApiAuthKind::Basic {
+        user_env,
+        password_env,
+    } = &spec.auth
+    {
+        if let (Some(user), Some(password)) = (env.get(user_env), env.get(password_env)) {
+            set.add_basic(user, password);
         }
     }
     if let Ok(auth) = resolve_auth(&spec.auth, env) {
         add_resolved_auth(&mut set, &auth);
     }
     set
+}
+
+/// Env keys referenced by the base URL's `{KEY}` placeholders and nowhere
+/// else the request or its auth can carry them.
+fn base_url_only_keys(spec: &ApiSpec, step: &WorkflowStep) -> std::collections::HashSet<String> {
+    let mut keys = brace_keys(&spec.base_url);
+    if keys.is_empty() {
+        return keys;
+    }
+    let mut elsewhere: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut texts: Vec<String> = vec![step.api_endpoint_path.clone().unwrap_or_default()];
+    for map in [&step.api_query, &step.api_headers].into_iter().flatten() {
+        texts.extend(map.values().cloned());
+    }
+    if let Some(body) = &step.api_body {
+        texts.push(body.to_string());
+    }
+    texts.extend(spec.default_headers.iter().map(|h| h.value.clone()));
+    for text in &texts {
+        elsewhere.extend(crate::core::oauth2_cache::env_ref_keys(text));
+        elsewhere.extend(brace_keys(text));
+    }
+    elsewhere.extend(auth_env_keys(&spec.auth));
+    keys.retain(|key| !elsewhere.contains(key));
+    keys
+}
+
+fn brace_keys(template: &str) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else { break };
+        keys.insert(after[..end].trim_start_matches('{').to_string());
+        rest = &after[end + 1..];
+    }
+    keys
+}
+
+/// The env keys an auth kind reads, including templates in its headers.
+fn auth_env_keys(auth: &ApiAuthKind) -> Vec<String> {
+    match auth {
+        ApiAuthKind::ApiKeyQuery { env_key, .. }
+        | ApiAuthKind::ApiKeyHeader { env_key, .. }
+        | ApiAuthKind::Bearer { env_key }
+        | ApiAuthKind::BasicApiKey { env_key } => vec![env_key.clone()],
+        ApiAuthKind::Basic {
+            user_env,
+            password_env,
+        } => vec![user_env.clone(), password_env.clone()],
+        ApiAuthKind::OAuth2ClientCredentials {
+            client_id_env,
+            client_secret_env,
+            extra_headers,
+            ..
+        } => {
+            let mut keys = vec![client_id_env.clone(), client_secret_env.clone()];
+            for header in extra_headers {
+                keys.extend(brace_keys(&header.value_template));
+            }
+            keys
+        }
+        ApiAuthKind::TokenExchange {
+            creds_env_keys,
+            body_template,
+            ..
+        } => {
+            let mut keys = creds_env_keys.clone();
+            keys.extend(crate::core::oauth2_cache::env_ref_keys(
+                &body_template.to_string(),
+            ));
+            keys
+        }
+        ApiAuthKind::CliToken {
+            fallback_env_key, ..
+        } => fallback_env_key.iter().cloned().collect(),
+        ApiAuthKind::None => vec![],
+    }
 }
 
 fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
@@ -246,7 +311,7 @@ async fn execute_core_unscrubbed(
     env: &HashMap<String, String>,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
-    secrets: &crate::core::secret_scrub::SecretSet,
+    secrets: &mut crate::core::secret_scrub::SecretSet,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -420,12 +485,11 @@ async fn execute_core_unscrubbed(
         Ok(client) => client,
         Err(e) => return fail(step, start, e),
     };
-    let mut call_secrets = secrets.clone();
     // Default headers rendered into `auth` may hold more credentials.
-    add_resolved_auth(&mut call_secrets, &auth);
+    add_resolved_auth(secrets, &auth);
     let transport = ApiTransport {
         client,
-        secrets: call_secrets,
+        secrets: secrets.clone(),
         pinned_base: if policy.enforce_host_match {
             Url::parse(&resolved_base_url).ok()
         } else {
@@ -5013,6 +5077,89 @@ mod tests {
     }
 
     // ─── Value-based scrubbing (KT-1035 round 2) ───────────────────
+
+    #[tokio::test]
+    async fn a_body_env_value_with_no_secret_looking_name_is_scrubbed_from_an_echo() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/echo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "you_sent": "Pw7EchoedValue",
+                "header": "Dh3DefaultHeaderValue",
+                "host": "tenant-acme"
+            })))
+            .mount(&server)
+            .await;
+        let mut plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("POST", "/echo")],
+        );
+        if let Some(spec) = plugin.api_spec.as_mut() {
+            spec.default_headers = vec![ApiDefaultHeader {
+                name: "X-Org".into(),
+                value: "${ENV.ORG_HEADER}".into(),
+            }];
+        }
+        let mut step = mk_step("/echo");
+        step.api_method = Some("POST".into());
+        step.api_body = Some(json!({"pw": "${ENV.PASSWORD}"}));
+        let env = HashMap::from([
+            ("PASSWORD".to_string(), "Pw7EchoedValue".to_string()),
+            (
+                "ORG_HEADER".to_string(),
+                "Dh3DefaultHeaderValue".to_string(),
+            ),
+        ]);
+        let out = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Pw7EchoedValue"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Dh3DefaultHeaderValue"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            out.result.output.contains("tenant-acme"),
+            "non-env data stays"
+        );
+    }
+
+    #[test]
+    fn a_value_used_only_in_the_base_url_stays_readable() {
+        let mut plugin = mk_plugin(
+            "https://{COMPANY}.example.com",
+            ApiAuthKind::Bearer {
+                env_key: "TOKEN".into(),
+            },
+            vec![],
+        );
+        plugin.api_spec.as_mut().unwrap().default_headers = vec![];
+        let env = HashMap::from([
+            ("COMPANY".to_string(), "acmecorp".to_string()),
+            ("TOKEN".to_string(), "bearer-token-value".to_string()),
+        ]);
+        let set = call_secrets(&plugin, &mk_step("/x"), &env);
+        let out = set.scrub("https://acmecorp.example.com bearer-token-value");
+        assert!(out.contains("acmecorp"), "{out}");
+        assert!(!out.contains("bearer-token-value"), "{out}");
+    }
 
     #[tokio::test]
     async fn a_successful_json_echoing_the_key_is_scrubbed() {
