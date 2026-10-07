@@ -54,18 +54,15 @@ fn refused_owned(what: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, what)
 }
 
-/// A sibling name no other writer uses; created exclusively.
-fn temp_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut tmp = std::ffi::OsString::from(".");
-    tmp.push(name);
-    tmp.push(format!(
-        ".kronn-tmp-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    tmp
+/// Attempts at an exclusive temporary name before giving up.
+const TEMP_ATTEMPTS: usize = 8;
+
+/// A short random sibling name, independent of the destination's (a name
+/// near the length limit stays writable). Created exclusively, retried on a
+/// collision.
+fn temp_name() -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!(".kronn-tmp-{}", &id[..16])
 }
 
 #[cfg(unix)]
@@ -191,15 +188,28 @@ mod imp {
         Ok(bytes)
     }
 
+    /// A fresh temporary file in `dir`, created exclusively under a random
+    /// name; a collision picks another name and never touches the existing one.
+    fn create_temp(dir: &OwnedFd) -> io::Result<(File, CString)> {
+        for _ in 0..super::TEMP_ATTEMPTS {
+            let tmp = cstring(super::temp_name().as_bytes())?;
+            match open_at(dir, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL) {
+                Ok(fd) => return Ok((File::from(fd), tmp)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free temporary name",
+        ))
+    }
+
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
         let (dir, name) = parent_dir(root, rel, true)?;
-        let tmp = cstring(super::temp_name(OsStr::from_bytes(name.as_bytes())).as_bytes())?;
+        // Cleanup is armed only once the temporary file is ours.
+        let (mut file, tmp) = create_temp(&dir)?;
         let written = (|| {
-            let mut file = File::from(open_at(
-                &dir,
-                &tmp,
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            )?);
             file.write_all(bytes)?;
             // SAFETY: as in open_at; renameat replaces the entry, never
             // writes through what it pointed at.
@@ -286,16 +296,11 @@ mod imp {
             .ok_or_else(|| super::refused("no parent directory"))?;
         std::fs::create_dir_all(parent)?;
         guarded(root, rel)?;
-        let name = path
-            .file_name()
-            .ok_or_else(|| super::refused("no file name"))?;
-        let tmp = parent.join(super::temp_name(name));
+        // Cleanup is armed only once the temporary file is ours.
+        let (mut file, tmp) = create_temp(parent)?;
         let written = (|| {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?
-                .write_all(bytes)?;
+            file.write_all(bytes)?;
+            drop(file);
             // Replaces the directory entry (a planted link included).
             std::fs::rename(&tmp, &path)
         })();
@@ -303,6 +308,23 @@ mod imp {
             let _ = std::fs::remove_file(&tmp);
         }
         written
+    }
+
+    /// A fresh temporary file in `dir` under a random name, retried on a
+    /// collision without touching the existing entry.
+    fn create_temp(dir: &Path) -> io::Result<(File, PathBuf)> {
+        for _ in 0..super::TEMP_ATTEMPTS {
+            let tmp = dir.join(super::temp_name());
+            match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+                Ok(file) => return Ok((file, tmp)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "no free temporary name",
+        ))
     }
 
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
@@ -441,6 +463,25 @@ mod tests {
         });
         assert!(read(root.path(), Path::new("hard")).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn an_existing_temporary_name_is_never_removed() {
+        let (root, _) = dirs();
+        let occupied = root.path().join(".kronn-tmp-occupied");
+        std::fs::write(&occupied, b"someone else").unwrap();
+        write(root.path(), Path::new("f"), b"x").unwrap();
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"someone else");
+        assert!(super::temp_name().starts_with(".kronn-tmp-"));
+        assert_ne!(super::temp_name(), super::temp_name());
+    }
+
+    #[test]
+    fn a_name_at_the_length_limit_stays_writable() {
+        let (root, _) = dirs();
+        let long = "n".repeat(255);
+        write(root.path(), Path::new(&long), b"x").unwrap();
+        assert_eq!(read(root.path(), Path::new(&long)).unwrap(), b"x");
     }
 
     #[test]
