@@ -228,6 +228,14 @@ mod imp {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        // Only a regular file or a link is replaced: a socket, FIFO, device
+        // or directory at the destination is refused, never destroyed.
+        if let Some(st) = existing {
+            let kind = st.st_mode & libc::S_IFMT;
+            if kind != libc::S_IFREG && kind != libc::S_IFLNK {
+                return Err(super::refused("the destination is not a regular file"));
+            }
+        }
         // A replaced regular file keeps its permission bits; a new file (or
         // one replacing a link) gets the usual 0644.
         let mode: libc::mode_t = match existing {
@@ -328,6 +336,14 @@ mod imp {
         std::fs::create_dir_all(parent)?;
         guarded(root, rel)?;
         let existing = std::fs::symlink_metadata(&path).ok();
+        // Only a regular file or a link is replaced, never a directory or
+        // device-like entry.
+        if existing
+            .as_ref()
+            .is_some_and(|meta| !meta.is_file() && !meta.file_type().is_symlink())
+        {
+            return Err(super::refused("the destination is not a regular file"));
+        }
         // Cleanup is armed only once the temporary file is ours.
         let (mut file, tmp) = create_temp(parent)?;
         let written = (|| {
@@ -544,6 +560,33 @@ mod tests {
         }
         write(root.path(), Path::new("fresh"), b"x").unwrap();
         assert_eq!(mode("fresh"), 0o644);
+    }
+
+    #[test]
+    fn special_destinations_are_refused_and_kept() {
+        use std::os::unix::fs::FileTypeExt;
+        let (root, _) = dirs();
+        let socket = root.path().join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let fifo = std::ffi::CString::new(root.path().join("pipe").as_os_str().as_encoded_bytes())
+            .unwrap();
+        // SAFETY: valid path; test-only.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        for name in ["s.sock", "pipe"] {
+            assert!(write(root.path(), Path::new(name), b"x").is_err(), "{name}");
+            assert!(
+                append(root.path(), Path::new(name), b"x").is_err(),
+                "{name}"
+            );
+        }
+        assert!(std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert!(std::fs::symlink_metadata(root.path().join("pipe"))
+            .unwrap()
+            .file_type()
+            .is_fifo());
     }
 
     #[test]
