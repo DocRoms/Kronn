@@ -9,14 +9,23 @@
 //! - A read must land on a regular file with a single link, and the name must
 //!   still point at that same file after it was opened: a hard link (or one
 //!   removed right after the open) would reach an outside file.
-//! - A write never opens the existing file. It writes a fresh, exclusively
-//!   created file next to it and renames it over the name, which replaces a
-//!   planted link instead of writing through it.
+//! - A write never opens the existing file. It writes a fresh file under a
+//!   short random name (owner-only, then the replaced file's permission
+//!   bits), syncs it and renames it over the name, which replaces a planted
+//!   link instead of writing through it; the directory is then synced. Only a
+//!   regular file or a link is replaced: sockets, FIFOs, devices and
+//!   directories are refused.
 //!
 //! Windows: the same replace-by-rename write and a no-follow, single-link
 //! read through the opened handle, but the path is walked by name after an
 //! `fs_guard` check, so a directory swapped in between check and open is not
-//! excluded (best effort). The rooted primitive for every platform is KT-1055.
+//! excluded, and directories cannot be synced (best effort).
+//!
+//! Known residual (KT-1055, 0.15): a read can still be fooled by a process
+//! that mutates the worktree namespace while it runs (a hard link unlinked
+//! and relinked between the checks on Unix, deletion of a hard link while
+//! the file is open on Windows). Closing it needs OS isolation or protected
+//! staging, i.e. the rooted primitive planned in KT-1055.
 
 use std::io;
 use std::path::{Component, Path};
