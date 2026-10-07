@@ -324,14 +324,16 @@ Release notes for 0.9.3 and earlier are available in the
   import already required, so a shared Cron or Tracker trigger no longer fires
   on the next tick. An agent's token can no longer enable a workflow through
   create, `workflow_update` or `workflow_set_enabled` (`force` included): the
-  backend refuses and tells it to ask the user. An agent's change to what an
-  enabled workflow executes (steps, rollback, trigger, Exec allowlist,
-  actions, workspace, guards, variables, concurrency limit and key, project)
-  disables it until the user enables it again, and so does its change to what
-  a Quick API sends or what a Quick Prompt runs (prompt, variables, agent,
-  connection, tier, skills, profiles, directives, agent settings), for every
-  enabled workflow using it by id or by a `ref:qa:`/`ref:prompt:` that
-  resolves to it in any project the workflow serves (steps and rollback,
+  backend refuses and tells it to ask the user, and an agent's write can never
+  turn a stored `false` back to `true`, even from a read made before a
+  concurrent disable. An agent's change to what an enabled workflow executes
+  (steps, rollback, trigger, Exec allowlist, actions, workspace, guards,
+  variables, concurrency limit and key, project) disables it until the user
+  enables it again, and so does its change to what a Quick API sends or what a
+  Quick Prompt runs (prompt, variables, agent, connection, tier, skills,
+  profiles, directives, agent settings), or its name's slug or its project,
+  for every enabled workflow using it by id or by a `ref:qa:`/`ref:prompt:`
+  that resolves to it in any project the workflow serves (steps and rollback,
   direct, batch, chained and collection fields); those workflows are found
   before and after the edit, so a rename that leaves an old slug or shadows
   another resource still matches, and disabled in the same transaction, which
@@ -352,16 +354,17 @@ Release notes for 0.9.3 and earlier are available in the
   disabled (KT-1037).
 - Kronn now says why it turned a workflow off on its own. Each automatic
   disable (an agent's edit or create, an agent's change to a Quick API or
-  Prompt it uses, an agent bundle or proposal, an import) is recorded on the
-  workflow with its reason, who and when, and a short summary ("steps changed
-  by Codex", "Quick API « fetch » edited by Claude"); migration 223. The
-  Automations page shows a banner when any is waiting ("N workflow(s) were
-  changed by an agent or imported and are disabled by default"), a details
-  panel with each one's reason, summary, author, date and link, a Re-enable
-  button per row and a Re-enable all button (a Cron or Tracker workflow is
-  always confirmed first), and a reason badge in the workflow list. A human
-  enable clears the record. `GET /api/workflows/auto-disabled` and `POST
-  /api/workflows/reenable` (one id or many) refuse a bridge token (KT-1037).
+  Prompt it uses, an agent bundle or proposal, an import, a config restore
+  that fails validation) is recorded on the workflow with its reason, who and
+  when, and a short summary ("steps changed by Codex", "Quick API « fetch »
+  edited by Claude"); migration 223. The Automations page shows a banner when
+  any is waiting ("N workflow(s) were changed by an agent or imported and are
+  disabled by default"), a details panel with each one's reason, summary,
+  author, date and link, a Re-enable button per row and a Re-enable all button
+  (a Cron or Tracker workflow is always confirmed first), and a reason badge
+  in the workflow list. A human enable clears the record. `GET
+  /api/workflows/auto-disabled` and `POST /api/workflows/reenable` (one id or
+  many) refuse a bridge token (KT-1037).
 - Outbound requests to a URL a user, a plugin, a provider or an agent supplies
   go through one guarded transport (`core::safe_http`): ApiCall (every page,
   retry and redirect), OAuth and token exchange, Notify, gate webhooks, media

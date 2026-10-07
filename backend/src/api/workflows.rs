@@ -2952,10 +2952,15 @@ async fn update_written(
     // A human turning it on has reviewed it: the record of why Kronn turned
     // it off goes.
     let clear_record = updated.enabled && writer == WorkflowWriter::Human;
+    let by_agent = writer == WorkflowWriter::Agent;
     match state
         .db
         .with_conn(move |conn| {
-            let saved = crate::db::workflows::update_workflow(conn, &w)?;
+            let saved = if by_agent {
+                crate::db::workflows::update_workflow_as_agent(conn, &w)?
+            } else {
+                crate::db::workflows::update_workflow(conn, &w)?
+            };
             if saved && clear_record {
                 crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
             }
@@ -2964,6 +2969,18 @@ async fn update_written(
         .await
     {
         Ok(true) => {
+            // The stored flag may have stayed off (see `update_workflow_as_agent`).
+            let mut updated = updated;
+            if by_agent {
+                let id = updated.id.clone();
+                if let Ok(Some(stored)) = state
+                    .db
+                    .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+                    .await
+                {
+                    updated.enabled = stored.enabled;
+                }
+            }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
                 record_auto_disable(
                     &state,
@@ -8758,6 +8775,41 @@ mod tests {
         assert_eq!(record.reason, AutoDisableReason::Imported);
         assert_eq!(record.disabled_by, "import");
         assert!(record.summary.contains("imported"), "{}", record.summary);
+    }
+
+    /// KT-1037: an agent's update that read `enabled = true` before a
+    /// concurrent disable (a dependency edited meanwhile) cannot write it
+    /// back; a human's update can.
+    #[tokio::test]
+    async fn an_agent_write_never_turns_a_stored_false_into_true() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("race");
+        wf.id = "wf-race".into();
+        wf.project_id = None;
+        wf.enabled = true;
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf)?;
+                // The agent's request read the workflow while it was enabled…
+                let mut stale = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                stale.name = "renamed by the agent".into();
+                // …then a dependency edit disabled it before the agent's write.
+                conn.execute("UPDATE workflows SET enabled = 0 WHERE id = 'wf-race'", [])?;
+                crate::db::workflows::update_workflow_as_agent(conn, &stale)?;
+                let after_agent = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                crate::db::workflows::update_workflow(conn, &stale)?;
+                let after_human = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                Ok((after_agent, after_human))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !outcome.0.enabled,
+            "the stale enabled=true is not written back"
+        );
+        assert_eq!(outcome.0.name, "renamed by the agent");
+        assert!(outcome.1.enabled, "a human's write can");
     }
 
     /// KT-1037 / KT-1017: only a human turns a workflow on. An agent's

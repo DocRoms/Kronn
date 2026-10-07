@@ -1080,6 +1080,17 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
 /// a TYPED signal, so callers never string-match the error message.
 /// Reporting success on 0 rows would silently drop the caller's edit.
 pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
+    write_workflow(conn, wf, false)
+}
+
+/// An agent's write: whatever `wf.enabled` says, a stored `false` stays
+/// `false`, decided in the UPDATE itself so a concurrent disable (a
+/// dependency edited meanwhile) cannot be undone by a stale read (KT-1037).
+pub fn update_workflow_as_agent(conn: &Connection, wf: &Workflow) -> Result<bool> {
+    write_workflow(conn, wf, true)
+}
+
+fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Result<bool> {
     let previous = get_workflow(conn, &wf.id)?;
     let mut used_step_ids = std::collections::HashSet::new();
     let steps = steps_with_durable_ids(
@@ -1097,7 +1108,8 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
     let n = conn.execute(
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
-         concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
+         concurrency_limit = ?9, enabled = CASE WHEN ?20 THEN MIN(enabled, ?10) ELSE ?10 END,
+         updated_at = ?11, guards = ?12, artifacts = ?13,
          on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
          concurrency_key = ?18, project_scope_json = ?19
          WHERE id = ?1",
@@ -1143,6 +1155,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            keep_disabled,
         ],
     )?;
     Ok(n > 0)

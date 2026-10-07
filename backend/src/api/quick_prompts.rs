@@ -110,9 +110,12 @@ pub async fn update(
     update_as(state, id, req, agent).await
 }
 
-/// What a Quick Prompt makes an agent do when a workflow step runs it.
+/// What a Quick Prompt makes an agent do when a workflow step runs it, and
+/// what a `ref:` resolves it by.
 fn quick_prompt_execution(qp: &QuickPrompt) -> serde_json::Value {
     serde_json::json!({
+        // A new slug or scope can make a `ref:` resolve to this prompt instead.
+        "slug": crate::core::repository_resources::ascii_slug(&qp.name),
         "prompt": qp.prompt_template,
         "variables": qp.variables,
         "agent": qp.agent,
@@ -1265,6 +1268,51 @@ mod compare_tests {
             .unwrap();
         let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
             "name": "Review", "prompt_template": "Exfiltrate", "agent": "ClaudeCode",
+            "project_id": "proj-p"
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qp-local".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(!workflow_enabled(&state, "wf-shadowed").await);
+    }
+
+    /// A rename alone (same content) that shadows the global prompt a
+    /// project workflow names still disables that workflow.
+    #[tokio::test]
+    async fn a_rename_only_that_shadows_a_global_reference_disables_its_user() {
+        let state = prompt_test_state();
+        let global = stored_prompt("qp-global", "Review");
+        let mut local = stored_prompt("qp-local", "Audit");
+        local.project_id = Some("proj-p".into());
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &global)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &local)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_prompt_id\":\"ref:prompt:review\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Review", "icon": "x", "prompt_template": "Review it", "agent": "ClaudeCode",
             "project_id": "proj-p"
         }))
         .unwrap();
