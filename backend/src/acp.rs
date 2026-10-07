@@ -592,6 +592,7 @@ pub struct AcpJsonRpcTransport {
     launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
     /// The name this session declares Kronn's bridge under.
     bridge_id: String,
+    timeouts: AcpRequestTimeouts,
 }
 
 /// How long `shutdown` waits for the stdout dispatcher after the child is
@@ -599,10 +600,15 @@ pub struct AcpJsonRpcTransport {
 /// blocking shutdown on that is worse than abandoning the drain.
 const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Budget for a control request — `initialize`, `session/new`, `session/cancel`.
-/// These are local handshakes; a runtime that has not answered in half a minute
-/// is not going to.
+/// Budget for a control request — `initialize`, `session/cancel`,
+/// `session/set_config_option`. These are local handshakes; a runtime that has
+/// not answered in half a minute is not going to.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Budget for `session/new` and `session/resume`, which start every declared
+/// MCP server before answering. OpenCode gives each server up to 30 s, so the
+/// control budget lost that race to a single slow or mute server.
+pub(crate) const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Backstop for a prompt turn.
 ///
@@ -627,12 +633,33 @@ const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_REQUEST_TIMEOUT: Duration =
     Duration::from_secs((crate::models::MAX_AGENT_GLOBAL_TIMEOUT_MIN as u64 + 10) * 60);
 
-fn request_timeout(method: &str) -> Duration {
-    if method == "session/prompt" {
-        PROMPT_REQUEST_TIMEOUT
-    } else {
-        CONTROL_REQUEST_TIMEOUT
+/// The per-method budgets of one transport. Tests shorten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcpRequestTimeouts {
+    pub control: Duration,
+    pub session_setup: Duration,
+    pub prompt: Duration,
+}
+
+impl AcpRequestTimeouts {
+    pub(crate) const DEFAULT: Self = Self {
+        control: CONTROL_REQUEST_TIMEOUT,
+        session_setup: SESSION_SETUP_TIMEOUT,
+        prompt: PROMPT_REQUEST_TIMEOUT,
+    };
+
+    fn for_method(&self, method: &str) -> Duration {
+        match method {
+            "session/prompt" => self.prompt,
+            "session/new" | "session/resume" => self.session_setup,
+            _ => self.control,
+        }
     }
+}
+
+#[cfg(test)]
+fn request_timeout(method: &str) -> Duration {
+    AcpRequestTimeouts::DEFAULT.for_method(method)
 }
 
 /// Owns the stdout dispatcher and cancels it when dropped. A bare `JoinHandle`
@@ -967,7 +994,14 @@ impl AcpJsonRpcTransport {
             broker,
             launch_mcp_servers: Mutex::new(None),
             bridge_id: "kronn-internal".into(),
+            timeouts: AcpRequestTimeouts::DEFAULT,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_request_timeouts(mut self, timeouts: AcpRequestTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
 
     /// Audit trail of every permission/fs/terminal decision the dispatcher
@@ -1075,7 +1109,7 @@ impl AcpJsonRpcTransport {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
-        timeout(request_timeout(method), receiver)
+        timeout(self.timeouts.for_method(method), receiver)
             .await
             .map_err(|_| AcpError::Timeout(method.to_owned()))?
             .map_err(|_| {
@@ -3584,7 +3618,12 @@ for line in sys.stdin:
         // "ACP request timed out: session/prompt", while the CLI path grants
         // the same work fifteen minutes of silence and up to two hours overall.
         assert_eq!(request_timeout("initialize"), CONTROL_REQUEST_TIMEOUT);
-        assert_eq!(request_timeout("session/new"), CONTROL_REQUEST_TIMEOUT);
+        assert_eq!(request_timeout("session/new"), SESSION_SETUP_TIMEOUT);
+        assert_eq!(request_timeout("session/resume"), SESSION_SETUP_TIMEOUT);
+        assert_eq!(
+            request_timeout("session/set_config_option"),
+            CONTROL_REQUEST_TIMEOUT
+        );
         assert_eq!(request_timeout("session/cancel"), CONTROL_REQUEST_TIMEOUT);
 
         assert_eq!(request_timeout("session/prompt"), PROMPT_REQUEST_TIMEOUT);

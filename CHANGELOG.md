@@ -248,6 +248,17 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A native ACP agent (OpenCode, Vibe, Copilot, Gemini CLI, Kiro) that stops
+  answering no longer leaves a discussion silent. Opening a session now waits
+  90 s, enough for OpenCode's 30 s per MCP server; the 30 s limit lost that
+  race to one slow project server, and the turn was deferred and retried
+  without a word. A phase that times out stops the agent, settles the turn as
+  failed and posts a translated message naming the phase and the project
+  servers it was starting. A prompt that gets no answer at all now stops at
+  the configured inactivity delay, not 15 minutes, with its own message. A
+  project server whose command is missing is no longer declared to the
+  session. A stop by Kronn's inactivity watchdog is no longer headed by a
+  wrong "Network error" hint.
 - The launch card's step details now show the model and efforts of the
   step's tier (economy or reasoning), not always those of the default tier
   (KT-1095).

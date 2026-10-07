@@ -57,6 +57,9 @@ impl Fixture {
                 "/scripts/disc-introspection-mcp.py"
             ),
         );
+        // The project server's command is on PATH: one that is not is left out.
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("safe-server"), "").unwrap();
         let mut registry = serde_json::from_value(serde_json::json!({"mcpServers":{
             "project-safe": {"command": "safe-server", "args": ["serve"]}
         }}))

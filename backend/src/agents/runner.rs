@@ -4868,6 +4868,7 @@ async fn run_acp_session(
         idle_timeout,
         step_tools,
     } = request;
+    use super::acp_start::{AcpStartPhase, AcpStartTimeout};
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
     };
@@ -4878,6 +4879,25 @@ async fn run_acp_session(
         acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode),
         step_tools,
     );
+    // A phase that timed out is reported with its own bound and, for the
+    // session, the project servers it was starting, so it is settled with a
+    // message instead of being deferred and retried in silence.
+    let project_servers: Vec<String> = mcp_servers
+        .iter()
+        .filter(|server| !crate::acp::is_bridge_like(&server.id))
+        .map(|server| server.id.clone())
+        .collect();
+    let start_timeout = |error: &crate::acp::AcpError, phase: AcpStartPhase, started: Instant| {
+        matches!(error, crate::acp::AcpError::Timeout(_)).then(|| {
+            let servers = if phase == AcpStartPhase::Session {
+                project_servers.clone()
+            } else {
+                Vec::new()
+            };
+            AcpStartTimeout::new(phase, started.elapsed(), servers).to_error(agent_type)
+        })
+    };
+    let started = Instant::now();
     if let Err(error) = host
         .negotiate(AcpInitialize {
             protocol_version: 1,
@@ -4886,11 +4906,9 @@ async fn run_acp_session(
         })
         .await
     {
-        return Err(acp_start_failure(
-            &host,
-            format!("{agent_type:?} ACP initialize failed: {error}"),
-        )
-        .await);
+        let failure = start_timeout(&error, AcpStartPhase::Initialize, started)
+            .unwrap_or_else(|| format!("{agent_type:?} ACP initialize failed: {error}"));
+        return Err(acp_start_failure(&host, failure).await);
     }
     if !mcp_servers.is_empty() {
         if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
@@ -4923,6 +4941,7 @@ async fn run_acp_session(
                     .await)
                 }
             };
+            let started = Instant::now();
             match host.resume_session(&target).await {
                 Ok(()) => (Some(target), false),
                 // Capability absence and a positively identified missing
@@ -4934,11 +4953,11 @@ async fn run_acp_session(
                 }) => (None, true),
                 Err(crate::acp::AcpError::SessionNotFound) => (None, true),
                 Err(error) => {
-                    return Err(acp_start_failure(
-                        &host,
-                        format!("{agent_type:?} ACP session resume failed: {error}"),
-                    )
-                    .await);
+                    let failure = start_timeout(&error, AcpStartPhase::Session, started)
+                        .unwrap_or_else(|| {
+                            format!("{agent_type:?} ACP session resume failed: {error}")
+                        });
+                    return Err(acp_start_failure(&host, failure).await);
                 }
             }
         }
@@ -4946,16 +4965,19 @@ async fn run_acp_session(
     };
     let session = match resumed {
         Some(target) => target,
-        None => match host.create_session().await {
-            Ok(session) => session,
-            Err(error) => {
-                return Err(acp_start_failure(
-                    &host,
-                    format!("{agent_type:?} ACP session creation failed: {error}"),
-                )
-                .await)
+        None => {
+            let started = Instant::now();
+            match host.create_session().await {
+                Ok(session) => session,
+                Err(error) => {
+                    let failure = start_timeout(&error, AcpStartPhase::Session, started)
+                        .unwrap_or_else(|| {
+                            format!("{agent_type:?} ACP session creation failed: {error}")
+                        });
+                    return Err(acp_start_failure(&host, failure).await);
+                }
             }
-        },
+        }
     };
     if let Some(store) = session_store.as_ref() {
         if AcpSessionStore::tracks(agent_type) {
@@ -4978,6 +5000,7 @@ async fn run_acp_session(
     // models of the directory it runs in, so a model seen from elsewhere can be
     // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
+        let started = Instant::now();
         match host.select_model(&session, model).await {
             Ok(true) => {
                 provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
@@ -5004,11 +5027,11 @@ async fn run_acp_session(
                 );
             }
             Err(error) => {
-                return Err(acp_start_failure(
-                    &host,
-                    format!("{agent_type:?} ACP model selection failed: {error}"),
-                )
-                .await)
+                let failure = start_timeout(&error, AcpStartPhase::ModelSelection, started)
+                    .unwrap_or_else(|| {
+                        format!("{agent_type:?} ACP model selection failed: {error}")
+                    });
+                return Err(acp_start_failure(&host, failure).await);
             }
         }
     }
@@ -5206,7 +5229,7 @@ async fn run_acp_session(
                     }
                     None => {
                         let progress = match idle.beats() {
-                            0 => "without ever sending a first token".to_owned(),
+                            0 => idle_watchdog::NO_FIRST_TOKEN.to_owned(),
                             beats => format!("after {beats} event(s)"),
                         };
                         idle_watchdog::stall_reason(&event_agent_label, idle.limit(), &progress)
@@ -5386,6 +5409,17 @@ fn acp_project_mcp_servers(
             } else {
                 crate::core::mcp_scanner::mcp_entry_leaks_secret(&entry)
             };
+            // A server whose command is not on this host would only fail
+            // inside the agent's start; it is left out, as the sync does.
+            if !command.trim().is_empty()
+                && !leaks
+                && !crate::core::mcp_scanner::is_command_available(&command)
+            {
+                tracing::warn!(
+                    "MCP server '{id}' command '{command}' not found in PATH — not declared to the ACP session"
+                );
+                return None;
+            }
             (!command.trim().is_empty() && !leaks).then_some(crate::acp::AcpMcpServer {
                 id,
                 command,
@@ -14292,7 +14326,16 @@ mod acp_resume_tests {
             let Err(error) = result else {
                 panic!("ambiguous resume failures must be surfaced");
             };
-            assert!(error.contains("ACP session resume failed"));
+            // A timeout is still surfaced, as the session phase it stopped in.
+            let timed_out = crate::agents::acp_start::AcpStartTimeout::from_error(&error)
+                .is_some_and(|timeout| {
+                    timeout.phase == crate::agents::acp_start::AcpStartPhase::Session
+                });
+            assert!(
+                error.contains("ACP session resume failed")
+                    || (matches!(outcome, ResumeOutcome::Timeout) && timed_out),
+                "{error}"
+            );
             assert_eq!(transport.created.load(Ordering::SeqCst), 0);
             assert!(transport.prompts.lock().unwrap().is_empty());
         }

@@ -611,9 +611,17 @@ def update(kind, text):
         "update": {"sessionUpdate": kind, "content": {"type": "text", "text": text}}}})
 
 mode = os.environ["FIXTURE_MODE"]
+if mode.startswith("mute_"):
+    # Holds the line from the start, like a runtime whose MCP servers are up.
+    subprocess.Popen(["sleep", "3600"], close_fds=False)
+    os.write(3, b"up")
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if method == "initialize" and mode == "mute_initialize":
+        continue
+    if method == "session/new" and mode == "mute_session":
+        continue
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "protocolVersion": 1,
@@ -740,10 +748,21 @@ struct AcpRun<'a> {
     line: Option<&'a AgentLine>,
     idle: Option<Duration>,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    timeouts: Option<crate::acp::AcpRequestTimeouts>,
 }
 
 #[cfg(unix)]
 async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentProcess {
+    try_start_acp_agent(run, project)
+        .await
+        .expect("the ACP run starts")
+}
+
+#[cfg(unix)]
+async fn try_start_acp_agent(
+    run: AcpRun<'_>,
+    project: &tempfile::TempDir,
+) -> Result<AgentProcess, String> {
     let mut command = tokio::process::Command::new("python3");
     command
         .args(["-c", ACP_AGENT])
@@ -767,11 +786,14 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
             });
         }
     }
-    let transport: Arc<dyn crate::acp::AcpTransport> = Arc::new(
+    let mut transport =
         crate::acp::AcpJsonRpcTransport::spawn(crate::acp::AcpAgent::OpenCode, command, false)
             .await
-            .expect("the stand-in agent starts"),
-    );
+            .expect("the stand-in agent starts");
+    if let Some(timeouts) = run.timeouts {
+        transport = transport.with_request_timeouts(timeouts);
+    }
+    let transport: Arc<dyn crate::acp::AcpTransport> = Arc::new(transport);
     if let Some(line) = run.line {
         line.release_write();
     }
@@ -796,7 +818,126 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
         )
     })
     .await
-    .expect("the ACP run starts")
+}
+
+/// Startup budgets a test can wait out.
+#[cfg(unix)]
+fn short_timeouts() -> crate::acp::AcpRequestTimeouts {
+    crate::acp::AcpRequestTimeouts {
+        control: Duration::from_secs(1),
+        session_setup: Duration::from_secs(2),
+        prompt: Duration::from_secs(60),
+    }
+}
+
+/// A runtime that never answers one startup phase: the start fails within
+/// that phase's bound, names it, and its whole process group is gone.
+#[cfg(unix)]
+async fn a_mute_startup_phase_fails_fast(mode: &str, phase: &str, bound: Duration) -> String {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers": {"Hang": {"command": "sh", "args": ["-c", "cat"]},
+            "Ghost": {"command": "kronn-test-no-such-mcp-command"}}}"#,
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let error = match try_start_acp_agent(
+        AcpRun {
+            mode,
+            line: Some(&line),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await
+    {
+        Ok(_) => panic!("{mode}: a runtime that never answers must not start"),
+        Err(error) => error,
+    };
+    let waited = started.elapsed();
+    assert!(
+        waited >= bound && waited < bound + Duration::from_secs(5),
+        "{mode}: failed on its own bound: {waited:?}"
+    );
+    let timeout = crate::agents::acp_start::AcpStartTimeout::from_error(&error)
+        .unwrap_or_else(|| panic!("{mode}: a structured start timeout: {error}"));
+    assert_eq!(
+        serde_json::to_value(timeout.phase).unwrap(),
+        serde_json::json!(phase)
+    );
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await,
+        "{mode}: the runtime and what it started are killed"
+    );
+    error
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_runtime_that_never_answers_initialize_is_stopped_with_its_phase() {
+    let error =
+        a_mute_startup_phase_fails_fast("mute_initialize", "initialize", Duration::from_secs(1))
+            .await;
+    assert!(
+        error.contains("OpenCode did not answer initialization within 1 s"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_runtime_that_never_opens_its_session_names_the_project_servers() {
+    let error =
+        a_mute_startup_phase_fails_fast("mute_session", "session", Duration::from_secs(2)).await;
+    let timeout = crate::agents::acp_start::AcpStartTimeout::from_error(&error).unwrap();
+    assert_eq!(
+        timeout.servers,
+        vec!["Hang".to_string()],
+        "the project server is named; one whose command is missing was never declared"
+    );
+    assert!(
+        error.contains("OpenCode did not open its session within 2 s"),
+        "{error}"
+    );
+}
+
+/// The prompt half: a session that opens, then never says a word. The run
+/// fails on the configured delay with the no-first-token reason the discussion
+/// turns into its own message, and the process group is gone.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_prompt_that_never_answers_fails_on_the_delay_and_is_killed() {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let mut running = start_acp_agent(
+        AcpRun {
+            mode: "mute_prompt",
+            line: Some(&line),
+            idle: Some(Duration::from_secs(1)),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await;
+    assert!(drain(&mut running).await.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(!running.child.wait().await.expect("lifeline").success());
+    let reason = running.captured_stderr_flushed().await.join("\n");
+    assert!(reason.contains(idle_watchdog::NO_FIRST_TOKEN), "{reason}");
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await,
+        "the silent runtime is killed with its process group"
+    );
 }
 
 /// DoD 3 for ACP, against the simulated Ollama — the agent is stopped with its

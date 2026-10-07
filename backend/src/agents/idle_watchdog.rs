@@ -57,6 +57,9 @@ pub fn tool_execution_timeout(model_limit: Duration) -> Duration {
     model_limit.saturating_mul(TOOL_TIMEOUT_MULTIPLIER)
 }
 
+/// The progress a stall reason gives when nothing at all came back.
+pub const NO_FIRST_TOKEN: &str = "without ever sending a first token";
+
 /// Leads every explicit stall reason. It is the same wording the workflow step
 /// watchdog has always used, so `is_stall_error` and a step's `on_timeout`
 /// routing keep recognising a stalled run whichever watchdog fired first.
