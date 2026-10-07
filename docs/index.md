@@ -7,7 +7,7 @@ This folder is the project's living knowledge base, shared by humans and AI agen
 - **[AGENTS.md](AGENTS.md)** — Tiered context loader read by Claude Code, Codex, Gemini, Vibe, Copilot, Kiro and any agent that follows the `AGENTS.md` convention. Start here if you're an LLM.
 - **This file (`index.md`)** — Plain landing page for humans browsing the folder. Extend it with whatever helps onboarding.
 
-## Current release: 0.14.2
+## Current release: 0.14.3
 
 - An audit on OpenCode or another ACP agent reads the versioned environment
   templates (`.env.dist`, `.env.example`), is stopped by "Cancel" in seconds,
