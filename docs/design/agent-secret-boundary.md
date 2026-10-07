@@ -803,8 +803,8 @@ step or the webhook supplied (whatever its name, `User-Agent` included).
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
 API call builds one set from every value it takes from the env or the
-credential store (no field marks a config value public, so only a value used
-solely in the plugin's base URL is left out), the resolved auth (Basic
+credential store, wherever it lands, base URL included (no plugin metadata
+marks a value public), the resolved auth (Basic
 decoded) and its default headers, and carries it through the success
 output, summaries, errors and the call log. Each value is masked raw,
 URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8

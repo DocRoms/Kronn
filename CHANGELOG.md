@@ -304,9 +304,9 @@ Release notes for 0.9.3 and earlier are available in the
 - An API call's credentials are scrubbed by value from everything it hands
   on: the step output (successful JSON included), URL summaries, errors and
   the call log, through one set built from every value the call takes from
-  the env or the credential store (nothing marks a config value public, so
-  only a value used solely in the plugin's base URL stays readable) plus the
-  resolved auth and default headers. Each value is masked raw, URL-encoded,
+  the env or the credential store, wherever it lands (base URL included: no
+  plugin metadata marks a value public, so a summary may show a masked base
+  URL) plus the resolved auth and default headers. Each value is masked raw, URL-encoded,
   hex, base64 and JSON-escaped, case-insensitively from 8 characters, before
   any truncation; shorter ones only as whole tokens. Notify scrubs its whole
   response before cutting the excerpt, a token-exchange error loses every
