@@ -2266,6 +2266,13 @@ pub async fn claim_by_token(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
+    // Peers are identified only by their code: off unless P2P is enabled,
+    // answered exactly like an unknown code.
+    if !state.config.read().await.server.p2p_enabled {
+        return Json(ApiResponse::err(
+            "unknown peer (invite code not in contacts)",
+        ));
+    }
 
     // 1. Authenticate the caller: the invite code must match a known contact
     //    (same trust model as the WS Presence handshake — no anonymous claims).
@@ -2405,6 +2412,13 @@ pub async fn fetch_file(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
+    // Peers are identified only by their code: off unless P2P is enabled,
+    // answered exactly like an unknown code.
+    if !state.config.read().await.server.p2p_enabled {
+        return Json(ApiResponse::err(
+            "unknown peer (invite code not in contacts)",
+        ));
+    }
     // Authenticate the caller (must be a known contact) — and KEEP its id:
     // being a contact is not enough to read arbitrary files (see below).
     let caller = match state
@@ -2538,10 +2552,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_peer_routes_answer_like_an_unknown_code_while_p2p_is_off() {
+        let state = make_state_with_disc("d-off-1").await;
+        let resp = fetch_file(
+            State(state.clone()),
+            Json(FetchFileRequest {
+                file_id: "f-1".into(),
+                from_invite_code: "kr-inv-abc".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.0.error.as_deref(),
+            Some("unknown peer (invite code not in contacts)")
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_file_is_scoped_to_discussions_shared_with_the_caller() {
         // Regression (Codex audit 2026-07-12): any accepted contact could
         // read ANY context file by id.
         let state = make_state_with_disc("d-fetch-1").await;
+        state.config.write().await.server.p2p_enabled = true;
         let tmp = tempfile::TempDir::new().unwrap();
         let blob = tmp.path().join("doc.pdf");
         std::fs::write(&blob, b"BYTES").unwrap();

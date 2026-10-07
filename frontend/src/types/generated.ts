@@ -6951,6 +6951,17 @@ export type ServerConfig = { host: string, port: number,
  */
 domain: string | null,
 /**
+ * Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
+ * and dial contacts. Off by default: a peer is identified only by its
+ * invite code until pairing secrets exist (KT-1033).
+ */
+p2p_enabled: boolean,
+/**
+ * Extra browser origins of this Kronn's frontend (LAN or Tailscale
+ * aliases), exact `scheme://host[:port]`. Checked on the WS upgrade.
+ */
+frontend_origins: Array<string>,
+/**
  * 0.8.11 (B6) — optional webhook (Slack/Teams/generic JSON) fired when a
  * scheduled/triggered run ends in a non-success terminal state
  * (Failed / Interrupted / StoppedByGuard). Lets an autonomous cron that
@@ -7180,7 +7191,7 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, };
+run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>, };
 
 /**
  * Configurable ceilings for one CLI session.

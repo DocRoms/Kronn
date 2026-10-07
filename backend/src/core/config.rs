@@ -630,6 +630,8 @@ pub fn default_config() -> AppConfig {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            p2p_enabled: false,
+            frontend_origins: vec![],
             failure_notify_url: None,
             run_retention_days: 0,
             run_payload_retention_days: 0,

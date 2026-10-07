@@ -251,14 +251,29 @@ Release notes for 0.9.3 and earlier are available in the
 
 - Security: a web page the operator visits can no longer open
   `ws://127.0.0.1:3140/api/ws` to read the event bus or inject chat messages
-  (KT-1033). The upgrade now checks `Origin`: a foreign page gets 403; the
-  frontend's own origins (the CORS list, any loopback port, the desktop
-  webview, a same-origin IP address) are allowed. A client without `Origin` is
-  treated as a federation peer and never gets the local bus. Nothing leaves the
-  bus before a verified Presence. A peer is verified only for an accepted
-  contact: an unknown invite code becomes a contact request (shown as
-  "request", never dialled back until you add its code) and counts toward the
-  ban, and chat, invite and sync frames from anyone else are dropped.
+  (KT-1033). The upgrade checks `Origin` against exact origins: the frontend
+  on the listening port (the desktop's runtime port included), the gateway
+  ports, the configured domain, the Tauri webview, the dev UI only under
+  `kronn start-dev`, and a new list of extra origins in Settings > Identity
+  for LAN or Tailscale names. A page on another port gets 403, and a
+  frontend still needs the token when auth is on, unless strict localhost
+  is off (unchanged rule). Heartbeats are answered on their own socket only,
+  and the request logs (backend span, gateway access log) no longer hold the
+  query string that carries the token.
+- Security: P2P federation is now a setting, "Accept P2P connections", off by
+  default and never turned on by the upgrade (KT-1033). A peer is identified
+  only by its invite code, so anyone who knows an accepted contact's code and
+  can reach the port could impersonate it until pairing secrets arrive in
+  0.15. While it is off, `/api/ws` refuses every non-frontend client, the
+  peer routes (`claim-by-token`, `fetch-file`) answer like an unknown code
+  and no contact is dialled. The contacts panel says why contacts are offline
+  and enables P2P in one click. When it is on, only an accepted contact is
+  admitted, checked again at every frame in both directions and every few
+  seconds: deleting or refusing a contact cuts its connection. An unknown
+  code becomes a contact request (shown as "request", capped and expiring,
+  never dialled or pinged until you add its code) and counts toward the ban,
+  unadmitted sockets are capped per address, and contact addresses must be
+  a bare host and port, requested without following redirects.
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

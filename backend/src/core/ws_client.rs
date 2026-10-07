@@ -6,7 +6,7 @@
 //! exponential backoff on disconnection.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -23,6 +23,15 @@ pub async fn run(state: AppState) {
     let mut connections: HashMap<String, JoinHandle<()>> = HashMap::new();
 
     loop {
+        // P2P off: no contact is dialled, and live connections end (aborting
+        // a connection task drops both of its socket halves).
+        if !state.config.read().await.server.p2p_enabled {
+            for (_, handle) in connections.drain() {
+                handle.abort();
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
         // Load current contacts
         let contacts = state
             .db
@@ -67,19 +76,48 @@ pub async fn run(state: AppState) {
     }
 }
 
+/// The contact as stored now, if this instance may still dial it.
+async fn dialable_contact(state: &AppState, id: &str) -> Option<crate::models::Contact> {
+    if !state.config.read().await.server.p2p_enabled {
+        return None;
+    }
+    let id = id.to_owned();
+    state
+        .db
+        .with_conn(move |conn| crate::db::contacts::get_contact(conn, &id))
+        .await
+        .ok()
+        .flatten()
+        .filter(|contact| crate::db::contacts::dials_outbound(&contact.status))
+}
+
+/// `ws(s)://host:port/api/ws` for a stored contact URL, or None when the URL
+/// is not a bare host and port.
+pub(crate) fn peer_ws_url(kronn_url: &str) -> Option<String> {
+    let base = crate::db::contacts::contact_base_url(kronn_url)?;
+    Some(format!(
+        "{}/api/ws",
+        base.replacen("http://", "ws://", 1)
+            .replacen("https://", "wss://", 1)
+    ))
+}
+
 /// Connect to a single peer and maintain the connection with exponential backoff.
 async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
     let mut backoff = Duration::from_secs(1);
     let max_backoff = Duration::from_secs(60);
 
     loop {
-        let ws_url = format!(
-            "{}/api/ws",
-            contact
-                .kronn_url
-                .replace("http://", "ws://")
-                .replace("https://", "wss://")
-        );
+        let Some(contact) = dialable_contact(&state, &contact.id).await else {
+            return;
+        };
+        let Some(ws_url) = peer_ws_url(&contact.kronn_url) else {
+            tracing::warn!(
+                "WS client: contact {} has an invalid URL, not dialling",
+                contact.pseudo
+            );
+            return;
+        };
 
         tracing::debug!("WS client: connecting to {} ({})", contact.pseudo, ws_url);
 
@@ -122,7 +160,7 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
                 });
 
                 // Handle the connection
-                handle_peer_connection(ws_stream, &state).await;
+                handle_peer_connection(ws_stream, &state, &contact.id).await;
 
                 // Connection lost — emit offline
                 tracing::info!("WS client: disconnected from {}", contact.pseudo);
@@ -182,16 +220,19 @@ pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 /// while still surfacing a dead link reasonably fast.
 pub(crate) const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Handle messages on an established peer WS connection.
+/// Handle messages on an established peer WS connection. Both halves and
+/// the authorization re-check are futures of the caller's task, so aborting
+/// that task, or revoking the contact, ends the whole connection.
 async fn handle_peer_connection(
     ws_stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     state: &AppState,
+    contact_id: &str,
 ) {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    let broadcast_tx = state.ws_broadcast.clone();
     let mut broadcast_rx = state.ws_broadcast.subscribe();
+    let peer = crate::api::ws::PeerAuth::ContactId(contact_id.to_owned());
 
     // Send our own presence to the peer. Use the SAME canonical builder as the
     // /api/contacts/invite-code endpoint so the code we send matches the code a
@@ -236,27 +277,17 @@ async fn handle_peer_connection(
         }
     }
 
-    // Loop guard shared by both halves: keys of chat/invite frames we received
-    // FROM this peer, so we never echo them straight back (which would bounce
-    // forever between the two instances).
-    let echo_guard: Arc<Mutex<PeerEchoGuard>> = Arc::new(Mutex::new(PeerEchoGuard::default()));
-    let recv_guard = echo_guard.clone();
+    // Keys of chat/invite frames received FROM this peer, never echoed back
+    // (they would bounce forever between the two instances).
+    let echo_guard = Mutex::new(PeerEchoGuard::default());
 
-    // Task 1: forward broadcast events → peer. Only peer-relayable frames cross
-    // the wire (chat + invites); Presence/heartbeats/local UI signals are
-    // filtered out — relaying Presence is what bounced the channel into overflow
-    // and dropped the socket (~2 s cross-machine flap).
-    let mut send_task = tokio::spawn(async move {
-        // Keepalive: ping every 20 s. An idle cross-machine WS would otherwise be
-        // silently dropped by a NAT / Tailscale idle-timeout — the TCP socket
-        // dies but neither task errors, so the connection is never detected as
-        // dead, never reconnects, and the peer shows "online" forever while no
-        // message flows (observed: `connected` logged, then `ss` shows NO socket
-        // and ZERO `disconnected` for minutes). The periodic ping both keeps the
-        // socket alive AND surfaces a dead one: a failed send breaks the loop →
-        // `connect_to_peer` reconnects with backoff.
+    // Only peer-relayable frames cross the wire; relaying Presence or local UI
+    // signals bounced the channel into overflow (~2 s cross-machine flap).
+    let send = async {
+        // A periodic ping keeps NAT/Tailscale idle-timeouts from silently
+        // killing the socket, and surfaces a dead one as a failed send.
         let mut keepalive = tokio::time::interval(WS_KEEPALIVE_INTERVAL);
-        keepalive.tick().await; // consume the immediate first tick
+        keepalive.tick().await;
         loop {
             tokio::select! {
                 _ = keepalive.tick() => {
@@ -273,11 +304,13 @@ async fn handle_peer_connection(
                         if !msg.is_peer_relayable() {
                             continue;
                         }
-                        // Don't echo a frame back to the peer it came from.
                         if let Some(key) = msg.relay_dedup_key() {
                             if echo_guard.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
                                 continue;
                             }
+                        }
+                        if !peer.check(state).await {
+                            break;
                         }
                         if let Ok(json) = serde_json::to_string(&msg) {
                             if ws_sender
@@ -289,61 +322,67 @@ async fn handle_peer_connection(
                             }
                         }
                     }
-                    // A burst made us fall behind the 256-slot bus. Skip the gap
-                    // and keep the socket instead of tearing it down (the old
-                    // `while let Ok` treated Lagged as terminal → reconnect storm).
+                    // Fell behind the bus: skip the gap, keep the socket.
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,
                 }
             }
         }
-    });
+    };
 
-    // Task 2: receive peer messages. Relayable frames are persisted via the same
-    // ingest path as the inbound `/api/ws` handler (so chat is stored exactly
-    // once whichever socket carries it) and re-broadcast ONLY if new — gating on
-    // novelty breaks the cross-connection relay loop that a per-connection echo
-    // guard can't (a frame bouncing A→B→A over the two directional sockets).
-    // Any received frame (incl. the peer's keepalive Ping) resets the idle
-    // timer; nothing within WS_IDLE_TIMEOUT → socket presumed dead → break →
-    // `connect_to_peer` reconnects (no more silent zombies).
-    let recv_state = state.clone();
-    let mut recv_task = tokio::spawn(async move {
+    // Relayable frames are persisted through the inbound handler's ingest path
+    // (stored once whichever socket carries them) and re-broadcast only if new.
+    // Any frame resets the idle timer; silence past WS_IDLE_TIMEOUT means a
+    // dead socket, and `connect_to_peer` reconnects.
+    let recv = async {
         loop {
-            match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
-                Err(_idle) => break,       // no traffic in the window → dead
-                Ok(None) => break,         // stream ended
-                Ok(Some(Err(_))) => break, // transport error
-                Ok(Some(Ok(msg))) => match msg {
-                    tungstenite::Message::Text(text) => {
-                        if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
-                            let should_broadcast = if ws_msg.is_peer_relayable() {
-                                crate::api::ws::ingest_relayable_frame(&recv_state, &ws_msg).await
-                            } else {
-                                true
-                            };
-                            if should_broadcast {
-                                if let Some(key) = ws_msg.relay_dedup_key() {
-                                    recv_guard
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .record(key);
-                                }
-                                let _ = broadcast_tx.send(ws_msg);
-                            }
-                        }
+            let msg = match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
+                Err(_) | Ok(None) | Ok(Some(Err(_))) => break,
+                Ok(Some(Ok(msg))) => msg,
+            };
+            let text = match msg {
+                tungstenite::Message::Text(text) => text,
+                tungstenite::Message::Close(_) => break,
+                _ => continue,
+            };
+            let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) else {
+                continue;
+            };
+            // A dialled peer feeds shared discussions only.
+            if !ws_msg.is_peer_relayable() {
+                continue;
+            }
+            match crate::api::ws::ingest_relayable_frame(state, &ws_msg, &peer).await {
+                crate::api::ws::Ingest::Revoked => break,
+                crate::api::ws::Ingest::Skip => {}
+                crate::api::ws::Ingest::Broadcast => {
+                    if let Some(key) = ws_msg.relay_dedup_key() {
+                        echo_guard
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .record(key);
                     }
-                    tungstenite::Message::Close(_) => break,
-                    // Ping/Pong/Binary: counted as liveness above; nothing to do.
-                    _ => {}
-                },
+                    let _ = state.ws_broadcast.send(ws_msg);
+                }
             }
         }
-    });
+    };
+
+    let recheck = async {
+        let mut every = tokio::time::interval(crate::api::ws::PEER_RECHECK_INTERVAL);
+        every.tick().await;
+        loop {
+            every.tick().await;
+            if !peer.check(state).await {
+                break;
+            }
+        }
+    };
 
     tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
+        _ = send => {}
+        _ = recv => {}
+        _ = recheck => {}
     }
 }
 
@@ -418,5 +457,106 @@ mod tests {
                 .replace("https://", "wss://")
         );
         assert_eq!(ws_url, "wss://peer.example.com:3456/api/ws");
+    }
+
+    fn test_state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let mut config = crate::core::config::default_config();
+        config.server.p2p_enabled = true;
+        AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    async fn insert(state: &AppState, url: &str) -> crate::models::Contact {
+        let contact = crate::models::Contact {
+            id: uuid::Uuid::new_v4().to_string(),
+            pseudo: "Peer".into(),
+            avatar_email: None,
+            kronn_url: url.into(),
+            invite_code: format!("kronn:Peer@{}", url.trim_start_matches("http://")),
+            status: "accepted".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let c = contact.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
+            .await
+            .unwrap();
+        contact
+    }
+
+    /// Accept one WS connection and report when its stream ends.
+    async fn peer_server() -> (String, tokio::sync::oneshot::Receiver<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(frame)) = ws.next().await {
+                if frame.is_close() {
+                    break;
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        (url, closed_rx)
+    }
+
+    #[tokio::test]
+    async fn deleting_a_dialled_contact_ends_the_connection() {
+        let state = test_state();
+        let (url, closed) = peer_server().await;
+        let contact = insert(&state, &url).await;
+        let (stream, _) = tokio_tungstenite::connect_async(peer_ws_url(&url).unwrap())
+            .await
+            .unwrap();
+        let id = contact.id.clone();
+        let task_state = state.clone();
+        let connection =
+            tokio::spawn(async move { handle_peer_connection(stream, &task_state, &id).await });
+        let id = contact.id.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::contacts::delete_contact(conn, &id))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(12), connection)
+            .await
+            .expect("the connection ends after revocation")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), closed)
+            .await
+            .expect("the peer sees the socket close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn aborting_a_peer_task_closes_its_socket() {
+        let state = test_state();
+        let (url, closed) = peer_server().await;
+        let contact = insert(&state, &url).await;
+        let task = tokio::spawn(connect_to_peer(state.clone(), contact));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        task.abort();
+        tokio::time::timeout(Duration::from_secs(2), closed)
+            .await
+            .expect("no half of the socket outlives the aborted task")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn p2p_off_or_an_invalid_url_dials_nothing() {
+        let state = test_state();
+        let contact = insert(&state, "http://127.0.0.1:9/admin#").await;
+        assert!(dialable_contact(&state, &contact.id).await.is_some());
+        assert!(peer_ws_url(&contact.kronn_url).is_none());
+        state.config.write().await.server.p2p_enabled = false;
+        assert!(dialable_contact(&state, &contact.id).await.is_none());
     }
 }

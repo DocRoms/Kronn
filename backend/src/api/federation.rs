@@ -357,15 +357,20 @@ pub async fn fetch_and_store_attachment(
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
         Err(_) => return,
     };
-    let url = format!(
-        "{}/api/disc/fetch-file",
-        host.kronn_url.trim_end_matches('/')
-    );
+    let Some(base) = crate::db::contacts::contact_base_url(&host.kronn_url) else {
+        tracing::warn!(
+            "F8: contact {} has an invalid URL, not fetching",
+            host.pseudo
+        );
+        return;
+    };
+    let url = format!("{base}/api/disc/fetch-file");
     let body = serde_json::json!({ "file_id": file_id, "from_invite_code": our_code });
     let resp = match client.post(&url).json(&body).send().await {
         Ok(r) => r,
@@ -434,9 +439,17 @@ pub async fn fetch_and_store_attachment(
         mime_type.to_string(),
     );
     let sz = size.max(0) as u64;
+    let host_code = host_invite_code.to_string();
     if let Err(e) = state
         .db
         .with_conn(move |conn| {
+            // The host may have been revoked during the download.
+            if !matches!(
+                crate::db::contacts::authenticate_invite_code(conn, &host_code)?,
+                crate::db::contacts::InviteAuth::Accepted(_)
+            ) {
+                anyhow::bail!("host is no longer an accepted contact");
+            }
             crate::db::discussions::insert_federated_context_file(
                 conn, &fid, &did, &mid, &fname, &mime, sz, &disk_path,
             )

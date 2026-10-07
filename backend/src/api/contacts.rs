@@ -46,11 +46,7 @@ pub async fn add(
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
     let health_url = format!("{}/api/health", kronn_url);
-    let ping_error = reqwest::Client::new()
-        .get(&health_url)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await;
+    let ping_error = guarded_client().get(&health_url).send().await;
 
     let (reachable, warning) = match &ping_error {
         Ok(r) if r.status().is_success() => (true, None),
@@ -253,6 +249,16 @@ pub async fn advertised_host_async(server: &crate::models::ServerConfig) -> Stri
     h.clone()
 }
 
+/// HTTP client for requests to a contact: short timeout, no redirects (a
+/// peer must not bounce Kronn to another address).
+pub(crate) fn guarded_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
 /// GET /api/contacts/:id/ping — check if a contact's Kronn is online
 pub async fn ping(
     State(state): State<AppState>,
@@ -268,14 +274,20 @@ pub async fn ping(
         Ok(None) => return Json(ApiResponse::err("Contact not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    // A request or a refused contact came from someone else's code: Kronn
+    // never sends it a request.
+    if !crate::db::contacts::dials_outbound(&contact.status) {
+        return Json(ApiResponse::err("Contact not accepted"));
+    }
+    let Some(base) = crate::db::contacts::contact_base_url(&contact.kronn_url) else {
+        return Json(ApiResponse::err("Contact address is invalid"));
+    };
 
-    let url = format!("{}/api/health", contact.kronn_url);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
-
-    match client.get(&url).send().await {
+    match guarded_client()
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => Json(ApiResponse::ok(true)),
         _ => Json(ApiResponse::ok(false)),
     }
@@ -297,6 +309,8 @@ mod tests {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            p2p_enabled: false,
+            frontend_origins: vec![],
             failure_notify_url: None,
             run_retention_days: 0,
             run_payload_retention_days: 30,

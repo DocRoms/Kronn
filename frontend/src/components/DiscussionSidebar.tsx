@@ -1,5 +1,6 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { P2pOffNotice } from './P2pOffNotice';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { DiscussionWeightBadge } from './DiscussionWeightBadge';
@@ -1581,6 +1582,7 @@ export function DiscussionSidebar({
               </button>
             </div>
           )}
+          <P2pOffNotice contactCount={contacts.length} t={t} />
           {/* Contact list — click a row to open a 1:1 chat with that contact.
               The identity is its own <button> rather than a clickable row: the
               delete button must not sit inside an interactive ancestor (axe

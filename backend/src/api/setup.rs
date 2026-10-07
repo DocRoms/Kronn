@@ -875,6 +875,8 @@ pub async fn get_server_config(
         discussion_weight: config.server.discussion_weight,
         execution_variable_retention_days: config.server.execution_variable_retention_days,
         run_payload_retention_days: config.server.run_payload_retention_days,
+        p2p_enabled: config.server.p2p_enabled,
+        frontend_origins: config.server.frontend_origins.clone(),
     }))
 }
 
@@ -891,7 +893,23 @@ pub async fn set_server_config(
         }
     }
 
+    let frontend_origins = match req.frontend_origins.as_deref().map(normalize_origin_list) {
+        Some(Err(invalid)) => {
+            return Json(ApiResponse::err(format!(
+                "Invalid frontend origin: {invalid} (expected scheme://host[:port])"
+            )))
+        }
+        Some(Ok(list)) => Some(list),
+        None => None,
+    };
+
     let mut config = state.config.write().await;
+    if let Some(list) = frontend_origins {
+        config.server.frontend_origins = list;
+    }
+    if let Some(enabled) = req.p2p_enabled {
+        config.server.p2p_enabled = enabled;
+    }
     if let Some(weight) = req.discussion_weight {
         config.server.discussion_weight = weight;
     }
@@ -985,6 +1003,19 @@ pub async fn set_server_config(
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
     }
+}
+
+/// Canonical, deduplicated origins, or the first entry that is not one.
+fn normalize_origin_list(entries: &[String]) -> Result<Vec<String>, String> {
+    let mut list = Vec::new();
+    for entry in entries.iter().map(|e| e.trim()).filter(|e| !e.is_empty()) {
+        let origin = crate::api::ws::normalize_origin(entry)
+            .ok_or_else(|| entry.chars().take(80).collect::<String>())?;
+        if !list.contains(&origin) {
+            list.push(origin);
+        }
+    }
+    Ok(list)
 }
 
 // ── Network exposure ("Allow connections from other devices") ───────────────
@@ -5086,6 +5117,29 @@ debug_mode = false
     fn mention_color_rejects_non_rgb_css_values() {
         for invalid in ["red", "#fff", "#12345678", "123456", "#12gg56"] {
             assert!(normalize_mention_color(Some(invalid)).is_err(), "{invalid}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod frontend_origin_tests {
+    use super::normalize_origin_list;
+
+    #[test]
+    fn frontend_origins_are_canonical_and_refused_when_not_exact() {
+        let list = normalize_origin_list(&[
+            "HTTP://Mac.Tailnet.ts.net:3140/".into(),
+            "  ".into(),
+            "http://mac.tailnet.ts.net:3140".into(),
+            "https://kronn.example:443".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            list,
+            ["http://mac.tailnet.ts.net:3140", "https://kronn.example"]
+        );
+        for bad in ["http://h:3140/path", "*", "http://evil#", "null"] {
+            assert!(normalize_origin_list(&[bad.into()]).is_err(), "{bad}");
         }
     }
 }

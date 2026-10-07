@@ -12304,9 +12304,17 @@ async fn exec_returns_expected_fields() {
 
 /// Helper: start a real TCP server with the router and return the address.
 async fn start_test_server(state: AppState) -> std::net::SocketAddr {
-    let app = build_router_with_auth(state, false);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // The test frontend is served from this random port.
+    state
+        .config
+        .write()
+        .await
+        .server
+        .frontend_origins
+        .push(format!("http://{addr}"));
+    let app = build_router_with_auth(state, false);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -14928,6 +14936,10 @@ type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 type WsSink = futures::stream::SplitSink<WsStream, tokio_tungstenite::tungstenite::Message>;
 
+async fn enable_p2p(state: &AppState) {
+    state.config.write().await.server.p2p_enabled = true;
+}
+
 /// Invite code of the accepted contact `ws_send_presence` authenticates as.
 const TEST_PEER_CODE: &str = "kronn:TestPeer@10.0.0.77:3456";
 
@@ -15043,6 +15055,7 @@ fn is_presence_of(msg: &WsMessage, pseudo: &str) -> bool {
 /// Authenticate the WS connection as an accepted federation peer.
 /// Required since the security fix: first message MUST be Presence.
 async fn ws_send_presence(state: &AppState, sender: &mut WsSink) {
+    enable_p2p(state).await;
     insert_test_contact(state, TEST_PEER_CODE, "accepted").await;
     let presence = WsMessage::Presence {
         from_pseudo: "TestPeer".into(),
@@ -15080,143 +15093,87 @@ async fn ws_broadcast_relay() {
     let _ = sender.close().await;
 }
 
-/// WS handler forwards client messages to broadcast channel.
+/// An admitted peer's Presence reaches the local bus (its contact is online).
 #[tokio::test]
-async fn ws_client_to_broadcast() {
+async fn ws_peer_presence_reaches_the_bus() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
-
-    // Subscribe to broadcast BEFORE the WS client sends
+    enable_p2p(&state).await;
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
-    let ws_stream = ws_connect_with_origin(addr, &format!("http://{addr}"), "")
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
         .await
         .expect("WS connect failed");
     let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&state, &mut sender).await;
 
-    // Send a presence message via WS
-    let msg = WsMessage::Presence {
-        from_pseudo: "PeerBeta".into(),
-        from_invite_code: "".into(),
-        online: true,
-    };
-    let json = serde_json::to_string(&msg).unwrap();
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
-        .await
-        .unwrap();
-
-    // Should appear on broadcast channel
     let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
         .await
         .expect("timeout")
         .expect("recv error");
-
-    match received {
-        WsMessage::Presence {
-            from_pseudo,
-            online,
-            ..
-        } => {
-            assert_eq!(from_pseudo, "PeerBeta");
-            assert!(online);
-        }
-        _ => panic!("Expected Presence, got {:?}", received),
-    }
+    assert!(is_presence_of(&received, "TestPeer"), "{received:?}");
 }
 
-/// WS handler responds to Ping with Pong via broadcast.
+/// KT-1033 — a heartbeat is answered on its own socket, never on the shared
+/// bus, before and after admission.
 #[tokio::test]
-async fn ws_ping_pong() {
+async fn ws_heartbeat_is_answered_on_its_socket_and_not_broadcast() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
-
+    enable_p2p(&state).await;
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
-    let url = format!("ws://{}/api/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
         .await
         .expect("WS connect failed");
-    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    let (mut sender, mut receiver) = StreamExt::split(ws_stream);
+    let wait = std::time::Duration::from_secs(2);
 
-    // Authenticate first (required since security fix)
+    // Before Presence (TD-20260504: a heartbeat races a reconnect Presence).
+    send_ws(
+        &mut sender,
+        &WsMessage::Ping {
+            timestamp: 1711100000,
+        },
+    )
+    .await;
+    let pong = next_ws_matching(&mut receiver, wait, |m| {
+        matches!(
+            m,
+            WsMessage::Pong {
+                timestamp: 1711100000
+            }
+        )
+    })
+    .await;
+    assert!(pong.is_some(), "the client gets its Pong");
+
     ws_send_presence(&state, &mut sender).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    send_ws(
+        &mut sender,
+        &WsMessage::Ping {
+            timestamp: 1711000000,
+        },
+    )
+    .await;
+    let pong = next_ws_matching(&mut receiver, wait, |m| {
+        matches!(
+            m,
+            WsMessage::Pong {
+                timestamp: 1711000000
+            }
+        )
+    })
+    .await;
+    assert!(pong.is_some(), "an admitted client gets its Pong too");
 
-    // Send a Ping
-    let ping = WsMessage::Ping {
-        timestamp: 1711000000,
-    };
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&ping).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-
-    // Drain any Presence broadcast first, then expect Pong
-    let mut pong_found = false;
-    for _ in 0..5 {
-        let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
-            .await
-            .expect("timeout")
-            .expect("recv error");
-        if let WsMessage::Pong { timestamp } = received {
-            assert_eq!(timestamp, 1711000000);
-            pong_found = true;
-            break;
-        }
+    while let Ok(msg) = broadcast_rx.try_recv() {
+        assert!(
+            !matches!(msg, WsMessage::Pong { .. } | WsMessage::Ping { .. }),
+            "a heartbeat never reaches the bus: {msg:?}"
+        );
     }
-    assert!(pong_found, "Expected Pong but never received it");
-}
-
-/// TD-20260504 — Ping is accepted as the FIRST frame before Presence.
-/// Pre-fix this would close the channel ("first message must be Presence,
-/// got Ping"). Post-fix the heartbeat is benign and the channel stays
-/// alive long enough for Presence to follow on a paused-Docker reconnect.
-#[tokio::test]
-async fn ws_accepts_ping_before_presence() {
-    let state = test_state();
-    let addr = start_test_server(state.clone()).await;
-
-    let mut broadcast_rx = state.ws_broadcast.subscribe();
-
-    let url = format!("ws://{}/api/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .expect("WS connect failed");
-    let (mut sender, _receiver) = StreamExt::split(ws_stream);
-
-    // Send Ping FIRST (no Presence yet) — racing-heartbeat scenario.
-    let ping = WsMessage::Ping {
-        timestamp: 1711100000,
-    };
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&ping).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-
-    // The server must answer with Pong, channel stays alive.
-    let mut pong_found = false;
-    for _ in 0..5 {
-        let recv = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
-            .await
-            .expect("timeout waiting for Pong")
-            .expect("recv error");
-        if let WsMessage::Pong { timestamp } = recv {
-            assert_eq!(timestamp, 1711100000);
-            pong_found = true;
-            break;
-        }
-    }
-    assert!(pong_found, "Pong must follow a pre-Presence Ping");
-
-    // Now Presence arrives — channel should now accept ChatMessage etc.
-    ws_send_presence(&state, &mut sender).await;
-    // Tiny grace period for the verification path.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    // No assertion needed — the security tests below cover post-Presence.
 }
 
 /// TD-20260504 — non-Presence non-Ping frames are silently DROPPED
@@ -15226,65 +15183,205 @@ async fn ws_accepts_ping_before_presence() {
 async fn ws_drops_pre_presence_garbage_silently() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
-
+    enable_p2p(&state).await;
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
-    let url = format!("ws://{}/api/ws", addr);
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
         .await
         .expect("WS connect failed");
-    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    let (mut sender, mut receiver) = StreamExt::split(ws_stream);
 
-    // Send a ChatMessage (NOT Presence, NOT Ping) — should be dropped.
-    let chat = WsMessage::ChatMessage {
-        shared_discussion_id: "d".into(),
-        message_id: "m".into(),
-        from_pseudo: "Attacker".into(),
-        from_avatar_email: None,
-        from_invite_code: "kronn:Attacker@evil:1".into(),
-        content: "hi".into(),
-        timestamp: 0,
-        role: kronn::models::MessageRole::User,
-        channel: kronn::models::MessageChannel::Main,
-        agent_type: None,
-        targets: vec![],
-        target_agents: vec![],
-        reply_to_message_id: None,
-    };
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&chat).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-
-    // Now Ping — must still get a Pong (channel still alive).
-    let ping = WsMessage::Ping {
-        timestamp: 1711200000,
-    };
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&ping).unwrap().into(),
-        ))
-        .await
-        .unwrap();
-
-    let mut pong_found = false;
-    for _ in 0..5 {
-        let recv = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
-            .await
-            .expect("timeout — channel was torn down by the garbage frame")
-            .expect("recv error");
-        if let WsMessage::Pong { timestamp } = recv {
-            assert_eq!(timestamp, 1711200000);
-            pong_found = true;
-            break;
-        }
-    }
+    send_ws(&mut sender, &chat_frame("d", "m", "kronn:Attacker@evil:1")).await;
+    send_ws(
+        &mut sender,
+        &WsMessage::Ping {
+            timestamp: 1711200000,
+        },
+    )
+    .await;
+    let pong = next_ws_matching(&mut receiver, std::time::Duration::from_secs(2), |m| {
+        matches!(
+            m,
+            WsMessage::Pong {
+                timestamp: 1711200000
+            }
+        )
+    })
+    .await;
     assert!(
-        pong_found,
+        pong.is_some(),
         "Channel must survive a pre-Presence garbage frame"
     );
+    assert!(
+        broadcast_rx.try_recv().is_err(),
+        "the garbage frame was not relayed"
+    );
+}
+
+/// KT-1033 — P2P is off by default: a client without a browser origin (a
+/// peer) is refused at the upgrade, even for an accepted contact.
+#[tokio::test]
+async fn ws_refuses_peers_while_p2p_is_off() {
+    let state = test_state();
+    insert_test_contact(&state, TEST_PEER_CODE, "accepted").await;
+    let addr = start_test_server(state.clone()).await;
+    match tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws")).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 403)
+        }
+        other => panic!("expected 403, got {other:?}"),
+    }
+    // On: the same accepted contact is admitted.
+    enable_p2p(&state).await;
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+    let (ws_stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+        .await
+        .expect("P2P on: the upgrade succeeds");
+    let (mut sender, _receiver) = StreamExt::split(ws_stream);
+    send_ws(
+        &mut sender,
+        &WsMessage::Presence {
+            from_pseudo: "TestPeer".into(),
+            from_invite_code: TEST_PEER_CODE.into(),
+            online: true,
+        },
+    )
+    .await;
+    let received = tokio::time::timeout(std::time::Duration::from_secs(2), broadcast_rx.recv())
+        .await
+        .expect("the admitted peer's Presence is relayed")
+        .unwrap();
+    assert!(is_presence_of(&received, "TestPeer"));
+}
+
+/// KT-1033 — deleting a contact cuts its open connection, even when it only
+/// sends keepalives.
+#[tokio::test]
+async fn ws_deleting_a_contact_cuts_its_inbound_connection() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    let (ws_stream, _) = {
+        enable_p2p(&state).await;
+        tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+            .await
+            .unwrap()
+    };
+    let (mut sender, mut receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&state, &mut sender).await;
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM contacts WHERE invite_code = ?1",
+                [TEST_PEER_CODE],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            match StreamExt::next(&mut receiver).await {
+                None | Some(Err(_)) => return true,
+                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => return true,
+                Some(Ok(_)) => {
+                    let _ = sender
+                        .send(tokio_tungstenite::tungstenite::Message::Ping(
+                            Vec::new().into(),
+                        ))
+                        .await;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(matches!(closed, Ok(true)), "the revoked peer must be cut");
+}
+
+/// KT-1033 — a page on another local port is not this Kronn's frontend.
+#[tokio::test]
+async fn ws_refuses_a_page_on_another_local_port() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    for origin in ["http://localhost:8000", "http://127.0.0.1:8000"] {
+        match ws_connect_with_origin(addr, origin, "").await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), 403, "{origin}")
+            }
+            other => panic!("{origin}: expected 403, got {other:?}"),
+        }
+    }
+}
+
+/// KT-1033 — an operator-listed LAN alias opens the frontend connection; an
+/// unlisted one is refused.
+#[tokio::test]
+async fn ws_listed_frontend_origin_is_allowed_and_unlisted_refused() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    state
+        .config
+        .write()
+        .await
+        .server
+        .frontend_origins
+        .push("http://kronn-mac.tail1234.ts.net:3140".into());
+    assert!(
+        ws_connect_with_origin(addr, "http://kronn-mac.tail1234.ts.net:3140", "")
+            .await
+            .is_ok()
+    );
+    match ws_connect_with_origin(addr, "http://kronn-pc.tail1234.ts.net:3140", "").await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 403)
+        }
+        other => panic!("expected 403, got {other:?}"),
+    }
+}
+
+/// KT-1033 — a contact request or a refused contact is never pinged, and a
+/// stored URL with a path or fragment is never requested.
+#[tokio::test]
+async fn contacts_ping_refuses_requests_and_url_tricks() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    insert_test_contact(&state, "kronn:Req@127.0.0.1:9000", "requested").await;
+    let legacy = kronn::models::Contact {
+        id: "legacy".into(),
+        pseudo: "Legacy".into(),
+        avatar_email: None,
+        kronn_url: "http://127.0.0.1:9000/admin/action#".into(),
+        invite_code: "kronn:Legacy@127.0.0.1:9000/admin/action#".into(),
+        status: "accepted".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .db
+        .with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &legacy))
+        .await
+        .unwrap();
+    let contacts = state
+        .db
+        .with_conn(kronn::db::contacts::list_contacts)
+        .await
+        .unwrap();
+    for contact in contacts {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/contacts/{}/ping", contact.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["success"], false, "{}: {body}", contact.pseudo);
+    }
 }
 
 /// KT-1033 — an unknown but well-formed invite code is recorded as a contact
@@ -15295,6 +15392,7 @@ async fn ws_unknown_valid_invite_code_is_a_request_not_a_verified_peer() {
     let state = test_state();
     let disc = seed_shared_discussion(&state, "shared-unknown").await;
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
     let url = format!("ws://{}/api/ws", addr);
@@ -15344,6 +15442,7 @@ async fn ws_chat_from_a_non_accepted_contact_is_dropped() {
     let pending = "kronn:Pending@10.0.0.60:3456";
     insert_test_contact(&state, pending, "pending").await;
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
     let url = format!("ws://{}/api/ws", addr);
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -15441,16 +15540,13 @@ async fn ws_allowed_origin_with_a_valid_token_gets_the_full_bus() {
         "the authenticated frontend gets the bus"
     );
 
-    // Same Origin, no token: not the frontend, no bus.
-    let stream = ws_connect_with_origin(addr, &origin, "").await.unwrap();
-    let (mut sender, mut receiver) = StreamExt::split(stream);
-    send_ws(&mut sender, &frontend_presence()).await;
-    state.ws_broadcast.send(presence_of("BusEvent2")).unwrap();
-    assert!(
-        next_ws_matching(&mut receiver, wait, |m| is_presence_of(m, "BusEvent2"))
-            .await
-            .is_none()
-    );
+    // Same Origin, no token: not the frontend, refused.
+    match ws_connect_with_origin(addr, &origin, "").await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 403)
+        }
+        other => panic!("expected 403 without the token, got {other:?}"),
+    }
 
     match ws_connect_with_origin(addr, "https://evil.example", "?token=operator-token").await {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
@@ -15466,6 +15562,7 @@ async fn ws_allowed_origin_with_a_valid_token_gets_the_full_bus() {
 async fn ws_peer_without_origin_gets_no_local_bus() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
     let url = format!("ws://{}/api/ws", addr);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     let (mut sender, mut receiver) = StreamExt::split(ws_stream);
@@ -15563,6 +15660,7 @@ fn chat_frame(shared_id: &str, message_id: &str, code: &str) -> WsMessage {
 async fn ws_rejects_invalid_invite_code_format() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
 
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
@@ -15602,6 +15700,7 @@ async fn ws_rejects_invalid_invite_code_format() {
 async fn ws_rejects_non_presence_first_message() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
 
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
@@ -15669,6 +15768,7 @@ async fn ws_accepts_known_invite_code() {
         .unwrap();
 
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
     let mut broadcast_rx = state.ws_broadcast.subscribe();
 
     let url = format!("ws://{}/api/ws", addr);
@@ -15815,6 +15915,7 @@ async fn share_discussion_creates_shared_id() {
 async fn ws_chat_message_inserts_into_shared_discussion() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
 
     // Create a discussion with a shared_id
     let now = chrono::Utc::now();
@@ -16008,6 +16109,7 @@ async fn disc_sync_request_resends_missing_messages() {
         .unwrap();
 
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
     let url = format!("ws://{}/api/ws", addr);
     let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -16067,6 +16169,7 @@ async fn disc_sync_request_resends_missing_messages() {
 #[tokio::test]
 async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
     let state = test_state();
+    enable_p2p(&state).await;
     // A trusted contact (the caller authenticates with this invite code).
     let now = chrono::Utc::now();
     let contact = kronn::models::Contact {
@@ -16368,6 +16471,7 @@ async fn send_message_to_no_agent_disc_skips_the_runner() {
 async fn ws_discussion_invite_creates_local_discussion() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
 
     // Connect via WS and send a DiscussionInvite
     let url = format!("ws://{}/api/ws", addr);
@@ -16424,6 +16528,7 @@ async fn ws_discussion_invite_creates_local_discussion() {
 async fn ws_chat_message_idempotent() {
     let state = test_state();
     let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
 
     // Create a shared discussion
     let now = chrono::Utc::now();

@@ -1214,6 +1214,22 @@ pub(crate) fn is_local_ip(ip: &str) -> bool {
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
 /// Build CORS layer based on config domain.
+/// Request span without the query string: the WS upgrade carries the operator
+/// token as `?token=`, and debug logs must never hold it.
+fn redacted_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %logged_uri(request.uri()),
+        version = ?request.version(),
+    )
+}
+
+/// The part of a request URI that may be logged: the path, never the query.
+pub(crate) fn logged_uri(uri: &axum::http::Uri) -> &str {
+    uri.path()
+}
+
 /// Browser origins of the local frontend, for CORS and the WS Origin check.
 pub(crate) fn frontend_origins(domain: &Option<String>, port: u16) -> Vec<String> {
     match domain {
@@ -2974,7 +2990,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))
         // ── Middleware ──
         .layer(build_cors(&domain, port))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span));
 
     if enable_auth {
         router = router.route_layer(middleware::from_fn_with_state(

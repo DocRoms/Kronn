@@ -1885,6 +1885,26 @@ button.disc-contact-open {
   white-space: nowrap;
 }
 
+.disc-p2p-off-notice {
+  margin: 4px 8px;
+  padding: 8px;
+  border-radius: var(--kr-r-xs);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-2xs);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.disc-p2p-off-notice p {
+  margin: 0;
+}
+
+.disc-p2p-off-warning {
+  color: var(--kr-warning);
+}
+
 .disc-contact-pending {
   font-size: var(--kr-fs-2xs);
   color: var(--kr-warning);

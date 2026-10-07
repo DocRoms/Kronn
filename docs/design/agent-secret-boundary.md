@@ -736,12 +736,19 @@ instance with strict localhost or LAN exposure, the agent no longer holds a
 credential that opens the API. The per-action human proof (layer B, second
 half) closes the loopback path in 0.15.
 
-**WebSocket bus (KT-1033).** `/api/ws` refuses a browser page whose `Origin`
-is foreign (403) and never treats a client without `Origin` as the frontend; a
-federation peer is verified only as an accepted contact. A local process,
-an agent included, can still forge an allowed `Origin` and get the bus under
-loopback trust, exactly as it reaches the HTTP API; strict localhost requires
-the operator token for both.
+**WebSocket bus and federation (KT-1033).** `/api/ws` admits a browser only
+from an exact frontend origin (listening port, gateway ports, configured
+domain, Tauri webview, the dev UI under `kronn start-dev`, the operator's
+list), and never treats a client without `Origin` as the frontend. A local
+process, an agent included, can still forge an allowed `Origin` and get the
+bus under loopback trust, as it reaches the HTTP API; strict localhost
+requires the operator token for both. The token sent as `?token=` is kept out
+of the backend request span and the gateway access log; a single-use WS
+ticket is left for 0.15 with KT-1034. Federation (`p2p_enabled`) is off by
+default: a peer proves only that it knows an invite code, which is not a
+secret, so turning it on lets anyone who knows an accepted contact's code
+and reaches the port act as that contact in shared discussions. Pairing
+secrets or a signed challenge replace this in 0.15.
 
 **Real probe for the human.**
 1. Start a Claude discussion on a project, with Kronn running natively.
