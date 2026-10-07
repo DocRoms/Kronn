@@ -196,10 +196,7 @@ pub(crate) async fn update_as(
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_apis::update_quick_api(conn, &q)?;
-            if disable_users {
-                crate::db::quick_apis::disable_workflows_using(conn, &q.id)?;
-            }
+            crate::db::quick_apis::update_quick_api_invalidating(conn, &q, disable_users)?;
             Ok(())
         })
         .await
@@ -1425,7 +1422,7 @@ mod tests {
         let Json(agent) = update_as(
             state.clone(),
             "qa-1".into(),
-            request("DELETE", "FETCH"),
+            request("DELETE", "Renamed API"),
             true,
         )
         .await;

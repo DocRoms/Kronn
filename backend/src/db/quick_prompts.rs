@@ -461,10 +461,25 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(n as u32)
 }
 
-/// Disables every enabled workflow that runs this resource, by id or by a
-/// `ref:` resolving to it; returns how many.
-pub fn disable_workflows_using(conn: &Connection, id: &str) -> Result<usize> {
-    crate::core::resource_refs::disable_workflows_using(conn, "prompt", id)
+/// Saves `item`; with `invalidate`, also disables every enabled workflow that
+/// runs it, found BEFORE the update (so a rename still matches the old
+/// slug's `ref:`) and disabled in the same transaction. A failed lookup (an
+/// ambiguous reference) rolls the whole update back.
+pub fn update_quick_prompt_invalidating(
+    conn: &Connection,
+    item: &QuickPrompt,
+    invalidate: bool,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let dependents = if invalidate {
+        crate::core::resource_refs::enabled_workflows_using(&tx, "prompt", &item.id)?
+    } else {
+        Vec::new()
+    };
+    update_quick_prompt(&tx, item)?;
+    let disabled = crate::core::resource_refs::disable_workflows(&tx, &dependents)?;
+    tx.commit()?;
+    Ok(disabled)
 }
 
 #[cfg(test)]

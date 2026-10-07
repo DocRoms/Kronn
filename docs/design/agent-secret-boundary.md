@@ -815,9 +815,14 @@ query/userinfo stripping and the heuristics of `core/redact.rs` only;
 value-based scrubbing of legacy rows is impossible because their credential
 context is gone.
 
-*Known residuals.* An endpoint that transforms what it echoes (another
-encoding, a split, a cipher) defeats any finite list of forms, and a secret
-under 8 characters glued inside another token is not masked. With localhost
+*Known residuals.* Invalidation acts on the stored workflow, for future
+runs: a run already in flight, a human-resumed one included, can still load a
+Quick API or Prompt an agent changed during that run (rollback and fan-out
+included). The planned fix is revision pinning, the approved workflow and its
+dependencies frozen at approval, a 0.15 priority. An endpoint that
+transforms what it echoes (another encoding, a split, a cipher) defeats any
+finite list of forms, and a secret under 8 characters glued inside another
+token is not masked. With localhost
 trust on (auth off, or `auth_strict_localhost = false`), a local process
 without a bridge token is indistinguishable from the human, so it can enable
 a workflow as the human can: the same trust model as the HTTP API and the
@@ -848,8 +853,8 @@ Quick Prompt runs disables every enabled workflow using it (Quick Exec is
 not in this rule: an agent's Quick Exec line already waits for a human's
 approval under KT-1017); a disabled definition does not run (a
 parent refuses a disabled child, manual and TriggerWorkflow launches and the
-scheduler skip it, only a human resumes a disabled workflow's run, and a run
-in progress stops before its next step once its workflow is disabled under
-it; a dependency is matched by id or by a `ref:` resolving to it in any
-project the workflow serves); JSON imports, accepted
+scheduler skip it, and only a human resumes a disabled workflow's run; a
+dependency is matched by id or by a `ref:` resolving to it in any project the
+workflow serves, found before the edit so a rename still matches, and
+disabled in the same transaction, which an ambiguous reference rolls back); JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.

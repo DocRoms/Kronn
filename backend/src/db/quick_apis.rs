@@ -287,10 +287,25 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Disables every enabled workflow that runs this resource, by id or by a
-/// `ref:` resolving to it; returns how many.
-pub fn disable_workflows_using(conn: &Connection, id: &str) -> Result<usize> {
-    crate::core::resource_refs::disable_workflows_using(conn, "qa", id)
+/// Saves `item`; with `invalidate`, also disables every enabled workflow that
+/// runs it, found BEFORE the update (so a rename still matches the old
+/// slug's `ref:`) and disabled in the same transaction. A failed lookup (an
+/// ambiguous reference) rolls the whole update back.
+pub fn update_quick_api_invalidating(
+    conn: &Connection,
+    item: &QuickApi,
+    invalidate: bool,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let dependents = if invalidate {
+        crate::core::resource_refs::enabled_workflows_using(&tx, "qa", &item.id)?
+    } else {
+        Vec::new()
+    };
+    update_quick_api(&tx, item)?;
+    let disabled = crate::core::resource_refs::disable_workflows(&tx, &dependents)?;
+    tx.commit()?;
+    Ok(disabled)
 }
 
 /// Number of workflow steps blocking deletion of this API.

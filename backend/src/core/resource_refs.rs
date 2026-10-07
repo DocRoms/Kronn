@@ -311,17 +311,30 @@ pub fn workflow_uses(
     Ok(false)
 }
 
-/// Disables every enabled workflow that runs `kind`/`id` (see
-/// [`workflow_uses`]); returns how many.
-pub fn disable_workflows_using(conn: &Connection, kind: &str, id: &str) -> anyhow::Result<usize> {
-    let mut disabled = 0;
+/// The enabled workflows that run `kind`/`id` (see [`workflow_uses`]). An
+/// ambiguous reference is an error, so the caller can refuse its change.
+pub fn enabled_workflows_using(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut ids = Vec::new();
     for workflow in crate::db::workflows::list_workflows(conn)? {
         if workflow.enabled && workflow_uses(conn, &workflow, kind, id)? {
-            disabled += conn.execute(
-                "UPDATE workflows SET enabled = 0 WHERE id = ?1 AND enabled = 1",
-                rusqlite::params![workflow.id],
-            )?;
+            ids.push(workflow.id);
         }
+    }
+    Ok(ids)
+}
+
+/// Disables the given workflows; returns how many were still enabled.
+pub fn disable_workflows(conn: &Connection, ids: &[String]) -> anyhow::Result<usize> {
+    let mut disabled = 0;
+    for id in ids {
+        disabled += conn.execute(
+            "UPDATE workflows SET enabled = 0 WHERE id = ?1 AND enabled = 1",
+            rusqlite::params![id],
+        )?;
     }
     Ok(disabled)
 }

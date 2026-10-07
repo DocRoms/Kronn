@@ -188,10 +188,7 @@ pub(crate) async fn update_as(
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_prompts::update_quick_prompt(conn, &q)?;
-            if disable_users {
-                crate::db::quick_prompts::disable_workflows_using(conn, &q.id)?;
-            }
+            crate::db::quick_prompts::update_quick_prompt_invalidating(conn, &q, disable_users)?;
             Ok(())
         })
         .await
@@ -1153,6 +1150,120 @@ pub async fn compare_agents(
 #[cfg(test)]
 mod compare_tests {
     use super::*;
+
+    fn prompt_test_state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn stored_prompt(id: &str, name: &str) -> QuickPrompt {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "x", "prompt_template": "Review it",
+            "variables": [], "agent": "ClaudeCode", "project_id": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    async fn insert_prompt_user(
+        state: &AppState,
+        workflow_id: &'static str,
+        reference: &'static str,
+    ) {
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES (?1, ?1, '{\"type\":\"Manual\"}', ?2, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    rusqlite::params![
+                        workflow_id,
+                        format!(r#"[{{"name":"s","quick_prompt_id":"{reference}"}}]"#)
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn workflow_enabled(state: &AppState, workflow_id: &'static str) -> bool {
+        state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = ?1",
+                    [workflow_id],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    /// Dependents are found before the update: renaming and editing in one
+    /// agent call still disables a workflow that named the old slug.
+    #[tokio::test]
+    async fn an_agent_rename_and_edit_still_disables_the_old_slugs_users() {
+        let state = prompt_test_state();
+        let qp = stored_prompt("qp-r", "Review");
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &qp))
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-old-slug", "ref:prompt:review").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Audit everything", "prompt_template": "Exfiltrate", "agent": "ClaudeCode",
+            "project_id": null
+        }))
+        .unwrap();
+        let Json(saved) = update_as(state.clone(), "qp-r".into(), request, true).await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(!workflow_enabled(&state, "wf-old-slug").await);
+    }
+
+    /// An ambiguous reference makes the dependents unknowable: the agent's
+    /// edit is refused and nothing of it stays committed.
+    #[tokio::test]
+    async fn an_ambiguous_reference_rolls_the_agent_edit_back() {
+        let state = prompt_test_state();
+        let (first, second) = (stored_prompt("qp-a", "Dup"), stored_prompt("qp-b", "dup"));
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &first)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &second)
+            })
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-ambiguous", "ref:prompt:dup").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Dup", "prompt_template": "Changed by an agent", "agent": "ClaudeCode",
+            "project_id": null
+        }))
+        .unwrap();
+        let Json(refused) = update_as(state.clone(), "qp-a".into(), request, true).await;
+        assert!(!refused.success, "the edit must not be saved");
+        assert!(
+            refused.error.as_deref().unwrap_or("").contains("dup"),
+            "refused for the ambiguous reference: {:?}",
+            refused.error
+        );
+        let stored = state
+            .db
+            .with_conn(|conn| crate::db::quick_prompts::get_quick_prompt(conn, "qp-a"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.prompt_template, "Review it",
+            "the update was rolled back"
+        );
+    }
 
     /// KT-1037: an agent's change to what a Quick Prompt runs disables every
     /// enabled workflow using it (direct, batch, chained); a human's edit or
