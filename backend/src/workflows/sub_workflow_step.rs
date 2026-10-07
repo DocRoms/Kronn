@@ -565,27 +565,45 @@ const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(test)]
 const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Until when a foreach item may wait for capacity: the parent run's own
-/// timeout guard. An unreadable parent gives no wait at all.
+/// Time kept between the end of a capacity wait and the runner's timeout, so
+/// the foreach can still record its skipped items before the runner drops it.
+fn capacity_margin(timeout_seconds: u64) -> chrono::Duration {
+    let tenth = std::time::Duration::from_secs(timeout_seconds) / 10;
+    let margin = tenth.clamp(CAPACITY_POLL * 2, std::time::Duration::from_secs(60));
+    chrono::Duration::from_std(margin).unwrap_or_else(|_| chrono::Duration::seconds(60))
+}
+
+/// Until when a foreach item may wait for capacity: a margin before the
+/// earliest timeout guard of the run executing the foreach and of every run
+/// above it (each runner drops its whole subtree at its own deadline). An
+/// unreadable run gives no wait at all.
 async fn capacity_deadline(state: &crate::AppState, parent_run_id: &str) -> chrono::DateTime<Utc> {
     let id = parent_run_id.to_string();
     let found = state
         .db
         .with_conn(move |conn| {
-            let Some(run) = crate::db::workflows::get_run(conn, &id)? else {
-                return Ok(None);
-            };
-            let guards = crate::db::workflows::get_workflow(conn, &run.workflow_id)?
-                .and_then(|workflow| workflow.guards);
-            Ok(Some((run.started_at, guards)))
+            let mut earliest: Option<chrono::DateTime<Utc>> = None;
+            let mut next = Some(id);
+            for _ in 0..=MAX_SUBWORKFLOW_DEPTH {
+                let Some(run_id) = next.take() else { break };
+                let Some(run) = crate::db::workflows::get_run(conn, &run_id)? else {
+                    return Ok(None);
+                };
+                let guards = crate::db::workflows::get_workflow(conn, &run.workflow_id)?
+                    .and_then(|workflow| workflow.guards);
+                let timeout = crate::models::WorkflowGuards::resolve_optional(guards.as_ref())
+                    .timeout_seconds;
+                let deadline = run.started_at
+                    + chrono::Duration::seconds(i64::try_from(timeout).unwrap_or(i64::MAX / 4))
+                    - capacity_margin(timeout);
+                earliest = Some(earliest.map_or(deadline, |e| e.min(deadline)));
+                next = run.parent_run_id;
+            }
+            Ok(earliest)
         })
         .await;
     match found {
-        Ok(Some((started_at, guards))) => {
-            let timeout =
-                crate::models::WorkflowGuards::resolve_optional(guards.as_ref()).timeout_seconds;
-            started_at + chrono::Duration::seconds(i64::try_from(timeout).unwrap_or(i64::MAX / 2))
-        }
+        Ok(Some(deadline)) => deadline,
         _ => Utc::now(),
     }
 }
@@ -623,7 +641,8 @@ where
                         started.elapsed().as_secs()
                     )));
                 }
-                tokio::time::sleep(CAPACITY_POLL).await;
+                let left = (deadline - Utc::now()).to_std().unwrap_or_default();
+                tokio::time::sleep(CAPACITY_POLL.min(left)).await;
             }
         }
     }
@@ -2466,6 +2485,133 @@ mod tests {
             "{data}"
         );
         assert_eq!(data["skipped_concurrency_limit"], 0);
+    }
+
+    /// A top-level run "outer-run" of parent-wf whose only step fans out
+    /// over child-wf, the child's single slot being held by "holder".
+    async fn outer_foreach_run(
+        state: &crate::AppState,
+        step: &crate::models::WorkflowStep,
+        timeout_seconds: u64,
+        ws: &tempfile::TempDir,
+    ) -> (crate::models::Workflow, crate::models::WorkflowRun) {
+        let step = step.clone();
+        // No project: the run keeps this path as the worktree its steps use.
+        let ws = ws.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |c| {
+                let mut child = crate::db::workflows::get_workflow(c, "child-wf")?.unwrap();
+                child.concurrency_limit = Some(1);
+                crate::db::workflows::update_workflow(c, &child)?;
+                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                parent.steps = vec![step];
+                parent.guards = Some(crate::models::WorkflowGuards {
+                    timeout_seconds: Some(timeout_seconds),
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(c, &parent)?;
+                let mut holder = crate::db::workflows::get_run(c, "parent-run")?.unwrap();
+                holder.id = "holder".into();
+                holder.workflow_id = "child-wf".into();
+                crate::db::workflows::insert_run(c, &holder)?;
+                let mut outer = holder.clone();
+                outer.id = "outer-run".into();
+                outer.workflow_id = "parent-wf".into();
+                outer.status = crate::models::RunStatus::Pending;
+                outer.started_at = chrono::Utc::now();
+                outer.workspace_path = Some(ws);
+                crate::db::workflows::insert_run(c, &outer)?;
+                Ok((parent, outer))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_runner_records_skipped_items_before_its_timeout() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 2, &ws).await;
+        let _ = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stored = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "outer-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let fanout = stored
+            .step_results
+            .iter()
+            .find(|r| r.step_name == "fanout")
+            .expect("the foreach step result is persisted");
+        assert!(fanout.output.contains("SKIPPED"), "{}", fanout.output);
+        assert!(
+            fanout.output.contains("SkippedConcurrencyLimit"),
+            "{}",
+            fanout.output
+        );
+        assert_ne!(fanout.status, crate::models::RunStatus::StoppedByGuard);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_run_ends_a_capacity_wait_without_starting_the_child() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 3600, &ws).await;
+        let canceller = {
+            let state = state.clone();
+            async move {
+                for _ in 0..200 {
+                    if state
+                        .cancel_registry
+                        .lock()
+                        .unwrap()
+                        .contains_key("outer-run")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "outer-run",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let run = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        );
+        let (_, ()) = tokio::join!(run, canceller);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert_eq!(outer.status, crate::models::RunStatus::Cancelled);
+        let children = state
+            .db
+            .with_conn(|c| crate::db::workflows::subworkflow_children(c, "outer-run"))
+            .await
+            .unwrap();
+        assert!(children.is_empty(), "no child started after the cancel");
     }
 
     #[tokio::test]
