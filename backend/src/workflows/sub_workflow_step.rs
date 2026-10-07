@@ -2358,7 +2358,9 @@ mod tests {
             "no child row was inserted"
         );
 
-        // The wait for capacity ends just before the runner's timeout.
+        // The wait for capacity ends just before the runner's timeout. A 60 s
+        // run with 8 s left: its 6 s margin keeps the wait short and leaves
+        // a loaded machine time to record the skips before the deadline.
         let foreach = super::execute_sub_workflow_step(
             &state,
             "parent-run",
@@ -2366,7 +2368,8 @@ mod tests {
             &foreach_step,
             &tokens,
             &agents,
-            budget_with_timeout(1),
+            crate::workflows::runner::SharedBudget::root(50)
+                .within_deadline(chrono::Utc::now() + chrono::Duration::seconds(8), 60),
             Some(ws.path().to_string_lossy().to_string()),
             launch(),
         )

@@ -44,7 +44,9 @@ fn text(content: &str) -> String {
 /// A provider that answers the first request with `first` and every later one with
 /// `then`, keeping each request body so the test can read what the model was told.
 async fn provider(first: String, then: String) -> (MockServer, Arc<Mutex<Vec<Value>>>) {
-    let server = MockServer::start().await;
+    // Not from wiremock's pool: a pooled server keeps its address across tests,
+    // so another test's late request could land in this one's count.
+    let server = MockServer::builder().start().await;
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let seen = requests.clone();
     Mock::given(method("POST"))
@@ -240,8 +242,8 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
-    // wiremock pools servers: a dropped one comes back under the same URI, where
-    // the first pass's validation discussion would still reach it.
+    // Kept until the end: the first pass's validation discussion still runs, and
+    // a freed port could be handed to the second pass's server.
     let mut servers = Vec::new();
     for reference in ["code.rs:1", "invented.rs:1"] {
         let correct = reference == "code.rs:1";
@@ -355,10 +357,15 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
                 2,
                 "exactly two corrective retries: {stream}"
             );
+            let requests = requests.lock().unwrap();
+            let asked: Vec<String> = requests
+                .iter()
+                .map(|r| r["messages"][1]["content"].to_string().chars().take(160).collect())
+                .collect();
             assert_eq!(
-                requests.lock().unwrap().len(),
+                requests.len(),
                 4,
-                "one tool response and three bounded attempts"
+                "one tool response and three bounded attempts: {asked:#?}"
             );
         }
         assert_eq!(
@@ -404,7 +411,7 @@ async fn http_failure_after_write_persists_status_and_preserves_partial_files_wi
 #[cfg(unix)]
 async fn assert_http_failure_is_persisted(after_write: bool) {
     use axum::response::IntoResponse;
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     let requests = Arc::new(Mutex::new(0));
     let seen = requests.clone();
     Mock::given(method("POST"))
@@ -958,7 +965,7 @@ async fn the_partial_audit_applies_the_same_gate_and_launcher() {
 async fn a_named_connection_audit_calls_that_connection_with_its_tier_model() {
     // KT-980 — an OpenRouter-style connection is a `Custom` agent: the audit
     // must reach the connection's own endpoint with the model of the tier.
-    let server = MockServer::start().await;
+    let server = MockServer::builder().start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(500).set_body_string("stop here"))
