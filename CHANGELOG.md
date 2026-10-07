@@ -222,7 +222,9 @@ Release notes for 0.9.3 and earlier are available in the
     for a free slot and is skipped only shortly before the run's timeout (as
     set when each run started), with a SKIPPED signal that the run keeps. A
     resumed child keeps its concurrency key, and no child is started or
-    resumed once its parent's cancellation has settled (KT-1045).
+    resumed once its parent's cancellation has settled or its run's timeout
+    has passed; a timeout guard stop cancels every child it left behind
+    (KT-1045).
   - Run retention and a bridge token's workflow list read indexes instead of
     whole tables (migrations 221 and 222, KT-1048, KT-1050).
   - A SubWorkflow foreach file must be a relative path inside the worktree:
@@ -230,7 +232,8 @@ Release notes for 0.9.3 and earlier are available in the
     bundle, restore) and at run time. Foreach reads and writes in the worktree
     never follow a symlink or a hard link (best effort on Windows); a write
     replaces the file through a synced temporary file, keeps its permission
-    bits and refuses sockets, FIFOs and devices. Known residual, tracked in
+    bits (a new file follows the umask) and refuses sockets, FIFOs and
+    devices. Known residual, tracked in
     KT-1055 for 0.15: a read can still be fooled by a process that mutates
     the worktree while it runs (KT-1038).
   - The pre-migration backup now includes the writes still in the
