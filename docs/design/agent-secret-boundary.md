@@ -746,7 +746,9 @@ requires the operator token for both. The frontend sends the token as a
 `kronn.auth.<base64url>` WebSocket subprotocol, never in the URL; `?token=`
 from older clients is still read and kept out of the backend span and the
 gateway access log. Federation frames travel only between the members of a
-shared discussion, checked in the same DB call as each write. Federation (`p2p_enabled`) is off by
+shared discussion, checked in the same DB call as each write; a peer's
+attachment is staged and published only after that check, and a file served
+to a peer is re-checked right before its bytes leave. Federation (`p2p_enabled`) is off by
 default: a peer proves only that it knows an invite code, which is not a
 secret, so turning it on lets anyone who knows an accepted contact's code
 and reaches the port act as that contact in shared discussions. Pairing

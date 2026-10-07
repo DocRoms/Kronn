@@ -125,12 +125,18 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
         // WS upgrade (NAT/relay half-open) would otherwise pin this task inside
         // connect_async forever — and the manager loop only respawns FINISHED
         // tasks, so that contact would stay silently unreachable until restart.
-        let connect = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            tokio_tungstenite::connect_async(&ws_url),
+        let connect = crate::api::federation::unless_p2p_off(
+            &state,
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio_tungstenite::connect_async(&ws_url),
+            ),
         )
-        .await
-        .unwrap_or_else(|_| {
+        .await;
+        let Some(connect) = connect else {
+            return;
+        };
+        let connect = connect.unwrap_or_else(|_| {
             Err(tokio_tungstenite::tungstenite::Error::Io(
                 std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -140,6 +146,11 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
         });
         match connect {
             Ok((ws_stream, _)) => {
+                // The upgrade may have been held until P2P was turned off or
+                // the contact refused: nothing is sent then.
+                if dialable_contact(&state, &contact.id).await.is_none() {
+                    return;
+                }
                 let session_start = Instant::now();
                 tracing::info!("WS client: connected to {}", contact.pseudo);
 
@@ -233,6 +244,10 @@ async fn handle_peer_connection(
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let mut broadcast_rx = state.ws_broadcast.subscribe();
     let peer = crate::api::ws::PeerAuth::ContactId(contact_id.to_owned());
+    // Checked again before the first byte (Presence, sync requests).
+    if !peer.check(state).await {
+        return;
+    }
 
     // Send our own presence to the peer. Use the SAME canonical builder as the
     // /api/contacts/invite-code endpoint so the code we send matches the code a
@@ -398,6 +413,7 @@ async fn handle_peer_connection(
         _ = send => {}
         _ = recv => {}
         _ = recheck => {}
+        _ = crate::api::federation::until_p2p_off(state) => {}
     }
 }
 

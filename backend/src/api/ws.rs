@@ -743,10 +743,19 @@ async fn handle_socket(
         }
     };
 
+    // The shared federation cancellation: a peer ends as soon as P2P is off.
+    let p2p_off = async {
+        if is_local {
+            std::future::pending::<()>().await;
+        }
+        crate::api::federation::until_p2p_off(&state).await;
+    };
+
     tokio::select! {
         _ = send => {}
         _ = recv => {}
         _ = recheck => {}
+        _ = p2p_off => {}
     }
 }
 
@@ -1320,7 +1329,11 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             // peer (which holds the file) receives our local emits below, finds
             // the file present, and stops — so the frames don't bounce.
             let exists = {
-                let (fid, sid) = (file_id.clone(), shared_discussion_id.clone());
+                let (fid, sid, mid) = (
+                    file_id.clone(),
+                    shared_discussion_id.clone(),
+                    message_id.clone(),
+                );
                 state
                     .db
                     .with_conn(move |conn| {
@@ -1329,6 +1342,18 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
                             // Not a member: handled like a file already held.
                             Some(false) => return Ok(Some(true)),
                             Some(true) => {}
+                        }
+                        // The message must belong to that same discussion.
+                        let in_discussion =
+                            match crate::db::discussions::find_discussion_by_shared_id(conn, &sid)? {
+                                Some(did) => {
+                                    crate::db::discussions::message_in_discussion(conn, &did, &mid)?
+                                }
+                                None => false,
+                            };
+                        if !in_discussion {
+                            tracing::warn!("F8: FileAttached names message {mid} outside shared discussion {sid}");
+                            return Ok(Some(true));
                         }
                         crate::db::discussions::context_file_exists(conn, &fid)
                             .map(Some)
@@ -1376,7 +1401,7 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
                     _ = crate::api::federation::fetch_and_store_attachment(
                         &st, &sid, &mid, &fid, &fname, &mime, sz, &host,
                     ) => {}
-                    _ = p2p_turned_off(&st) => {
+                    _ = crate::api::federation::until_p2p_off(&st) => {
                         tracing::info!("F8: P2P turned off, attachment {fid} transfer cancelled");
                     }
                 }
@@ -1384,16 +1409,6 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             Some(false)
         }
         _ => Some(false),
-    }
-}
-
-/// Resolves once P2P is off (checked every second).
-pub(crate) async fn p2p_turned_off(state: &AppState) {
-    loop {
-        if !state.config.read().await.server.p2p_enabled {
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -2207,6 +2222,177 @@ mod origin_and_admission_tests {
         );
         assert_eq!(admit_presence(&state, "", ip, false).await, None);
         rate_limit::reset(ip);
+    }
+
+    /// Room A (shared with contact A) and room B, each with one message.
+    async fn two_rooms(state: &AppState) -> &'static str {
+        let code = "kronn:A@10.0.0.50:3456";
+        state.config.write().await.server.p2p_enabled = true;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-a".into(),
+                        pseudo: "A".into(),
+                        avatar_email: None,
+                        kronn_url: "http://10.0.0.50:3456".into(),
+                        invite_code: code.into(),
+                        status: "accepted".into(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                )?;
+                for (shared, msg) in [("shared-a", "a-msg"), ("shared-b", "b-msg")] {
+                    crate::db::discussions::ensure_mirror_by_shared_id(conn, shared, "T", "H")?;
+                    handle_incoming_chat_message(
+                        conn,
+                        shared,
+                        msg,
+                        "H",
+                        None,
+                        "hi",
+                        0,
+                        crate::models::MessageRole::User,
+                        crate::models::MessageChannel::Main,
+                        None,
+                        vec![],
+                        None,
+                    )?;
+                }
+                let room_a =
+                    crate::db::discussions::find_discussion_by_shared_id(conn, "shared-a")?
+                        .unwrap();
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    &room_a,
+                    "shared-a",
+                    &["c-a".to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        code
+    }
+
+    #[tokio::test]
+    async fn a_member_of_one_room_cannot_attach_to_another_rooms_message() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        let mut bus = state.ws_broadcast.subscribe();
+        let frame = WsMessage::FileAttached {
+            shared_discussion_id: "shared-a".into(),
+            message_id: "b-msg".into(),
+            file_id: "f-evil".into(),
+            filename: "x.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 1,
+            from_invite_code: code.into(),
+            pending: false,
+        };
+        assert_eq!(
+            ingest_relayable_frame(&state, &frame, &PeerAuth::InviteCode(code.into())).await,
+            Ingest::Skip
+        );
+        assert!(bus.try_recv().is_err(), "no placeholder reaches room B");
+        let listed = state
+            .db
+            .with_conn(|conn| {
+                let room_b =
+                    crate::db::discussions::find_discussion_by_shared_id(conn, "shared-b")?
+                        .unwrap();
+                crate::db::discussions::list_context_files_for_message_in(conn, &room_b, "b-msg")
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "room B's agents never see it");
+    }
+
+    #[tokio::test]
+    async fn a_download_publishes_nothing_once_the_sender_is_revoked() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        let base = tempfile::TempDir::new().unwrap();
+        let room_a = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::find_discussion_by_shared_id(conn, "shared-a")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let attachment =
+            |file_id: &str, message_id: &str| crate::api::federation::FederatedAttachment {
+                host: PeerAuth::InviteCode(code.into()),
+                shared_id: "shared-a".into(),
+                discussion_id: room_a.clone(),
+                file_id: file_id.into(),
+                message_id: message_id.into(),
+                filename: "doc.pdf".into(),
+                mime_type: "application/pdf".into(),
+                size: 3,
+            };
+        let stage = |file_id: &str| {
+            crate::core::context_files::stage_federated_file_in(
+                base.path(),
+                &room_a,
+                file_id,
+                "doc.pdf",
+                b"abc",
+            )
+            .unwrap()
+        };
+        let room_dir = base.path().join("federated").join(&room_a);
+
+        // Another room's message: refused, nothing published.
+        let staged = stage("f-1");
+        let target = staged.target().to_path_buf();
+        assert!(crate::api::federation::commit_federated_attachment(
+            &state,
+            staged,
+            attachment("f-1", "b-msg")
+        )
+        .await
+        .is_err());
+        assert!(!target.exists());
+
+        // Authorized: published and linked.
+        let staged = stage("f-2");
+        let target = staged.target().to_path_buf();
+        crate::api::federation::commit_federated_attachment(
+            &state,
+            staged,
+            attachment("f-2", "a-msg"),
+        )
+        .await
+        .unwrap();
+        assert!(target.exists());
+
+        // The sender is revoked while the bytes were in flight.
+        let staged = stage("f-3");
+        let target = staged.target().to_path_buf();
+        state
+            .db
+            .with_conn(|conn| crate::db::contacts::delete_contact(conn, "c-a"))
+            .await
+            .unwrap();
+        assert!(crate::api::federation::commit_federated_attachment(
+            &state,
+            staged,
+            attachment("f-3", "a-msg")
+        )
+        .await
+        .is_err());
+        assert!(!target.exists(), "nothing published after revocation");
+        let leftovers: Vec<_> = std::fs::read_dir(&room_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        assert!(leftovers.is_empty(), "rejected staging files are removed");
     }
 
     #[test]

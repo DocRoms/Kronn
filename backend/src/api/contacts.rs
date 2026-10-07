@@ -50,8 +50,12 @@ pub async fn add(
         (false, Some("P2P_OFF".to_string()))
     } else {
         let health_url = format!("{}/api/health", kronn_url);
-        match guarded_client().get(&health_url).send().await {
-            Ok(r) if r.status().is_success() => (true, None),
+        let ping = guarded_client().get(&health_url).send();
+        match crate::api::federation::unless_p2p_off(&state, ping)
+            .await
+            .and_then(Result::ok)
+        {
+            Some(r) if r.status().is_success() => (true, None),
             _ => {
                 // Diagnose WHY the peer is unreachable
                 let hint = diagnose_unreachable(&kronn_url).await;
@@ -289,12 +293,13 @@ pub async fn ping(
         return Json(ApiResponse::err("Contact address is invalid"));
     };
 
-    match guarded_client()
-        .get(format!("{base}/api/health"))
-        .send()
+    // Turning P2P off cancels the ping in flight.
+    let ping = guarded_client().get(format!("{base}/api/health")).send();
+    match crate::api::federation::unless_p2p_off(&state, ping)
         .await
+        .and_then(Result::ok)
     {
-        Ok(resp) if resp.status().is_success() => Json(ApiResponse::ok(true)),
+        Some(resp) if resp.status().is_success() => Json(ApiResponse::ok(true)),
         _ => Json(ApiResponse::ok(false)),
     }
 }

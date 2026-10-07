@@ -797,6 +797,8 @@ fn federated_context_file_insert_exists_and_get() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
     assert!(!crate::db::discussions::context_file_exists(&conn, "f1").unwrap());
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
 
     // F8: insert a file received from a peer, pinned to a message.
     crate::db::discussions::insert_federated_context_file(
@@ -827,6 +829,44 @@ fn federated_context_file_insert_exists_and_get() {
     assert!(crate::db::discussions::get_context_file(&conn, "missing")
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn a_federated_file_must_target_a_message_of_its_discussion() {
+    let conn = test_db();
+    for disc in ["room-a", "room-b"] {
+        crate::db::discussions::insert_discussion(&conn, &sample_discussion(disc, None)).unwrap();
+    }
+    crate::db::discussions::insert_message(
+        &conn,
+        "room-b",
+        &sample_message("b-msg", MessageRole::User),
+    )
+    .unwrap();
+    // A member of room A names room B's message: refused.
+    assert!(crate::db::discussions::insert_federated_context_file(
+        &conn,
+        "f-evil",
+        "room-a",
+        "b-msg",
+        "x.pdf",
+        "application/pdf",
+        1,
+        "/tmp/x.pdf",
+    )
+    .is_err());
+    // A row slipped in before the check is never listed with room B's message.
+    conn.execute(
+        "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path, message_id)
+         VALUES ('f-legacy', 'room-a', 'x.pdf', 'application/pdf', 1, '', 0, '/tmp/x.pdf', 'b-msg')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        crate::db::discussions::list_context_files_for_message_in(&conn, "room-b", "b-msg")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

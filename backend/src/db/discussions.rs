@@ -4052,13 +4052,30 @@ pub fn insert_federated_context_file(
     mime_type: &str,
     size: u64,
     disk_path: &str,
-) -> rusqlite::Result<()> {
+) -> anyhow::Result<()> {
+    // A peer names the message: it must be one of this discussion's.
+    if !message_in_discussion(conn, discussion_id, message_id)? {
+        anyhow::bail!("message {message_id} is not in discussion {discussion_id}");
+    }
     conn.execute(
         "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path, message_id)
          VALUES (?1, ?2, ?3, ?4, ?5, '', 0, ?6, ?7)",
         rusqlite::params![id, discussion_id, filename, mime_type, size as i64, disk_path, message_id],
     )?;
     Ok(())
+}
+
+/// Whether `message_id` is a message of `discussion_id`.
+pub fn message_in_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND discussion_id = ?2)",
+        rusqlite::params![message_id, discussion_id],
+        |row| row.get(0),
+    )
 }
 
 pub fn list_context_files(
@@ -4123,6 +4140,27 @@ pub fn list_context_files_for_message(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![message_id], map_context_file_row)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// Files pinned to one message of one discussion. What agents read: a file
+/// row naming another discussion's message is never shown with it.
+pub fn list_context_files_for_message_in(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
+    let sql = format!(
+        "{CONTEXT_FILE_SELECT} WHERE cf.message_id = ?1 AND cf.discussion_id = ?2 ORDER BY cf.created_at"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![message_id, discussion_id],
+            map_context_file_row,
+        )?
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
