@@ -296,4 +296,25 @@ describe('IdentitySection — network exposure toggle', () => {
     expect(screen.getByText('./kronn restart')).toBeInTheDocument();
     expect(screen.queryByText('settings.exposeRestartBtn')).toBeNull();
   });
+
+  it('keeps P2P off until the operator turns it on, with the impersonation warning', async () => {
+    await mountIdentity();
+    const toggle = screen.getByTestId('p2p-toggle');
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByText('settings.p2pWarning')).toBeInTheDocument();
+    await act(async () => { fireEvent.click(toggle); });
+    expect(config.setServerConfig).toHaveBeenCalledWith({ p2p_enabled: true });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+  });
+
+  it('saves the extra frontend origins on blur, one per line', async () => {
+    await mountIdentity();
+    const field = screen.getByTestId('frontend-origins');
+    fireEvent.change(field, { target: { value: 'http://mac.tailnet.ts.net:3140\n\n http://192.168.1.5:3140 ' } });
+    await act(async () => { fireEvent.blur(field); });
+    expect(config.setServerConfig).toHaveBeenCalledWith({
+      frontend_origins: ['http://mac.tailnet.ts.net:3140', 'http://192.168.1.5:3140'],
+    });
+  });
 });

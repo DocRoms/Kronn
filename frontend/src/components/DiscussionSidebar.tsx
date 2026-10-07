@@ -1,5 +1,6 @@
 import { Fragment, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
+import { P2pOffNotice } from './P2pOffNotice';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem } from './SwipeableDiscItem';
 import { DiscussionWeightBadge } from './DiscussionWeightBadge';
@@ -1581,6 +1582,7 @@ export function DiscussionSidebar({
               </button>
             </div>
           )}
+          <P2pOffNotice contactCount={contacts.length} t={t} />
           {/* Contact list — click a row to open a 1:1 chat with that contact.
               The identity is its own <button> rather than a clickable row: the
               delete button must not sit inside an interactive ancestor (axe
@@ -1600,6 +1602,9 @@ export function DiscussionSidebar({
                 <span className="disc-contact-name">{c.pseudo}</span>
                 {c.status === 'pending' && !contactsOnline[c.id] && (
                   <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
+                )}
+                {c.status === 'requested' && (
+                  <span className="disc-contact-pending" title={t('contacts.requestedHint')}>{t('contacts.requested')}</span>
                 )}
                 {c.status === 'accepted' && !contactsOnline[c.id] && (
                   <span className="disc-contact-offline">offline</span>

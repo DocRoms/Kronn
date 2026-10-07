@@ -515,8 +515,11 @@ pub async fn disc_get_message(
     let (attachments, reply_target) = state
         .db
         .with_conn(move |conn| {
-            let attachments =
-                crate::db::discussions::list_context_files_for_message(conn, &msg_id)?;
+            let attachments = crate::db::discussions::list_context_files_for_message_in(
+                conn,
+                &did_for_message_meta,
+                &msg_id,
+            )?;
             let reply_target = crate::db::discussions::message_cli_author_target(
                 conn,
                 &did_for_message_meta,
@@ -605,16 +608,19 @@ pub async fn disc_note_list(
             let rows = rows
                 .into_iter()
                 .map(|(sort_order, message)| {
-                    let attachments =
-                        crate::db::discussions::list_context_files_for_message(conn, &message.id)?
-                            .into_iter()
-                            .map(|file| MessageAttachment {
-                                id: file.id,
-                                filename: file.filename,
-                                mime_type: file.mime_type,
-                                disk_path: file.disk_path,
-                            })
-                            .collect();
+                    let attachments = crate::db::discussions::list_context_files_for_message_in(
+                        conn,
+                        &did,
+                        &message.id,
+                    )?
+                    .into_iter()
+                    .map(|file| MessageAttachment {
+                        id: file.id,
+                        filename: file.filename,
+                        mime_type: file.mime_type,
+                        disk_path: file.disk_path,
+                    })
+                    .collect();
                     // MAX over an empty set is one NULL row, so this always
                     // returns exactly one row and the Option is the answer.
                     let revised_at: Option<String> = conn.query_row(

@@ -155,11 +155,15 @@ async fn emit_attachments(
     message_id: &str,
     our_invite_code: &str,
 ) {
-    let mid = message_id.to_string();
+    let (mid, sid) = (message_id.to_string(), shared_id.to_string());
     let files = state
         .db
         .with_conn(move |conn| {
-            crate::db::discussions::list_context_files_for_message(conn, &mid)
+            let Some(disc_id) = crate::db::discussions::find_discussion_by_shared_id(conn, &sid)?
+            else {
+                return Ok(Vec::new());
+            };
+            crate::db::discussions::list_context_files_for_message_in(conn, &disc_id, &mid)
                 .map_err(|e| anyhow::anyhow!(e))
         })
         .await
@@ -295,6 +299,95 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
     }
 }
 
+/// The shared cancellation of federation work: resolves once P2P is off
+/// (checked every 250 ms). Every peer socket, transfer and HTTP call to a
+/// contact races it.
+pub(crate) async fn until_p2p_off(state: &AppState) {
+    loop {
+        if !state.p2p.enabled() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Run `work` unless P2P goes off first.
+pub(crate) async fn unless_p2p_off<F: std::future::Future>(
+    state: &AppState,
+    work: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        output = work => Some(output),
+        _ = until_p2p_off(state) => None,
+    }
+}
+
+/// Where a downloaded attachment belongs, and who sent it.
+pub(crate) struct FederatedAttachment {
+    pub host: crate::api::ws::PeerAuth,
+    pub shared_id: String,
+    pub discussion_id: String,
+    pub file_id: String,
+    pub message_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
+/// Publish a staged attachment and link it, in one DB call that first
+/// checks P2P, the sender's membership, the target message and the file id.
+/// A refusal drops the staged file.
+pub(crate) async fn commit_federated_attachment(
+    state: &AppState,
+    staged: crate::core::context_files::StagedFile,
+    attachment: FederatedAttachment,
+) -> anyhow::Result<()> {
+    if !state.p2p.enabled() {
+        anyhow::bail!("P2P is off");
+    }
+    let gate = state.p2p.clone();
+    state
+        .db
+        .with_conn(move |conn| {
+            let a = attachment;
+            // Held until the row is inserted: turning P2P off waits for this
+            // publication, and none starts once it is off.
+            let on = gate.read();
+            if !*on {
+                anyhow::bail!("P2P is off");
+            }
+            if a.host.membership(conn, &a.shared_id)? != Some(true) {
+                anyhow::bail!("the sender is no longer an accepted member of this discussion");
+            }
+            if !crate::db::discussions::message_in_discussion(
+                conn,
+                &a.discussion_id,
+                &a.message_id,
+            )? {
+                anyhow::bail!("the message is not in this discussion");
+            }
+            if crate::db::discussions::context_file_exists(conn, &a.file_id)? {
+                anyhow::bail!("the file is already known");
+            }
+            let path = staged.publish()?;
+            if let Err(e) = crate::db::discussions::insert_federated_context_file(
+                conn,
+                &a.file_id,
+                &a.discussion_id,
+                &a.message_id,
+                &a.filename,
+                &a.mime_type,
+                a.size,
+                &path,
+            ) {
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+            Ok(())
+        })
+        .await
+}
+
 /// Receiver side of F8: a `FileAttached` arrived for a shared disc we host a
 /// mirror of. Fetch the binary from the announcing host over HTTP, store it on
 /// disk, and link it to the (cross-instance-stable) `message_id`. Idempotent on
@@ -357,15 +450,20 @@ pub async fn fetch_and_store_attachment(
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
         Err(_) => return,
     };
-    let url = format!(
-        "{}/api/disc/fetch-file",
-        host.kronn_url.trim_end_matches('/')
-    );
+    let Some(base) = crate::db::contacts::contact_base_url(&host.kronn_url) else {
+        tracing::warn!(
+            "F8: contact {} has an invalid URL, not fetching",
+            host.pseudo
+        );
+        return;
+    };
+    let url = format!("{base}/api/disc/fetch-file");
     let body = serde_json::json!({ "file_id": file_id, "from_invite_code": our_code });
     let resp = match client.post(&url).json(&body).send().await {
         Ok(r) => r,
@@ -408,15 +506,6 @@ pub async fn fetch_and_store_attachment(
         return;
     }
 
-    // Mirror discs have no project work_dir → persistent config-dir store.
-    let disk_path = match crate::core::context_files::save_file_to_disk(file_id, filename, &bytes) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("F8: failed to save fetched attachment {file_id}: {e}");
-            return;
-        }
-    };
-
     let sid = shared_id.to_string();
     let disc_id = state
         .db
@@ -426,25 +515,29 @@ pub async fn fetch_and_store_attachment(
         .flatten();
     let Some(disc_id) = disc_id else { return };
 
-    let (fid, did, mid, fname, mime) = (
-        file_id.to_string(),
-        disc_id,
-        message_id.to_string(),
-        filename.to_string(),
-        mime_type.to_string(),
-    );
-    let sz = size.max(0) as u64;
-    if let Err(e) = state
-        .db
-        .with_conn(move |conn| {
-            crate::db::discussions::insert_federated_context_file(
-                conn, &fid, &did, &mid, &fname, &mime, sz, &disk_path,
-            )
-            .map_err(|e| anyhow::anyhow!(e))
-        })
-        .await
-    {
-        tracing::warn!("F8: failed to link fetched attachment {file_id}: {e}");
+    // Staged in the discussion's own directory, published only if the
+    // sender is still authorized at that moment.
+    let staged =
+        match crate::core::context_files::stage_federated_file(&disc_id, file_id, filename, &bytes)
+        {
+            Ok(staged) => staged,
+            Err(e) => {
+                tracing::warn!("F8: failed to stage fetched attachment {file_id}: {e}");
+                return;
+            }
+        };
+    let attachment = FederatedAttachment {
+        host: crate::api::ws::PeerAuth::InviteCode(host_invite_code.to_string()),
+        shared_id: shared_id.to_string(),
+        discussion_id: disc_id,
+        file_id: file_id.to_string(),
+        message_id: message_id.to_string(),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        size: size.max(0) as u64,
+    };
+    if let Err(e) = commit_federated_attachment(state, staged, attachment).await {
+        tracing::warn!("F8: attachment {file_id} not kept: {e}");
         return;
     }
     tracing::info!("F8: fetched + stored federated attachment {file_id} ({filename})");

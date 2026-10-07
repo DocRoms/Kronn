@@ -120,6 +120,15 @@ pub struct ServerConfig {
     #[serde(default)]
     #[ts(skip)]
     pub auth_strict_localhost: bool,
+    /// Accept federation peers (inbound `/api/ws` peers, the peer HTTP routes)
+    /// and dial contacts. Off by default: a peer is identified only by its
+    /// invite code until pairing secrets exist (KT-1033).
+    #[serde(default)]
+    pub p2p_enabled: bool,
+    /// Extra browser origins of this Kronn's frontend (LAN or Tailscale
+    /// aliases), exact `scheme://host[:port]`. Checked on the WS upgrade.
+    #[serde(default)]
+    pub frontend_origins: Vec<String>,
     /// 0.8.11 (B6) — optional webhook (Slack/Teams/generic JSON) fired when a
     /// scheduled/triggered run ends in a non-success terminal state
     /// (Failed / Interrupted / StoppedByGuard). Lets an autonomous cron that
@@ -1006,6 +1015,8 @@ pub struct ServerConfigPublic {
     pub execution_variable_retention_days: u32,
     /// Days a finished workflow run keeps its step outputs. Zero keeps them.
     pub run_payload_retention_days: u32,
+    pub p2p_enabled: bool,
+    pub frontend_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1048,4 +1059,9 @@ pub struct UpdateServerConfigRequest {
     /// Days a finished workflow run keeps its step outputs; zero keeps them.
     #[serde(default)]
     pub run_payload_retention_days: Option<u32>,
+    #[serde(default)]
+    pub p2p_enabled: Option<bool>,
+    /// Replaces the whole list; every entry must be an exact origin.
+    #[serde(default)]
+    pub frontend_origins: Option<Vec<String>>,
 }

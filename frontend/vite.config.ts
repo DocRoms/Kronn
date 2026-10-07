@@ -37,6 +37,9 @@ export default defineConfig({
   },
   server: {
     port: Number(process.env.VITE_DEV_PORT ?? 5173),
+    // The backend accepts the WebSocket only from this exact port (KT-1033):
+    // never fall back to another one.
+    strictPort: true,
     proxy: {
       // KRONN_BACKEND_URL lets perf-test scripts point at a sandbox backend
       // (e.g. http://localhost:3141 with KRONN_DATA_DIR=/tmp/kronn-perf-sandbox)

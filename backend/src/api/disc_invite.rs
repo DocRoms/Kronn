@@ -326,6 +326,12 @@ pub async fn peer_join(
         match local {
             Ok(j) => (j.disc_id, j.session_pk, j.resume_token),
             Err(local_err) => {
+                if !state.p2p.enabled() {
+                    return Json(ApiResponse::err(format!(
+                        "{local_err}. A room hosted on another Kronn needs P2P connections: \
+                         enable \"Accept P2P connections\" in Settings > Identity to join it."
+                    )));
+                }
                 match try_remote_join(&state, &token, &agent_type, &session_id).await {
                     Ok(Some(r)) => r,
                     // No contact hosts it → surface the original local error.
@@ -855,21 +861,27 @@ async fn try_remote_join(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(6))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     for contact in contacts.into_iter().filter(|c| c.status == "accepted") {
-        let url = format!(
-            "{}/api/disc/claim-by-token",
-            contact.kronn_url.trim_end_matches('/')
-        );
-        let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
-        let resp = match client.post(&url).json(&body).send().await {
-            Ok(r) => r,
-            Err(_) => continue, // unreachable peer → try the next contact
+        if !state.p2p.enabled() {
+            return Ok(None);
+        }
+        let Some(base) = db::contacts::contact_base_url(&contact.kronn_url) else {
+            continue;
         };
-        let parsed: serde_json::Value = match resp.json().await {
-            Ok(v) => v,
-            Err(_) => continue,
+        let url = format!("{base}/api/disc/claim-by-token");
+        let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
+        let claim = async {
+            let resp = client.post(&url).json(&body).send().await.ok()?;
+            resp.json::<serde_json::Value>().await.ok()
+        };
+        // Turning P2P off cancels the claim in flight.
+        let parsed = match crate::api::federation::unless_p2p_off(state, claim).await {
+            None => return Ok(None),
+            Some(None) => continue, // unreachable peer → try the next contact
+            Some(Some(parsed)) => parsed,
         };
         let data = parsed.get("data");
         let found = data
@@ -898,11 +910,32 @@ async fn try_remote_join(
             .and_then(|t| t.as_str())
             .unwrap_or("Discussion")
             .to_string();
-        let (sid, ttl, from) = (shared_id.clone(), title, contact.pseudo.clone());
+        // P2P may have been turned off while the claim was in flight.
+        if !state.p2p.enabled() {
+            return Ok(None);
+        }
+        let (sid, ttl, from, host) = (
+            shared_id.clone(),
+            title,
+            contact.pseudo.clone(),
+            contact.id.clone(),
+        );
+        // The operator joined through this host explicitly: it becomes the
+        // mirror's member, also for a mirror made before membership existed.
+        let gate = state.p2p.clone();
         let mirror_disc_id = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussions::ensure_mirror_by_shared_id(conn, &sid, &ttl, &from)
+                let on = gate.read();
+                if !*on {
+                    anyhow::bail!("P2P connections are off");
+                }
+                if !db::contacts::contact_id_is_accepted(conn, &host)? {
+                    anyhow::bail!("the host contact is no longer accepted");
+                }
+                crate::db::discussions::ensure_mirror_with_host(
+                    conn, &sid, &ttl, &from, &host, true,
+                )
             })
             .await?;
         let (mdid, a, s) = (
@@ -2266,6 +2299,13 @@ pub async fn claim_by_token(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
+    // Peers are identified only by their code: off unless P2P is enabled,
+    // answered exactly like an unknown code.
+    if !state.p2p.enabled() {
+        return Json(ApiResponse::err(
+            "unknown peer (invite code not in contacts)",
+        ));
+    }
 
     // 1. Authenticate the caller: the invite code must match a known contact
     //    (same trust model as the WS Presence handshake — no anonymous claims).
@@ -2318,9 +2358,16 @@ pub async fn claim_by_token(
     //    `share` handler — set/keep shared_id, append the contact, persist.
     let cid = caller.id.clone();
     let did = disc_id.clone();
+    let gate = state.p2p.clone();
     let shared = state
         .db
         .with_conn(move |conn| {
+            // Held through the write: P2P cannot turn off, nor the caller be
+            // revoked, between this check and the sharing update.
+            let on = gate.read();
+            if !*on || !crate::db::contacts::contact_id_is_accepted(conn, &cid)? {
+                anyhow::bail!("unknown peer (invite code not in contacts)");
+            }
             let disc = crate::db::discussions::get_discussion(conn, &did)?
                 .ok_or_else(|| anyhow::anyhow!("discussion vanished"))?;
             let shared_id = disc
@@ -2405,6 +2452,13 @@ pub async fn fetch_file(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
+    // Peers are identified only by their code: off unless P2P is enabled,
+    // answered exactly like an unknown code.
+    if !state.p2p.enabled() {
+        return Json(ApiResponse::err(
+            "unknown peer (invite code not in contacts)",
+        ));
+    }
     // Authenticate the caller (must be a known contact) — and KEEP its id:
     // being a contact is not enough to read arbitrary files (see below).
     let caller = match state
@@ -2487,17 +2541,117 @@ pub async fn fetch_file(
             data_base64: None,
         }));
     };
-    let bytes = match tokio::fs::read(&disk_path).await {
+    let not_found = || {
+        Json(ApiResponse::ok(FetchFileResponse {
+            found: false,
+            filename: None,
+            mime_type: None,
+            data_base64: None,
+        }))
+    };
+    let caller_code = req.from_invite_code.trim().to_string();
+    // Revoking the caller, removing it from the discussion or turning P2P
+    // off cancels the read.
+    let read = tokio::select! {
+        read = tokio::fs::read(&disk_path) => read,
+        _ = until_fetch_unentitled(&state, &caller_code, &cf.discussion_id) => return not_found(),
+    };
+    let bytes = match read {
         Ok(b) => b,
         Err(e) => return Json(ApiResponse::err(format!("read error: {e}"))),
     };
-    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Json(ApiResponse::ok(FetchFileResponse {
+    // Encoded first; the last check and the hand-off then happen together.
+    let response = FetchFileResponse {
         found: true,
         filename: Some(cf.filename),
         mime_type: Some(cf.mime_type),
-        data_base64: Some(data_base64),
-    }))
+        data_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+    };
+    match fetch_release(&state, &caller_code, &cf.discussion_id, response).await {
+        Some(response) => Json(ApiResponse::ok(response)),
+        None => not_found(),
+    }
+}
+
+/// Still an accepted contact listed in the discussion's `shared_with`.
+fn caller_entitled(
+    conn: &rusqlite::Connection,
+    caller_code: &str,
+    disc_id: &str,
+) -> anyhow::Result<bool> {
+    let crate::db::contacts::InviteAuth::Accepted(caller) =
+        crate::db::contacts::authenticate_invite_code(conn, caller_code)?
+    else {
+        return Ok(false);
+    };
+    let members: Option<String> = conn
+        .query_row(
+            "SELECT shared_with_json FROM discussions WHERE id = ?1",
+            [disc_id],
+            |row| row.get(0),
+        )
+        .ok();
+    let members: Vec<String> = members
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    Ok(members.contains(&caller.id))
+}
+
+/// The caller may still receive files of `disc_id`: P2P on, still an
+/// accepted contact, and still listed in the discussion's `shared_with`.
+async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> bool {
+    if !state.p2p.enabled() {
+        return false;
+    }
+    let (code, did, gate) = (
+        caller_code.to_owned(),
+        disc_id.to_owned(),
+        state.p2p.clone(),
+    );
+    let entitled = state
+        .db
+        .with_conn(move |conn| {
+            if !*gate.read() {
+                return Ok(false);
+            }
+            caller_entitled(conn, &code, &did)
+        })
+        .await
+        .unwrap_or(false);
+    // The DB may have been busy while P2P was turned off.
+    entitled && state.p2p.enabled()
+}
+
+/// Hand `response` over only if the caller is entitled, checked under the
+/// gate and the DB lock together: neither P2P going off nor a revocation can
+/// land between this check and the release.
+async fn fetch_release(
+    state: &AppState,
+    caller_code: &str,
+    disc_id: &str,
+    response: FetchFileResponse,
+) -> Option<FetchFileResponse> {
+    let (code, did, gate) = (
+        caller_code.to_owned(),
+        disc_id.to_owned(),
+        state.p2p.clone(),
+    );
+    state
+        .db
+        .with_conn(move |conn| {
+            let on = gate.read();
+            Ok((*on && caller_entitled(conn, &code, &did)?).then_some(response))
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Resolves once the caller loses its entitlement (checked every 250 ms).
+async fn until_fetch_unentitled(state: &AppState, caller_code: &str, disc_id: &str) {
+    while fetch_entitled(state, caller_code, disc_id).await {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 #[cfg(test)]
@@ -2538,10 +2692,243 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_is_released_only_while_the_caller_stays_entitled() {
+        let state = make_state_with_disc("d-ent-1").await;
+        state.p2p.set(true);
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-ent".into(),
+                        pseudo: "peer".into(),
+                        avatar_email: None,
+                        kronn_url: "http://peer.local:3140".into(),
+                        invite_code: "kr-inv-ent".into(),
+                        status: "accepted".into(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )?;
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-ent-1",
+                    "shared-ent",
+                    &["c-ent".to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+
+        // A read in flight is cancelled once membership is removed.
+        let cancelled = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = std::future::pending::<()>() => false,
+                    _ = until_fetch_unentitled(&state, "kr-inv-ent", "d-ent-1") => true,
+                }
+            })
+        };
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-ent-1",
+                    "shared-ent",
+                    &[],
+                )
+            })
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(2), cancelled)
+            .await
+            .expect("the transfer is cancelled")
+            .unwrap());
+        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+
+        // P2P off and a deleted contact deny as well.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-ent-1",
+                    "shared-ent",
+                    &["c-ent".to_string()],
+                )
+            })
+            .await
+            .unwrap();
+        state.p2p.set(false);
+        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+        state.p2p.set(true);
+        state
+            .db
+            .with_conn(|conn| crate::db::contacts::delete_contact(conn, "c-ent"))
+            .await
+            .unwrap();
+        assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+    }
+
+    #[tokio::test]
+    async fn the_final_file_check_queued_behind_a_busy_db_respects_p2p_turned_off() {
+        let state = make_state_with_disc("d-busy-1").await;
+        state.p2p.set(true);
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-busy".into(),
+                        pseudo: "peer".into(),
+                        avatar_email: None,
+                        kronn_url: "http://peer.local:3140".into(),
+                        invite_code: "kr-inv-busy".into(),
+                        status: "accepted".into(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )?;
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-busy-1",
+                    "shared-busy",
+                    &["c-busy".to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let db = state.db.clone();
+        let busy = tokio::spawn(async move {
+            let _ = db
+                .with_conn(|_| {
+                    std::thread::sleep(Duration::from_millis(600));
+                    Ok(())
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let check = {
+            let state = state.clone();
+            tokio::spawn(async move { fetch_entitled(&state, "kr-inv-busy", "d-busy-1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.p2p.set(false);
+        busy.await.unwrap();
+        assert!(!check.await.unwrap(), "no bytes once P2P is off");
+    }
+
+    #[tokio::test]
+    async fn the_file_is_handed_off_only_under_the_final_check() {
+        let state = make_state_with_disc("d-rel-1").await;
+        state.p2p.set(true);
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-rel".into(),
+                        pseudo: "peer".into(),
+                        avatar_email: None,
+                        kronn_url: "http://peer.local:3140".into(),
+                        invite_code: "kr-inv-rel".into(),
+                        status: "accepted".into(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )?;
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-rel-1",
+                    "shared-rel",
+                    &["c-rel".to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let response = || FetchFileResponse {
+            found: true,
+            filename: Some("doc.pdf".into()),
+            mime_type: Some("application/pdf".into()),
+            data_base64: Some("Qk9EWQ".into()),
+        };
+        assert!(fetch_release(&state, "kr-inv-rel", "d-rel-1", response())
+            .await
+            .is_some());
+
+        // P2P turned off while the release waits for the DB: nothing leaves.
+        let db = state.db.clone();
+        let busy = tokio::spawn(async move {
+            let _ = db
+                .with_conn(|_| {
+                    std::thread::sleep(Duration::from_millis(600));
+                    Ok(())
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let release = {
+            let state = state.clone();
+            tokio::spawn(
+                async move { fetch_release(&state, "kr-inv-rel", "d-rel-1", response()).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.p2p.set(false);
+        busy.await.unwrap();
+        assert!(release.await.unwrap().is_none());
+
+        // A revoked membership: nothing leaves either.
+        state.p2p.set(true);
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-rel-1",
+                    "shared-rel",
+                    &[],
+                )
+            })
+            .await
+            .unwrap();
+        assert!(fetch_release(&state, "kr-inv-rel", "d-rel-1", response())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn the_peer_routes_answer_like_an_unknown_code_while_p2p_is_off() {
+        let state = make_state_with_disc("d-off-1").await;
+        let resp = fetch_file(
+            State(state.clone()),
+            Json(FetchFileRequest {
+                file_id: "f-1".into(),
+                from_invite_code: "kr-inv-abc".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.0.error.as_deref(),
+            Some("unknown peer (invite code not in contacts)")
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_file_is_scoped_to_discussions_shared_with_the_caller() {
         // Regression (Codex audit 2026-07-12): any accepted contact could
         // read ANY context file by id.
         let state = make_state_with_disc("d-fetch-1").await;
+        state.p2p.set(true);
         let tmp = tempfile::TempDir::new().unwrap();
         let blob = tmp.path().join("doc.pdf");
         std::fs::write(&blob, b"BYTES").unwrap();
@@ -2562,17 +2949,11 @@ mod tests {
                         updated_at: chrono::Utc::now(),
                     },
                 )?;
-                crate::db::discussions::insert_federated_context_file(
-                    conn,
-                    "f-1",
-                    "d-fetch-1",
-                    "m-1",
-                    "doc.pdf",
-                    "application/pdf",
-                    5,
-                    &blob_str,
-                )
-                .map_err(|e| anyhow::anyhow!(e))?;
+                conn.execute(
+                    "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path, message_id)
+                     VALUES ('f-1', 'd-fetch-1', 'doc.pdf', 'application/pdf', 5, '', 0, ?1, 'm-1')",
+                    [&blob_str],
+                )?;
                 Ok(())
             })
             .await

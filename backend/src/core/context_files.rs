@@ -164,6 +164,105 @@ pub fn save_file_to_disk(id: &str, filename: &str, data: &[u8]) -> Result<String
     Ok(path.to_string_lossy().to_string())
 }
 
+/// A peer's attachment written to a staging file in its discussion's own
+/// directory, published under its full file id only once authorized. The
+/// staging file is removed when the value is dropped unpublished.
+#[derive(Debug)]
+pub struct StagedFile {
+    staging: std::path::PathBuf,
+    target: std::path::PathBuf,
+}
+
+impl StagedFile {
+    /// Atomically move the bytes to their final name; never overwrites.
+    pub fn publish(self) -> Result<String> {
+        if self.target.exists() {
+            bail!("{} already exists", self.target.display());
+        }
+        std::fs::rename(&self.staging, &self.target)?;
+        Ok(self.target.to_string_lossy().to_string())
+    }
+
+    pub fn target(&self) -> &std::path::Path {
+        &self.target
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.staging);
+    }
+}
+
+/// An id a peer sent, usable as one path component.
+fn safe_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// `<file id>_<sanitized name>`: the full id keeps names collision-free.
+pub fn federated_file_name(file_id: &str, filename: &str) -> Result<String> {
+    if !safe_component(file_id) {
+        bail!("invalid file id");
+    }
+    let name: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_start_matches('.')
+        .chars()
+        .take(100)
+        .collect();
+    let name = if name.is_empty() {
+        "file".to_string()
+    } else {
+        name
+    };
+    Ok(format!("{file_id}_{name}"))
+}
+
+/// Stage a peer's attachment under `<base>/federated/<discussion id>/`.
+pub fn stage_federated_file_in(
+    base: &std::path::Path,
+    discussion_id: &str,
+    file_id: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<StagedFile> {
+    if !safe_component(discussion_id) {
+        bail!("invalid discussion id");
+    }
+    let dir = base.join("federated").join(discussion_id);
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(federated_file_name(file_id, filename)?);
+    let staged = StagedFile {
+        staging: dir.join(format!(".staging-{}", uuid::Uuid::new_v4())),
+        target,
+    };
+    std::fs::write(&staged.staging, data)?;
+    Ok(staged)
+}
+
+/// `stage_federated_file_in` under the persistent context-file store.
+pub fn stage_federated_file(
+    discussion_id: &str,
+    file_id: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<StagedFile> {
+    let base = crate::core::config::config_dir()?.join("context-files");
+    stage_federated_file_in(&base, discussion_id, file_id, filename, data)
+}
+
 /// Save image bytes to disk. Returns the absolute path.
 /// Fallback when no project work_dir is available.
 pub fn save_image_to_disk(id: &str, ext: &str, data: &[u8]) -> Result<String> {
@@ -1248,5 +1347,54 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Failed to open spreadsheet"), "got {err}");
+    }
+}
+
+#[cfg(test)]
+mod federated_storage_tests {
+    use super::*;
+
+    #[test]
+    fn ids_with_the_same_prefix_never_share_a_file() {
+        let base = tempfile::TempDir::new().unwrap();
+        let first =
+            stage_federated_file_in(base.path(), "disc-a", "abcdefgh-1111", "doc.pdf", b"one")
+                .unwrap()
+                .publish()
+                .unwrap();
+        let second =
+            stage_federated_file_in(base.path(), "disc-a", "abcdefgh-2222", "doc.pdf", b"two")
+                .unwrap()
+                .publish()
+                .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        // The same full id never overwrites a published file.
+        let again =
+            stage_federated_file_in(base.path(), "disc-a", "abcdefgh-1111", "doc.pdf", b"evil")
+                .unwrap();
+        assert!(again.publish().is_err());
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+    }
+
+    #[test]
+    fn an_unpublished_staging_file_is_removed_and_ids_cannot_escape() {
+        let base = tempfile::TempDir::new().unwrap();
+        let staged = stage_federated_file_in(base.path(), "disc-a", "f-1", "x.txt", b"x").unwrap();
+        let target = staged.target().to_path_buf();
+        drop(staged);
+        let dir = base.path().join("federated").join("disc-a");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing left behind"
+        );
+        assert!(!target.exists());
+        assert!(stage_federated_file_in(base.path(), "../up", "f", "x", b"x").is_err());
+        assert!(stage_federated_file_in(base.path(), "d", "../f", "x", b"x").is_err());
+        assert_eq!(
+            federated_file_name("f", "../../etc/passwd").unwrap(),
+            "f__.._etc_passwd"
+        );
     }
 }

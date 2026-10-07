@@ -249,6 +249,49 @@ Release notes for 0.9.3 and earlier are available in the
     again, and the tech-debt registry lists open items only, each with its
     detail file, checked in CI (KT-1060, KT-1061).
 
+- Security: a web page the operator visits can no longer open
+  `ws://127.0.0.1:3140/api/ws` to read the event bus or inject chat messages
+  (KT-1033). The upgrade checks `Origin` against exact origins: the frontend
+  on the listening port (the desktop's runtime port included), the gateway
+  ports only under Docker, the configured domain, the Tauri webview, the dev
+  UI under `kronn start-dev` (which now follows `VITE_DEV_PORT` and keeps an
+  operator-set `KRONN_DEV_UI_URL`; Vite no longer falls back to another
+  port), and a new list of extra origins in
+  Settings > Identity for LAN or Tailscale names, checked with a full URL
+  parser. A page on another port gets 403, and a frontend still needs the
+  token when auth is on, unless strict localhost is off (unchanged rule).
+  The frontend now sends the token as a WebSocket subprotocol instead of
+  `?token=` in the URL, so no proxy log can hold it (`?token=` is still read
+  from older clients, and dropped from the backend span and the gateway
+  access log). Heartbeats are answered on their own socket only.
+- Docker detection reads `KRONN_IN_DOCKER` only when it is `1` or `true`.
+- Security: P2P federation is now a setting, "Accept P2P connections", off by
+  default and never turned on by the upgrade (KT-1033). A peer is identified
+  only by its invite code, so anyone who knows an accepted contact's code and
+  can reach the port could impersonate it until pairing secrets arrive in
+  0.15. While it is off, `/api/ws` refuses every non-frontend client, the
+  peer routes (`claim-by-token`, `fetch-file`) answer like an unknown code,
+  no contact is dialled, pinged or asked to resolve a join code (the join
+  says P2P is off), and an attachment transfer in flight is cancelled. The contacts panel says why contacts are offline
+  and enables P2P in one click. When it is on, only an accepted contact is
+  admitted, checked again at every frame in both directions and every few
+  seconds: deleting or refusing a contact cuts its connection. A shared
+  discussion travels only between its members (the contacts it was shared
+  with, or on a mirror its host): another accepted contact never receives
+  it and cannot write into it or ask to sync it, even knowing its id. A
+  peer's attachment must name a message of that same discussion; it is
+  downloaded to a staging file in the discussion's own folder, under its
+  full file id, and published only if the sender is still authorized at
+  that moment. A file served to a peer is checked again right before its
+  bytes leave, and the transfer stops if the contact is revoked, removed
+  from the discussion or P2P is turned off. Turning P2P off also stops
+  connections still being set up and join-code claims in flight. A
+  mirror joined before this release has no recorded host: join it again
+  with its code to resume syncing. An unknown
+  code becomes a contact request (shown as "request", capped and expiring,
+  never dialled or pinged until you add its code) and counts toward the ban,
+  unadmitted sockets are capped per address, and contact addresses must be
+  a bare host and port, requested without following redirects.
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

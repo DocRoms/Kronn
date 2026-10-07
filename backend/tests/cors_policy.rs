@@ -71,7 +71,12 @@ async fn without_a_domain_only_local_origins_are_allowed() {
     let app = router(None);
     assert_allowed(&app, &format!("http://localhost:{PORT}")).await;
     assert_allowed(&app, &format!("http://127.0.0.1:{PORT}")).await;
-    assert_allowed(&app, "http://localhost:3141").await;
+    // The nginx gateway ports belong to the Docker deployment only (KT-1033).
+    if kronn::core::env::is_docker() {
+        assert_allowed(&app, "http://localhost:3141").await;
+    } else {
+        assert_refused(&app, "http://localhost:3141").await;
+    }
     for foreign in [
         "https://evil.example",
         "http://localhost:9999",
