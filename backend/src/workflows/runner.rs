@@ -2447,17 +2447,17 @@ async fn execute_run_body(
                     threshold: resolved_guards.timeout_seconds,
                     actual: actual_secs,
                 });
-                if matches!(step.step_type, StepType::BatchQuickPrompt) {
-                    if let Err(error) = super::cancellation::cancel_run_tree(
-                        &state,
-                        &run.id,
-                        super::cancellation::CancellationScope::DescendantsOnly,
-                        "workflow_timeout_guard",
-                    )
-                    .await
-                    {
-                        tracing::error!(run_id = %run.id, "Unable to cancel timed-out batch descendants: {error}");
-                    }
+                // Every step kind: the dropped executor may have left a child
+                // row (sub-workflow, batch) that nothing will run any more.
+                if let Err(error) = super::cancellation::cancel_run_tree(
+                    &state,
+                    &run.id,
+                    super::cancellation::CancellationScope::DescendantsOnly,
+                    "workflow_timeout_guard",
+                )
+                .await
+                {
+                    tracing::error!(run_id = %run.id, "Unable to cancel timed-out descendants: {error}");
                 }
                 stopped_by_guard = true;
                 StepOutcome {
@@ -3748,7 +3748,7 @@ pub(crate) async fn claim_interrupted_run_row(
     run: &mut WorkflowRun,
 ) -> Result<()> {
     let id = run.id.clone();
-    try_claim_interrupted_run_row(state, run)
+    try_claim_interrupted_run_row(state, run, None)
         .await?
         .map_err(|reason| anyhow::anyhow!("Run {id} cannot resume: {reason}"))
 }
@@ -3756,10 +3756,12 @@ pub(crate) async fn claim_interrupted_run_row(
 /// Claims an `Interrupted` run, its concurrency key and resume trail included,
 /// in the same closure as the admission check. `Ok(Err(reason))`: the
 /// workflow's concurrency limit refused it; `run` is then left unchanged, so
-/// the caller may wait and try again.
+/// the caller may wait and try again. `deadline`: the earliest timeout the
+/// runners above a sub-workflow child enforce; past it the claim is refused.
 pub(crate) async fn try_claim_interrupted_run_row(
     state: &AppState,
     run: &mut WorkflowRun,
+    deadline: Option<chrono::DateTime<Utc>>,
 ) -> Result<std::result::Result<(), String>> {
     use anyhow::anyhow;
     if run.status != RunStatus::Interrupted {
@@ -3776,6 +3778,9 @@ pub(crate) async fn try_claim_interrupted_run_row(
         .db
         .with_conn(move |conn| {
             if candidate.run_type == "subworkflow" {
+                if let Some(reason) = super::concurrency::past_deadline(deadline) {
+                    anyhow::bail!("Run {} cannot resume: {reason}", candidate.id);
+                }
                 if let Some(reason) = super::concurrency::parent_refuses_children(
                     conn,
                     candidate.parent_run_id.as_deref(),

@@ -166,14 +166,28 @@ pub fn parent_refuses_children(
     })
 }
 
+/// Refuses a child admission or resume that runs past `deadline`, the
+/// earliest timeout the runners above it enforce: their executors are gone
+/// even while the parent row still says Running.
+pub fn past_deadline(deadline: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    deadline
+        .filter(|deadline| chrono::Utc::now() >= *deadline)
+        .map(|deadline| format!("the run's timeout passed at {}", deadline.to_rfc3339()))
+}
+
 /// [`insert_run_within_limit`] for a sub-workflow child, refused outright
-/// (an error, not a limit refusal to wait on) once its parent stopped.
+/// (an error, not a limit refusal to wait on) once its parent stopped or
+/// its runners' deadline passed.
 pub fn insert_child_within_limit(
     conn: &Connection,
     workflow: &Workflow,
     run: &WorkflowRun,
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
 ) -> anyhow::Result<Result<(), String>> {
     let tx = conn.unchecked_transaction()?;
+    if let Some(reason) = past_deadline(deadline) {
+        anyhow::bail!("child not started: {reason}");
+    }
     if let Some(reason) = parent_refuses_children(&tx, run.parent_run_id.as_deref())? {
         anyhow::bail!("child not started: {reason}");
     }
