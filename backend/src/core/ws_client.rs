@@ -156,9 +156,14 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
 
                 // Update contact status to accepted (WS connection proves reachability)
                 let cid = contact.id.clone();
+                let gate = state.p2p.clone();
                 let _ = state
                     .db
                     .with_conn(move |conn| {
+                        let on = gate.read();
+                        if !*on {
+                            return Ok(false);
+                        }
                         crate::db::contacts::update_contact_status(conn, &cid, "accepted")
                     })
                     .await;

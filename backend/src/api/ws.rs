@@ -1143,6 +1143,7 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
         return None;
     }
     let peer = peer.clone();
+    let gate = state.p2p.clone();
     match msg {
         WsMessage::ChatMessage {
             shared_discussion_id,
@@ -1184,6 +1185,11 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             state
                 .db
                 .with_conn(move |conn| {
+                    // Held through the write: P2P cannot turn off mid-way.
+                    let on = gate.read();
+                    if !*on {
+                        return Ok(None);
+                    }
                     match peer.membership(conn, &sid)? {
                         None => return Ok(None),
                         Some(false) => return Ok(Some(false)),
@@ -1249,6 +1255,11 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             state
                 .db
                 .with_conn(move |conn| {
+                    // Held through the write: P2P cannot turn off mid-way.
+                    let on = gate.read();
+                    if !*on {
+                        return Ok(None);
+                    }
                     match peer.membership(conn, &sid)? {
                         None => return Ok(None),
                         Some(false) => return Ok(Some(false)),
@@ -1301,6 +1312,11 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
                 .with_conn(move |conn| {
                     // Any accepted contact may invite: the mirror records it
                     // as the host, its only member.
+                    // Held through the write: P2P cannot turn off mid-way.
+                    let on = gate.read();
+                    if !*on {
+                        return Ok(None);
+                    }
                     let Some(inviter) = peer.accepted_contact_id(conn)? else {
                         return Ok(None);
                     };
@@ -1352,6 +1368,10 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
                 state
                     .db
                     .with_conn(move |conn| {
+                        let on = gate.read();
+                        if !*on {
+                            return Ok(None);
+                        }
                         match peer.membership(conn, &sid)? {
                             None => return Ok(None),
                             // Not a member: handled like a file already held.
@@ -1446,9 +1466,16 @@ async fn record_contact_request(state: &AppState, invite_code: &str, peer_ip: Ip
         updated_at: now,
     };
     let pseudo = contact.pseudo.clone();
+    let gate = state.p2p.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::contacts::insert_contact_request(conn, &contact))
+        .with_conn(move |conn| {
+            let on = gate.read();
+            if !*on {
+                return Ok(false);
+            }
+            crate::db::contacts::insert_contact_request(conn, &contact)
+        })
         .await
     {
         Ok(true) => tracing::info!("WS: recorded a contact request from {pseudo} ({peer_ip})"),
@@ -2153,6 +2180,7 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn an_unknown_well_formed_code_is_charged_before_it_is_recorded() {
         let state = state();
+        state.p2p.set(true);
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 66, 0, 1));
         rate_limit::reset(ip);
         for n in 0..10 {
@@ -2173,6 +2201,7 @@ mod origin_and_admission_tests {
     #[tokio::test]
     async fn requests_beyond_the_quota_are_not_recorded() {
         let state = state();
+        state.p2p.set(true);
         for n in 0..(crate::db::contacts::MAX_PENDING_REQUESTS + 5) {
             // A fresh IP each time: the quota holds across IPs.
             let ip = IpAddr::V4(std::net::Ipv4Addr::new(
@@ -2556,6 +2585,50 @@ mod origin_and_admission_tests {
                 .is_err()
         );
         assert!(!target.exists(), "no publication starts after P2P is off");
+    }
+
+    #[tokio::test]
+    async fn a_chat_write_queued_behind_a_busy_db_is_refused_once_p2p_is_off() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        let frame = WsMessage::ChatMessage {
+            shared_discussion_id: "shared-a".into(),
+            message_id: "late-msg".into(),
+            from_pseudo: "A".into(),
+            from_avatar_email: None,
+            from_invite_code: code.into(),
+            content: "late".into(),
+            timestamp: 1,
+            role: crate::models::MessageRole::User,
+            channel: crate::models::MessageChannel::Main,
+            agent_type: None,
+            target_agents: vec![],
+            targets: vec![],
+            reply_to_message_id: None,
+        };
+        let busy = hold_db(&state, 600).await;
+        let ingest = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                ingest_relayable_frame(&state, &frame, &PeerAuth::InviteCode(code.into())).await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.p2p.set(false);
+        busy.await.unwrap();
+        assert_eq!(ingest.await.unwrap(), Ingest::Revoked);
+        let stored = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE id = 'late-msg'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "nothing written once P2P is off");
     }
 
     #[test]
