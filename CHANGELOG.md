@@ -205,6 +205,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The launch card's step details now show the model and efforts of the
+  step's tier (economy or reasoning), not always those of the default tier
+  (KT-1095).
 - Audit quick wins:
   - Translations with a repeated placeholder (for example "2 dossiers
     sélectionnés") no longer show a literal `{1}` (KT-1053).
