@@ -2,16 +2,9 @@ import { useState } from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
-import type { AutoDisabledWorkflow, AutoDisableReason } from '../../types/generated';
+import type { AutoDisabledWorkflow } from '../../types/generated';
+import { AUTO_DISABLE_REASON_KEY } from '../../lib/autoDisableReason';
 import './AutoDisabledReview.css';
-
-/** i18n key of each reason Kronn records when it disables a workflow itself. */
-export const AUTO_DISABLE_REASON_KEY: Record<AutoDisableReason, string> = {
-  agent_edit: 'wf.autoDisabled.reason.agent_edit',
-  dependency_edited_by_agent: 'wf.autoDisabled.reason.dependency_edited_by_agent',
-  created_by_agent: 'wf.autoDisabled.reason.created_by_agent',
-  imported: 'wf.autoDisabled.reason.imported',
-};
 
 /** A Cron or Tracker trigger runs on its own once enabled: always confirmed. */
 function isScheduled(item: AutoDisabledWorkflow): boolean {

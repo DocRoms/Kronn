@@ -27,7 +27,8 @@ import {
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
-import { AutoDisabledReview, AUTO_DISABLE_REASON_KEY } from '../components/workflows/AutoDisabledReview';
+import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
+import { AUTO_DISABLE_REASON_KEY } from '../lib/autoDisableReason';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
