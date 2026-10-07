@@ -149,7 +149,10 @@ mod tests {
         for uri in ["/api", "/api/", "/api/nope", "/api/projects/unknown/thing"] {
             let (status, body) = get(dist.path(), uri).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
-            assert!(!body.contains("Kronn"), "{uri} must not answer with the app");
+            assert!(
+                !body.contains("Kronn"),
+                "{uri} must not answer with the app"
+            );
         }
     }
 
@@ -183,7 +186,11 @@ mod tests {
         std::fs::create_dir(&dist_dir).unwrap();
         std::fs::write(dist_dir.join("index.html"), INDEX).unwrap();
 
-        for uri in ["/../secret.txt", "/%2e%2e/secret.txt", "/assets/../../secret.txt"] {
+        for uri in [
+            "/../secret.txt",
+            "/%2e%2e/secret.txt",
+            "/assets/../../secret.txt",
+        ] {
             let (_, body) = get(&dist_dir, uri).await;
             assert!(!body.contains("top secret"), "{uri}");
         }
