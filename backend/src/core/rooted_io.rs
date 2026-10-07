@@ -222,15 +222,14 @@ mod imp {
 
     /// A fresh temporary file in `dir`, created exclusively under a random
     /// name; a collision picks another name and never touches the existing one.
-    fn create_temp(dir: &OwnedFd) -> io::Result<(File, CString)> {
+    fn create_temp(dir: &OwnedFd, mode: libc::c_uint) -> io::Result<(File, CString)> {
         for _ in 0..super::TEMP_ATTEMPTS {
             let tmp = cstring(super::temp_name().as_bytes())?;
-            // Owner-only until its final mode is applied.
             match open_at_mode(
                 dir,
                 &tmp,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-                0o600,
+                mode,
             ) {
                 Ok(fd) => return Ok((File::from(fd), tmp)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -258,18 +257,23 @@ mod imp {
                 return Err(super::refused("the destination is not a regular file"));
             }
         }
-        // A replaced regular file keeps its permission bits; a new file (or
-        // one replacing a link) gets the usual 0644.
-        let mode: libc::mode_t = match existing {
-            Some(st) if (st.st_mode & libc::S_IFMT) == libc::S_IFREG => st.st_mode & 0o777,
-            _ => 0o644,
+        // A replaced regular file keeps its permission bits: the temporary
+        // file starts owner-only and gets them before it is published. A new
+        // file (or one replacing a link) is created 0666 under the umask, like
+        // any file the process writes.
+        let kept: Option<libc::mode_t> = match existing {
+            Some(st) if (st.st_mode & libc::S_IFMT) == libc::S_IFREG => Some(st.st_mode & 0o777),
+            _ => None,
         };
+        let create_mode = if kept.is_some() { 0o600 } else { 0o666 };
         // Cleanup is armed only once the temporary file is ours.
-        let (mut file, tmp) = create_temp(&dir)?;
+        let (mut file, tmp) = create_temp(&dir, create_mode)?;
         let written = (|| {
-            // SAFETY: the descriptor is open and owned by `file`.
-            if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-                return Err(io::Error::last_os_error());
+            if let Some(mode) = kept {
+                // SAFETY: the descriptor is open and owned by `file`.
+                if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
             }
             file.write_all(bytes)?;
             // Content first, then the entry: a crash never publishes a
@@ -591,8 +595,6 @@ mod tests {
             append(root.path(), Path::new(name), b"+").unwrap();
             assert_eq!(mode(name), bits, "{name}");
         }
-        write(root.path(), Path::new("fresh"), b"x").unwrap();
-        assert_eq!(mode("fresh"), 0o644);
     }
 
     #[test]
