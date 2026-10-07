@@ -64,6 +64,8 @@ vi.mock('../../lib/api', () => ({
     triggerStream: vi.fn(),
     exportWorkflow: vi.fn(),
     importWorkflow: vi.fn(),
+    autoDisabled: vi.fn().mockResolvedValue([]),
+    reenable: vi.fn().mockResolvedValue([]),
   },
   skills: { list: vi.fn().mockResolvedValue([]), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   projects: { usedSkills: vi.fn().mockResolvedValue([]), usedSkillFile: vi.fn() },

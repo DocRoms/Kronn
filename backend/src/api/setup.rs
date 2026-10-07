@@ -2112,9 +2112,12 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 .to_string(),
         );
     }
+    // The validation reason of each workflow the restore turned off, recorded
+    // with it for the review panel (KT-1037).
     let mut workflows = Vec::new();
     for wf in &restored_workflows {
         let mut w = wf.clone();
+        let mut disabled_because = None;
         if let Err(reason) = crate::api::workflows::validate_exec_definition(&w)
             .and_then(|()| crate::api::workflows::validate_foreach_files(&w))
         {
@@ -2123,8 +2126,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 "Workflow « {} » importé désactivé, à revoir avant de le réactiver : {reason}",
                 w.name
             ));
+            disabled_because = Some(format!(
+                "restored from a backup, failed validation: {reason}"
+            ));
         }
-        workflows.push(w);
+        workflows.push((w, disabled_because));
     }
     let mut quick_execs = Vec::new();
     for qe in &restored_quick_execs {
@@ -2193,9 +2199,20 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             for c in &mcp_configs {
                 crate::db::mcps::insert_config(&tx, c).map_err(|e| fail("MCP config", e))?;
             }
-            for w in &workflows {
+            for (w, disabled_because) in &workflows {
                 if let Err(e) = crate::db::workflows::insert_workflow(&tx, w) {
                     tracing::warn!("Import workflow error: {e}");
+                    continue;
+                }
+                if let Some(summary) = disabled_because {
+                    crate::db::workflows::mark_auto_disabled(
+                        &tx,
+                        &w.id,
+                        crate::models::AutoDisableReason::Imported,
+                        "import",
+                        summary,
+                    )
+                    .map_err(|e| fail("workflow review record", e))?;
                 }
             }
             for c in &contacts {
@@ -4539,6 +4556,22 @@ mod tests {
             .unwrap();
         let unsafe_workflow = workflows.iter().find(|w| w.id == "wf-unsafe").unwrap();
         assert!(!unsafe_workflow.enabled, "imported disabled");
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        let record = records
+            .iter()
+            .find(|item| item.id == "wf-unsafe")
+            .expect("the restore's disable is listed for review");
+        assert_eq!(record.reason, crate::models::AutoDisableReason::Imported);
+        assert!(
+            record.summary.contains("failed validation"),
+            "{}",
+            record.summary
+        );
+        assert!(records.iter().all(|item| item.id != "wf-safe"));
         assert!(
             workflows
                 .iter()

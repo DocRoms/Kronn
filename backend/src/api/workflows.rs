@@ -2101,7 +2101,66 @@ pub async fn create(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    create_as(state, req, WorkflowWriter::from_bridge(&bridge)).await
+    let label = agent_label(&state, &bridge).await;
+    create_as_labeled(state, req, WorkflowWriter::from_bridge(&bridge), label).await
+}
+
+/// Who a bridge-token caller is, for the record of an automatic disable:
+/// the agent of the launch's discussion, else "an agent". `None` for a human.
+pub(crate) async fn agent_label(
+    state: &AppState,
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let caller = bridge.as_ref()?;
+    let discussion = caller.own_discussions.first().cloned();
+    let agent = match discussion {
+        Some(id) => state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT agent FROM discussions WHERE id = ?1",
+                        [&id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?)
+            })
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    Some(agent.unwrap_or_else(|| AN_AGENT.to_string()))
+}
+
+/// Who an automatic disable names when the agent is unknown.
+pub(crate) const AN_AGENT: &str = "an agent";
+
+/// Records why Kronn disabled these workflows on its own (KT-1037); a
+/// failure is logged, never surfaced: the disable itself already happened.
+pub(crate) async fn record_auto_disable(
+    state: &AppState,
+    ids: Vec<String>,
+    reason: AutoDisableReason,
+    by: String,
+    summary: String,
+) {
+    if ids.is_empty() {
+        return;
+    }
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            for id in &ids {
+                crate::db::workflows::mark_auto_disabled(conn, id, reason, &by, &summary)?;
+            }
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!("could not record why workflows were disabled: {error}");
+    }
 }
 
 /// `POST /api/workflows/agent-proposal` — an agent's `KRONN:WORKFLOW_READY`
@@ -2109,17 +2168,133 @@ pub async fn create(
 /// value waits for a human's approval in the editor.
 pub async fn create_agent_proposal(
     State(state): State<AppState>,
-    Json(req): Json<CreateWorkflowRequest>,
+    Json(mut req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    create_as(state, req, WorkflowWriter::Agent).await
+    // Accepting the proposal saves it; enabling it is a separate human step.
+    req.enabled = Some(false);
+    create_as_labeled(state, req, WorkflowWriter::Agent, Some(AN_AGENT.into())).await
 }
+
+/// `GET /api/workflows/auto-disabled` — workflows Kronn disabled on its own
+/// (agent edit or create, agent edit of a dependency, import) that no human
+/// has enabled since.
+pub async fn list_auto_disabled(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<Vec<AutoDisabledWorkflow>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    match state
+        .db
+        .with_read_conn(crate::db::workflows::list_auto_disabled)
+        .await
+    {
+        Ok(items) => Json(ApiResponse::ok(items)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+    }
+}
+
+/// `POST /api/workflows/reenable` — a human enables one workflow or several
+/// after review; each goes through the ordinary human update, which clears
+/// the record of why it was off. Refused for a bridge token.
+pub async fn reenable(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<ReenableWorkflowsRequest>,
+) -> Json<ApiResponse<Vec<Workflow>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    reenable_as_human(state, req.ids).await
+}
+
+pub(crate) async fn reenable_as_human(
+    state: AppState,
+    ids: Vec<String>,
+) -> Json<ApiResponse<Vec<Workflow>>> {
+    let mut enabled = Vec::with_capacity(ids.len());
+    for id in ids {
+        let request: UpdateWorkflowRequest =
+            match serde_json::from_value(serde_json::json!({"enabled": true})) {
+                Ok(request) => request,
+                Err(e) => return Json(ApiResponse::err(e.to_string())),
+            };
+        let Json(response) =
+            update_as(state.clone(), id.clone(), request, WorkflowWriter::Human).await;
+        match response.data {
+            Some(workflow) if response.success => enabled.push(workflow),
+            _ => {
+                return Json(ApiResponse::err(format!(
+                    "Workflow {id} could not be enabled: {}",
+                    response.error.unwrap_or_default()
+                )))
+            }
+        }
+    }
+    Json(ApiResponse::ok(enabled))
+}
+
+/// Why an agent cannot resume a disabled workflow's run.
+pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
+     be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
+
+/// Everything that decides what a workflow runs, where and when.
+fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
+    serde_json::json!({
+        "steps": wf.steps,
+        "on_failure": wf.on_failure,
+        "trigger": wf.trigger,
+        "exec_allowlist": wf.exec_allowlist,
+        "actions": wf.actions,
+        "safety": wf.safety,
+        "workspace_config": wf.workspace_config,
+        "guards": wf.guards,
+        "artifacts": wf.artifacts,
+        "variables": wf.variables,
+        "concurrency_limit": wf.concurrency_limit,
+        "concurrency_key": wf.concurrency_key,
+        "project_id": wf.project_id,
+        "project_scope": wf.project_scope,
+    })
+}
+
+/// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
+/// Tracker trigger would then run its content with no human in the loop.
+pub(crate) const AGENT_ENABLE_REFUSAL: &str = "Enabling a workflow is a human decision: \
+     ask the user to review it and click \"Enable\" in Kronn (Workflows). Workflows an agent \
+     creates or edits stay disabled until then.";
 
 pub(crate) async fn create_as(
     state: AppState,
     req: CreateWorkflowRequest,
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = create_written(state, req, writer).await;
+    let label = (writer == WorkflowWriter::Agent).then(|| AN_AGENT.to_string());
+    create_as_labeled(state, req, writer, label).await
+}
+
+/// [`create_as`] naming the agent for the record of its disabled workflow.
+pub(crate) async fn create_as_labeled(
+    state: AppState,
+    req: CreateWorkflowRequest,
+    writer: WorkflowWriter,
+    label: Option<String>,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = create_written(state.clone(), req, writer).await;
+    if writer == WorkflowWriter::Agent {
+        if let Some(created) = response.data.as_ref().filter(|wf| !wf.enabled) {
+            let by = label.unwrap_or_else(|| AN_AGENT.to_string());
+            record_auto_disable(
+                &state,
+                vec![created.id.clone()],
+                AutoDisableReason::CreatedByAgent,
+                by.clone(),
+                format!("created by {by}"),
+            )
+            .await;
+        }
+    }
     Json(with_awaiting_notice(response))
 }
 
@@ -2129,6 +2304,10 @@ async fn create_written(
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
     if writer == WorkflowWriter::Agent {
+        if req.enabled == Some(true) {
+            return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+        }
+        req.enabled = Some(false);
         clear_human_approvals(&mut req.steps);
         clear_human_approvals(&mut req.on_failure);
     }
@@ -2435,7 +2614,8 @@ pub async fn update(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    update_as(state, id, req, WorkflowWriter::from_bridge(&bridge)).await
+    let label = agent_label(&state, &bridge).await;
+    update_as_labeled(state, id, req, WorkflowWriter::from_bridge(&bridge), label).await
 }
 
 pub(crate) async fn update_as(
@@ -2444,7 +2624,19 @@ pub(crate) async fn update_as(
     req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = update_written(state, id, req, writer).await;
+    let label = (writer == WorkflowWriter::Agent).then(|| AN_AGENT.to_string());
+    update_as_labeled(state, id, req, writer, label).await
+}
+
+/// [`update_as`] naming the agent for the record of a disable it caused.
+pub(crate) async fn update_as_labeled(
+    state: AppState,
+    id: String,
+    req: UpdateWorkflowRequest,
+    writer: WorkflowWriter,
+    label: Option<String>,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = update_written(state, id, req, writer, label).await;
     Json(with_awaiting_notice(response))
 }
 
@@ -2453,6 +2645,7 @@ async fn update_written(
     id: String,
     mut req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
+    label: Option<String>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -2469,6 +2662,13 @@ async fn update_written(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if writer == WorkflowWriter::Agent && req.enabled == Some(true) && !existing.enabled {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    // An agent's change to what an enabled workflow executes would run under
+    // the human's earlier activation: compared below, it disables the workflow.
+    let agent_guard = (writer == WorkflowWriter::Agent && existing.enabled)
+        .then(|| execution_fingerprint(&existing));
     if let Some(steps) = req.steps.as_mut() {
         drop_foreign_fields(steps);
     }
@@ -2653,7 +2853,7 @@ async fn update_written(
         }
     }
 
-    let updated = Workflow {
+    let mut updated = Workflow {
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -2678,6 +2878,26 @@ async fn update_written(
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
+    let was_enabled = agent_guard.is_some();
+    let mut auto_disable_summary = None;
+    if let Some(before) = agent_guard {
+        let after = execution_fingerprint(&updated);
+        if before != after {
+            updated.enabled = false;
+            let changed: Vec<&str> = before
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, value)| after.get(key.as_str()) != Some(*value))
+                .map(|(key, _)| key.as_str())
+                .collect();
+            let by = label.clone().unwrap_or_else(|| AN_AGENT.to_string());
+            auto_disable_summary = Some((
+                by.clone(),
+                format!("{} changed by {by}", changed.join(", ")),
+            ));
+        }
+    }
 
     if let Err(e) = crate::workflows::concurrency::validate_key(
         updated.concurrency_key.as_deref(),
@@ -2729,12 +2949,50 @@ async fn update_written(
     }
 
     let w = updated.clone();
+    // A human turning it on has reviewed it: the record of why Kronn turned
+    // it off goes.
+    let clear_record = updated.enabled && writer == WorkflowWriter::Human;
+    let by_agent = writer == WorkflowWriter::Agent;
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &w))
+        .with_conn(move |conn| {
+            let saved = if by_agent {
+                crate::db::workflows::update_workflow_as_agent(conn, &w)?
+            } else {
+                crate::db::workflows::update_workflow(conn, &w)?
+            };
+            if saved && clear_record {
+                crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
+            }
+            Ok(saved)
+        })
         .await
     {
-        Ok(true) => Json(ApiResponse::ok(updated)),
+        Ok(true) => {
+            // The stored flag may have stayed off (see `update_workflow_as_agent`).
+            let mut updated = updated;
+            if by_agent {
+                let id = updated.id.clone();
+                if let Ok(Some(stored)) = state
+                    .db
+                    .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+                    .await
+                {
+                    updated.enabled = stored.enabled;
+                }
+            }
+            if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
+                record_auto_disable(
+                    &state,
+                    vec![updated.id.clone()],
+                    AutoDisableReason::AgentEdit,
+                    by,
+                    summary,
+                )
+                .await;
+            }
+            Json(ApiResponse::ok(updated))
+        }
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
         Ok(false) => Json(ApiResponse::err_coded(
@@ -3516,7 +3774,9 @@ async fn import_workflow_written(
         w.project_id = req.project_id.clone();
         w.created_at = now;
         w.updated_at = now;
-        w.enabled = true;
+        // ADR-005: a shared file must not arm its Cron/Tracker trigger on this
+        // instance; the operator enables it after review.
+        w.enabled = false;
         prepared.push(w);
     }
 
@@ -3593,22 +3853,60 @@ async fn import_workflow_written(
                     conn, &page, &revision, &datasets, None,
                 )?;
             }
+            // A bundled resource can shadow a shared `ref:` an enabled
+            // workflow already uses: that workflow goes off too.
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
+                crate::core::resource_refs::disable_workflows_naming(
+                    conn,
+                    "prompt",
+                    &qp.id,
+                    &[crate::core::repository_resources::ascii_slug(&qp.name)],
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!(
+                        "Quick Prompt « {} » created by import (shadows a shared reference)",
+                        qp.name
+                    ),
+                )?;
             }
             for mut qa in qas {
                 rebind_quick_api_config(conn, &mut qa, rebind_project.as_deref());
                 crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+                crate::core::resource_refs::disable_workflows_naming(
+                    conn,
+                    "qa",
+                    &qa.id,
+                    &[crate::core::repository_resources::ascii_slug(&qa.name)],
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!(
+                        "Quick API « {} » created by import (shadows a shared reference)",
+                        qa.name
+                    ),
+                )?;
             }
             for qe in &qes {
                 crate::db::quick_execs::insert_quick_exec(conn, qe)?;
             }
             let mut root_out: Option<Workflow> = None;
+            let bundle_name = prepared
+                .iter()
+                .find(|w| w.id == root_id_for_return)
+                .map(|w| w.name.clone())
+                .unwrap_or_default();
             for mut w in prepared {
                 // #9 — retarget ApiCall configs to this instance before insert.
                 rebind_api_configs(conn, &mut w.steps, rebind_project.as_deref());
                 rebind_api_configs(conn, &mut w.on_failure, rebind_project.as_deref());
                 crate::db::workflows::insert_workflow(conn, &w)?;
+                crate::db::workflows::mark_auto_disabled(
+                    conn,
+                    &w.id,
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!("imported from the file of « {bundle_name} »"),
+                )?;
                 if w.id == root_id_for_return {
                     root_out = Some(w);
                 }
@@ -4926,6 +5224,16 @@ fn parse_resume_interrupted_request(
 pub async fn resume_interrupted(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    payload: Bytes,
+) -> Json<ApiResponse<ResumeRunResponse>> {
+    resume_interrupted_as(state, run_id, WorkflowWriter::from_bridge(&bridge), payload).await
+}
+
+pub(crate) async fn resume_interrupted_as(
+    state: AppState,
+    run_id: String,
+    caller: WorkflowWriter,
     payload: Bytes,
 ) -> Json<ApiResponse<ResumeRunResponse>> {
     let retry_uncertain_effect = match parse_resume_interrupted_request(&payload) {
@@ -4967,6 +5275,12 @@ pub async fn resume_interrupted(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+
+    // A disabled workflow (an agent changed it since the interruption, or a
+    // human turned it off) resumes only at a human's request (KT-1037).
+    if caller == WorkflowWriter::Agent && !workflow.enabled {
+        return Json(ApiResponse::err(AGENT_RESUME_REFUSAL));
+    }
 
     // Validation + atomic claim — awaited, so the caller's answer reflects
     // whether THIS call won the run.
@@ -5166,7 +5480,14 @@ pub async fn get_run(
         .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
         .await
     {
-        Ok(Some(run)) => Json(ApiResponse::ok(run)),
+        Ok(Some(mut run)) => {
+            // Stored output may predate value-based scrubbing; the MCP
+            // `workflow_run_get` reads this route too.
+            for step in &mut run.step_results {
+                step.output = crate::core::redact::redact_stored_text(&step.output);
+            }
+            Json(ApiResponse::ok(run))
+        }
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Run not found",
@@ -8315,6 +8636,462 @@ mod tests {
             "empty QP vec should be omitted; got: {}",
             json
         );
+    }
+
+    /// The run detail (REST and MCP `workflow_run_get`) serves stored step
+    /// output through the stored-text redaction.
+    #[tokio::test]
+    async fn run_detail_redacts_stored_step_output() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("history");
+        wf.project_id = None;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let (_, mut run) = create_manual_run(
+            &state,
+            &wf.id,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        run.step_results = vec![serde_json::from_value(serde_json::json!({
+            "step_name": "call",
+            "status": "Failed",
+            "output": "HTTP 401 on GET https://u:pw0rdValue@api.example.com/x?credential=Qk7SecretValue9 — token=rawTokenValue42",
+            "duration_ms": 1
+        }))
+        .unwrap()];
+        let stored = run.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_run(conn, &stored))
+            .await
+            .unwrap();
+        let Json(served) =
+            get_run(State(state.clone()), Path((wf.id.clone(), run.id.clone()))).await;
+        let output = served.data.unwrap().step_results[0].output.clone();
+        for leaked in ["pw0rdValue", "Qk7SecretValue9", "rawTokenValue42"] {
+            assert!(!output.contains(leaked), "{leaked}: {output}");
+        }
+    }
+
+    async fn auto_disabled(state: &AppState) -> Vec<AutoDisabledWorkflow> {
+        state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap()
+    }
+
+    /// KT-1037: every automatic disable records why; a human re-enable
+    /// clears it; the re-enable route refuses a bridge token.
+    #[tokio::test]
+    async fn automatic_disables_record_why_and_a_human_reenable_clears_it() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "by-agent", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as_labeled(
+            state.clone(),
+            request,
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let created = created.data.unwrap();
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].reason, AutoDisableReason::CreatedByAgent);
+        assert_eq!(listed[0].disabled_by, "Codex");
+        assert_eq!(listed[0].summary, "created by Codex");
+
+        let bridge = Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+            own_run: None,
+        }));
+        let Json(refused) = reenable(
+            State(state.clone()),
+            bridge.clone(),
+            Json(ReenableWorkflowsRequest {
+                ids: vec![created.id.clone()],
+            }),
+        )
+        .await;
+        assert!(!refused.success, "a bridge token cannot re-enable");
+        let Json(refused_list) = list_auto_disabled(State(state.clone()), bridge).await;
+        assert!(!refused_list.success, "nor list what to re-enable");
+
+        let Json(enabled) = reenable(
+            State(state.clone()),
+            None,
+            Json(ReenableWorkflowsRequest {
+                ids: vec![created.id.clone()],
+            }),
+        )
+        .await;
+        assert!(enabled.success, "{:?}", enabled.error);
+        assert!(enabled.data.unwrap()[0].enabled);
+        assert!(
+            auto_disabled(&state).await.is_empty(),
+            "the human re-enable clears the record"
+        );
+
+        let swap: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"b": 2}}]
+        }))
+        .unwrap();
+        let Json(edited) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            swap,
+            WorkflowWriter::Agent,
+            Some("Claude".into()),
+        )
+        .await;
+        assert!(edited.success, "{:?}", edited.error);
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed[0].reason, AutoDisableReason::AgentEdit);
+        assert_eq!(listed[0].summary, "steps changed by Claude");
+
+        let mut wf = mk_workflow_for_export("imported");
+        wf.project_id = None;
+        let mut emit = mk_step("emit", StepType::JsonData);
+        emit.json_data_payload = Some(serde_json::json!({"a": 1}));
+        wf.steps = vec![emit];
+        let content = serde_json::to_string(&WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: wf,
+            referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
+            referenced_workflows: vec![],
+            redacted_fields: vec![],
+        })
+        .unwrap();
+        let Json(imported) = import_workflow(
+            State(state.clone()),
+            None,
+            Json(ImportWorkflowRequest {
+                content,
+                project_id: None,
+            }),
+        )
+        .await;
+        assert!(imported.success, "{:?}", imported.error);
+        let imported = imported.data.unwrap();
+        let record = auto_disabled(&state)
+            .await
+            .into_iter()
+            .find(|item| item.id == imported.id)
+            .expect("the import is listed");
+        assert_eq!(record.reason, AutoDisableReason::Imported);
+        assert_eq!(record.disabled_by, "import");
+        assert!(record.summary.contains("imported"), "{}", record.summary);
+    }
+
+    /// KT-1037: an agent's update that read `enabled = true` before a
+    /// concurrent disable (a dependency edited meanwhile) cannot write it
+    /// back; a human's update can.
+    #[tokio::test]
+    async fn an_agent_write_never_turns_a_stored_false_into_true() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("race");
+        wf.id = "wf-race".into();
+        wf.project_id = None;
+        wf.enabled = true;
+        let outcome = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf)?;
+                // The agent's request read the workflow while it was enabled…
+                let mut stale = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                stale.name = "renamed by the agent".into();
+                // …then a dependency edit disabled it before the agent's write.
+                conn.execute("UPDATE workflows SET enabled = 0 WHERE id = 'wf-race'", [])?;
+                crate::db::workflows::update_workflow_as_agent(conn, &stale)?;
+                let after_agent = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                crate::db::workflows::update_workflow(conn, &stale)?;
+                let after_human = crate::db::workflows::get_workflow(conn, "wf-race")?.unwrap();
+                Ok((after_agent, after_human))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !outcome.0.enabled,
+            "the stale enabled=true is not written back"
+        );
+        assert_eq!(outcome.0.name, "renamed by the agent");
+        assert!(outcome.1.enabled, "a human's write can");
+    }
+
+    /// KT-1037 / KT-1017: only a human turns a workflow on. An agent's
+    /// create lands disabled, its `enabled: true` is refused with a message
+    /// sending it to the human, and its new trigger on an enabled workflow
+    /// disables it.
+    #[tokio::test]
+    async fn an_agent_can_never_enable_a_workflow() {
+        let state = agent_state();
+        let request = |enabled: Option<bool>| -> CreateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": "agent-made", "project_id": null,
+                "trigger": {"type": "Cron", "schedule": "* * * * *"},
+                "enabled": enabled,
+                "variables": [{"name": "ticket", "label": "Ticket", "placeholder": "", "required": false}],
+                "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+            }))
+            .unwrap()
+        };
+        let Json(refused) =
+            create_as(state.clone(), request(Some(true)), WorkflowWriter::Agent).await;
+        assert!(!refused.success);
+        assert!(refused.error.unwrap().contains("human"));
+        let Json(created) = create_as(state.clone(), request(None), WorkflowWriter::Agent).await;
+        assert!(created.success, "{:?}", created.error);
+        let created = created.data.unwrap();
+        assert!(!created.enabled, "an agent's workflow lands disabled");
+
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(refused) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(
+            !refused.success,
+            "a bridge workflow_update with enabled:true is refused"
+        );
+        assert!(refused.error.unwrap().contains("Enable"));
+
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(human) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(human.success, "{:?}", human.error);
+        assert!(human.data.unwrap().enabled);
+
+        let retrigger: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Cron", "schedule": "*/5 * * * *"}
+        }))
+        .unwrap();
+        let Json(edited) = update_as(
+            state.clone(),
+            created.id.clone(),
+            retrigger,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(edited.success, "{:?}", edited.error);
+        assert!(
+            !edited.data.unwrap().enabled,
+            "an agent's new trigger is not armed"
+        );
+
+        // Re-enabled by the human, then the agent swaps the steps: the
+        // schedule must not run the new content under the old activation.
+        let enable: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let Json(human) = update_as(
+            state.clone(),
+            created.id.clone(),
+            enable,
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(human.data.unwrap().enabled);
+        let rename: UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"name": "renamed by agent"})).unwrap();
+        let Json(renamed) = update_as(
+            state.clone(),
+            created.id.clone(),
+            rename,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(
+            renamed.data.unwrap().enabled,
+            "a rename changes nothing that runs"
+        );
+        let swap: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"swapped": true}}]
+        }))
+        .unwrap();
+        let Json(swapped) = update_as(
+            state.clone(),
+            created.id.clone(),
+            swap,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(swapped.success, "{:?}", swapped.error);
+        assert!(
+            !swapped.data.unwrap().enabled,
+            "an agent's new steps on an enabled workflow need a human again"
+        );
+
+        for change in [
+            serde_json::json!({"concurrency_limit": 50}),
+            serde_json::json!({"concurrency_key": "{{ticket}}"}),
+        ] {
+            let enable: UpdateWorkflowRequest =
+                serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+            let Json(human) = update_as(
+                state.clone(),
+                created.id.clone(),
+                enable,
+                WorkflowWriter::Human,
+            )
+            .await;
+            assert!(human.data.unwrap().enabled);
+            let request: UpdateWorkflowRequest = serde_json::from_value(change.clone()).unwrap();
+            let Json(changed) = update_as(
+                state.clone(),
+                created.id.clone(),
+                request,
+                WorkflowWriter::Agent,
+            )
+            .await;
+            assert!(changed.success, "{change}: {:?}", changed.error);
+            assert!(
+                !changed.data.unwrap().enabled,
+                "an agent's concurrency change disables: {change}"
+            );
+        }
+    }
+
+    /// KT-1037: an agent cannot resume a run of a disabled workflow; a human
+    /// can try (the resume then goes through its own checks).
+    #[tokio::test]
+    async fn an_agent_cannot_resume_a_disabled_workflows_run() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("interrupted");
+        wf.project_id = None;
+        wf.enabled = false;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let mut run: WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-int", "workflow_id": wf.id, "status": "Interrupted",
+            "step_results": [], "tokens_used": 0, "started_at": "2026-01-01T00:00:00Z",
+            "run_type": "linear", "batch_total": 0, "batch_completed": 0,
+            "batch_failed": 0, "batch_no_response": 0, "state": {}
+        }))
+        .unwrap();
+        run.project_id = None;
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &run))
+            .await
+            .unwrap();
+        let Json(agent) = resume_interrupted_as(
+            state.clone(),
+            "run-int".into(),
+            WorkflowWriter::Agent,
+            Bytes::new(),
+        )
+        .await;
+        assert!(!agent.success);
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RESUME_REFUSAL));
+        let Json(human) = resume_interrupted_as(
+            state.clone(),
+            "run-int".into(),
+            WorkflowWriter::Human,
+            Bytes::new(),
+        )
+        .await;
+        assert_ne!(human.error.as_deref(), Some(AGENT_RESUME_REFUSAL));
+    }
+
+    /// KT-1037: a JSON import lands disabled, so its Cron never fires until
+    /// the operator enables it.
+    #[tokio::test]
+    async fn json_import_lands_disabled_and_the_scheduler_skips_it() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("cron-import");
+        wf.project_id = None;
+        wf.trigger = WorkflowTrigger::Cron {
+            schedule: "* * * * *".into(),
+        };
+        let mut emit = mk_step("emit", StepType::JsonData);
+        emit.json_data_payload = Some(serde_json::json!({"a": 1}));
+        wf.steps = vec![emit];
+        let content = serde_json::to_string(&WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: wf,
+            referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
+            referenced_workflows: vec![],
+            redacted_fields: vec![],
+        })
+        .unwrap();
+        let imported = import_workflow(
+            State(state.clone()),
+            None,
+            Json(ImportWorkflowRequest {
+                content,
+                project_id: None,
+            }),
+        )
+        .await
+        .0;
+        assert!(imported.success, "{:?}", imported.error);
+        let imported = imported.data.unwrap();
+        assert!(!imported.enabled, "an import must land disabled");
+
+        let engine = crate::workflows::WorkflowEngine::new(state.clone());
+        let runs = |id: String| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .with_conn(move |conn| crate::db::workflows::list_runs(conn, &id))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        let window = || chrono::Utc::now() - chrono::Duration::minutes(3);
+        engine.check_triggers_since(window()).await.unwrap();
+        assert_eq!(runs(imported.id.clone()).await, 0);
+
+        // Control: the same workflow, once enabled, is fired by the same tick.
+        let mut enabled = imported.clone();
+        enabled.enabled = true;
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &enabled))
+            .await
+            .unwrap();
+        engine.check_triggers_since(window()).await.unwrap();
+        assert_eq!(runs(imported.id.clone()).await, 1);
     }
 
     /// B and R5-05: a human import never carries an approval, an import

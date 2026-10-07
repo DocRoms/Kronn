@@ -205,6 +205,15 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The launch card's step details now show the model and efforts of the
+  step's tier (economy or reasoning), not always those of the default tier
+  (KT-1095).
+- An audit step retried after an attempt that did not report a token counter
+  no longer shows a cost estimate: the counter stays unknown in the step's
+  total instead of reading as complete (KT-1094).
+- The taller model menu no longer runs past the bottom of the window: it
+  opens on the side where it fits, or the roomier one, and is never taller than
+  that side's room (KT-1032).
 - Audit quick wins:
   - Translations with a repeated placeholder (for example "2 dossiers
     sélectionnés") no longer show a literal `{1}` (KT-1053).
@@ -292,6 +301,89 @@ Release notes for 0.9.3 and earlier are available in the
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be
   a bare host and port, requested without following redirects.
+- An API call's credentials are scrubbed by value from everything it hands on:
+  the step output (successful JSON included), URL summaries, errors and the
+  call log, through one set built from every value the call takes from the env
+  or the credential store, wherever it lands (base URL included: no plugin
+  metadata marks a value public, so a summary may show a masked base URL) plus
+  the resolved auth and default headers. Each value is masked raw,
+  URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
+  characters, before any truncation; shorter ones only as whole tokens. Notify
+  scrubs its whole response before cutting the excerpt, a token-exchange error
+  loses every `${ENV.*}` its body used (the same parser as substitution, so
+  `${env.password}` counts), and a successful token response is never quoted.
+  Stored text (call log, run detail in the UI and through MCP
+  `workflow_run_get`, MCP run status) gets URL query/userinfo stripping and
+  the secret heuristics, the most that can be done for output written before.
+  Known limits: an endpoint that transforms what it echoes defeats any finite
+  list of forms, and a short secret glued inside another token stays visible
+  (KT-1035).
+- Turning a workflow on is a human decision. A workflow imported from a
+  `.kronn-workflow.json` file, an accepted agent bundle (parent and children)
+  and an accepted agent proposal land disabled, as ADR-005 and the Artifact
+  import already required, so a shared Cron or Tracker trigger no longer fires
+  on the next tick. An agent's token can no longer enable a workflow through
+  create, `workflow_update` or `workflow_set_enabled` (`force` included): the
+  backend refuses and tells it to ask the user, and an agent's write can never
+  turn a stored `false` back to `true`, even from a read made before a
+  concurrent disable. An agent's change to what an enabled workflow executes
+  (steps, rollback, trigger, Exec allowlist, actions, workspace, guards,
+  variables, concurrency limit and key, project) disables it until the user
+  enables it again, and so does its change to what a Quick API sends or what a
+  Quick Prompt runs (prompt, variables, agent, connection, tier, skills,
+  profiles, directives, agent settings), or its name's slug or its project,
+  and so does an agent's (or an import's, Artifact imports included) creation
+  of a Quick API or Prompt that shadows a shared `ref:` such a workflow uses,
+  for every enabled workflow, in any project, that names it by id or holds a
+  `ref:qa:`/`ref:prompt:` (any field, fan-out or rollback position) with its
+  old or new slug or any slug it was published or imported under: no reference
+  is resolved, so the rule is a conservative superset that ambiguity can never
+  block, and it runs in the same transaction as the write. Quick Exec lines
+  keep their own KT-1017 rule: an agent's line waits for a human's approval. A
+  disabled definition never runs: a parent refuses a disabled sub-workflow,
+  manual and TriggerWorkflow launches, the scheduler and trackers skip it and
+  only a human can resume an interrupted run of a disabled workflow. Known
+  residual: a run already in flight, a human-resumed one included, can still
+  load a Quick API or Prompt an agent changed during that run (rollback and
+  fan-out included); revision pinning (the approved workflow and its
+  dependencies frozen at approval) is a 0.15 priority. With localhost trust on
+  (auth off, or `auth_strict_localhost = false`) a local process without a
+  bridge token still counts as the user, the trust model already documented
+  for the HTTP API; strict localhost is the mitigation until positive human
+  authorization (0.15, KT-1034). The import preview shows the trigger, the
+  Exec steps and the Exec allowlist, and the agent banners say the workflow is
+  created disabled (KT-1037).
+- Kronn now says why it turned a workflow off on its own. Each automatic
+  disable (an agent's edit or create, an agent's change to a Quick API or
+  Prompt it uses, an agent bundle or proposal, an import, a config restore
+  that fails validation) is recorded on the workflow with its reason, who and
+  when, and a short summary ("steps changed by Codex", "Quick API « fetch »
+  edited by Claude"); migration 223. The Automations page shows a banner when
+  any is waiting ("N workflow(s) were changed by an agent or imported and are
+  disabled by default"), a details panel with each one's reason, summary,
+  author, date and link, a Re-enable button per row and a Re-enable all button
+  (a Cron or Tracker workflow is always confirmed first), and a reason badge
+  in the workflow list. A human enable clears the record. `GET
+  /api/workflows/auto-disabled` and `POST /api/workflows/reenable` (one id or
+  many) refuse a bridge token (KT-1037).
+- Outbound requests to a URL a user, a plugin, a provider or an agent supplies
+  go through one guarded transport (`core::safe_http`): ApiCall (every page,
+  retry and redirect), OAuth and token exchange, Notify, gate webhooks, media
+  asset downloads, remote MCP probes, page `web_fetch` and the GitHub tracker.
+  Its resolver checks every DNS answer and connects only to the checked
+  addresses, so a rebinding answer cannot reach the socket; IPv4-mapped IPv6
+  forms such as `[::ffff:127.0.0.1]` are refused like their IPv4 host. Each
+  redirect hop is re-checked; an https→http downgrade and a cross-origin
+  307/308 are refused, as is any cross-origin hop that would resend a body (a
+  301/302 on PUT included); a cross-origin hop drops every header and query
+  key the plugin, the step or the webhook supplied. IPv6 addresses are
+  classified against the IANA special-purpose registry (the local-use NAT64
+  `64:ff9b:1::/48`, `2001:2::/48`, `3fff::/20`, `5f00::/16` and everything
+  outside `2000::/3` are refused). Peer attachment fetches and remote joins
+  use the guarded client and never follow a redirect; repository discovery
+  uses it with same-origin redirects, and an imported GitLab host never
+  receives the process `GITLAB_TOKEN`: a token only goes to the host it was
+  configured with (KT-1039).
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

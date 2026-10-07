@@ -236,8 +236,10 @@ pub struct McpRunStatusResponse {
 const OUTPUT_EXCERPT_MAX_CHARS: usize = 200;
 
 fn excerpt(s: &str) -> String {
+    // Stored output may predate value-based scrubbing.
+    let s = crate::core::redact::redact_stored_text(s);
     if s.chars().count() <= OUTPUT_EXCERPT_MAX_CHARS {
-        return s.to_string();
+        return s;
     }
     // Char-boundary-safe truncation (matches the `feedback_rust_str_slicing` memory).
     let mut out: String = s.chars().take(OUTPUT_EXCERPT_MAX_CHARS).collect();

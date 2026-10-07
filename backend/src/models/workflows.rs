@@ -14,6 +14,65 @@ use super::{
     PromptVariable,
 };
 
+/// Why Kronn disabled a workflow on its own (KT-1037).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoDisableReason {
+    /// An agent changed what the workflow executes.
+    AgentEdit,
+    /// An agent changed a Quick API or Quick Prompt the workflow uses.
+    DependencyEditedByAgent,
+    /// An agent created it (create, bundle, accepted proposal).
+    CreatedByAgent,
+    /// It came from an import.
+    Imported,
+}
+
+impl AutoDisableReason {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::AgentEdit => "agent_edit",
+            Self::DependencyEditedByAgent => "dependency_edited_by_agent",
+            Self::CreatedByAgent => "created_by_agent",
+            Self::Imported => "imported",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "agent_edit" => Self::AgentEdit,
+            "dependency_edited_by_agent" => Self::DependencyEditedByAgent,
+            "created_by_agent" => Self::CreatedByAgent,
+            "imported" => Self::Imported,
+            _ => return None,
+        })
+    }
+}
+
+/// A workflow Kronn disabled on its own and no human has enabled since.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AutoDisabledWorkflow {
+    pub id: String,
+    pub name: String,
+    pub project_id: Option<String>,
+    pub trigger: WorkflowTrigger,
+    pub reason: AutoDisableReason,
+    pub disabled_at: DateTime<Utc>,
+    /// The agent's name, or "import".
+    pub disabled_by: String,
+    /// What changed, in a few words ("steps changed by Codex").
+    pub summary: String,
+}
+
+/// `POST /api/workflows/reenable` body: one id or many.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ReenableWorkflowsRequest {
+    pub ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Workflow {

@@ -1199,7 +1199,7 @@ pub async fn full_audit(
                     citation_feedback.get_or_insert_with(String::new).push_str(&feedback);
                 }
             }
-            let mut previous_attempt_usage = crate::db::audit_runs::StepTokens::UNKNOWN;
+            let mut previous_attempt_usage: Option<crate::db::audit_runs::StepTokens> = None;
             let mut step_cost = super::agent_launch::StepCost::default();
             'attempts: loop {
             attempt += 1;
@@ -1605,8 +1605,11 @@ pub async fn full_audit(
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     let duration_ms = step_started_at.elapsed().as_millis() as u64;
                     run_tokens.add(step_usage.total());
-                    let combined_step_usage = previous_attempt_usage.plus(step_usage);
-                    previous_attempt_usage = combined_step_usage;
+                    let combined_step_usage = crate::db::audit_runs::StepTokens::after_attempt(
+                        previous_attempt_usage,
+                        step_usage,
+                    );
+                    previous_attempt_usage = Some(combined_step_usage);
 
                     // 0.8.3 — Root-cause guard for the empty-tech-debt
                     // bug on DOCROMS_WEB. The CLI exited 0 (cli_success)
@@ -1969,7 +1972,7 @@ pub async fn full_audit(
                     if let Err(error) = db.with_conn(move |conn| {
                         crate::db::audit_runs::finalize_audit_step(
                             conn, &run_id, step as u32, Utc::now(), duration_ms,
-                            &previous_attempt_usage, recorded_total, false,
+                            &previous_attempt_usage.unwrap_or(crate::db::audit_runs::StepTokens::UNKNOWN), recorded_total, false,
                             Some(&warning), false,
                         )
                     }).await {
@@ -1986,7 +1989,7 @@ pub async fn full_audit(
                     yield Event::default().event("step_done").data(
                         serde_json::json!({
                             "step": step, "success": false, "file": file_label,
-                            "tokens": previous_attempt_usage.total(), "duration_ms": duration_ms,
+                            "tokens": previous_attempt_usage.and_then(|usage| usage.total()), "duration_ms": duration_ms,
                             "total_tokens": run_tokens.total(),
                             "cost_usd_micros": step_cost.usd_micros(),
                         }).to_string()

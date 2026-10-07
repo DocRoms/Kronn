@@ -2035,6 +2035,13 @@ fn import_document(
                 resource.created_at = now;
                 crate::db::workflows::insert_workflow(conn, &resource)?;
             }
+            crate::db::workflows::mark_auto_disabled(
+                conn,
+                &resource.id,
+                crate::models::AutoDisableReason::Imported,
+                "import",
+                "imported from the project's resource library",
+            )?;
             resource.id
         }
         ProjectRepositoryResourceKind::QuickPrompt => {

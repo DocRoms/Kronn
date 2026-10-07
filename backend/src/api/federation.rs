@@ -448,11 +448,8 @@ pub async fn fetch_and_store_attachment(
         crate::api::contacts::build_invite_code(&cfg.server).await
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    // The peer's address is approved, not where it redirects to.
+    let client = match crate::core::safe_http::peer_client(std::time::Duration::from_secs(30)) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -465,7 +462,10 @@ pub async fn fetch_and_store_attachment(
     };
     let url = format!("{base}/api/disc/fetch-file");
     let body = serde_json::json!({ "file_id": file_id, "from_invite_code": our_code });
-    let resp = match client.post(&url).json(&body).send().await {
+    let Ok(url) = reqwest::Url::parse(&url) else {
+        return;
+    };
+    let resp = match client.post(url).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("F8: fetch-file request to {} failed: {e}", host.pseudo);

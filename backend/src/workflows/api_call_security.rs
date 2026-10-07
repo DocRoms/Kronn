@@ -76,13 +76,11 @@ pub fn assert_host_matches_base(target: &Url, plugin_base_url: &str) -> Result<(
 /// [`assert_host_matches_base`] (which catches the cheap case) and
 /// **before** issuing the real request.
 ///
-/// TOCTOU note: a DNS server could return a public IP here and a private
-/// IP on reqwest's own resolution a moment later (DNS rebind). In practice
-/// this matters for browsers, not for a self-hosted backend where the
-/// operator controls the resolver. A harder guard would mean resolving
-/// once and feeding the IP to reqwest with a `Host:` header override,
-/// which is a much bigger surgery — revisit if the threat model changes.
+/// An early, readable refusal only: the connection itself goes through
+/// [`crate::core::safe_http`], whose resolver re-checks and pins the
+/// addresses, so a DNS answer that changes after this check is still refused.
 pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
+    let refused = is_disallowed_ip;
     let host = target.host_str().ok_or(SecurityError::NoHost)?.to_string();
 
     // Fast path: the URL already contains an IP literal (`127.0.0.1`,
@@ -92,7 +90,7 @@ pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
     // `[…]` brackets for IPv6 literals, hence the trim.
     let host_stripped = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_stripped.parse::<IpAddr>() {
-        if is_disallowed_ip(&ip) {
+        if refused(&ip) {
             return Err(SecurityError::PrivateOrLoopback { host, ip });
         }
         return Ok(());
@@ -112,37 +110,17 @@ pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
     };
     for sock in lookup {
         let ip = sock.ip();
-        if is_disallowed_ip(&ip) {
+        if refused(&ip) {
             return Err(SecurityError::PrivateOrLoopback { host, ip });
         }
     }
     Ok(())
 }
 
-/// Rejects the RFC 1918, loopback, link-local, multicast and
-/// unspecified ranges. Leaves only globally-routable addresses through.
+/// Everything [`crate::core::safe_http::is_global`] refuses, including the
+/// IPv4-mapped and other embedded-IPv4 forms of a private address.
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()     // 169.254.* — Docker / AWS metadata
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || v4.is_documentation() // 192.0.2.*, 198.51.100.*, 203.0.113.*
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_multicast()
-                || v6.is_unspecified()
-                // Unique-local (fc00::/7) + link-local (fe80::/10). The
-                // stdlib does not expose these helpers on stable, so we
-                // check the prefix bytes.
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
+    !crate::core::safe_http::is_global(*ip)
 }
 
 /// Resolved auth material ready to be attached to a reqwest::RequestBuilder.
@@ -315,6 +293,18 @@ mod tests {
     fn host_match_case_insensitive() {
         let target = Url::parse("https://API.Jira.com/").unwrap();
         assert!(assert_host_matches_base(&target, "https://api.jira.com").is_ok());
+    }
+
+    #[test]
+    fn mapped_ipv6_forms_of_private_addresses_are_disallowed() {
+        for blocked in [
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+        ] {
+            let ip: IpAddr = blocked.parse().unwrap();
+            assert!(is_disallowed_ip(&ip), "{blocked}");
+        }
     }
 
     // ─── assert_public_ip ───────────────────────────────────────────

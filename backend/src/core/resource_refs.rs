@@ -265,6 +265,104 @@ pub fn resolve_run_structured_references(
     Ok(())
 }
 
+/// Whether `workflow` names the Quick Prompt (`kind` "prompt") or Quick API
+/// ("qa") `id` anywhere (steps and rollback; direct, batch, chained or
+/// collection fields), by its literal id or by a `ref:` of that kind whose
+/// slug is one of `slugs`. No project resolution on purpose: a slug match is
+/// a conservative superset of every project a reference could resolve in.
+pub fn workflow_names(workflow: &Workflow, kind: &str, id: &str, slugs: &[String]) -> bool {
+    workflow
+        .steps
+        .iter()
+        .chain(workflow.on_failure.iter())
+        .any(|step| {
+            let mut step = step.clone();
+            structured_fields(&mut step)
+                .into_iter()
+                .filter(|(field_kind, _)| *field_kind == kind)
+                .any(|(_, value)| match parse_reference(value) {
+                    Some((ref_kind, slug)) => {
+                        ref_kind == kind && slugs.iter().any(|s| s.eq_ignore_ascii_case(slug))
+                    }
+                    None => value.trim() == id,
+                })
+        })
+}
+
+/// The enabled workflows that name `kind`/`id` or one of `slugs` (see
+/// [`workflow_names`]).
+pub fn enabled_workflows_naming(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+    slugs: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let slugs: Vec<String> = slugs.iter().filter(|s| !s.is_empty()).cloned().collect();
+    Ok(crate::db::workflows::list_workflows(conn)?
+        .into_iter()
+        .filter(|workflow| workflow.enabled && workflow_names(workflow, kind, id, &slugs))
+        .map(|workflow| workflow.id)
+        .collect())
+}
+
+/// Every slug `resource_identities` maps to `kind`/`id`, in any scope, as
+/// the runtime compares them (trimmed).
+fn identity_slugs(conn: &Connection, kind: &str, id: &str) -> anyhow::Result<Vec<String>> {
+    let table_kind = match kind {
+        "prompt" => "quick_prompt",
+        "qa" => "quick_api",
+        "qe" => "quick_exec",
+        "workflow" => "workflow",
+        other => other,
+    };
+    let mut stmt =
+        conn.prepare("SELECT slug FROM resource_identities WHERE kind = ?1 AND target_id = ?2")?;
+    let slugs = stmt
+        .query_map(rusqlite::params![table_kind, id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(slugs
+        .into_iter()
+        .map(|slug| slug.trim().to_string())
+        .collect())
+}
+
+/// Disables (and records) every enabled workflow naming `kind`/`id` or one
+/// of `slugs`. Call it inside the write's transaction.
+pub fn disable_workflows_naming(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+    slugs: &[String],
+    reason: crate::models::AutoDisableReason,
+    by: &str,
+    summary: &str,
+) -> anyhow::Result<usize> {
+    // The runtime also resolves a `ref:` through every slug the resource was
+    // published or imported under, whatever its name is now.
+    let mut slugs = slugs.to_vec();
+    slugs.extend(identity_slugs(conn, kind, id)?);
+    let users = enabled_workflows_naming(conn, kind, id, &slugs)?;
+    let disabled = disable_workflows(conn, &users)?;
+    for user in &users {
+        crate::db::workflows::mark_auto_disabled(conn, user, reason, by, summary)?;
+    }
+    Ok(disabled)
+}
+
+/// Disables the given workflows; returns how many were still enabled.
+pub fn disable_workflows(conn: &Connection, ids: &[String]) -> anyhow::Result<usize> {
+    let mut disabled = 0;
+    for id in ids {
+        disabled += conn.execute(
+            "UPDATE workflows SET enabled = 0 WHERE id = ?1 AND enabled = 1",
+            rusqlite::params![id],
+        )?;
+    }
+    Ok(disabled)
+}
+
 /// The slug a resource of `kind` is published under: its identity in the
 /// workflow's project, else the one its name gives, as publication does.
 fn publication_slug(
