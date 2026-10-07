@@ -35,28 +35,55 @@ pub async fn add(
         .db
         .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code))
         .await;
-    if let Ok(Some(_)) = exists {
-        return Json(ApiResponse::err("Contact already exists"));
-    }
+    // Adding a code that came in as a request accepts that request.
+    let request = match exists {
+        Ok(Some(existing)) if existing.status == crate::db::contacts::STATUS_REQUESTED => {
+            Some(existing)
+        }
+        Ok(Some(_)) => return Json(ApiResponse::err("Contact already exists")),
+        _ => None,
+    };
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
-    let health_url = format!("{}/api/health", kronn_url);
-    let ping_error = reqwest::Client::new()
-        .get(&health_url)
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await;
-
-    let (reachable, warning) = match &ping_error {
-        Ok(r) if r.status().is_success() => (true, None),
-        _ => {
-            // Diagnose WHY the peer is unreachable
-            let hint = diagnose_unreachable(&kronn_url).await;
-            (false, Some(hint))
+    // P2P off: no request leaves for the peer; the contact waits as pending.
+    let (reachable, warning) = if !state.p2p.enabled() {
+        (false, Some("P2P_OFF".to_string()))
+    } else {
+        let health_url = format!("{}/api/health", kronn_url);
+        let ping = guarded_client().get(&health_url).send();
+        match crate::api::federation::unless_p2p_off(&state, ping)
+            .await
+            .and_then(Result::ok)
+        {
+            Some(r) if r.status().is_success() => (true, None),
+            _ => {
+                // Diagnose WHY the peer is unreachable
+                let hint = diagnose_unreachable(&kronn_url).await;
+                (false, Some(hint))
+            }
         }
     };
 
     let status = if reachable { "accepted" } else { "pending" };
+
+    if let Some(mut existing) = request {
+        let id = existing.id.clone();
+        return match state
+            .db
+            .with_conn(move |conn| crate::db::contacts::update_contact_status(conn, &id, status))
+            .await
+        {
+            Ok(_) => {
+                existing.status = status.into();
+                existing.updated_at = Utc::now();
+                Json(ApiResponse::ok(AddContactResult {
+                    contact: existing,
+                    warning,
+                }))
+            }
+            Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
+        };
+    }
 
     let now = Utc::now();
     let contact = Contact {
@@ -229,6 +256,16 @@ pub async fn advertised_host_async(server: &crate::models::ServerConfig) -> Stri
     h.clone()
 }
 
+/// HTTP client for requests to a contact: short timeout, no redirects (a
+/// peer must not bounce Kronn to another address).
+pub(crate) fn guarded_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
 /// GET /api/contacts/:id/ping — check if a contact's Kronn is online
 pub async fn ping(
     State(state): State<AppState>,
@@ -244,15 +281,25 @@ pub async fn ping(
         Ok(None) => return Json(ApiResponse::err("Contact not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if !state.p2p.enabled() {
+        return Json(ApiResponse::err("P2P connections are off"));
+    }
+    // A request or a refused contact came from someone else's code: Kronn
+    // never sends it a request.
+    if !crate::db::contacts::dials_outbound(&contact.status) {
+        return Json(ApiResponse::err("Contact not accepted"));
+    }
+    let Some(base) = crate::db::contacts::contact_base_url(&contact.kronn_url) else {
+        return Json(ApiResponse::err("Contact address is invalid"));
+    };
 
-    let url = format!("{}/api/health", contact.kronn_url);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
-
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => Json(ApiResponse::ok(true)),
+    // Turning P2P off cancels the ping in flight.
+    let ping = guarded_client().get(format!("{base}/api/health")).send();
+    match crate::api::federation::unless_p2p_off(&state, ping)
+        .await
+        .and_then(Result::ok)
+    {
+        Some(resp) if resp.status().is_success() => Json(ApiResponse::ok(true)),
         _ => Json(ApiResponse::ok(false)),
     }
 }
@@ -273,6 +320,8 @@ mod tests {
             auth_locked: false,
             auth_token_session_only: false,
             auth_strict_localhost: false,
+            p2p_enabled: false,
+            frontend_origins: vec![],
             failure_notify_url: None,
             run_retention_days: 0,
             run_payload_retention_days: 30,

@@ -55,6 +55,16 @@ pub fn get_contact(conn: &Connection, id: &str) -> Result<Option<Contact>> {
     Ok(rows.next().and_then(|r| r.ok()))
 }
 
+/// An incoming contact request: an unknown peer presented this code. Kronn
+/// never connects back nor verifies it until the operator adds the code.
+pub const STATUS_REQUESTED: &str = "requested";
+
+/// Whether the outbound client may dial this contact. A request or a refused
+/// contact is never dialled: dialling would mark it accepted.
+pub fn dials_outbound(status: &str) -> bool {
+    status != STATUS_REQUESTED && status != "refused"
+}
+
 /// Passe D — the ONE sanctioned way to authenticate a P2P caller by invite
 /// code: a known contact whose status is `accepted`. A pending/refused
 /// contact keeps its code but must not pass the auth-exempt routes
@@ -104,16 +114,106 @@ pub fn find_contact_by_invite_code(
     Ok(rows.next().and_then(|r| r.ok()))
 }
 
-/// Parse invite code format: kronn:pseudo@host:port
+/// Longest invite code accepted from anyone (a peer's Presence or a paste).
+pub const MAX_INVITE_CODE_LEN: usize = 256;
+/// Longest pseudo carried by an invite code, in characters.
+pub const MAX_PSEUDO_CHARS: usize = 64;
+/// Most contact requests kept at once, and how long one is kept.
+pub const MAX_PENDING_REQUESTS: i64 = 20;
+pub const REQUEST_TTL_DAYS: i64 = 7;
+
+/// Parse invite code format: kronn:pseudo@host:port. The address must be a
+/// bare host and port: no path, query, fragment or credentials, so the URL
+/// built from it cannot point anywhere else.
 pub fn parse_invite_code(code: &str) -> Option<(String, String)> {
     let code = code.trim();
-    let rest = code.strip_prefix("kronn:")?;
-    let (pseudo, url_part) = rest.split_once('@')?;
-    if pseudo.is_empty() || url_part.is_empty() {
+    if code.len() > MAX_INVITE_CODE_LEN {
         return None;
     }
-    let kronn_url = format!("http://{}", url_part);
-    Some((pseudo.to_string(), kronn_url))
+    let rest = code.strip_prefix("kronn:")?;
+    let (pseudo, url_part) = rest.rsplit_once('@')?;
+    if pseudo.is_empty()
+        || pseudo.chars().count() > MAX_PSEUDO_CHARS
+        || pseudo.chars().any(|c| c.is_control() || c == '@')
+    {
+        return None;
+    }
+    let authority = canonical_authority(url_part)?;
+    Some((pseudo.to_string(), format!("http://{authority}")))
+}
+
+/// `host:port` in canonical form, or None unless it is exactly a DNS name,
+/// an IPv4 address or a bracketed IPv6 address followed by a port.
+pub fn canonical_authority(authority: &str) -> Option<String> {
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (v6, tail) = rest.split_once(']')?;
+        v6.parse::<std::net::Ipv6Addr>().ok()?;
+        (
+            format!("[{}]", v6.to_ascii_lowercase()),
+            tail.strip_prefix(':')?,
+        )
+    } else {
+        let (host, port) = authority.rsplit_once(':')?;
+        if !valid_host_name(host) {
+            return None;
+        }
+        (host.to_ascii_lowercase(), port)
+    };
+    if port.is_empty() || port.len() > 5 || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let port: u16 = port.parse().ok().filter(|p| *p != 0)?;
+    Some(format!("{host}:{port}"))
+}
+
+fn valid_host_name(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+/// The base URL of a stored contact, re-validated before any request to it:
+/// rows written before the strict grammar may hold a path or a fragment.
+pub fn contact_base_url(kronn_url: &str) -> Option<String> {
+    let (scheme, authority) = kronn_url.trim_end_matches('/').split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    Some(format!("{scheme}://{}", canonical_authority(authority)?))
+}
+
+/// Store an incoming contact request, dropping expired ones first. Returns
+/// false when the request table is full.
+pub fn insert_contact_request(conn: &Connection, contact: &Contact) -> Result<bool> {
+    let cutoff = (Utc::now() - chrono::Duration::days(REQUEST_TTL_DAYS)).to_rfc3339();
+    conn.execute(
+        "DELETE FROM contacts WHERE status = ?1 AND created_at < ?2",
+        params![STATUS_REQUESTED, cutoff],
+    )?;
+    let outstanding: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM contacts WHERE status = ?1",
+        params![STATUS_REQUESTED],
+        |row| row.get(0),
+    )?;
+    if outstanding >= MAX_PENDING_REQUESTS {
+        return Ok(false);
+    }
+    insert_contact(conn, contact)?;
+    Ok(true)
+}
+
+/// Whether a contact id still designates an accepted contact.
+pub fn contact_id_is_accepted(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(get_contact(conn, id)?.is_some_and(|c| c.status == "accepted"))
 }
 
 pub fn insert_contact(conn: &Connection, contact: &Contact) -> Result<()> {
@@ -306,6 +406,70 @@ mod tests {
         let (pseudo, url) = parse_invite_code("kronn:user-with_dots.x@100.65.0.1:9999").unwrap();
         assert_eq!(pseudo, "user-with_dots.x");
         assert_eq!(url, "http://100.65.0.1:9999");
+    }
+
+    #[test]
+    fn parse_invite_code_refuses_path_fragment_and_credential_tricks() {
+        for code in [
+            "kronn:x@127.0.0.1:9000/admin/action#",
+            "kronn:x@127.0.0.1:9000#frag",
+            "kronn:x@127.0.0.1:9000?a=b",
+            "kronn:x@user:pw@127.0.0.1:9000",
+            "kronn:x@127.0.0.1",
+            "kronn:x@127.0.0.1:0",
+            "kronn:x@127.0.0.1:65536",
+            "kronn:x@exa mple.com:3140",
+            "kronn:x@[::1]9000",
+        ] {
+            assert!(parse_invite_code(code).is_none(), "{code}");
+        }
+        let long_pseudo = format!("kronn:{}@host:3140", "p".repeat(MAX_PSEUDO_CHARS + 1));
+        assert!(parse_invite_code(&long_pseudo).is_none());
+        let long_host = format!("kronn:p@{}.example:3140", "h".repeat(MAX_INVITE_CODE_LEN));
+        assert!(parse_invite_code(&long_host).is_none());
+        assert_eq!(
+            parse_invite_code("kronn:x@[::1]:3140").unwrap().1,
+            "http://[::1]:3140"
+        );
+    }
+
+    #[test]
+    fn contact_base_url_revalidates_stored_urls() {
+        assert_eq!(
+            contact_base_url("http://10.0.0.5:3140/").as_deref(),
+            Some("http://10.0.0.5:3140")
+        );
+        assert!(contact_base_url("http://127.0.0.1:9000/admin/action#").is_none());
+        assert!(contact_base_url("file://host:1").is_none());
+    }
+
+    #[test]
+    fn contact_requests_are_capped_and_expire() {
+        let conn = test_conn();
+        let request = |n: usize, age_days: i64| Contact {
+            id: format!("r{n}"),
+            pseudo: format!("R{n}"),
+            avatar_email: None,
+            kronn_url: format!("http://10.0.0.{n}:3456"),
+            invite_code: format!("kronn:R{n}@10.0.0.{n}:3456"),
+            status: STATUS_REQUESTED.into(),
+            created_at: Utc::now() - chrono::Duration::days(age_days),
+            updated_at: Utc::now(),
+        };
+        for n in 0..MAX_PENDING_REQUESTS as usize {
+            assert!(insert_contact_request(&conn, &request(n, 0)).unwrap());
+        }
+        assert!(!insert_contact_request(&conn, &request(200, 0)).unwrap());
+        conn.execute(
+            "UPDATE contacts SET created_at = ?1 WHERE id = 'r0'",
+            params![(Utc::now() - chrono::Duration::days(REQUEST_TTL_DAYS + 1)).to_rfc3339()],
+        )
+        .unwrap();
+        assert!(insert_contact_request(&conn, &request(201, 0)).unwrap());
+        assert!(
+            get_contact(&conn, "r0").unwrap().is_none(),
+            "expired request dropped"
+        );
     }
 
     #[test]

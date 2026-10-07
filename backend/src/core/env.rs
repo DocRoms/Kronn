@@ -13,9 +13,18 @@
 /// LAN-bind boot guard trusts KRONN_BIND instead of the real bind host) — a
 /// false positive there is fail-open.
 pub fn is_docker() -> bool {
-    crate::core::child_env::var("KRONN_IN_DOCKER").is_ok()
-        || std::path::Path::new("/.dockerenv").exists()
+    in_docker_marker(
+        crate::core::child_env::var("KRONN_IN_DOCKER")
+            .ok()
+            .as_deref(),
+    ) || std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()
+}
+
+/// `KRONN_IN_DOCKER` counts only when explicitly true: "0" or an empty value
+/// is not a container, and Docker relaxes the security posture.
+fn in_docker_marker(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
 }
 
 /// Whether API auth should be ENABLED by default when a fresh config first
@@ -100,6 +109,17 @@ mod tests {
         assert!(!apple_silicon_from("WSL", "aarch64"));
         assert!(!apple_silicon_from("Windows", "aarch64"));
         assert!(!apple_silicon_from("Unknown", "aarch64"));
+    }
+
+    #[test]
+    fn only_an_explicitly_true_marker_means_docker() {
+        for yes in ["1", "true", "TRUE", " 1 "] {
+            assert!(in_docker_marker(Some(yes)), "{yes}");
+        }
+        for no in ["0", "", "false", "no", "yes"] {
+            assert!(!in_docker_marker(Some(no)), "{no}");
+        }
+        assert!(!in_docker_marker(None));
     }
 
     #[test]

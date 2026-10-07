@@ -6719,4 +6719,34 @@ mod tests {
         );
         assert!(!body.to_string().contains("api-test-nonce"));
     }
+
+    /// KT-1033 — the WS token travels as `?token=`: neither the backend's
+    /// request span nor the gateway's access log may hold a query string.
+    #[test]
+    fn the_ws_token_never_reaches_the_request_logs() {
+        let uri: axum::http::Uri = "/api/ws?token=sekret-ws-token".parse().unwrap();
+        assert_eq!(crate::logged_uri(&uri), "/api/ws");
+        let router_source = include_str!("lib.rs");
+        assert!(router_source
+            .contains("TraceLayer::new_for_http().make_span_with(redacted_request_span)"));
+        assert!(router_source.contains("uri = %logged_uri(request.uri())"));
+
+        let nginx = include_str!("../../.docker/nginx.conf");
+        assert!(nginx.contains("access_log /var/log/nginx/access.log kronn_no_query;"));
+        let format = nginx
+            .split("log_format kronn_no_query")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("the no-query log format");
+        assert!(format.contains("$uri"));
+        for leak in [
+            "$request_uri",
+            "$args",
+            "$query_string",
+            "\"$request\"",
+            "$request ",
+        ] {
+            assert!(!format.contains(leak), "{leak} would log the token");
+        }
+    }
 }

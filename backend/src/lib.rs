@@ -370,9 +370,42 @@ impl AuditTracker {
     }
 }
 
+/// Runtime switch of P2P federation, apart from the config lock (KT-1033).
+/// Federation checks take the read side for a short critical section (never
+/// across an await); turning P2P off takes the write side, so it waits for
+/// those in progress and none starts after.
+#[derive(Debug, Default)]
+pub struct P2pGate(std::sync::RwLock<bool>);
+
+impl P2pGate {
+    pub fn new(enabled: bool) -> Self {
+        Self(std::sync::RwLock::new(enabled))
+    }
+
+    pub fn enabled(&self) -> bool {
+        *self.read()
+    }
+
+    /// Hold while checking and acting; the value cannot turn off meanwhile.
+    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, bool> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn set(&self, enabled: bool) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = enabled;
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
+    /// P2P federation on/off, mirrored from `server.p2p_enabled`.
+    pub p2p: Arc<P2pGate>,
     pub db: Arc<Database>,
     pub agent_semaphore: Arc<Semaphore>,
     pub audit_tracker: Arc<Mutex<AuditTracker>>,
@@ -449,7 +482,13 @@ impl AppState {
         max_agents: usize,
     ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
+        // Nothing else holds the fresh config yet.
+        let p2p_enabled = config
+            .try_read()
+            .map(|config| config.server.p2p_enabled)
+            .unwrap_or(false);
         Self {
+            p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
             db,
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
@@ -767,7 +806,11 @@ async fn ws_credential_refusal(
                 .map(crate::core::bridge_token::percent_decode)
         })
     });
-    let presented: Vec<String> = bearer.into_iter().chain(query_token).collect();
+    let presented: Vec<String> = bearer
+        .into_iter()
+        .chain(query_token)
+        .chain(crate::api::ws::subprotocol_credential(headers))
+        .collect();
     if presented.is_empty() {
         return None;
     }
@@ -1214,23 +1257,51 @@ pub(crate) fn is_local_ip(ip: &str) -> bool {
 // ─── CORS ────────────────────────────────────────────────────────────────────
 
 /// Build CORS layer based on config domain.
-fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
-    let origins: Vec<String> = match domain {
+/// Request span without the query string: the WS upgrade carries the operator
+/// token as `?token=`, and debug logs must never hold it.
+fn redacted_request_span<B>(request: &axum::http::Request<B>) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %logged_uri(request.uri()),
+        version = ?request.version(),
+    )
+}
+
+/// The part of a request URI that may be logged: the path, never the query.
+pub(crate) fn logged_uri(uri: &axum::http::Uri) -> &str {
+    uri.path()
+}
+
+/// Browser origins of the local frontend, for CORS and the WS Origin check.
+/// The nginx gateway ports exist only in the Docker deployment: a desktop or
+/// native backend on another port must not trust a page served there.
+pub(crate) fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bool) -> Vec<String> {
+    match domain {
         Some(d) => vec![
             format!("https://{}", d),
             format!("http://{}", d),
             format!("https://{}:{}", d, port),
             format!("http://{}:{}", d, port),
         ],
-        None => vec![
-            format!("http://localhost:{}", port),
-            format!("http://127.0.0.1:{}", port),
-            // Default gateway port
-            "http://localhost:3140".into(),
-            "http://localhost:3141".into(),
-        ],
-    };
+        None => {
+            let mut origins = vec![
+                format!("http://localhost:{}", port),
+                format!("http://127.0.0.1:{}", port),
+            ];
+            if in_docker {
+                for gateway in [3140, 3141] {
+                    origins.push(format!("http://localhost:{gateway}"));
+                    origins.push(format!("http://127.0.0.1:{gateway}"));
+                }
+            }
+            origins
+        }
+    }
+}
 
+fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
+    let origins = frontend_origins(domain, port, crate::core::env::is_docker());
     let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     CorsLayer::new()
@@ -2974,7 +3045,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))
         // ── Middleware ──
         .layer(build_cors(&domain, port))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().make_span_with(redacted_request_span));
 
     if enable_auth {
         router = router.route_layer(middleware::from_fn_with_state(

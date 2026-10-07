@@ -33,6 +33,9 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [exposure, setExposure] = useState<NetworkExposure | null>(null);
   const [showConnectionGuide, setShowConnectionGuide] = useState(false);
+  const [p2pEnabled, setP2pEnabled] = useState<boolean | null>(null);
+  const [frontendOrigins, setFrontendOrigins] = useState('');
+  const [frontendOriginsDirty, setFrontendOriginsDirty] = useState(false);
   const isTauri = isTauriRuntime();
 
   useEffect(() => {
@@ -42,6 +45,8 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
       setPseudo(config.pseudo ?? '');
       setAvatarEmail(config.avatar_email ?? '');
       setBio(config.bio ?? '');
+      setP2pEnabled(config.p2p_enabled ?? false);
+      setFrontendOrigins((config.frontend_origins ?? []).join('\n'));
     }).catch(() => {});
     configApi.getGlobalContext().then(context => {
       setGlobalContext(context ?? '');
@@ -287,6 +292,57 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
             )}
 
             {isTauri && <DesktopPortField toast={toast} onRestart={restartApp} />}
+
+            <button
+              type="button"
+              role="switch"
+              data-testid="p2p-toggle"
+              aria-checked={!!p2pEnabled}
+              className="set-identity-network-toggle"
+              disabled={p2pEnabled === null}
+              onClick={async () => {
+                try {
+                  await configApi.setServerConfig({ p2p_enabled: !p2pEnabled });
+                  setP2pEnabled(!p2pEnabled);
+                } catch (error) {
+                  reportSaveError(error);
+                }
+              }}
+            >
+              <span>
+                <strong>{t('settings.p2pAccept')}</strong>
+                <small>{t('settings.p2pAcceptHint')}</small>
+              </span>
+              <span className="set-toggle-track" data-on={!!p2pEnabled} aria-hidden="true">
+                <span className="set-toggle-thumb" style={{ left: p2pEnabled ? 15 : 1 }} />
+              </span>
+            </button>
+            <div className="set-expose-warn" role="note">{t('settings.p2pWarning')}</div>
+
+            <div>
+              <label className="set-form-label" htmlFor="identity-frontend-origins">{t('settings.frontendOrigins')}</label>
+              <textarea
+                id="identity-frontend-origins"
+                data-testid="frontend-origins"
+                value={frontendOrigins}
+                placeholder="http://my-mac.tailnet.ts.net:3140"
+                onChange={event => {
+                  setFrontendOrigins(event.target.value);
+                  setFrontendOriginsDirty(true);
+                }}
+                onBlur={() => {
+                  if (!frontendOriginsDirty) return;
+                  const list = frontendOrigins.split('\n').map(line => line.trim()).filter(Boolean);
+                  configApi.setServerConfig({ frontend_origins: list }).then(() => {
+                    setFrontendOriginsDirty(false);
+                    toast(t('settings.frontendOriginsSaved'), 'success');
+                  }).catch(reportSaveError);
+                }}
+                className="set-input"
+                rows={2}
+              />
+              <div className="set-hint-xs">{t('settings.frontendOriginsHint')}</div>
+            </div>
 
             {pseudo ? (
               <div className="set-invite-box">
