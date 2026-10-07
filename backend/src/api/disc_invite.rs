@@ -2548,11 +2548,21 @@ pub async fn fetch_file(
         Ok(b) => b,
         Err(e) => return Json(ApiResponse::err(format!("read error: {e}"))),
     };
-    // Checked again right before the bytes leave.
-    if !fetch_entitled(&state, &caller_code, &cf.discussion_id).await {
+    // The response is prepared, then checked once more, still under the
+    // cancellation: nothing leaves unless the caller is entitled after it.
+    let prepared = async {
+        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        fetch_entitled(&state, &caller_code, &cf.discussion_id)
+            .await
+            .then_some(data_base64)
+    };
+    let data_base64 = tokio::select! {
+        prepared = prepared => prepared,
+        _ = until_fetch_unentitled(&state, &caller_code, &cf.discussion_id) => None,
+    };
+    let Some(data_base64) = data_base64 else {
         return not_found();
-    }
-    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    };
     Json(ApiResponse::ok(FetchFileResponse {
         found: true,
         filename: Some(cf.filename),
@@ -2567,10 +2577,17 @@ async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> b
     if !state.config.read().await.server.p2p_enabled {
         return false;
     }
-    let (code, did) = (caller_code.to_owned(), disc_id.to_owned());
-    state
+    let (code, did, config) = (
+        caller_code.to_owned(),
+        disc_id.to_owned(),
+        state.config.clone(),
+    );
+    let entitled = state
         .db
         .with_conn(move |conn| {
+            if !crate::api::federation::p2p_enabled_now(&config) {
+                return Ok(false);
+            }
             let crate::db::contacts::InviteAuth::Accepted(caller) =
                 crate::db::contacts::authenticate_invite_code(conn, &code)?
             else {
@@ -2589,7 +2606,9 @@ async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> b
             Ok(members.contains(&caller.id))
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // The DB may have been busy while P2P was turned off.
+    entitled && state.config.read().await.server.p2p_enabled
 }
 
 /// Resolves once the caller loses its entitlement (checked every 250 ms).
@@ -2718,6 +2737,56 @@ mod tests {
             .await
             .unwrap();
         assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
+    }
+
+    #[tokio::test]
+    async fn the_final_file_check_queued_behind_a_busy_db_respects_p2p_turned_off() {
+        let state = make_state_with_disc("d-busy-1").await;
+        state.config.write().await.server.p2p_enabled = true;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-busy".into(),
+                        pseudo: "peer".into(),
+                        avatar_email: None,
+                        kronn_url: "http://peer.local:3140".into(),
+                        invite_code: "kr-inv-busy".into(),
+                        status: "accepted".into(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )?;
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-busy-1",
+                    "shared-busy",
+                    &["c-busy".to_string()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let db = state.db.clone();
+        let busy = tokio::spawn(async move {
+            let _ = db
+                .with_conn(|_| {
+                    std::thread::sleep(Duration::from_millis(600));
+                    Ok(())
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let check = {
+            let state = state.clone();
+            tokio::spawn(async move { fetch_entitled(&state, "kr-inv-busy", "d-busy-1").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.config.write().await.server.p2p_enabled = false;
+        busy.await.unwrap();
+        assert!(!check.await.unwrap(), "no bytes once P2P is off");
     }
 
     #[tokio::test]

@@ -311,6 +311,16 @@ pub(crate) async fn until_p2p_off(state: &AppState) {
     }
 }
 
+/// P2P setting read from inside a DB closure (a blocking thread). A config
+/// write in progress counts as off: never wait on the config lock while
+/// holding the DB, and never act on a setting being changed.
+pub(crate) fn p2p_enabled_now(config: &tokio::sync::RwLock<crate::AppConfig>) -> bool {
+    config
+        .try_read()
+        .map(|config| config.server.p2p_enabled)
+        .unwrap_or(false)
+}
+
 /// Run `work` unless P2P goes off first.
 pub(crate) async fn unless_p2p_off<F: std::future::Future>(
     state: &AppState,
@@ -345,10 +355,16 @@ pub(crate) async fn commit_federated_attachment(
     if !state.config.read().await.server.p2p_enabled {
         anyhow::bail!("P2P is off");
     }
+    let config = state.config.clone();
     state
         .db
         .with_conn(move |conn| {
             let a = attachment;
+            // Read again here: this call may have waited for the DB while
+            // P2P was being turned off.
+            if !p2p_enabled_now(&config) {
+                anyhow::bail!("P2P is off");
+            }
             if a.host.membership(conn, &a.shared_id)? != Some(true) {
                 anyhow::bail!("the sender is no longer an accepted member of this discussion");
             }

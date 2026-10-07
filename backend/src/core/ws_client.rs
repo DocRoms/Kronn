@@ -231,51 +231,36 @@ pub(crate) const WS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
 /// while still surfacing a dead link reasonably fast.
 pub(crate) const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Handle messages on an established peer WS connection. Both halves and
-/// the authorization re-check are futures of the caller's task, so aborting
-/// that task, or revoking the contact, ends the whole connection.
-async fn handle_peer_connection(
-    ws_stream: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+/// Send our Presence and the F4 catch-up requests. False when the peer lost
+/// its authorization or the socket failed: the connection then ends.
+async fn bootstrap_peer<S>(
+    ws_sender: &mut S,
     state: &AppState,
+    peer: &crate::api::ws::PeerAuth,
     contact_id: &str,
-) {
-    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-    let mut broadcast_rx = state.ws_broadcast.subscribe();
-    let peer = crate::api::ws::PeerAuth::ContactId(contact_id.to_owned());
-    // Checked again before the first byte (Presence, sync requests).
-    if !peer.check(state).await {
-        return;
-    }
-
-    // Send our own presence to the peer. Use the SAME canonical builder as the
-    // /api/contacts/invite-code endpoint so the code we send matches the code a
-    // peer stored — an empty pseudo here yields `kronn:@host:port`, which the
-    // peer rejects, triggering a reconnect/online-offline storm and an IP ban.
+) -> bool
+where
+    S: futures::Sink<tungstenite::Message> + Unpin,
+{
+    // Use the SAME canonical builder as the /api/contacts/invite-code endpoint
+    // so the code we send matches the code a peer stored: an empty pseudo
+    // yields `kronn:@host:port`, which the peer rejects (reconnect storm, ban).
     let config = state.config.read().await;
     let our_pseudo = crate::api::contacts::invite_pseudo(&config.server);
     let our_invite_code = crate::api::contacts::build_invite_code(&config.server).await;
     drop(config);
-
     let presence_msg = WsMessage::Presence {
         from_pseudo: our_pseudo,
         from_invite_code: our_invite_code,
         online: true,
     };
-    if let Ok(json) = serde_json::to_string(&presence_msg) {
-        let _ = ws_sender
-            .send(tungstenite::Message::Text(json.into()))
-            .await;
+    if !send_if_authorized(ws_sender, state, peer, &presence_msg).await {
+        return false;
     }
 
-    // F4 catch-up — on every (re)connect, ask this peer to re-send anything we
-    // missed in each shared disc while either side was offline. Sent directly
-    // on this socket (targeted, not broadcast) right after Presence. The peer
-    // answers with ChatMessages we dedup on message_id, so it's a cheap no-op
-    // when already in sync. Without this, messages authored while a peer was
-    // disconnected were lost forever (fire-and-forget broadcast, no outbox).
-    // Only the shared discussions this contact belongs to: a sync request
+    // F4 catch-up: ask this peer to re-send what we missed in each shared
+    // discussion while either side was offline (the answers dedup on
+    // message_id). Only the shares this contact belongs to: a sync request
     // names its shared id.
     let member_id = contact_id.to_owned();
     let sync_points = state
@@ -293,15 +278,56 @@ async fn handle_peer_connection(
         .await
         .unwrap_or_default();
     for (shared_discussion_id, since_timestamp) in sync_points {
-        let req = WsMessage::DiscSyncRequest {
+        let request = WsMessage::DiscSyncRequest {
             shared_discussion_id,
             since_timestamp,
         };
-        if let Ok(json) = serde_json::to_string(&req) {
-            let _ = ws_sender
-                .send(tungstenite::Message::Text(json.into()))
-                .await;
+        if !send_if_authorized(ws_sender, state, peer, &request).await {
+            return false;
         }
+    }
+    true
+}
+
+async fn send_if_authorized<S>(
+    ws_sender: &mut S,
+    state: &AppState,
+    peer: &crate::api::ws::PeerAuth,
+    msg: &WsMessage,
+) -> bool
+where
+    S: futures::Sink<tungstenite::Message> + Unpin,
+{
+    if !peer.check(state).await {
+        return false;
+    }
+    let Ok(json) = serde_json::to_string(msg) else {
+        return true;
+    };
+    ws_sender
+        .send(tungstenite::Message::Text(json.into()))
+        .await
+        .is_ok()
+}
+
+/// Handle messages on an established peer WS connection. Both halves and
+/// the authorization re-check are futures of the caller's task, so aborting
+/// that task, or revoking the contact, ends the whole connection.
+async fn handle_peer_connection(
+    ws_stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    state: &AppState,
+    contact_id: &str,
+) {
+    let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+    let mut broadcast_rx = state.ws_broadcast.subscribe();
+    let peer = crate::api::ws::PeerAuth::ContactId(contact_id.to_owned());
+    // The whole bootstrap (Presence, then the sync requests) runs under the
+    // shared cancellation, and each send is authorized right before it.
+    let bootstrap = bootstrap_peer(&mut ws_sender, state, &peer, contact_id);
+    if crate::api::federation::unless_p2p_off(state, bootstrap).await != Some(true) {
+        return;
     }
 
     // Keys of chat/invite frames received FROM this peer, never echoed back
@@ -565,6 +591,56 @@ mod tests {
             .await
             .expect("the peer sees the socket close")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bootstrap_queued_behind_a_busy_db_sends_nothing_once_p2p_is_off() {
+        let state = test_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let received = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorder = received.clone();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            while let Some(Ok(frame)) = ws.next().await {
+                if let tungstenite::Message::Text(text) = frame {
+                    recorder.lock().unwrap().push(text.to_string());
+                }
+            }
+        });
+        let contact = insert(&state, &url).await;
+        let (stream, _) = tokio_tungstenite::connect_async(peer_ws_url(&url).unwrap())
+            .await
+            .unwrap();
+        let db = state.db.clone();
+        let busy = tokio::spawn(async move {
+            let _ = db
+                .with_conn(|_| {
+                    std::thread::sleep(Duration::from_millis(600));
+                    Ok(())
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let connection = {
+            let state = state.clone();
+            let id = contact.id.clone();
+            tokio::spawn(async move { handle_peer_connection(stream, &state, &id).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.config.write().await.server.p2p_enabled = false;
+        busy.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), connection)
+            .await
+            .expect("the connection ends")
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "no Presence nor sync request once P2P is off: {:?}",
+            received.lock().unwrap()
+        );
     }
 
     #[tokio::test]

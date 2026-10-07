@@ -1028,13 +1028,22 @@ impl PeerAuth {
         if !state.config.read().await.server.p2p_enabled {
             return None;
         }
-        let (peer, sid) = (self.clone(), shared_id.to_owned());
-        state
+        let (peer, sid, config) = (self.clone(), shared_id.to_owned(), state.config.clone());
+        let member = state
             .db
-            .with_conn(move |conn| peer.membership(conn, &sid))
+            .with_conn(move |conn| {
+                if !crate::api::federation::p2p_enabled_now(&config) {
+                    return Ok(None);
+                }
+                peer.membership(conn, &sid)
+            })
             .await
             .ok()
-            .flatten()
+            .flatten();
+        if !state.config.read().await.server.p2p_enabled {
+            return None;
+        }
+        member
     }
 
     /// Whether `msg` may go to this peer: None to close the connection.
@@ -1050,12 +1059,16 @@ impl PeerAuth {
         if !state.config.read().await.server.p2p_enabled {
             return false;
         }
-        let peer = self.clone();
-        state
+        let (peer, config) = (self.clone(), state.config.clone());
+        let authorized = state
             .db
-            .with_conn(move |conn| peer.authorized(conn))
+            .with_conn(move |conn| {
+                Ok(crate::api::federation::p2p_enabled_now(&config) && peer.authorized(conn)?)
+            })
             .await
-            .unwrap_or(false)
+            .unwrap_or(false);
+        // The DB may have been busy while P2P was turned off.
+        authorized && state.config.read().await.server.p2p_enabled
     }
 }
 
@@ -2393,6 +2406,71 @@ mod origin_and_admission_tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".staging-"))
             .collect();
         assert!(leftovers.is_empty(), "rejected staging files are removed");
+    }
+
+    /// Keep the single DB connection busy for `ms` on a blocking thread.
+    async fn hold_db(state: &AppState, ms: u64) -> tokio::task::JoinHandle<()> {
+        let db = state.db.clone();
+        let busy = tokio::spawn(async move {
+            let _ = db
+                .with_conn(move |_| {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    Ok(())
+                })
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        busy
+    }
+
+    #[tokio::test]
+    async fn a_publication_queued_behind_a_busy_db_respects_p2p_turned_off() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        let base = tempfile::TempDir::new().unwrap();
+        let room_a = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::find_discussion_by_shared_id(conn, "shared-a")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let staged = crate::core::context_files::stage_federated_file_in(
+            base.path(),
+            &room_a,
+            "f-busy",
+            "doc.pdf",
+            b"abc",
+        )
+        .unwrap();
+        let target = staged.target().to_path_buf();
+        let attachment = crate::api::federation::FederatedAttachment {
+            host: PeerAuth::InviteCode(code.into()),
+            shared_id: "shared-a".into(),
+            discussion_id: room_a,
+            file_id: "f-busy".into(),
+            message_id: "a-msg".into(),
+            filename: "doc.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 3,
+        };
+        let busy = hold_db(&state, 600).await;
+        let commit = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                crate::api::federation::commit_federated_attachment(&state, staged, attachment)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        state.config.write().await.server.p2p_enabled = false;
+        busy.await.unwrap();
+        assert!(
+            commit.await.unwrap().is_err(),
+            "the queued publication is refused"
+        );
+        assert!(!target.exists(), "nothing published once P2P is off");
     }
 
     #[test]
