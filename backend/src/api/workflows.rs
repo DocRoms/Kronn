@@ -2116,6 +2116,10 @@ pub async fn create_agent_proposal(
     create_as(state, req, WorkflowWriter::Agent).await
 }
 
+/// Why an agent cannot resume a disabled workflow's run.
+pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
+     be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
+
 /// Everything that decides what a workflow runs, where and when.
 fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
     serde_json::json!({
@@ -2129,6 +2133,8 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
         "guards": wf.guards,
         "artifacts": wf.artifacts,
         "variables": wf.variables,
+        "concurrency_limit": wf.concurrency_limit,
+        "concurrency_key": wf.concurrency_key,
         "project_id": wf.project_id,
         "project_scope": wf.project_scope,
     })
@@ -4968,6 +4974,16 @@ fn parse_resume_interrupted_request(
 pub async fn resume_interrupted(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    payload: Bytes,
+) -> Json<ApiResponse<ResumeRunResponse>> {
+    resume_interrupted_as(state, run_id, WorkflowWriter::from_bridge(&bridge), payload).await
+}
+
+pub(crate) async fn resume_interrupted_as(
+    state: AppState,
+    run_id: String,
+    caller: WorkflowWriter,
     payload: Bytes,
 ) -> Json<ApiResponse<ResumeRunResponse>> {
     let retry_uncertain_effect = match parse_resume_interrupted_request(&payload) {
@@ -5009,6 +5025,12 @@ pub async fn resume_interrupted(
         }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+
+    // A disabled workflow (an agent changed it since the interruption, or a
+    // human turned it off) resumes only at a human's request (KT-1037).
+    if caller == WorkflowWriter::Agent && !workflow.enabled {
+        return Json(ApiResponse::err(AGENT_RESUME_REFUSAL));
+    }
 
     // Validation + atomic claim — awaited, so the caller's answer reflects
     // whether THIS call won the run.
@@ -8421,6 +8443,7 @@ mod tests {
                 "name": "agent-made", "project_id": null,
                 "trigger": {"type": "Cron", "schedule": "* * * * *"},
                 "enabled": enabled,
+                "variables": [{"name": "ticket", "label": "Ticket", "placeholder": "", "required": false}],
                 "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
             }))
             .unwrap()
@@ -8519,6 +8542,81 @@ mod tests {
             !swapped.data.unwrap().enabled,
             "an agent's new steps on an enabled workflow need a human again"
         );
+
+        for change in [
+            serde_json::json!({"concurrency_limit": 50}),
+            serde_json::json!({"concurrency_key": "{{ticket}}"}),
+        ] {
+            let enable: UpdateWorkflowRequest =
+                serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+            let Json(human) = update_as(
+                state.clone(),
+                created.id.clone(),
+                enable,
+                WorkflowWriter::Human,
+            )
+            .await;
+            assert!(human.data.unwrap().enabled);
+            let request: UpdateWorkflowRequest = serde_json::from_value(change.clone()).unwrap();
+            let Json(changed) = update_as(
+                state.clone(),
+                created.id.clone(),
+                request,
+                WorkflowWriter::Agent,
+            )
+            .await;
+            assert!(changed.success, "{change}: {:?}", changed.error);
+            assert!(
+                !changed.data.unwrap().enabled,
+                "an agent's concurrency change disables: {change}"
+            );
+        }
+    }
+
+    /// KT-1037: an agent cannot resume a run of a disabled workflow; a human
+    /// can try (the resume then goes through its own checks).
+    #[tokio::test]
+    async fn an_agent_cannot_resume_a_disabled_workflows_run() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("interrupted");
+        wf.project_id = None;
+        wf.enabled = false;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let mut run: WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-int", "workflow_id": wf.id, "status": "Interrupted",
+            "step_results": [], "tokens_used": 0, "started_at": "2026-01-01T00:00:00Z",
+            "run_type": "linear", "batch_total": 0, "batch_completed": 0,
+            "batch_failed": 0, "batch_no_response": 0, "state": {}
+        }))
+        .unwrap();
+        run.project_id = None;
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &run))
+            .await
+            .unwrap();
+        let Json(agent) = resume_interrupted_as(
+            state.clone(),
+            "run-int".into(),
+            WorkflowWriter::Agent,
+            Bytes::new(),
+        )
+        .await;
+        assert!(!agent.success);
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RESUME_REFUSAL));
+        let Json(human) = resume_interrupted_as(
+            state.clone(),
+            "run-int".into(),
+            WorkflowWriter::Human,
+            Bytes::new(),
+        )
+        .await;
+        assert_ne!(human.error.as_deref(), Some(AGENT_RESUME_REFUSAL));
     }
 
     /// KT-1037: a JSON import lands disabled, so its Cron never fires until

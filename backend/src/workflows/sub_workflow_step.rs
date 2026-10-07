@@ -335,6 +335,19 @@ pub async fn execute_sub_workflow_step(
         .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
         .await
     {
+        // A disabled child (an agent changed it, or it was never enabled) is
+        // not run under the parent's activation (KT-1037).
+        Ok(Some(w)) if !w.enabled => {
+            return fail(
+                step,
+                start,
+                format!(
+                    "Sub-workflow `{}` ({target}) is disabled: a human must review and enable it \
+                     before its parent can run it.",
+                    w.name
+                ),
+            )
+        }
         Ok(Some(w)) => w,
         Ok(None) => {
             return fail(
@@ -844,6 +857,19 @@ async fn execute_foreach(
         .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
         .await
     {
+        // A disabled child (an agent changed it, or it was never enabled) is
+        // not run under the parent's activation (KT-1037).
+        Ok(Some(w)) if !w.enabled => {
+            return fail(
+                step,
+                start,
+                format!(
+                    "Sub-workflow `{}` ({target}) is disabled: a human must review and enable it \
+                     before its parent can run it.",
+                    w.name
+                ),
+            )
+        }
         Ok(Some(w)) => w,
         Ok(None) => {
             return fail(
@@ -1697,6 +1723,56 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    /// KT-1037: a disabled child is refused by its parent, single and
+    /// foreach alike, with a reason that sends the user to enable it.
+    #[tokio::test]
+    async fn a_disabled_child_is_refused_by_its_parent() {
+        let (state, tokens, agents, ws, foreach_step) = foreach_fixture().await;
+        state
+            .db
+            .with_conn(|c| {
+                c.execute("UPDATE workflows SET enabled = 0 WHERE id = 'child-wf'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let single_step = step_json(serde_json::json!({
+            "name": "child", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "child-wf",
+        }));
+        for step in [&single_step, &foreach_step] {
+            let ctx = crate::workflows::template::TemplateContext::new();
+            let outcome = super::execute_sub_workflow_step(
+                &state,
+                "parent-run",
+                0,
+                step,
+                &tokens,
+                &agents,
+                crate::workflows::runner::SharedBudget::root(50),
+                Some(ws.path().to_string_lossy().to_string()),
+                super::ChildLaunch {
+                    ctx: &ctx,
+                    parent_variables: &[],
+                    parent_project_id: None,
+                    cancel: None,
+                },
+            )
+            .await;
+            assert_eq!(outcome.result.status, crate::models::RunStatus::Failed);
+            assert!(
+                outcome.result.output.contains("is disabled"),
+                "{}",
+                outcome.result.output
+            );
+        }
+        assert_eq!(
+            child_rows_for(&state, "T1").await,
+            0,
+            "no child run started"
+        );
     }
 
     #[tokio::test]

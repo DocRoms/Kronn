@@ -97,7 +97,36 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickApiRequest>,
+) -> Json<ApiResponse<QuickApi>> {
+    update_as(state, id, req, bridge.is_some()).await
+}
+
+/// What a Quick API sends when a workflow step calls it.
+fn quick_api_execution(qa: &QuickApi) -> serde_json::Value {
+    serde_json::json!({
+        "plugin": qa.api_plugin_slug,
+        "config": qa.api_config_id,
+        "endpoint": qa.api_endpoint_path,
+        "method": qa.api_method,
+        "query": qa.api_query,
+        "path_params": qa.api_path_params,
+        "headers": qa.api_headers,
+        "body": qa.api_body,
+        "extract": qa.api_extract,
+        "pagination": qa.api_pagination,
+        "timeout": qa.api_timeout_ms,
+        "retries": qa.api_max_retries,
+        "variables": qa.variables,
+    })
+}
+
+pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    req: CreateQuickApiRequest,
+    by_agent: bool,
 ) -> Json<ApiResponse<QuickApi>> {
     let qa_id = id.clone();
     let existing = match state
@@ -112,6 +141,7 @@ pub async fn update(
     if let Err(error) = validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(error));
     }
+    let existing_snapshot = existing.clone();
 
     let updated = QuickApi {
         id: existing.id,
@@ -157,10 +187,21 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
+    // An agent's change to what the API sends would run under the human's
+    // activation of every workflow that calls it (KT-1037): those go back
+    // to disabled.
+    let disable_users =
+        by_agent && quick_api_execution(&existing_snapshot) != quick_api_execution(&updated);
     let q = updated.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_apis::update_quick_api(conn, &q))
+        .with_conn(move |conn| {
+            crate::db::quick_apis::update_quick_api(conn, &q)?;
+            if disable_users {
+                crate::db::quick_apis::disable_workflows_using(conn, &q.id)?;
+            }
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
@@ -1302,6 +1343,95 @@ fn normalize_batch_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KT-1037: an agent's change to what a Quick API sends disables every
+    /// enabled workflow that calls it; a human's edit or a rename does not.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_quick_api_disables_the_workflows_calling_it() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let qa: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-1", "name": "Fetch", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-qa', 'uses qa', '{\"type\":\"Manual\"}', '[{\"name\":\"call\",\"quick_api_id\":\"qa-1\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let enabled = |state: AppState| async move {
+            state
+                .db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT enabled FROM workflows WHERE id = 'wf-qa'",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        };
+        let request = |method: &str, name: &str| -> CreateQuickApiRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "description": "", "project_id": null,
+                "api_plugin_slug": "p", "api_config_id": "c",
+                "api_endpoint_path": "/items", "api_method": method, "variables": []
+            }))
+            .unwrap()
+        };
+        let Json(renamed) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("GET", "Renamed"),
+            true,
+        )
+        .await;
+        assert!(renamed.success, "{:?}", renamed.error);
+        assert!(
+            enabled(state.clone()).await,
+            "a rename changes nothing that runs"
+        );
+        let Json(human) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("POST", "Renamed"),
+            false,
+        )
+        .await;
+        assert!(human.success, "{:?}", human.error);
+        assert!(
+            enabled(state.clone()).await,
+            "a human's edit keeps the activation"
+        );
+        let Json(agent) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("DELETE", "Renamed"),
+            true,
+        )
+        .await;
+        assert!(agent.success, "{:?}", agent.error);
+        assert!(
+            !enabled(state.clone()).await,
+            "an agent's new method disables the caller"
+        );
+    }
 
     #[test]
     fn normalize_string_items_with_first_var_wraps_each_into_object() {

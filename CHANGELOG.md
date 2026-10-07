@@ -326,8 +326,13 @@ Release notes for 0.9.3 and earlier are available in the
   through create, `workflow_update` or `workflow_set_enabled` (`force`
   included): the backend refuses and tells it to ask the user; an agent's
   change to what an enabled workflow executes (steps, rollback, trigger, Exec
-  allowlist, actions, workspace, guards, variables, project) disables it
-  until the user enables it again. With localhost trust on (auth off, or
+  allowlist, actions, workspace, guards, variables, concurrency limit and
+  key, project) disables it until the user enables it again, and so does
+  its change to what a Quick API sends, for every enabled workflow calling
+  that API. A disabled definition never runs: a parent refuses a disabled
+  sub-workflow, manual and TriggerWorkflow launches, the scheduler and
+  trackers skip it, and only a human can resume an interrupted run of a
+  disabled workflow. With localhost trust on (auth off, or
   `auth_strict_localhost = false`) a local process without a bridge token
   still counts as the user, the trust model already documented for the HTTP
   API; strict localhost is the mitigation until positive human authorization

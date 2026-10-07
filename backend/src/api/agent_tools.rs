@@ -1835,10 +1835,12 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(merged) => merged,
                     Err(error) => return fail(call, format!("invalid Quick API: {error}")),
                 };
-                let Json(res) = crate::api::quick_apis::update(
-                    State(self.state.clone()),
-                    Path(existing.id.clone()),
-                    Json(merged),
+                // An agent's edit: dependent workflows lose their activation.
+                let Json(res) = crate::api::quick_apis::update_as(
+                    self.state.clone(),
+                    existing.id.clone(),
+                    merged,
+                    true,
                 )
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)

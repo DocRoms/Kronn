@@ -842,6 +842,9 @@ agent's lines wait for a human), an agent never arms a trigger: a bridge
 token's create lands disabled and its `enabled: true` is refused
 (`api/workflows.rs` `AGENT_ENABLE_REFUSAL`), its update cannot enable and
 any change it makes to what an enabled workflow executes (steps, rollback,
-trigger, Exec allowlist, actions, workspace, guards, variables, project)
-disables it; JSON imports, accepted
+trigger, Exec allowlist, actions, workspace, guards, variables, concurrency,
+project) disables it, and its change to what a Quick API sends disables
+every enabled workflow calling it; a disabled definition does not run (a
+parent refuses a disabled child, manual and TriggerWorkflow launches and the
+scheduler skip it, and only a human resumes a disabled workflow's run); JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.
