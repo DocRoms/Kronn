@@ -162,7 +162,9 @@ signale. La spec refuse donc de tourner sans `KRONN_SANDBOX_DIR`, et refuse
 # rend la main que si `/api/health` répond vraiment et que le processus qui
 # tient le port est celui qu'il vient de démarrer.
 cargo build --bin kronn
-PID=$(scripts/e2e-sandbox-backend.sh /tmp/kronn-kt619-sandbox 61140)
+# KRONN_E2E_DEV_UI_PORT admits that Vite's WebSocket Origin (KT-1033); without
+# it every live update (run cards, media jobs) stays silent.
+PID=$(KRONN_E2E_DEV_UI_PORT=61372 scripts/e2e-sandbox-backend.sh /tmp/kronn-kt619-sandbox 61140)
 
 cd frontend && env VITE_DEV_PORT=61372 \
   KRONN_BACKEND_URL=http://127.0.0.1:61140 \

@@ -58,6 +58,25 @@ export async function stubBootEndpoints(page: Page) {
       }),
     })
   );
+  // The interface preferences are mirrored server-side (KT-972) and a fresh
+  // browser context hydrates from that copy. Against the shared e2e backend,
+  // one spec's tour progress or theme would leak into the next. Each page
+  // gets its own in-memory mirror instead.
+  let uiPreferences: Record<string, string> = {};
+  await page.route('**/api/ui-preferences', route => {
+    if (route.request().method() === 'PUT') {
+      uiPreferences = route.request().postDataJSON() ?? {};
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        success: true,
+        data: route.request().method() === 'PUT' ? null : uiPreferences,
+        error: null,
+      }),
+    });
+  });
   // Backend health pill polls `/api/health` every 30s. Stub a healthy
   // reply so the BackendStatus pill stays hidden during E2E runs —
   // tests that want to assert the offline pill override this stub.

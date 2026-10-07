@@ -618,6 +618,9 @@ jobs:
         run: |
           KRONN_DATA_DIR=$(mktemp -d)
           export KRONN_DATA_DIR
+          # The WebSocket upgrade accepts only exact origins (KT-1033): name
+          # the Vite dev UI the specs drive, as `kronn start-dev` does.
+          export KRONN_DEV_UI_URL=http://localhost:5173
           ./target/release/kronn > /tmp/backend.log 2>&1 &
           echo $! > /tmp/backend.pid
           # Wait for backend to be ready (max 60s).

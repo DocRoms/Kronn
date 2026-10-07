@@ -8,6 +8,8 @@
 #
 # Usage:  scripts/e2e-sandbox-backend.sh <data-dir> <port>
 # Prints: the pid on stdout, and nothing else.
+# Env:    KRONN_E2E_DEV_UI_PORT=<vite port> admits that dev UI's WebSocket
+#         Origin (the backend refuses any other port, KT-1033).
 # Stop:   kill "$PID". By pid — the process shows up as `./target/debug/kronn`,
 #         so a `pkill -f` on a worktree path matches nothing.
 #
@@ -78,6 +80,12 @@ fi
 [[ -e "$DATA_DIR" || -L "$DATA_DIR" ]] && die "$DATA_DIR already exists; this script owns the directory it creates"
 [[ -x "$BINARY" ]] || die "no backend binary at $BINARY (cargo build --bin kronn)"
 [[ "$BINARY" == /* ]] || die "backend binary path must be absolute"
+DEV_UI_ENV=()
+if [[ -n "${KRONN_E2E_DEV_UI_PORT:-}" ]]; then
+    [[ "$KRONN_E2E_DEV_UI_PORT" =~ ^[1-9][0-9]{3,4}$ ]] && (( KRONN_E2E_DEV_UI_PORT >= 1024 && KRONN_E2E_DEV_UI_PORT <= 65535 )) \
+        || die "dev UI port out of range (1024-65535): $KRONN_E2E_DEV_UI_PORT"
+    DEV_UI_ENV=("KRONN_DEV_UI_URL=http://localhost:$KRONN_E2E_DEV_UI_PORT")
+fi
 readonly HEALTH_TRIES="${KRONN_E2E_HEALTH_TRIES:-90}"
 [[ "$HEALTH_TRIES" =~ ^[1-9][0-9]{0,2}$ ]] && (( HEALTH_TRIES <= 300 )) \
     || die "health tries must be an integer from 1 to 300"
@@ -138,7 +146,7 @@ TOML
         KRONN_BACKUP_DIR="$DATA_DIR/backups" KRONN_BACKUP_INTERVAL_HOURS=0 \
         KRONN_DOCS_SIDECAR="$DATA_DIR/docs-sidecar-disabled" \
         XDG_CONFIG_HOME="$DATA_DIR/xdg-config" XDG_CACHE_HOME="$DATA_DIR/cache" \
-        TMPDIR="$DATA_DIR/tmp" "$BINARY"
+        TMPDIR="$DATA_DIR/tmp" ${DEV_UI_ENV[@]+"${DEV_UI_ENV[@]}"} "$BINARY"
 ) < /dev/null >"$DATA_DIR/backend.log" 2>&1 &
 backend=$!
 

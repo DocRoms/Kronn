@@ -12,7 +12,10 @@
  * `handleSave` catches the thrown error and renders the banner. Since the
  * decomposed-presets work (0.8.6), a preset carrying `childWorkflows`
  * (e.g. 🎫 Ticket Autopilot) routes the save to `POST /api/workflows/bundle`
- * instead of `POST /api/workflows`, so we intercept BOTH endpoints.
+ * instead of `POST /api/workflows`. Since 0.14.3 a bundle the operator builds
+ * in the wizard goes to `POST /api/workflows/bundle/human` (the plain bundle
+ * route now treats its content as agent-written, KT-1017), so all three are
+ * intercepted.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
@@ -26,8 +29,9 @@ test.describe('Wizard — save error banner', () => {
     // validation rejection. Done BEFORE goto so the route is registered
     // when the request fires. Matches both the flat create endpoint
     // (`/api/workflows`) and the decomposed-preset bundle endpoint
-    // (`/api/workflows/bundle`) — Ticket Autopilot now saves via the latter.
-    await page.route(/\/api\/workflows(\/bundle)?(\?.*)?$/, async (route, request) => {
+    // (`/api/workflows/bundle`) and its human-authored variant
+    // (`/api/workflows/bundle/human`), which Ticket Autopilot saves through.
+    await page.route(/\/api\/workflows(\/bundle(\/human)?)?(\?.*)?$/, async (route, request) => {
       if (request.method() === 'POST') {
         await route.fulfill({
           status: 400,
