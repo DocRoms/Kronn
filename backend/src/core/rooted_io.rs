@@ -141,6 +141,8 @@ mod imp {
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             return Err(error);
                         }
+                    } else {
+                        sync_dir(&dir)?;
                     }
                     open_at(&dir, &name, libc::O_RDONLY | libc::O_DIRECTORY)?
                 }
@@ -149,6 +151,17 @@ mod imp {
         }
         let last: &OsStr = parts[parts.len() - 1];
         Ok((dir, cstring(last.as_bytes())?))
+    }
+
+    /// Makes a directory's new entries durable.
+    fn sync_dir(dir: &OwnedFd) -> io::Result<()> {
+        #[cfg(test)]
+        super::tests::DIR_SYNCS.with(|count| count.set(count.get() + 1));
+        // SAFETY: `dir` is an open descriptor.
+        if unsafe { libc::fsync(dir.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// `lstat` of `name` in `dir`.
@@ -250,6 +263,9 @@ mod imp {
                 return Err(io::Error::last_os_error());
             }
             file.write_all(bytes)?;
+            // Content first, then the entry: a crash never publishes a
+            // half-written file over the previous one.
+            file.sync_all()?;
             // SAFETY: as in open_at; renameat replaces the entry, never
             // writes through what it pointed at.
             if unsafe {
@@ -265,11 +281,14 @@ mod imp {
             }
             Ok(())
         })();
-        if written.is_err() {
-            // SAFETY: as in open_at.
-            unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        match written {
+            Ok(()) => sync_dir(&dir),
+            Err(error) => {
+                // SAFETY: as in open_at.
+                unsafe { libc::unlinkat(dir.as_raw_fd(), tmp.as_ptr(), 0) };
+                Err(error)
+            }
         }
-        written
     }
 
     pub fn remove(root: &Path, rel: &Path) -> io::Result<()> {
@@ -352,6 +371,9 @@ mod imp {
             if let Some(meta) = existing.as_ref().filter(|meta| meta.is_file()) {
                 file.set_permissions(meta.permissions())?;
             }
+            // std cannot sync a directory on Windows: the content is synced,
+            // the renamed entry relies on the file system's journal.
+            file.sync_all()?;
             drop(file);
             // Replaces the directory entry (a planted link included).
             std::fs::rename(&tmp, &path)
@@ -419,6 +441,8 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     thread_local! {
+        /// Directory syncs made by this thread.
+        pub(super) static DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// Runs once inside the next read, right after its open.
         pub(super) static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
@@ -587,6 +611,18 @@ mod tests {
             .unwrap()
             .file_type()
             .is_fifo());
+    }
+
+    #[test]
+    fn a_write_syncs_its_directory_and_every_created_parent() {
+        let (root, _) = dirs();
+        DIR_SYNCS.with(|count| count.set(0));
+        write(root.path(), Path::new("a/b/f.json"), b"x").unwrap();
+        // root (gains a/), a/ (gains b/), b/ (gains f.json).
+        assert_eq!(DIR_SYNCS.with(|count| count.get()), 3);
+        DIR_SYNCS.with(|count| count.set(0));
+        write(root.path(), Path::new("a/b/f.json"), b"y").unwrap();
+        assert_eq!(DIR_SYNCS.with(|count| count.get()), 1);
     }
 
     #[test]
