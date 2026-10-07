@@ -2844,6 +2844,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_between_step_guard_stop_settles_a_fire_and_forget_batch() {
+        let (state, tokens, agents, ws, _) = foreach_fixture().await;
+        // A step that loops onto itself trips loop detection between steps.
+        let looping = step_json(serde_json::json!({
+            "name": "loop", "step_type": {"type": "JsonData"},
+            "json_data_payload": {"again": true},
+            "on_result": [{"contains": "OK", "action": {"type": "Goto", "step_name": "loop"}}],
+        }));
+        let (mut parent, mut outer) = outer_foreach_run(&state, &looping, 3600, &ws).await;
+        parent.guards = Some(crate::models::WorkflowGuards {
+            loop_detection_max_revisits: Some(1),
+            ..Default::default()
+        });
+        let saved = parent.clone();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::update_workflow(c, &saved)?;
+                // A batch child left running by an earlier fire-and-forget
+                // step, with a queued agent dispatch.
+                let now = chrono::Utc::now().to_rfc3339();
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, parent_run_id,
+                      step_results_json, started_at, batch_total)
+                     VALUES ('batch-child', 'child-wf', 'Running', 'batch', 'outer-run',
+                      '[]', ?1, 1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO discussions
+                     (id, title, agent, participants_json, workflow_run_id,
+                      awaiting_agent, created_at, updated_at, message_count, next_message_seq)
+                     VALUES ('batch-disc', 'item', 'ClaudeCode', '[\"ClaudeCode\"]',
+                      'batch-child', 1, ?1, ?1, 1, 1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES ('batch-msg', 'batch-disc', 'User', 'main', 'work', ?1, 0)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    c,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "batch-job",
+                        discussion_id: "batch-disc",
+                        trigger_message_id: "batch-msg",
+                        trigger_sort_order: 0,
+                        dedupe_key: "batch-job",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: Some("batch-child"),
+                        group_concurrency_limit: Some(1),
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let _ = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            outer.status,
+            crate::models::RunStatus::StoppedByGuard,
+            "{:?}",
+            outer.step_results
+        );
+        let (batch, job): (String, String) = state
+            .db
+            .with_conn(|c| {
+                Ok((
+                    c.query_row(
+                        "SELECT status FROM workflow_runs WHERE id = 'batch-child'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    c.query_row(
+                        "SELECT status FROM agent_dispatch_jobs WHERE id = 'batch-job'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!((batch.as_str(), job.as_str()), ("Cancelled", "Cancelled"));
+    }
+
+    #[tokio::test]
     async fn the_retained_token_ends_a_capacity_wait() {
         // Cancellation removes the registry entry first: only the token the
         // runner kept can tell the wait to stop.

@@ -2448,18 +2448,6 @@ async fn execute_run_body(
                     threshold: resolved_guards.timeout_seconds,
                     actual: actual_secs,
                 });
-                // Every step kind: the dropped executor may have left a child
-                // row (sub-workflow, batch) that nothing will run any more.
-                if let Err(error) = super::cancellation::cancel_run_tree(
-                    &state,
-                    &run.id,
-                    super::cancellation::CancellationScope::DescendantsOnly,
-                    "workflow_timeout_guard",
-                )
-                .await
-                {
-                    tracing::error!(run_id = %run.id, "Unable to cancel timed-out descendants: {error}");
-                }
                 stopped_by_guard = true;
                 StepOutcome {
                     result: StepResult {
@@ -3348,6 +3336,23 @@ async fn execute_run_body(
         Ok(updated)
     })
     .await?;
+
+    // Every guard exit (in-flight or between-step timeout, LLM quota, loop
+    // detection) ends here. Settled after the terminal write: an admission
+    // that runs later sees the stopped parent and refuses, one that ran
+    // earlier left a child this sweep cancels, with its whole subtree.
+    if run.status == RunStatus::StoppedByGuard {
+        if let Err(error) = super::cancellation::cancel_run_tree(
+            &state,
+            &run.id,
+            super::cancellation::CancellationScope::DescendantsOnly,
+            "workflow_guard_stop",
+        )
+        .await
+        {
+            tracing::error!(run_id = %run.id, "Unable to settle descendants after a guard stop: {error}");
+        }
+    }
 
     // Emit run done
     emit(RunEvent::RunDone {
