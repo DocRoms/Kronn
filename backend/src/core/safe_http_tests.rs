@@ -37,6 +37,17 @@ fn embedded_ipv4_forms_are_classified_as_their_ipv4_host() {
         "2001:db8::1",
         "::1",
         "::",
+        "64:ff9b:1::a00:1",
+        "2001:2::1",
+        "3fff::1",
+        "5f00::1",
+        "100::1",
+        "100:0:0:1::1",
+        "fc00::1",
+        "fe80::1",
+        "ff02::1",
+        "4000::1",
+        "192.88.99.1",
     ] {
         assert!(!is_global(ip(blocked)), "{blocked} must not be global");
     }
@@ -258,6 +269,7 @@ async fn a_cross_origin_307_is_refused_and_the_body_never_reaches_it() {
             secret_headers: &[],
             secret_query_keys: &[],
             attach_body: &attach,
+            has_body: true,
             pinned_base: None,
         },
     )
@@ -300,6 +312,7 @@ async fn a_cross_origin_hop_drops_secret_slots_whatever_their_name_and_secret_qu
             secret_headers: &[reqwest::header::USER_AGENT],
             secret_query_keys: &["apikey".to_string()],
             attach_body: &attach,
+            has_body: false,
             pinned_base: None,
         },
     )
@@ -316,4 +329,58 @@ async fn a_cross_origin_hop_drops_secret_slots_whatever_their_name_and_secret_qu
     assert!(sink.headers.get("authorization").is_none());
     assert_eq!(sink.headers.get("accept").unwrap(), "application/json");
     assert_eq!(sink.url.query(), Some("lang=fr"));
+}
+
+#[tokio::test]
+async fn a_cross_origin_302_that_would_resend_a_put_body_is_refused() {
+    let origin = MockServer::start().await;
+    let other = MockServer::start().await;
+    Mock::given(path("/put"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", format!("{}/sink", other.uri())),
+        )
+        .mount(&origin)
+        .await;
+    Mock::given(path("/sink"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&other)
+        .await;
+    let attach = |r: SafeRequest| r.body("{\"secret\":\"x\"}");
+    let err = send_following(
+        &test_client(Redirects::Manual),
+        Outbound {
+            method: Method::PUT,
+            url: url(&format!("{}/put", origin.uri())),
+            headers: HeaderMap::new(),
+            secret_headers: &[],
+            secret_query_keys: &[],
+            attach_body: &attach,
+            has_body: true,
+            pinned_base: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("PUT body"), "{err}");
+}
+
+#[tokio::test]
+async fn a_peer_client_does_not_follow_a_redirect_off_the_peer() {
+    let peer = MockServer::start().await;
+    Mock::given(path("/api/disc/claim-by-token"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+        )
+        .mount(&peer)
+        .await;
+    let err = peer_client(Duration::from_secs(5))
+        .unwrap()
+        .post(url(&format!("{}/api/disc/claim-by-token", peer.uri())))
+        .json(&serde_json::json!({"from_invite_code": "code"}))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.is_blocked(), "{err}");
 }

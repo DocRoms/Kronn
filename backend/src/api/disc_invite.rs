@@ -859,10 +859,9 @@ async fn try_remote_join(
         .await
         .unwrap_or_default();
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(6))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    // The peer's address is approved, not where it redirects to.
+    let client = crate::core::safe_http::peer_client(Duration::from_secs(6))
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     for contact in contacts.into_iter().filter(|c| c.status == "accepted") {
         if !state.p2p.enabled() {
@@ -871,10 +870,12 @@ async fn try_remote_join(
         let Some(base) = db::contacts::contact_base_url(&contact.kronn_url) else {
             continue;
         };
-        let url = format!("{base}/api/disc/claim-by-token");
+        let Ok(url) = reqwest::Url::parse(&format!("{base}/api/disc/claim-by-token")) else {
+            continue;
+        };
         let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
         let claim = async {
-            let resp = client.post(&url).json(&body).send().await.ok()?;
+            let resp = client.post(url).json(&body).send().await.ok()?;
             resp.json::<serde_json::Value>().await.ok()
         };
         // Turning P2P off cancels the claim in flight.

@@ -273,15 +273,12 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<Authentic
         // GitLab MCP — current names first, then backwards-compatible aliases.
         if cfg.server_id == "mcp-gitlab" {
             let (configured_token, configured_host) = gitlab_credentials(&env);
-            let token = configured_token.or_else(gitlab_token_from_process_env);
-            let host = configured_host.or_else(gitlab_host_from_process_env);
-            let auth = match token {
-                Some(token) => RepoSourceAuth::Token {
-                    token,
-                    api_url: host,
-                },
-                None => RepoSourceAuth::GitLabCli { host },
-            };
+            let auth = gitlab_source_auth(
+                configured_token,
+                configured_host,
+                gitlab_token_from_process_env(),
+                gitlab_host_from_process_env(),
+            );
             sources.push(AuthenticatedRepoSource {
                 source: RepoSource {
                     id: cfg.id.clone(),
@@ -354,6 +351,33 @@ fn gitlab_credentials(
     )
 }
 
+/// A token only goes to the origin it was configured with: the config's
+/// token with the config's host, the process token with the process host. A
+/// configured (possibly imported) host without its own token never borrows
+/// the process token; it falls back to `glab`, which holds its own
+/// per-host logins.
+fn gitlab_source_auth(
+    configured_token: Option<String>,
+    configured_host: Option<String>,
+    process_token: Option<String>,
+    process_host: Option<String>,
+) -> RepoSourceAuth {
+    match (configured_token, configured_host) {
+        (Some(token), host) => RepoSourceAuth::Token {
+            token,
+            api_url: host,
+        },
+        (None, Some(host)) => RepoSourceAuth::GitLabCli { host: Some(host) },
+        (None, None) => match process_token {
+            Some(token) => RepoSourceAuth::Token {
+                token,
+                api_url: process_host,
+            },
+            None => RepoSourceAuth::GitLabCli { host: process_host },
+        },
+    }
+}
+
 fn gitlab_token_from_process_env() -> Option<String> {
     ["GITLAB_TOKEN", "GITLAB_PERSONAL_ACCESS_TOKEN"]
         .iter()
@@ -384,16 +408,28 @@ pub(crate) fn normalize_repo_url(url: &str) -> String {
 /// Bounded per request: discovery paginates in a loop inside a GET handler —
 /// one stalled page (self-hosted GitLab that accepts and never answers) would
 /// pin the handler forever; the UI modal has no cancel.
-fn discovery_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
+/// The host may be a self-hosted GitLab on the LAN, so any address is
+/// allowed, but a redirect never leaves that origin and the token never
+/// follows one elsewhere.
+fn discovery_client() -> Result<crate::core::safe_http::SafeClient, String> {
+    use crate::core::safe_http::{client, ClientOptions, Redirects, SafeHttpPolicy};
+    client(
+        SafeHttpPolicy::Configured,
+        ClientOptions::new(Redirects::SameOrigin)
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15)),
+    )
+}
+
+/// An API error body, without the token that was sent.
+fn scrubbed_body(body: &str, token: &str) -> String {
+    let mut secrets = crate::core::secret_scrub::SecretSet::new();
+    secrets.add(token);
+    secrets.scrub(body)
 }
 
 async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
-    let client = discovery_client();
+    let client = discovery_client()?;
     let mut all_repos = vec![];
     let mut seen = std::collections::HashSet::new();
 
@@ -475,10 +511,11 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
 
 /// Helper: GET a JSON array from GitHub API with auth headers.
 async fn github_get_json_array(
-    client: &reqwest::Client,
+    client: &crate::core::safe_http::SafeClient,
     url: &str,
     token: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    let url = reqwest::Url::parse(url).map_err(|e| format!("GitHub URL invalid: {e}"))?;
     let resp = client
         .get(url)
         .header("Authorization", format!("Bearer {}", token))
@@ -491,7 +528,11 @@ async fn github_get_json_array(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub API error {}: {}", status, body));
+        return Err(format!(
+            "GitHub API error {}: {}",
+            status,
+            scrubbed_body(&body, token)
+        ));
     }
 
     resp.json()
@@ -517,7 +558,7 @@ fn parse_github_repo(r: &serde_json::Value) -> RemoteRepo {
 
 /// Fetch all repos for the authenticated GitLab user, including group repos.
 async fn fetch_gitlab_repos(token: &str, api_url: &str) -> Result<Vec<RemoteRepo>, String> {
-    let client = discovery_client();
+    let client = discovery_client()?;
     let base = normalize_gitlab_base_url(api_url)?;
     let mut all_repos = vec![];
     let mut seen = std::collections::HashSet::new();
@@ -646,7 +687,7 @@ async fn fetch_gitlab_repos_via_cli(host: &str) -> Result<Vec<RemoteRepo>, Strin
 
 /// Paginate a GitLab projects endpoint and collect results.
 async fn gitlab_collect_projects(
-    client: &reqwest::Client,
+    client: &crate::core::safe_http::SafeClient,
     token: &str,
     base_url: &str,
     out: &mut Vec<RemoteRepo>,
@@ -676,10 +717,11 @@ async fn gitlab_collect_projects(
 
 /// Helper: GET a JSON array from GitLab API with auth headers.
 async fn gitlab_get_json_array(
-    client: &reqwest::Client,
+    client: &crate::core::safe_http::SafeClient,
     url: &str,
     token: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
+    let url = reqwest::Url::parse(url).map_err(|e| format!("GitLab URL invalid: {e}"))?;
     let resp = client
         .get(url)
         .header("PRIVATE-TOKEN", token)
@@ -691,7 +733,11 @@ async fn gitlab_get_json_array(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitLab API error {}: {}", status, body));
+        return Err(format!(
+            "GitLab API error {}: {}",
+            status,
+            scrubbed_body(&body, token)
+        ));
     }
 
     resp.json()
@@ -777,6 +823,59 @@ mod tests {
         let out = normalize_repo_url("https://bitbucket.example.com/Foo/Bar.git");
         assert!(out.contains("bitbucket.example.com"));
         assert!(!out.ends_with(".git"));
+    }
+
+    #[test]
+    fn an_imported_gitlab_host_never_receives_the_process_token() {
+        let auth = gitlab_source_auth(
+            None,
+            Some("https://evil.example".into()),
+            Some("process-token".into()),
+            None,
+        );
+        assert!(matches!(auth, RepoSourceAuth::GitLabCli { .. }));
+        let own = gitlab_source_auth(
+            Some("bundle-token".into()),
+            Some("https://gitlab.example".into()),
+            Some("process-token".into()),
+            None,
+        );
+        assert!(matches!(own, RepoSourceAuth::Token { ref token, .. } if token == "bundle-token"));
+        let ambient = gitlab_source_auth(
+            None,
+            None,
+            Some("process-token".into()),
+            Some("https://gitlab.corp".into()),
+        );
+        assert!(matches!(
+            ambient,
+            RepoSourceAuth::Token { ref token, ref api_url }
+                if token == "process-token" && api_url.as_deref() == Some("https://gitlab.corp")
+        ));
+    }
+
+    #[tokio::test]
+    async fn gitlab_discovery_does_not_follow_a_redirect_to_another_origin() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gitlab = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(path("/api/v4/projects"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/steal", other.uri())),
+            )
+            .mount(&gitlab)
+            .await;
+        Mock::given(path("/steal"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .expect(0)
+            .mount(&other)
+            .await;
+        let err = fetch_gitlab_repos("glpat-secret", &gitlab.uri())
+            .await
+            .unwrap_err();
+        assert!(err.contains("Security"), "{err}");
     }
 
     #[test]

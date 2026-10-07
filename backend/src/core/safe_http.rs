@@ -87,6 +87,8 @@ pub fn is_global(ip: IpAddr) -> bool {
                 || (o[0] == 100 && (o[1] & 0xc0) == 64)
                 // 192.0.0.0/24 IETF protocol assignments.
                 || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                // 192.88.99.0/24 deprecated 6to4 relay anycast.
+                || (o[0] == 192 && o[1] == 88 && o[2] == 99)
                 // 198.18.0.0/15 benchmarking.
                 || (o[0] == 198 && (o[1] & 0xfe) == 18)
                 // 240.0.0.0/4 reserved.
@@ -100,17 +102,59 @@ pub fn is_global(ip: IpAddr) -> bool {
                 let [c, d] = s[2].to_be_bytes();
                 return is_global(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
             }
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (s[0] & 0xfe00) == 0xfc00 // unique local
-                || (s[0] & 0xffc0) == 0xfe80 // link local
-                || (s[0] & 0xffc0) == 0xfec0 // site local (deprecated)
-                || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
-                || (s[0] == 0x2001 && s[1] == 0) // Teredo
-                || (s[0] == 0x0100 && s[1..4] == [0; 3])) // discard-only
+            ipv6_is_global(u128::from(v6))
         }
     }
+}
+
+/// `(prefix, length)` as a 128-bit value and its mask width.
+const fn v6(prefix: u128, len: u32) -> (u128, u32) {
+    (prefix, len)
+}
+
+fn in_prefix(addr: u128, (prefix, len): (u128, u32)) -> bool {
+    let mask = if len == 0 {
+        0
+    } else {
+        u128::MAX << (128 - len)
+    };
+    addr & mask == prefix & mask
+}
+
+/// Non-global entries of the IANA IPv6 Special-Purpose Address Registry
+/// that fall inside 2000::/3 (everything outside it is refused anyway).
+const IPV6_NON_GLOBAL: [(u128, u32); 5] = [
+    v6(0x2001_0000 << 96, 23), // IETF protocol assignments (Teredo, 2001:2::/48 benchmarking…)
+    v6(0x2001_0db8 << 96, 32), // documentation
+    v6(0x3fff_0000 << 96, 20), // documentation
+    v6(0x5f00_0000 << 96, 16), // SRv6 SIDs
+    v6(0x2002_0000 << 96, 16), // 6to4, classified by its embedded host instead
+];
+
+/// Inside 2001::/23, the registry's globally reachable exceptions.
+const IPV6_GLOBAL_IN_IETF: [(u128, u32); 7] = [
+    v6(0x2001_0001_0000_0000_0000_0000_0000_0001, 128), // PCP anycast
+    v6(0x2001_0001_0000_0000_0000_0000_0000_0002, 128), // TURN anycast
+    v6(0x2001_0001_0000_0000_0000_0000_0000_0003, 128), // DNS-SD SRP anycast
+    v6(0x2001_0003 << 96, 32),                          // AMT
+    v6(0x2001_0004_0112 << 80, 48),                     // AS112-v6
+    v6(0x2001_0020 << 96, 28),                          // ORCHIDv2
+    v6(0x2001_0030 << 96, 28),                          // drone remote ID
+];
+
+/// Global unicast is 2000::/3; outside it every block (loopback, ULA,
+/// link-local, multicast, discard-only 100::/64, the dummy prefix, the
+/// local-use NAT64 64:ff9b:1::/48, reserved space) is non-global. The
+/// well-known NAT64 64:ff9b::/96 and the mapped forms were already
+/// reduced to their IPv4 host by [`canonical_ip`].
+fn ipv6_is_global(addr: u128) -> bool {
+    if !in_prefix(addr, v6(0x2000 << 112, 3)) {
+        return false;
+    }
+    if IPV6_GLOBAL_IN_IETF.iter().any(|p| in_prefix(addr, *p)) {
+        return true;
+    }
+    !IPV6_NON_GLOBAL.iter().any(|p| in_prefix(addr, *p))
 }
 
 /// A destination refused by policy. Kept as an error type so it can be found
@@ -249,6 +293,15 @@ pub struct SafeClient {
 
 pub fn client(policy: SafeHttpPolicy, options: ClientOptions) -> Result<SafeClient, String> {
     build(policy, options, system_lookup())
+}
+
+/// A contact's Kronn: its configured address may be on the LAN or Tailscale,
+/// so any address is allowed, but no redirect leaves that origin.
+pub fn peer_client(timeout: Duration) -> Result<SafeClient, String> {
+    client(
+        SafeHttpPolicy::Configured,
+        ClientOptions::new(Redirects::SameOrigin).timeout(timeout),
+    )
 }
 
 #[cfg(test)]
@@ -427,6 +480,9 @@ pub struct Outbound<'a> {
     /// Query keys holding a credential.
     pub secret_query_keys: &'a [String],
     pub attach_body: &'a (dyn Fn(SafeRequest) -> SafeRequest + Sync),
+    /// Whether `attach_body` adds a body: a hop to another origin that would
+    /// carry it is refused.
+    pub has_body: bool,
     /// Every hop must keep this host and scheme (ApiCall's plugin base).
     pub pinned_base: Option<&'a Url>,
 }
@@ -455,6 +511,7 @@ pub async fn send_following(
         secret_headers,
         secret_query_keys,
         attach_body,
+        has_body,
         pinned_base,
     } = outbound;
     let refuse = |reason: String| SendError::Blocked(reason);
@@ -496,6 +553,12 @@ pub async fn send_following(
                 with_body = false;
             }
             _ => {}
+        }
+        if cross_origin && with_body && has_body {
+            return Err(refuse(format!(
+                "redirect refused: a {} to another origin would resend the {method} body",
+                status.as_u16()
+            )));
         }
         if cross_origin {
             let mut kept = HeaderMap::new();

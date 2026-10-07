@@ -332,8 +332,16 @@ Release notes for 0.9.3 and earlier are available in the
   to the checked addresses, so a rebinding answer cannot reach the socket;
   IPv4-mapped IPv6 forms such as `[::ffff:127.0.0.1]` are refused like their
   IPv4 host. Each redirect hop is re-checked; an https→http downgrade and a
-  cross-origin 307/308 are refused, and a cross-origin hop drops every
-  credential header slot (whatever its name) and auth query key (KT-1039).
+  cross-origin 307/308 are refused, as is any cross-origin hop that would
+  resend a body (a 301/302 on PUT included); a cross-origin hop drops every
+  header and query key the plugin, the step or the webhook supplied. IPv6
+  addresses are classified against the IANA special-purpose registry (the
+  local-use NAT64 `64:ff9b:1::/48`, `2001:2::/48`, `3fff::/20`, `5f00::/16`
+  and everything outside `2000::/3` are refused). Peer attachment fetches,
+  remote joins and repository discovery use the guarded client with
+  same-origin redirects, and an imported GitLab host never receives the
+  process `GITLAB_TOKEN`: a token only goes to the host it was configured
+  with (KT-1039).
 - A project whose validation discussion has finished no longer stays stuck at
   Audited: that discussion archives itself on its last word, which hid the
   "Mark audit valid" banner, while the audit timeline's "Validate the audit"

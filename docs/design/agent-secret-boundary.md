@@ -773,18 +773,20 @@ one transport for requests whose destination a user, a plugin spec, a
 provider payload or an agent supplies. A `SafeClient` resolves names through
 its own resolver: the answer is classified by `safe_http::is_global` (one
 rule; IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms count as their IPv4
-host; loopback, private, link-local, shared 100.64/10, documentation,
-benchmarking, reserved, unique-local and Teredo are refused), a host with any
+host; IPv4 follows the IANA special-purpose registry, and IPv6 must be in
+2000::/3 outside that registry's non-global blocks, so loopback, private,
+link-local, shared 100.64/10, documentation, benchmarking, reserved,
+unique-local, local-use NAT64, SRv6 and Teredo are refused), a host with any
 refused answer is refused, and the connection uses exactly the checked
 addresses, so a second DNS answer cannot reach the socket. Literal-IP URLs
 are checked by the same rule before every send and every hop; proxies are
 off. A `SafeRequest` can only leave through that checked `send`. Redirects
 are either followed by reqwest on the same origin only, or by
 `send_following`, which re-checks each hop (5 at most), refuses an https→http
-downgrade, a hop off the plugin host and any cross-origin 307/308 (it would
-replay the body), and on a cross-origin hop drops every declared secret
-header slot (whatever its name, `User-Agent` included) and the auth query
-keys.
+downgrade, a hop off the plugin host and any cross-origin hop that would
+resend a body (307/308 always, 301/302 on PUT and other non-POST methods),
+and on a cross-origin hop drops every header and query key the plugin, the
+step or the webhook supplied (whatever its name, `User-Agent` included).
 
 | Client | Policy |
 |---|---|
@@ -796,6 +798,8 @@ keys.
 | Remote MCP probe, SSE and streamable (`api/mcps.rs`) | configured (the operator's URL may be local); same-origin only |
 | Page `web_fetch` (`api/agent_workspace_tools.rs`) | public; redirects reported, not followed |
 | GitHub tracker (`workflows/tracker/github.rs`) | public; same-origin only |
+| Peer attachment fetch and remote join (`api/federation.rs`, `api/disc_invite.rs`) | configured (the contact's LAN or Tailscale address); same-origin only |
+| Repository discovery, GitHub and GitLab (`api/discover.rs`) | configured (a self-hosted GitLab may be local); same-origin only; a token only goes to the host it was configured with, never an imported host with the process token |
 
 What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
 API call collects every credential it resolved (auth slots, env values
@@ -813,11 +817,9 @@ and their probes on a configured connection (`agents/runner.rs`,
 `api/ollama.rs`, `core/ollama_registry.rs`,
 `core/model_catalog/ollama_discovery.rs`, `api/lite_llm.rs`, `api/nvidia.rs`,
 `api/external_api_connections.rs`, `agents/vision.rs`, `api/media.rs`, media
-provider calls in `agents/media_runner.rs`); peers (`api/contacts.rs`,
-`api/federation.rs`, `api/disc_invite.rs`, LAN or Tailscale by design);
+provider calls in `agents/media_runner.rs`); contact probes (`api/contacts.rs`, LAN or Tailscale by design);
 fixed hosts (`core/versions.rs`, `api/version.rs`,
-`core/github_connection.rs`, `api/discover.rs` with the operator's GitLab
-host); the operator's failure webhook (`core/run_notify.rs`); the local docs
+`core/github_connection.rs`); the operator's failure webhook (`core/run_notify.rs`); the local docs
 sidecar (`api/docs.rs`); the gate auto-approve self-call to `127.0.0.1`
 (`workflows/runner.rs`).
 

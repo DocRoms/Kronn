@@ -166,6 +166,10 @@ pub async fn execute_notify_step_with_policy(
         headers.append(name, value);
     }
     let send_body = method != reqwest::Method::GET && !body.is_empty();
+    let secret_query_keys: Vec<String> = parsed_url
+        .query_pairs()
+        .map(|(k, _)| k.into_owned())
+        .collect();
     let attach_body = |req: safe_http::SafeRequest| {
         if send_body {
             req.body(body.clone())
@@ -180,8 +184,9 @@ pub async fn execute_notify_step_with_policy(
             url: parsed_url.clone(),
             headers,
             secret_headers: &secret_headers,
-            secret_query_keys: &[],
+            secret_query_keys: &secret_query_keys,
             attach_body: &attach_body,
+            has_body: send_body,
             pinned_base: None,
         },
     )

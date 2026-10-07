@@ -1877,7 +1877,7 @@ async fn send_with_retry(
     transport: &ApiTransport,
 ) -> Result<(Value, Option<String>, Option<u16>), String> {
     let headers = build_request_headers(auth, extra_headers)?;
-    let (secret_headers, secret_query_keys) = secret_slots(auth);
+    let (secret_headers, secret_query_keys) = secret_slots(auth, extra_headers, url);
 
     // 2026-06-10 audit P1 — automatic retries are only safe on idempotent
     // verbs. A network timeout can land AFTER the server processed a POST:
@@ -1907,6 +1907,7 @@ async fn send_with_retry(
                 secret_headers: &secret_headers,
                 secret_query_keys: &secret_query_keys,
                 attach_body: &attach_body,
+                has_body: body.is_some(),
                 pinned_base: transport.pinned_base.as_ref(),
             },
         )
@@ -1986,16 +1987,25 @@ struct ApiTransport {
 
 /// The header and query slots that hold the resolved credential, whatever
 /// their names; a cross-origin hop drops them.
-fn secret_slots(auth: &ResolvedAuth) -> (Vec<HeaderName>, Vec<String>) {
+fn secret_slots(
+    auth: &ResolvedAuth,
+    extra_headers: &HashMap<String, String>,
+    url: &Url,
+) -> (Vec<HeaderName>, Vec<String>) {
+    // Every header the plugin or the step supplied, and every query key of
+    // the request: any of them may carry a substituted credential.
     let mut headers: Vec<HeaderName> = auth
         .headers
         .keys()
+        .chain(extra_headers.keys())
         .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
         .collect();
     if auth.bearer.is_some() {
         headers.push(AUTHORIZATION);
     }
-    (headers, auth.query.keys().cloned().collect())
+    let mut query: Vec<String> = auth.query.keys().cloned().collect();
+    query.extend(url.query_pairs().map(|(k, _)| k.into_owned()));
+    (headers, query)
 }
 
 /// Parse every header before constructing the request. Besides producing a

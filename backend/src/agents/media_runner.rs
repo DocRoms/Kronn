@@ -446,6 +446,7 @@ async fn download_asset(
                 secret_headers: &[reqwest::header::AUTHORIZATION],
                 secret_query_keys: &[],
                 attach_body: &attach,
+                has_body: false,
                 pinned_base: None,
             },
         )
