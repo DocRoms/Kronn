@@ -855,6 +855,7 @@ approval under KT-1017); a disabled definition does not run (a
 parent refuses a disabled child, manual and TriggerWorkflow launches and the
 scheduler skip it, and only a human resumes a disabled workflow's run; a
 dependency is matched by id or by a `ref:` resolving to it in any project the
-workflow serves, found before the edit so a rename still matches, and
-disabled in the same transaction, which an ambiguous reference rolls back); JSON imports, accepted
+workflow serves, found before and after the edit (a rename may leave an old
+slug or shadow another resource), and disabled in the same transaction,
+which an ambiguous reference rolls back); JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.

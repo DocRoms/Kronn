@@ -1341,6 +1341,71 @@ fn normalize_batch_items(
 mod tests {
     use super::*;
 
+    /// A project-local Quick API renamed to shadow the global one a project
+    /// workflow names by `ref:` captures it: the workflow is disabled.
+    #[tokio::test]
+    async fn a_rename_that_shadows_a_global_quick_api_reference_disables_its_user() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let api = |id: &str, name: &str, project: Option<&str>| -> QuickApi {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "icon": "x", "description": "",
+                "project_id": project, "api_plugin_slug": "p", "api_config_id": "c",
+                "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let (global, local) = (
+            api("qa-global", "Fetch", None),
+            api("qa-local", "Other", Some("proj-p")),
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_apis::insert_quick_api(conn, &global)?;
+                crate::db::quick_apis::insert_quick_api(conn, &local)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch", "description": "", "project_id": "proj-p",
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "DELETE", "variables": []
+        }))
+        .unwrap();
+        let Json(saved) = update_as(state.clone(), "qa-local".into(), request, true).await;
+        assert!(saved.success, "{:?}", saved.error);
+        let enabled = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-shadowed'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the shadowing rename disables the workflow");
+    }
+
     /// KT-1037: an agent's change to what a Quick API sends disables every
     /// enabled workflow that calls it; a human's edit or a rename does not.
     #[tokio::test]

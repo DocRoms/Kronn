@@ -288,21 +288,30 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
 }
 
 /// Saves `item`; with `invalidate`, also disables every enabled workflow that
-/// runs it, found BEFORE the update (so a rename still matches the old
-/// slug's `ref:`) and disabled in the same transaction. A failed lookup (an
-/// ambiguous reference) rolls the whole update back.
+/// runs it before OR after the update (a rename may leave an old slug's
+/// `ref:` or capture a new one), in the same transaction. A failed lookup
+/// (an ambiguous reference) rolls the whole update back.
 pub fn update_quick_api_invalidating(
     conn: &Connection,
     item: &QuickApi,
     invalidate: bool,
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let dependents = if invalidate {
+    let mut dependents = if invalidate {
         crate::core::resource_refs::enabled_workflows_using(&tx, "qa", &item.id)?
     } else {
         Vec::new()
     };
     update_quick_api(&tx, item)?;
+    if invalidate {
+        // After the update too: a new name can make a `ref:` resolve to it
+        // (a project-local resource shadowing a global one).
+        for id in crate::core::resource_refs::enabled_workflows_using(&tx, "qa", &item.id)? {
+            if !dependents.contains(&id) {
+                dependents.push(id);
+            }
+        }
+    }
     let disabled = crate::core::resource_refs::disable_workflows(&tx, &dependents)?;
     tx.commit()?;
     Ok(disabled)

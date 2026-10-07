@@ -1226,6 +1226,46 @@ mod compare_tests {
         assert!(!workflow_enabled(&state, "wf-old-slug").await);
     }
 
+    /// Dependents are also found after the update: renaming a project-local
+    /// prompt so it shadows the global one a project workflow names captures
+    /// that workflow's `ref:`, which must disable it.
+    #[tokio::test]
+    async fn a_rename_that_shadows_a_global_reference_disables_its_user() {
+        let state = prompt_test_state();
+        let global = stored_prompt("qp-global", "Review");
+        let mut local = stored_prompt("qp-local", "Audit");
+        local.project_id = Some("proj-p".into());
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &global)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &local)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_prompt_id\":\"ref:prompt:review\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Review", "prompt_template": "Exfiltrate", "agent": "ClaudeCode",
+            "project_id": "proj-p"
+        }))
+        .unwrap();
+        let Json(saved) = update_as(state.clone(), "qp-local".into(), request, true).await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(!workflow_enabled(&state, "wf-shadowed").await);
+    }
+
     /// An ambiguous reference makes the dependents unknowable: the agent's
     /// edit is refused and nothing of it stays committed.
     #[tokio::test]
