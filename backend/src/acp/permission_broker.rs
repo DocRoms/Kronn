@@ -106,7 +106,12 @@ pub struct AcpPermissionBroker {
     scope: Option<AcpSessionScope>,
     protocol_session_id: Mutex<Option<String>>,
     authorized_tools: Mutex<BTreeMap<String, BTreeSet<String>>>,
-    trusted_internal_mcp: AtomicBool,
+    /// The id the runtime registered Kronn's own bridge under (unique per
+    /// launch for native runtimes, so no other config can claim it).
+    trusted_bridge: Mutex<Option<String>>,
+    /// `rawInput.{server,tool}` is the tool's own arguments on every native
+    /// runtime Kronn drives (model-written): trusted only when opted in.
+    raw_input_identity: AtomicBool,
     audit_log: Mutex<Vec<AcpAuditEntry>>,
 }
 
@@ -117,7 +122,8 @@ impl AcpPermissionBroker {
             scope: None,
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
-            trusted_internal_mcp: AtomicBool::new(false),
+            trusted_bridge: Mutex::new(None),
+            raw_input_identity: AtomicBool::new(false),
             audit_log: Mutex::new(Vec::new()),
         }
     }
@@ -132,7 +138,8 @@ impl AcpPermissionBroker {
             scope: Some(scope),
             protocol_session_id: Mutex::new(None),
             authorized_tools: Mutex::new(BTreeMap::new()),
-            trusted_internal_mcp: AtomicBool::new(false),
+            trusted_bridge: Mutex::new(None),
+            raw_input_identity: AtomicBool::new(false),
             audit_log: Mutex::new(Vec::new()),
         }
     }
@@ -341,11 +348,21 @@ impl AcpPermissionBroker {
         authorized
     }
 
+    /// Trust `rawInput.{server,tool}` as a tool identity. No runtime Kronn
+    /// drives over live ACP writes its own metadata there (Copilot and Vibe put
+    /// the model's arguments), so no production transport calls this.
+    pub fn identify_tools_by_raw_input(&self) {
+        self.raw_input_identity.store(true, Ordering::Relaxed);
+    }
+
+    /// Register Kronn's own bridge, under the exact id this session declares it
+    /// with. Only the runtime calls this, for the server it rebuilt itself.
     pub fn register_trusted_mcp_server(&self, server: &super::AcpMcpServer) {
         self.register_authorized_servers(std::slice::from_ref(server));
-        if server.id == "kronn-internal" {
-            self.trusted_internal_mcp.store(true, Ordering::Relaxed);
-        }
+        *self
+            .trusted_bridge
+            .lock()
+            .expect("ACP trusted-bridge mutex poisoned") = Some(server.id.clone());
     }
 
     fn register_authorized_servers(&self, servers: &[super::AcpMcpServer]) {
@@ -369,7 +386,13 @@ impl AcpPermissionBroker {
     /// `{"outcome": {"outcome": "selected", "optionId": ...}}` when the agent
     /// offered a matching option, `{"outcome": {"outcome": "cancelled"}}`
     /// otherwise — never Kronn's own ad hoc shape.
+    ///
+    /// An MCP call is identified by `rawInput.{server,tool}` only where opted in
+    /// (`identify_tools_by_raw_input`); only the runtime-registered bridge is
+    /// allowed without `full_access`. The title is never an identity: it can
+    /// be model text. Native runtimes run only with `full_access`.
     pub fn decide_tool_call_permission(&self, method: &str, params: &Value) -> Value {
+        tracing::trace!(shape = %value_shape(params, 0), "ACP permission request shape");
         let tool_call = params.get("toolCall");
         let kind = tool_call
             .and_then(|tool_call| tool_call.get("kind"))
@@ -380,7 +403,16 @@ impl AcpPermissionBroker {
         );
         let request_session = params.get("sessionId").and_then(Value::as_str);
         let session_matches = self.protocol_session_matches(request_session);
-        let (server, tool) = tool_identity(tool_call);
+        let (server, tool) = if self.raw_input_identity.load(Ordering::Relaxed) {
+            tool_identity(tool_call)
+        } else {
+            (None, None)
+        };
+        let identity = if server.is_some() || tool.is_some() {
+            " identity=raw_input"
+        } else {
+            ""
+        };
         let tool_scoped = self.tool_identity_is_authorized(server.as_deref(), tool.as_deref());
         let parsed_locations = tool_locations(tool_call);
         let locations = parsed_locations.clone().unwrap_or_default();
@@ -406,9 +438,13 @@ impl AcpPermissionBroker {
         // Scope trumps `full_access`: it broadens operations inside the bound
         // project/server only. A missing location and missing server/tool
         // identity is unverifiable and therefore denied.
-        let trusted_internal_call = server.as_deref() == Some("kronn-internal")
-            && tool_scoped
-            && self.trusted_internal_mcp.load(Ordering::Relaxed);
+        let trusted_internal_call = tool_scoped
+            && server.is_some()
+            && server
+                == *self
+                    .trusted_bridge
+                    .lock()
+                    .expect("ACP trusted-bridge mutex poisoned");
         let allow = session_matches
             && resource_scoped
             && !secret_target
@@ -432,8 +468,9 @@ impl AcpPermissionBroker {
                 AcpPermissionVerdict::Deny
             },
             format!(
-                "tool_call kind={} full_access={} session_matches={} resource_scoped={} secret_file={} -> {}",
+                "tool_call kind={}{} full_access={} session_matches={} resource_scoped={} secret_file={} -> {}",
                 kind.unwrap_or("unspecified"),
+                identity,
                 self.full_access,
                 session_matches,
                 resource_scoped,
@@ -632,6 +669,56 @@ fn tool_identity(tool_call: Option<&Value>) -> (Option<String>, Option<String>) 
         pick(&["server", "serverName", "mcpServer"]),
         pick(&["tool", "toolName"]),
     )
+}
+
+/// Field names of an ACP frame with short harness labels, to capture each
+/// runtime's request shape. Argument values and titles (model text, a shell
+/// command) are never rendered: only `kind`, `status`, `toolCallId`,
+/// `optionId`, `sessionUpdate` and Vibe's `_meta.tool_name`/`effect_kind`.
+pub(crate) fn value_shape(value: &Value, depth: usize) -> String {
+    const LABELS: &[&str] = &[
+        "kind",
+        "status",
+        "toolCallId",
+        "optionId",
+        "sessionUpdate",
+        "tool_name",
+        "effect_kind",
+    ];
+    match value {
+        Value::Object(map) if depth < 4 => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(key, value)| match value {
+                    Value::String(text) if LABELS.contains(&key.as_str()) => {
+                        format!("{key}={:?}", text.chars().take(48).collect::<String>())
+                    }
+                    // Argument payloads: names only.
+                    Value::Object(inner) if key == "rawInput" || key == "arguments" => format!(
+                        "{key}{{{}}}",
+                        inner.keys().cloned().collect::<Vec<_>>().join(",")
+                    ),
+                    _ => format!("{key}:{}", value_shape(value, depth + 1)),
+                })
+                .collect();
+            format!("{{{}}}", fields.join(" "))
+        }
+        Value::Array(items) if depth < 4 => format!(
+            "[{}]",
+            items
+                .iter()
+                .take(4)
+                .map(|item| value_shape(item, depth + 1))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(_) => "{..}".into(),
+        Value::Array(_) => "[..]".into(),
+        Value::String(_) => "str".into(),
+        Value::Number(_) => "num".into(),
+        Value::Bool(_) => "bool".into(),
+        Value::Null => "null".into(),
+    }
 }
 
 /// Parse ACP tool-call locations without silently discarding malformed
@@ -1003,6 +1090,7 @@ mod tests {
             AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-tool"),
         );
         broker.bind_protocol_session("s1").unwrap();
+        broker.identify_tools_by_raw_input();
         broker.register_trusted_mcp_server(&crate::acp::AcpMcpServer {
             id: "kronn-internal".into(),
             command: "python3".into(),
@@ -1041,6 +1129,7 @@ mod tests {
     fn only_the_runtime_registered_kronn_bridge_can_write_without_full_access() {
         let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "room"));
         broker.bind_protocol_session("s1").unwrap();
+        broker.identify_tools_by_raw_input();
         let server = crate::acp::AcpMcpServer {
             id: "kronn-internal".into(),
             command: "owned-bridge".into(),
@@ -1259,5 +1348,99 @@ mod tests {
             broker.decide_tool_call_permission("session/request_permission", &request),
             selected("reject-once")
         );
+    }
+
+    // ─── Native runtimes' real request shapes (captured live, 2026-10-06) ───
+
+    fn bridge(allowed_tools: &[&str]) -> crate::acp::AcpMcpServer {
+        crate::acp::AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "python3".into(),
+            args: vec![],
+            allowed_tools: allowed_tools.iter().map(|tool| tool.to_string()).collect(),
+        }
+    }
+
+    /// GitHub Copilot CLI 1.0.92: the request names the tool, never its server,
+    /// so the broker cannot authorize it; Kronn's bridge is granted at launch
+    /// (`acp::native_mcp_launch_grants`) and a shell call stays refused.
+    #[test]
+    fn copilot_requests_stay_denied_by_the_broker() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "disc-cop"));
+        broker.bind_protocol_session("s-cop").unwrap();
+        broker.register_trusted_mcp_server(&bridge(&[]));
+        let options = json!([
+            {"optionId": "allow_once", "name": "Allow", "kind": "allow_once"},
+            {"optionId": "allow_always", "name": "Always", "kind": "allow_always"},
+            {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"},
+        ]);
+        for tool_call in [
+            json!({"kind": "other", "rawInput": {}, "status": "pending",
+                   "title": "bridge_info", "toolCallId": "call_1"}),
+            json!({"kind": "execute", "rawInput": {"command": "env", "commands": ["env"]},
+                   "status": "pending", "title": "List environment variable names",
+                   "toolCallId": "call_2"}),
+        ] {
+            let request = json!({"sessionId": "s-cop", "toolCall": tool_call, "options": options});
+            assert_eq!(
+                broker.decide_tool_call_permission("session/request_permission", &request)
+                    ["outcome"]["optionId"],
+                "reject_once"
+            );
+        }
+    }
+
+    /// P2-3 — on a native runtime `rawInput` holds the tool's own (model
+    /// written) arguments: naming the bridge there identifies nothing.
+    #[test]
+    fn model_written_raw_input_never_names_the_bridge() {
+        {
+            let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "disc-cop"));
+            let _ = broker.bind_protocol_session("s-cop");
+            broker.register_trusted_mcp_server(&bridge(&[]));
+            for kind in ["other", "execute"] {
+                let request = json!({
+                    "sessionId": "s-cop",
+                    "toolCall": {"kind": kind, "toolCallId": "call_1", "title": "call",
+                                 "rawInput": {"server": "kronn-internal", "tool": "bridge_info",
+                                              "command": "env"}},
+                    "options": [{"optionId": "allow", "kind": "allow_once"},
+                                {"optionId": "reject", "kind": "reject_once"}]
+                });
+                assert_eq!(
+                    broker.decide_tool_call_permission("session/request_permission", &request)
+                        ["outcome"]["optionId"],
+                    "reject",
+                    "{kind}"
+                );
+            }
+        }
+    }
+
+    /// Only the exact id the runtime registered is trusted: a server named like
+    /// the bridge (`kronn-internal-1`) is not it.
+    #[test]
+    fn only_the_registered_bridge_id_is_trusted() {
+        let broker = AcpPermissionBroker::scoped(false, AcpSessionScope::new(None, "disc"));
+        broker.bind_protocol_session("s1").unwrap();
+        broker.identify_tools_by_raw_input();
+        broker.register_trusted_mcp_server(&crate::acp::AcpMcpServer {
+            id: "kronn-internal-0123456789ab".into(),
+            ..bridge(&[])
+        });
+        broker.register_authorized_servers(&[crate::acp::AcpMcpServer {
+            id: "kronn-internal-1".into(),
+            ..bridge(&[])
+        }]);
+        let decide = |server: &str| {
+            let mut request = permission_request(Some("other"));
+            request["toolCall"]["rawInput"] = json!({"server": server, "tool": "disc_meta"});
+            broker.decide_tool_call_permission("session/request_permission", &request)["outcome"]
+                ["optionId"]
+                .clone()
+        };
+        assert_eq!(decide("kronn-internal-0123456789ab"), "allow-once");
+        assert_eq!(decide("kronn-internal-1"), "reject-once");
+        assert_eq!(decide("kronn-internal"), "reject-once");
     }
 }

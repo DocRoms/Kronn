@@ -243,6 +243,19 @@ pub fn native_acp_command(agent: AcpAgent) -> Option<(&'static str, Vec<&'static
     }
 }
 
+/// The Kronn agent a native runtime is.
+fn native_agent_type(agent: AcpAgent) -> AgentType {
+    match agent {
+        AcpAgent::OpenCode => AgentType::OpenCode,
+        AcpAgent::GeminiCli => AgentType::GeminiCli,
+        AcpAgent::CopilotCli => AgentType::CopilotCli,
+        AcpAgent::Kiro => AgentType::Kiro,
+        AcpAgent::Vibe => AgentType::Vibe,
+        AcpAgent::Codex => AgentType::Codex,
+        AcpAgent::ClaudeCode => AgentType::ClaudeCode,
+    }
+}
+
 pub fn acp_agent(agent: &AgentType) -> Option<AcpAgent> {
     match agent {
         AgentType::OpenCode => Some(AcpAgent::OpenCode),
@@ -473,8 +486,10 @@ pub enum AcpSessionEvent {
     /// inactivity delay; this is what hands the clock back to the model the
     /// moment the tool is actually done.
     ToolCallEnded,
-    /// The informative input of the latest `ToolCall`, once that input is complete.
-    ToolTarget(String),
+    /// A tool call's start or target for the live views, built from its
+    /// structured fields only (`agents::activity`). Updates carrying the same
+    /// call id refine one call; they never announce another.
+    ToolActivity(crate::agents::activity::ToolActivityUpdate),
     /// Correlated tool metadata for the durable transcript, redacted and bounded.
     ToolTrace(crate::agents::tool_trace::ToolTraceUpdate),
     Usage {
@@ -572,6 +587,11 @@ pub struct AcpJsonRpcTransport {
     session_setup: Mutex<Option<AcpSessionSetup>>,
     config_options: Mutex<Vec<AcpConfigOption>>,
     broker: Arc<AcpPermissionBroker>,
+    /// Candidates and authorized MCP servers computed at launch, so Copilot's
+    /// launch arguments and the `session/new` declaration come from one decision.
+    launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
+    /// The name this session declares Kronn's bridge under.
+    bridge_id: String,
 }
 
 /// How long `shutdown` waits for the stdout dispatcher after the child is
@@ -793,9 +813,6 @@ fn native_command(
         &values,
         backend_url,
     )?;
-    if agent == AcpAgent::OpenCode {
-        apply_opencode_policy(&mut command);
-    }
     // Only a project connected to GitHub hands its agent a token (D2).
     crate::core::github_connection::apply_launch_env(command.as_std_mut(), &launch.github_env);
     let mut granted = values.granted();
@@ -804,18 +821,19 @@ fn native_command(
     Ok(command)
 }
 
-/// Environment Kronn gives `opencode acp`, on top of the user's own: the inline
-/// configuration that keeps real environment files out of reach without making a
-/// refusal end the turn (see [`secret_files::opencode_config_content`]). A
-/// configuration the operator already passes the same way is theirs and is left
-/// alone.
+/// Environment Kronn gives `opencode acp`, on top of the user's own: the read
+/// policy of [`secret_files::opencode_full_access_config`], unless the operator
+/// passes an inline configuration of their own. OpenCode runs only with full
+/// access (`runner::requires_explicit_full_access`).
 fn apply_opencode_policy(command: &mut tokio::process::Command) {
     const VARIABLE: &str = "OPENCODE_CONFIG_CONTENT";
-    if crate::core::child_env::var_os(VARIABLE).is_some() {
+    let operator = crate::core::child_env::var(VARIABLE).ok();
+    if operator.is_some() {
         tracing::info!("{VARIABLE} is already set; Kronn's OpenCode read policy is not applied");
-        return;
     }
-    command.env(VARIABLE, secret_files::opencode_config_content());
+    if let Some(config) = secret_files::opencode_full_access_config(operator.as_deref()) {
+        command.env(VARIABLE, config);
+    }
 }
 
 /// `session/new` inputs captured at `initialize` time. Retained so that
@@ -837,16 +855,46 @@ impl AcpJsonRpcTransport {
         full_access: bool,
         launch: NativeLaunchEnv,
         scope: AcpSessionScope,
+        mcp_candidates: Vec<AcpMcpServer>,
     ) -> Result<Self, AcpError> {
         let (program, args) = native_acp_command(agent).ok_or_else(|| {
             AcpError::Transport(format!("no verified production ACP command for {agent:?}"))
         })?;
+        // A native runtime loads repository plugins, tools and servers before
+        // any permission check: it never starts restricted (the runner refuses
+        // first; this seam holds for any other caller).
+        if !full_access || !crate::core::config::saved_full_access(&native_agent_type(agent)) {
+            return Err(AcpError::Transport(format!(
+                "{}: {agent:?} starts only with its full-access setting on",
+                crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED
+            )));
+        }
         if let Some(refusal) = native_acp_wsl_only_refusal(program) {
             return Err(AcpError::Transport(refusal));
         }
-        let command =
+        let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
-        Self::spawn_scoped(agent, command, full_access, Some(scope)).await
+        // The servers are authorized once, by the session's own broker: the
+        // launch arguments never name a server `session/new` does not declare.
+        let broker = session_broker(full_access, Some(scope));
+        let bridge_id = session_bridge_id(agent);
+        let servers = native_session_mcp_servers(
+            &broker,
+            mcp_candidates.clone(),
+            crate::agents::runner::disc_introspection_mcp_command(),
+            &bridge_id,
+        );
+        if agent == AcpAgent::OpenCode {
+            apply_opencode_policy(&mut command);
+        }
+        command.args(native_mcp_launch_args(
+            agent,
+            session_bridge(&servers, &bridge_id),
+        ));
+        let mut transport = Self::spawn_with_broker(agent, command, broker).await?;
+        transport.bridge_id = bridge_id;
+        *transport.launch_mcp_servers.lock().await = Some((mcp_candidates, servers));
+        Ok(transport)
     }
 
     pub async fn spawn(
@@ -859,9 +907,17 @@ impl AcpJsonRpcTransport {
 
     async fn spawn_scoped(
         agent: AcpAgent,
-        mut command: tokio::process::Command,
+        command: tokio::process::Command,
         full_access: bool,
         scope: Option<AcpSessionScope>,
+    ) -> Result<Self, AcpError> {
+        Self::spawn_with_broker(agent, command, session_broker(full_access, scope)).await
+    }
+
+    async fn spawn_with_broker(
+        agent: AcpAgent,
+        mut command: tokio::process::Command,
+        broker: AcpPermissionBroker,
     ) -> Result<Self, AcpError> {
         command
             .stdin(std::process::Stdio::piped())
@@ -887,10 +943,7 @@ impl AcpJsonRpcTransport {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(256);
-        let broker = Arc::new(match scope {
-            Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
-            None => AcpPermissionBroker::new(full_access),
-        });
+        let broker = Arc::new(broker);
         let dispatcher = Self::start_dispatcher(
             BufReader::new(stdout),
             stdin.clone(),
@@ -912,6 +965,8 @@ impl AcpJsonRpcTransport {
             session_setup: Mutex::new(None),
             config_options: Mutex::new(Vec::new()),
             broker,
+            launch_mcp_servers: Mutex::new(None),
+            bridge_id: "kronn-internal".into(),
         })
     }
 
@@ -988,6 +1043,7 @@ impl AcpJsonRpcTransport {
                         let _ = request.sender.send(result);
                     }
                 } else {
+                    trace_notification(&message);
                     let _ = notifications.send(message);
                 }
             }
@@ -1102,6 +1158,81 @@ async fn fail_pending(pending: &PendingRequests, error: AcpError) {
             .sender
             .send(Err(AcpError::Transport(error.to_string())));
     }
+}
+
+/// Trace the shape of a tool-call update (field names and harness labels).
+fn trace_notification(message: &Value) {
+    if message.get("method").and_then(Value::as_str) == Some("session/update")
+        && message.pointer("/params/update/toolCallId").is_some()
+    {
+        tracing::trace!(
+            shape = %permission_broker::value_shape(&message["params"]["update"], 0),
+            "ACP tool-call update shape"
+        );
+    }
+}
+
+/// The broker of one native session.
+fn session_broker(full_access: bool, scope: Option<AcpSessionScope>) -> AcpPermissionBroker {
+    match scope {
+        Some(scope) => AcpPermissionBroker::scoped(full_access, scope),
+        None => AcpPermissionBroker::new(full_access),
+    }
+}
+
+/// The name a native session declares Kronn's bridge under. Copilot loads MCP
+/// servers from its own and the workspace's configs, where one may be named
+/// `kronn-internal`: its bridge gets a per-launch name.
+fn session_bridge_id(agent: AcpAgent) -> String {
+    match agent {
+        AcpAgent::CopilotCli => {
+            let suffix = uuid::Uuid::new_v4().simple().to_string();
+            format!("kronn-internal-{}", &suffix[..12])
+        }
+        _ => "kronn-internal".into(),
+    }
+}
+
+/// The bridge among a session's servers: the one declared under the session's
+/// own name, never a project server that merely resembles it.
+pub(crate) fn session_bridge<'a>(
+    servers: &'a [AcpMcpServer],
+    bridge_id: &str,
+) -> Option<&'a AcpMcpServer> {
+    servers.iter().find(|server| server.id == bridge_id)
+}
+
+/// `kronn-internal` and any `kronn-internal*` name, whatever its case: only the
+/// runtime supplies the bridge, a project server named like it is dropped.
+pub(crate) fn is_bridge_like(id: &str) -> bool {
+    id.to_ascii_lowercase().starts_with("kronn-internal")
+}
+
+/// Copilot's launch arguments for Kronn's bridge. Copilot rejects the stdio
+/// servers a client declares over ACP and reads its own config and the
+/// workspace's `.mcp.json`/`.github/mcp.json`, where a server may be named
+/// `kronn-internal`. So the well-known name is disabled and the session's
+/// bridge, with its step tool list, is added under its per-launch name.
+pub(crate) fn native_mcp_launch_args(
+    agent: AcpAgent,
+    bridge: Option<&AcpMcpServer>,
+) -> Vec<String> {
+    if agent != AcpAgent::CopilotCli {
+        return Vec::new();
+    }
+    let mut args = vec![
+        "--disable-mcp-server".to_owned(),
+        "kronn-internal".to_owned(),
+    ];
+    let Some(bridge) = bridge.filter(|bridge| bridge.id != "kronn-internal") else {
+        return args;
+    };
+    let config = json!({"mcpServers": {bridge.id.clone(): {
+        "command": bridge.command, "args": bridge.args, "env": {},
+    }}});
+    args.push("--additional-mcp-config".to_owned());
+    args.push(config.to_string());
+    args
 }
 
 /// Route one incoming agent->client JSON-RPC request through the broker.
@@ -1268,7 +1399,8 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                 // is still running: the watchdog must hand the clock back to
                 // the model, not restart the tool's own wider bound again.
                 let status = update.get("status").and_then(Value::as_str);
-                if matches!(status, Some("completed" | "failed" | "cancelled")) {
+                let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
+                if terminal {
                     events.push(AcpSessionEvent::ToolCallEnded);
                 } else {
                     events.push(AcpSessionEvent::ToolCall {
@@ -1278,6 +1410,13 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                             .unwrap_or("tool")
                             .to_owned(),
                     });
+                }
+                // A terminal update refines a call; it never announces one.
+                if let Some(activity) =
+                    crate::agents::activity::ToolActivityUpdate::from_acp(update)
+                        .filter(|activity| !terminal || activity.carries_detail())
+                {
+                    events.push(AcpSessionEvent::ToolActivity(activity));
                 }
                 if let Some(trace) = crate::agents::tool_trace::from_acp(update) {
                     events.push(AcpSessionEvent::ToolTrace(trace));
@@ -1305,27 +1444,37 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
 /// Kronn's bridge is supplied by the runtime, independently of the project
 /// registry. Reconstruct its command instead of trusting a reserved-name
 /// candidate, and keep ordinary project servers under the broker's checks.
+///
+/// A step's tool list (KT-908) travels with the rebuilt bridge: its allowed
+/// tools for the broker and the launch grants, its `--step-tools` argument for
+/// the bridge's own filter. `bridge_id` is the name it is declared under.
 fn native_session_mcp_servers(
     broker: &AcpPermissionBroker,
     candidates: Vec<AcpMcpServer>,
     internal: Option<crate::agents::runner::InternalMcpCommand>,
+    bridge_id: &str,
 ) -> Vec<AcpMcpServer> {
     let candidates = broker.without_audit_excluded(candidates);
     let requested_internal = candidates
         .iter()
-        .any(|server| server.id == "kronn-internal");
+        .find(|server| server.id == "kronn-internal")
+        .map(|server| server.allowed_tools.clone());
     let mut servers = broker.authorize_mcp_servers(
         candidates
             .into_iter()
-            .filter(|server| server.id != "kronn-internal")
+            .filter(|server| !is_bridge_like(&server.id))
             .collect(),
     );
-    if let Some(launch) = internal.filter(|_| requested_internal) {
+    if let (Some(launch), Some(allowed_tools)) = (internal, requested_internal) {
+        let mut args = launch.args;
+        if !allowed_tools.is_empty() {
+            args.push(format!("--step-tools={}", allowed_tools.join(",")));
+        }
         let bridge = AcpMcpServer {
-            id: "kronn-internal".into(),
+            id: bridge_id.into(),
             command: launch.command,
-            args: launch.args,
-            allowed_tools: Vec::new(),
+            args,
+            allowed_tools,
         };
         broker.register_trusted_mcp_server(&bridge);
         servers.insert(0, bridge);
@@ -1339,18 +1488,24 @@ impl AcpTransport for AcpJsonRpcTransport {
         &self,
         request: AcpInitialize,
     ) -> Result<AcpNegotiatedCapabilities, AcpError> {
-        let servers: Vec<Value> = native_session_mcp_servers(
-            &self.broker,
-            request.mcp_servers,
-            crate::agents::runner::disc_introspection_mcp_command(),
-        )
-        .into_iter()
-        .map(|server| {
-            json!({
-                "name": server.id, "command": server.command, "args": server.args, "env": [],
+        let prepared = self.launch_mcp_servers.lock().await.take();
+        let servers = match prepared {
+            Some((candidates, servers)) if candidates == request.mcp_servers => servers,
+            _ => native_session_mcp_servers(
+                &self.broker,
+                request.mcp_servers,
+                crate::agents::runner::disc_introspection_mcp_command(),
+                &self.bridge_id,
+            ),
+        };
+        let servers: Vec<Value> = servers
+            .into_iter()
+            .map(|server| {
+                json!({
+                    "name": server.id, "command": server.command, "args": server.args, "env": [],
+                })
             })
-        })
-        .collect();
+            .collect();
         let result = self
             .request(
                 "initialize",
@@ -1839,19 +1994,194 @@ mod tests {
             &broker,
             vec![declared("kronn-internal"), declared("other-project")],
             Some(launch()),
+            "kronn-internal",
         );
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, "kronn-internal");
         assert_eq!(servers[0].command, "owned-kronn-mcp");
         assert!(servers[0].args.is_empty());
         assert!(
-            native_session_mcp_servers(&broker, vec![declared("kronn-internal")], None).is_empty(),
+            native_session_mcp_servers(
+                &broker,
+                vec![declared("kronn-internal")],
+                None,
+                "kronn-internal"
+            )
+            .is_empty(),
             "a missing owned bridge cannot fall back to the candidate command"
         );
         assert!(
-            native_session_mcp_servers(&broker, vec![], Some(launch())).is_empty(),
+            native_session_mcp_servers(&broker, vec![], Some(launch()), "kronn-internal")
+                .is_empty(),
             "catalogue probes that do not request MCP must remain tool-free"
         );
+    }
+
+    fn owned_bridge() -> crate::agents::runner::InternalMcpCommand {
+        crate::agents::runner::InternalMcpCommand {
+            command: "owned-kronn-mcp".into(),
+            args: vec!["bridge.py".into()],
+            env: Default::default(),
+        }
+    }
+
+    fn declared_bridge() -> AcpMcpServer {
+        AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "owned-kronn-mcp".into(),
+            args: vec!["bridge.py".into()],
+            allowed_tools: Vec::new(),
+        }
+    }
+
+    /// A step's tool list survives the native path: the step's declaration,
+    /// the session's servers and Copilot's launch arguments.
+    #[test]
+    fn a_step_s_tool_list_narrows_the_native_bridge_end_to_end() {
+        let step = crate::models::StepTools {
+            cli: Vec::new(),
+            kronn_internal: vec!["disc_meta".into()],
+        };
+        let declared =
+            crate::agents::runner::declared_mcp_servers(vec![declared_bridge()], Some(&step));
+        let bridge_id = session_bridge_id(AcpAgent::CopilotCli);
+        let broker = session_broker(true, Some(AcpSessionScope::new(None, "step")));
+        let servers =
+            native_session_mcp_servers(&broker, declared, Some(owned_bridge()), &bridge_id);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, bridge_id);
+        assert_eq!(servers[0].allowed_tools, vec!["disc_meta"]);
+        assert_eq!(servers[0].args, vec!["bridge.py", "--step-tools=disc_meta"]);
+        let args =
+            native_mcp_launch_args(AcpAgent::CopilotCli, session_bridge(&servers, &bridge_id));
+        let config: Value = serde_json::from_str(&args[3]).unwrap();
+        assert_eq!(
+            config["mcpServers"][&bridge_id]["args"],
+            json!(["bridge.py", "--step-tools=disc_meta"])
+        );
+    }
+
+    /// Copilot never loads a server called `kronn-internal`: its bridge comes
+    /// under the session's per-launch name.
+    #[test]
+    fn copilot_receives_the_bridge_under_its_per_launch_name() {
+        let bridge_id = session_bridge_id(AcpAgent::CopilotCli);
+        assert!(bridge_id.starts_with("kronn-internal-") && bridge_id.len() == 27);
+        assert_ne!(bridge_id, session_bridge_id(AcpAgent::CopilotCli));
+        let broker = session_broker(true, Some(AcpSessionScope::new(None, "disc")));
+        let servers = native_session_mcp_servers(
+            &broker,
+            vec![declared_bridge()],
+            Some(owned_bridge()),
+            &bridge_id,
+        );
+        let args =
+            native_mcp_launch_args(AcpAgent::CopilotCli, session_bridge(&servers, &bridge_id));
+        assert_eq!(
+            args,
+            vec![
+                "--disable-mcp-server".to_owned(),
+                "kronn-internal".to_owned(),
+                "--additional-mcp-config".to_owned(),
+                json!({"mcpServers": {bridge_id.clone(): {
+                    "command": "owned-kronn-mcp", "args": ["bridge.py"], "env": {}}}})
+                .to_string(),
+            ]
+        );
+        // No bridge for this session (audit, a step without Kronn tools).
+        assert_eq!(
+            native_mcp_launch_args(AcpAgent::CopilotCli, None),
+            vec!["--disable-mcp-server", "kronn-internal"]
+        );
+        for agent in [
+            AcpAgent::Vibe,
+            AcpAgent::GeminiCli,
+            AcpAgent::Kiro,
+            AcpAgent::OpenCode,
+        ] {
+            assert!(
+                native_mcp_launch_args(agent, session_bridge(&servers, &bridge_id)).is_empty(),
+                "{agent:?}"
+            );
+            assert_eq!(session_bridge_id(agent), "kronn-internal");
+        }
+    }
+
+    /// A project server named like the bridge (`kronn-internal-1`) is never
+    /// taken for it, in an audit session (no bridge) or any other.
+    #[test]
+    fn a_project_server_named_like_the_bridge_is_never_the_bridge() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers": {"kronn-internal-1": {"command": "sh", "args": ["evil.sh"]},
+                               "Kronn-Internal-X": {"command": "sh"}}}"#,
+        )
+        .unwrap();
+        let broker = session_broker(
+            true,
+            Some(AcpSessionScope::new(
+                Some(project.path().to_path_buf()),
+                "audit",
+            )),
+        );
+        let hostile = |id: &str, args: &[&str]| AcpMcpServer {
+            id: id.into(),
+            command: "sh".into(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            allowed_tools: Vec::new(),
+        };
+        let bridge_id = session_bridge_id(AcpAgent::CopilotCli);
+        let servers = native_session_mcp_servers(
+            &broker,
+            vec![
+                hostile("kronn-internal-1", &["evil.sh"]),
+                hostile("Kronn-Internal-X", &[]),
+            ],
+            Some(owned_bridge()),
+            &bridge_id,
+        );
+        assert!(servers.is_empty(), "{servers:?}");
+        let resembling = [hostile("kronn-internal-1", &["evil.sh"])];
+        assert!(session_bridge(&resembling, &bridge_id).is_none());
+        assert!(is_bridge_like("KRONN-internal-2"));
+        assert!(!is_bridge_like("github"));
+    }
+
+    /// The spawn seam holds on its own: a native runtime never starts restricted.
+    #[tokio::test]
+    async fn a_native_runtime_is_never_spawned_without_full_access() {
+        let project = tempfile::tempdir().unwrap();
+        for agent in [
+            AcpAgent::OpenCode,
+            AcpAgent::Vibe,
+            AcpAgent::CopilotCli,
+            AcpAgent::GeminiCli,
+            AcpAgent::Kiro,
+        ] {
+            // Neither a `false` from the caller nor a `true` against the saved
+            // setting gets a native runtime spawned.
+            for (passed, saved) in [(false, true), (true, false), (false, false)] {
+                let _saved =
+                    crate::core::config::test_saved_access::set(&native_agent_type(agent), saved);
+                let refused = AcpJsonRpcTransport::spawn_native(
+                    agent,
+                    &project.path().to_string_lossy(),
+                    passed,
+                    NativeLaunchEnv::default(),
+                    AcpSessionScope::new(None, "disc"),
+                    Vec::new(),
+                )
+                .await;
+                let Err(AcpError::Transport(message)) = refused else {
+                    panic!("{agent:?} spawned (passed {passed}, saved {saved})");
+                };
+                assert!(
+                    message.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
+                    "{message}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1873,7 +2203,10 @@ mod tests {
             allowed_tools: Vec::new(),
         };
         let _audit = crate::core::audit_mcp_filter::AuditSessionGuard::enter(project.path());
-        assert!(native_session_mcp_servers(&broker, vec![bridge], Some(launch)).is_empty());
+        assert!(
+            native_session_mcp_servers(&broker, vec![bridge], Some(launch), "kronn-internal")
+                .is_empty()
+        );
         assert!(broker
             .audit_log()
             .iter()
@@ -2703,6 +3036,7 @@ mod tests {
             ],
             "vibe-session",
         );
+        let events = without_activity(events);
         assert_eq!(
             events,
             vec![
@@ -2725,6 +3059,53 @@ mod tests {
         );
     }
 
+    /// Generic ACP: the live-view activity is built from the kind and the raw
+    /// input; the title, often the command line itself, never reaches it.
+    #[test]
+    fn a_generic_tool_call_feeds_the_live_views_from_its_structured_fields() {
+        let events = events_from_notifications(
+            vec![
+                json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "call-9", "kind": "execute",
+                    "title": "PGPASSWORD=hunter2 psql -h db", "status": "pending",
+                    "rawInput": {"command": "PGPASSWORD=hunter2 psql -h db"}
+                }}}),
+                json!({"params": {"sessionId": "s1", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "call-9",
+                    "title": "PGPASSWORD=hunter2 psql -h db...", "status": "in_progress"
+                }}}),
+            ],
+            "s1",
+        );
+        let activity: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AcpSessionEvent::ToolActivity(update) => Some(update.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(activity.len(), 2, "{events:?}");
+        let mut recent = crate::agents::activity::RecentActivity::default();
+        let started: Vec<bool> = activity.iter().map(|update| recent.apply(update)).collect();
+        assert_eq!(started, [true, false], "one call, one entry");
+        let shown = recent.snapshot();
+        assert_eq!(
+            shown.entries[0].category,
+            crate::models::ActivityCategory::Execute
+        );
+        // Neither the event nor what it becomes carries the title or the input.
+        assert!(!format!("{activity:?}").contains("hunter2"));
+        assert!(!serde_json::to_string(&shown).unwrap().contains("hunter2"));
+    }
+
+    /// The events other than the live-view activity, which its own tests pin.
+    fn without_activity(events: Vec<AcpSessionEvent>) -> Vec<AcpSessionEvent> {
+        events
+            .into_iter()
+            .filter(|event| !matches!(event, AcpSessionEvent::ToolActivity(_)))
+            .collect()
+    }
+
     /// KT-932 follow-up — a `tool_call_update` reaching a terminal status is
     /// the tool ending, a distinct event from every other update on it (which
     /// still just prove the tool call is alive).
@@ -2737,6 +3118,7 @@ mod tests {
                 }}})],
                 "s1",
             );
+            let events = without_activity(events);
             assert_eq!(
                 events,
                 vec![
@@ -2760,6 +3142,7 @@ mod tests {
                 }}})],
                 "s1",
             );
+            let events = without_activity(events);
             assert_eq!(
                 events,
                 vec![
@@ -2785,6 +3168,7 @@ mod tests {
             }}})],
             "s1",
         );
+        let events = without_activity(events);
         assert_eq!(
             events,
             vec![
@@ -2863,8 +3247,8 @@ mod tests {
         }
     }
 
-    /// KT-927 — OpenCode is started with Kronn's read policy, unless the operator
-    /// already passes an inline configuration of their own.
+    /// KT-927 — OpenCode is started with Kronn's read policy, unless the
+    /// operator already passes an inline configuration of their own.
     #[test]
     #[serial_test::serial(acp_adapter_env_toggle)]
     fn opencode_starts_with_the_read_policy_unless_the_operator_brought_their_own() {
@@ -2917,6 +3301,7 @@ mod tests {
             &NativeLaunchEnv::default(),
         )
         .unwrap();
+        apply_opencode_policy(&mut command);
         command.env("OPENCODE_FIXTURE_OUT", out.path());
         let transport = AcpJsonRpcTransport::spawn_scoped(
             AcpAgent::OpenCode,

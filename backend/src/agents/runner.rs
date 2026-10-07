@@ -1773,9 +1773,15 @@ pub struct ToolActivityProbe(Arc<Mutex<AgentUsage>>);
 
 impl ToolActivityProbe {
     /// The last tool called and the running count, `None` before the first call.
-    pub fn read(&self) -> Option<(String, u32)> {
+    pub fn read(&self) -> Option<(crate::models::ActivityCategory, u32)> {
         let usage = self.0.lock().ok()?;
-        usage.last_tool.clone().map(|tool| (tool, usage.tool_calls))
+        usage.last_tool.map(|category| (category, usage.tool_calls))
+    }
+
+    /// The run's latest tool calls, newest first; prose is not recorded here.
+    pub fn recent(&self) -> Option<crate::models::AuditRecentActivity> {
+        let usage = self.0.lock().ok()?;
+        Some(usage.recent.snapshot())
     }
 
     /// The run's usage so far: an HTTP agent adds each tool turn, an ACP session
@@ -1787,6 +1793,12 @@ impl ToolActivityProbe {
             output_tokens: usage.output_tokens,
             prompt_cache: usage.prompt_cache,
         })
+    }
+
+    /// One HTTP tool call, recorded as the tool loop records it.
+    #[cfg(test)]
+    pub fn record_http_call(&self, call: &crate::agents::tools::ToolCall) {
+        record_http_tool_call(&self.0, None, call);
     }
 
     /// A probe no run backs, fed by the test the way an HTTP tool loop feeds it.
@@ -1802,26 +1814,30 @@ impl ToolActivityProbe {
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
         usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
         if let Some(tool) = tool {
-            usage.last_tool = Some(tool.to_owned());
+            let update = super::activity::ToolActivityUpdate::named(None, tool);
+            usage.last_tool = update.category();
             usage.tool_calls = usage.tool_calls.saturating_add(1);
+            usage.recent.apply(&update);
         }
     }
 }
 
-/// `read_file · src/main.rs`: the tool, and the path it works on when it has one.
-fn tool_activity_label(call: &crate::agents::tools::ToolCall) -> String {
-    match ["path", "pattern", "query"]
-        .iter()
-        .find_map(|key| call.arguments.get(*key).and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(target) => {
-            let target: String = target.chars().take(80).collect();
-            format!("{} · {target}", call.name)
-        }
-        None => call.name.clone(),
+/// An HTTP agent's tool call on its run: the last tool, the count and the
+/// recent actions, read from outside the run by `ToolActivityProbe`.
+fn record_http_tool_call(
+    usage: &Mutex<AgentUsage>,
+    activity: Option<&super::activity::AgentActivitySink>,
+    call: &crate::agents::tools::ToolCall,
+) {
+    // Its category only: the name and arguments are the model's own strings.
+    let update = super::activity::ToolActivityUpdate::named(None, &call.name);
+    if let Ok(mut usage) = usage.lock() {
+        usage.last_tool = update.category();
+        usage.tool_calls = usage.tool_calls.saturating_add(1);
+        usage.recent.apply(&update);
     }
+    // The launch's own sink: a workflow step stores it as its live activity.
+    super::activity::tool_started(activity, update.category().unwrap_or_default());
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1835,10 +1851,12 @@ struct AgentUsage {
     /// At least one response reported no cost: the sum is then only a part of
     /// the run's cost, so the run's cost is unknown.
     cost_incomplete: bool,
-    /// The last native tool an HTTP agent called (with its path when it has
-    /// one) and how many it has called: what a CLI's stream-json shows.
-    last_tool: Option<String>,
+    /// The category of the last native tool an HTTP agent called, and how
+    /// many it has called.
+    last_tool: Option<crate::models::ActivityCategory>,
     tool_calls: u32,
+    /// The run's latest tool calls, for an audit's details panel.
+    recent: super::activity::RecentActivity,
 }
 
 /// Prompt-cache tokens a runtime reported beside its input and output.
@@ -3522,6 +3540,63 @@ pub async fn start_agent(
 pub const NATIVE_ACP_TASK_WORKER_REFUSAL: &str =
     "this agent runs on its native ACP transport, which cannot carry the task-worker delivery context or permission scope; use Claude Code, Codex, an HTTP model or an exact joined CLI session";
 
+/// Prefix of the refusal of a native ACP launch without full access.
+pub const NATIVE_FULL_ACCESS_REQUIRED: &str = "native_full_access_required";
+
+/// Whether `agent` runs only with its full-access setting on: a native ACP
+/// runtime (OpenCode, Vibe, GitHub Copilot, Gemini CLI, Kiro) loads repository
+/// plugins, tools, hooks and MCP servers before any permission check, so no
+/// restricted mode can be promised for it (0.14.3; an isolated runner is the
+/// 0.15 plan).
+pub fn requires_explicit_full_access(agent: &AgentType) -> bool {
+    crate::acp::resolve_acp_route(agent) == crate::acp::AcpProductionRoute::NativeAcp
+}
+
+/// The agent's name as Config › Agents shows it.
+pub fn agent_settings_label(agent: &AgentType) -> &'static str {
+    match agent {
+        AgentType::ClaudeCode => "Claude Code",
+        AgentType::Codex => "Codex",
+        AgentType::OpenCode => "OpenCode",
+        AgentType::Vibe => "Vibe",
+        AgentType::GeminiCli => "Gemini CLI",
+        AgentType::Kiro => "Kiro",
+        AgentType::CopilotCli => "GitHub Copilot",
+        AgentType::Ollama => "Ollama",
+        AgentType::LiteLlm => "LiteLLM",
+        AgentType::Nvidia => "NVIDIA",
+        AgentType::Custom => "Custom",
+    }
+}
+
+/// The refusal of a native launch whose agent does not have full access on.
+pub fn native_full_access_refusal(agent: &AgentType) -> String {
+    let label = agent_settings_label(agent);
+    format!(
+        "{NATIVE_FULL_ACCESS_REQUIRED}: {label} runs only with full access. Enable it in Config › Agents › {label} › Full access, or choose another agent."
+    )
+}
+
+/// The same refusal in the user's language (`fr`, `es`, `zh`, else English),
+/// for the place a user reads it: a discussion message, an audit error.
+pub fn native_full_access_refusal_in(agent: &AgentType, language: &str) -> String {
+    let label = agent_settings_label(agent);
+    match language {
+        "fr" => format!(
+            "{label} ne fonctionne qu'avec l'accès complet. Activez-le dans Config › Agents › {label} › Accès complet, ou choisissez un autre agent."
+        ),
+        "es" => format!(
+            "{label} solo funciona con acceso completo. Actívalo en Config › Agentes › {label} › Acceso completo, o elige otro agente."
+        ),
+        "zh" => format!(
+            "{label} 只能在完全访问模式下运行。请在 配置 › 智能体 › {label} › 完全访问 中启用，或选择其他智能体。"
+        ),
+        _ => format!(
+            "{label} runs only with full access. Enable it in Config › Agents › {label} › Full access, or choose another agent."
+        ),
+    }
+}
+
 /// The worker policy shared by every launch route and by worker preparation.
 /// Returns the `full_access` the launch may use, or why a task worker cannot
 /// run on this agent's resolved transport. A worker never inherits the
@@ -3544,6 +3619,16 @@ pub fn task_worker_route_policy(
 
 /// Start an agent process with full configuration.
 pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<AgentProcess, String> {
+    // Every route (discussion, room, workflow step, Quick Prompt, audit,
+    // resume) launches through here: a native runtime without full access is
+    // refused before anything is prepared or spawned, never upgraded.
+    // The authority is the agent's own saved setting, read now for the agent
+    // actually launched: no boolean a route passes (a reviewer inheriting its
+    // author's, a value cached at the start of a run) can stand in for it.
+    let native = requires_explicit_full_access(config.agent_type);
+    if native && !crate::core::config::saved_full_access(config.agent_type) {
+        return Err(native_full_access_refusal(config.agent_type));
+    }
     let has_read_only_paths =
         !config.read_only_repos.is_empty() || !config.read_only_dirs.is_empty();
     if config.task_worker_context.is_some() && has_read_only_paths {
@@ -3569,7 +3654,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     )?;
     let launch_full_access = task_worker_route_policy(
         config.agent_type,
-        config.full_access,
+        // A native runtime runs only with full access, granted above.
+        native || config.full_access,
         config.task_worker_context.is_some(),
     )
     .map_err(|reason| format!("Task worker refused: {reason}"))?;
@@ -4012,6 +4098,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.provenance.clone(),
             config.idle_timeout,
             config.context_images,
+            config.activity,
         )
         .await;
     }
@@ -4612,6 +4699,12 @@ async fn start_native_acp(
         project_root,
         request.discussion_id.unwrap_or("unbound-discussion"),
     );
+    // The same declaration `run_acp_session` negotiates: Copilot's launch
+    // grant for the bridge follows the broker's decision on it.
+    let mcp_candidates = declared_mcp_servers(
+        acp_project_mcp_servers(request.project_path, false),
+        request.step_tools,
+    );
     let transport: Arc<dyn AcpTransport> = Arc::new(
         AcpJsonRpcTransport::spawn_native(
             acp_agent_kind,
@@ -4619,6 +4712,7 @@ async fn start_native_acp(
             full_access,
             native_env,
             scope,
+            mcp_candidates,
         )
         .await
         .map_err(|error| format!("{agent_type:?} ACP spawn failed: {error}"))?,
@@ -5016,7 +5110,6 @@ async fn run_acp_session(
                         if let Ok(mut capture) = forwarder_stderr.lock() {
                             capture.push(format!("{ACP_TOOL_MARKER}{name}"));
                         }
-                        super::activity::tool_started(activity.as_ref(), &name);
                         // KT-932 follow-up — a tool call is open: measure
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
@@ -5026,8 +5119,18 @@ async fn run_acp_session(
                         // Back to watching the model itself.
                         forwarder_idle.end_tool();
                     }
-                    AcpSessionEvent::ToolTarget(target) => {
-                        super::activity::tool_target(activity.as_ref(), target);
+                    AcpSessionEvent::ToolActivity(update) => {
+                        // Counted once per call, whatever its progress updates.
+                        let started = task_usage
+                            .lock()
+                            .map(|mut usage| usage.recent.apply(&update))
+                            .unwrap_or(false);
+                        if started {
+                            super::activity::tool_started(
+                                activity.as_ref(),
+                                update.category().unwrap_or_default(),
+                            );
+                        }
                     }
                     AcpSessionEvent::ToolTrace(trace) => {
                         if let Ok(mut capture) = forwarder_stderr.lock() {
@@ -5046,6 +5149,7 @@ async fn run_acp_session(
                             prompt_cache,
                             cost_usd_micros: usage.cost_usd_micros,
                             cost_incomplete: usage.cost_incomplete,
+                            recent: std::mem::take(&mut usage.recent),
                             ..AgentUsage::default()
                         };
                     }
@@ -5210,7 +5314,7 @@ pub(crate) fn step_tools_bridge_arg(tools: &crate::models::StepTools) -> String 
 
 /// KT-908 — a step that declares its tools gets only Kronn's bridge, narrowed
 /// to them, or no server at all; an undeclared step keeps `servers` as is.
-fn declared_mcp_servers(
+pub(crate) fn declared_mcp_servers(
     servers: Vec<crate::acp::AcpMcpServer>,
     step_tools: Option<&crate::models::StepTools>,
 ) -> Vec<crate::acp::AcpMcpServer> {
@@ -5264,7 +5368,9 @@ fn acp_project_mcp_servers(
         .mcp_servers
         .into_iter()
         .filter_map(|(id, entry)| {
-            if id == "kronn-internal" {
+            // Only the runtime supplies the bridge; a project server named
+            // like it (`kronn-internal-1`) is dropped, never trusted.
+            if crate::acp::is_bridge_like(&id) {
                 return None;
             }
             let command = entry.command.clone()?;
@@ -7419,6 +7525,31 @@ fn push_http_turn_trace(stderr: &Arc<Mutex<Vec<String>>>, trace: HttpTurnTrace) 
     }
 }
 
+/// A tool name for logs and traces: the run's own declared name as is, a name
+/// the model made up only as its category.
+fn logged_tool_name(name: &str, declared: &std::collections::HashSet<String>) -> String {
+    if declared.contains(name) {
+        name.to_owned()
+    } else {
+        format!("undeclared {}", super::activity::category_of(name).as_str())
+    }
+}
+
+/// A refusal as its trace line may show it: an undeclared call keeps neither
+/// its name nor its arguments.
+fn logged_refusal(
+    refusal: &crate::agents::tools::ToolOutcome,
+    declared: &std::collections::HashSet<String>,
+) -> crate::agents::tools::ToolOutcome {
+    if declared.contains(&refusal.call.name) {
+        return refusal.clone();
+    }
+    let mut logged = refusal.clone();
+    logged.call.name = logged_tool_name(&refusal.call.name, declared);
+    logged.call.arguments = serde_json::json!({});
+    logged
+}
+
 fn push_http_tool_exec_trace(stderr: &Arc<Mutex<Vec<String>>>, turn: u32, name: &str, ok: bool) {
     let trace = HttpToolExecTrace {
         version: 1,
@@ -8153,6 +8284,7 @@ async fn start_ollama_http(
         provenance,
         None,
         None,
+        None,
     )
     .await
 }
@@ -8194,6 +8326,7 @@ async fn start_ollama_http_with_idle(
     provenance: Option<AgentProvenanceCapture>,
     idle_timeout: Option<Duration>,
     images: Option<&super::vision::ContextImages>,
+    activity: Option<super::activity::AgentActivitySink>,
 ) -> Result<AgentProcess, String> {
     let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
@@ -9080,7 +9213,13 @@ async fn start_ollama_http_with_idle(
                     requested_tools: calls
                         .iter()
                         .take(MAX_HTTP_TELEMETRY_TOOLS_PER_TURN)
-                        .map(|call| bounded_http_tool_name(&call.name))
+                        // A made-up name is traced by its category only.
+                        .map(|call| {
+                            bounded_http_tool_name(&logged_tool_name(
+                                &call.name,
+                                &declared_tools_for_turn,
+                            ))
+                        })
                         .collect(),
                 },
             );
@@ -9905,7 +10044,9 @@ async fn start_ollama_http_with_idle(
             let mut repair_edit_succeeded = false;
             for call in &calls {
                 if round_ceiling_reached {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -9920,7 +10061,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                     }
                     results.push(refusal);
                     budget_refusals += 1;
@@ -9935,10 +10079,14 @@ async fn start_ollama_http_with_idle(
                     {
                         refused_finalization_read_this_turn = true;
                     }
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
+                    // The model chose this name: only its category is logged.
+                    let logged = logged_tool_name(&call.name, &declared_tools_for_turn);
                     tracing::warn!(
                         target: "kronn::agent::tools",
-                        tool = %call.name,
+                        tool = %logged,
                         turn,
                         "undeclared tool call refused before executor"
                     );
@@ -9954,10 +10102,12 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
-                            "{backend} refused undeclared tool `{}` at turn {turn}; it was absent from the request catalogue and the executor was not called",
-                            call.name
+                            "{backend} refused an undeclared tool ({logged}) at turn {turn}; it was absent from the request catalogue and the executor was not called"
                         ));
                     }
                     results.push(refusal);
@@ -9977,7 +10127,9 @@ async fn start_ollama_http_with_idle(
                         if worker_repair_stage_for_turn == WorkerRepairStage::Edit {
                             failed_edit_this_turn = true;
                         }
-                        *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                        *refusals_per_tool
+                            .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                            .or_insert(0) += 1;
                         let refusal = crate::agents::tools::ToolOutcome {
                             call: call.clone(),
                             ok: false,
@@ -9987,7 +10139,10 @@ async fn start_ollama_http_with_idle(
                             }),
                         };
                         if let Ok(mut se) = stderr_clone.lock() {
-                            se.push(trace_line(&refusal));
+                            se.push(trace_line(&logged_refusal(
+                                &refusal,
+                                &declared_tools_for_turn,
+                            )));
                             se.push(format!(
                                 "{backend} refused a prelocalized {} call outside its frozen target at turn {turn}",
                                 worker_repair_stage_for_turn.label()
@@ -10014,7 +10169,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused syntax repair outside its preconstructed target at turn {turn}"
                         ));
@@ -10031,7 +10189,9 @@ async fn start_ollama_http_with_idle(
                     && worker_finalization_read_calls >= WORKER_FINALIZATION_READ_FILE_CALLS
                 {
                     refused_finalization_read_this_turn = true;
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10044,7 +10204,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused finalization read_file beyond the {}-call refresh budget at turn {turn}",
                             WORKER_FINALIZATION_READ_FILE_CALLS
@@ -10074,7 +10237,9 @@ async fn start_ollama_http_with_idle(
                     && worker_finalization_git_inspection_calls
                         >= WORKER_FINALIZATION_GIT_INSPECTION_CALLS
                 {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10087,7 +10252,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                         se.push(format!(
                             "{backend} refused finalization `{}` beyond the {}-call combined Git inspection budget at turn {turn}",
                             call.name, WORKER_FINALIZATION_GIT_INSPECTION_CALLS
@@ -10123,7 +10291,9 @@ async fn start_ollama_http_with_idle(
                 *used += 1;
                 let call_index = *used;
                 if open_tool_circuits.contains(&call.name) {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     let refusal = crate::agents::tools::ToolOutcome {
                         call: call.clone(),
                         ok: false,
@@ -10142,7 +10312,10 @@ async fn start_ollama_http_with_idle(
                         }),
                     };
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(trace_line(&refusal));
+                        se.push(trace_line(&logged_refusal(
+                            &refusal,
+                            &declared_tools_for_turn,
+                        )));
                     }
                     results.push(refusal);
                     budget_refusals += 1;
@@ -10160,7 +10333,9 @@ async fn start_ollama_http_with_idle(
                     )
                 };
                 if *used > tool_limit {
-                    *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                    *refusals_per_tool
+                        .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                        .or_insert(0) += 1;
                     withdrawn_tools.insert(call.name.clone());
                     if ceiling_allowance.ask_on_ceiling
                         || tool_run_mode == crate::agents::tools::ToolRunMode::Audit
@@ -10201,7 +10376,9 @@ async fn start_ollama_http_with_idle(
                         let repeats = repeated_calls.entry(signature.clone()).or_insert(0);
                         *repeats += 1;
                         if *repeats > 1 {
-                            *refusals_per_tool.entry(call.name.clone()).or_insert(0) += 1;
+                            *refusals_per_tool
+                                .entry(logged_tool_name(&call.name, &declared_tools_for_turn))
+                                .or_insert(0) += 1;
                             tracing::warn!(
                                 target: "kronn::agent::tools",
                                 tool = %call.name, turn, repeats = *repeats,
@@ -10519,10 +10696,7 @@ async fn start_ollama_http_with_idle(
                     tool = %call.name, ok = outcome.ok, turn,
                     "HTTP agent tool call"
                 );
-                if let Ok(mut usage) = task_usage.lock() {
-                    usage.last_tool = Some(tool_activity_label(call));
-                    usage.tool_calls = usage.tool_calls.saturating_add(1);
-                }
+                record_http_tool_call(&task_usage, activity.as_ref(), call);
                 if let Ok(mut se) = stderr_clone.lock() {
                     se.push(trace_line(&outcome));
                 }
@@ -11640,6 +11814,8 @@ pub(crate) enum CopilotTaskWorkerPreflight {
     Malformed,
     SpawnFailed,
     TimedOut,
+    /// Copilot's saved full-access setting is off: the CLI is not started.
+    FullAccessOff,
 }
 
 impl CopilotTaskWorkerPreflight {
@@ -11650,6 +11826,7 @@ impl CopilotTaskWorkerPreflight {
             Self::Malformed => Some("copilot_preflight_malformed"),
             Self::SpawnFailed => Some("copilot_preflight_spawn_failed"),
             Self::TimedOut => Some("copilot_preflight_timed_out"),
+            Self::FullAccessOff => Some("copilot_full_access_off"),
         }
     }
 }
@@ -11688,6 +11865,9 @@ fn copilot_task_worker_preflight_error(status: CopilotTaskWorkerPreflight) -> St
         CopilotTaskWorkerPreflight::TimedOut => {
             "the bounded `copilot -p /user show` preflight did not finish before its deadline"
         }
+        CopilotTaskWorkerPreflight::FullAccessOff => {
+            "Copilot runs only with full access (Config › Agents › GitHub Copilot › Full access)"
+        }
         CopilotTaskWorkerPreflight::Usable => unreachable!("usable Copilot preflight has no error"),
     };
     format!(
@@ -11715,6 +11895,11 @@ async fn run_copilot_task_worker_preflight_with_timeout(
     work_dir: &Path,
     timeout: Duration,
 ) -> Result<std::process::Output, CopilotTaskWorkerPreflight> {
+    // The CLI starts here only with its saved setting on, read for each
+    // attempt (the direct one and the npx fallback alike).
+    if !crate::core::config::saved_full_access(&AgentType::CopilotCli) {
+        return Err(CopilotTaskWorkerPreflight::FullAccessOff);
+    }
     let (command, args, via_wsl) = resolved;
     let (command, args, effective_work_dir) =
         platform_agent_invocation(command, args, via_wsl, work_dir);

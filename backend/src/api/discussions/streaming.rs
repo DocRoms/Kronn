@@ -4739,17 +4739,17 @@ async fn make_agent_stream_inner(
                 // ── 0.8.4 (#329 / F9) Auto-archive on validation complete ──
                 //
                 // When a validation disc emits `KRONN:VALIDATION_COMPLETE`,
-                // its job is over: the agent has reviewed the audit, the TD
-                // status updates landed, the project flips to `Validated`.
+                // the agent's part is over. The project stays `Audited`
+                // until the human validates: the audit timeline offers that
+                // action and opens the archived disc (validate_audit accepts
+                // an archived linked disc).
                 // Pre-fix the disc stayed visible in the sidebar forever,
                 // accumulating one new disc per audit run (Marc-persona
                 // discovery during the 0.8.4 Playwright pass: 3 stale
                 // "Validation audit AI" discs after a Full + 2 sub-audits).
                 //
-                // Archiving silently lifts the noise — the disc is still
-                // reachable via the Archives toggle if the user wants to
-                // re-read the conversation, but it stops cluttering the
-                // active list.
+                // Archiving lifts the noise; the disc stays reachable from the
+                // Archives toggle and from the audit timeline.
                 //
                 // Bootstrap + briefing discs follow the same lifecycle and
                 // are handled here too (they ship the *_COMPLETE family).
@@ -4863,10 +4863,24 @@ async fn make_agent_stream_inner(
                     return;
                 }
                 tracing::error!("Agent start failed: {}", e);
+                // A native agent without full access: said in the user's
+                // language, and settled, never deferred and retried.
+                let refused_full_access = e.starts_with(runner::NATIVE_FULL_ACCESS_REQUIRED);
+                let e = if refused_full_access {
+                    runner::native_full_access_refusal_in(&agent_type, &disc.language)
+                } else {
+                    e
+                };
 
-                let tracked_outcome = completion_tx
-                    .as_ref()
-                    .map(|_| agent_start_failure_outcome(&agent_type, &e));
+                let tracked_outcome = completion_tx.as_ref().map(|_| {
+                    if refused_full_access {
+                        AgentExecutionOutcome::PreflightFailed {
+                            diagnostic: e.clone(),
+                        }
+                    } else {
+                        agent_start_failure_outcome(&agent_type, &e)
+                    }
+                });
                 if matches!(
                     &tracked_outcome,
                     Some(AgentExecutionOutcome::RuntimeUnavailable { .. })
@@ -7367,11 +7381,14 @@ mod resume_delta_tests {
         assert_eq!(resume_id1, None);
         assert_eq!(checkpoint1.as_deref(), Some("m1"));
 
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+
         let mut turn1 = runner::start_agent_with_config(runner::AgentStartConfig {
             cli_resume_id: resume_id1.as_deref(),
             acp_session_store: Some(store.clone()),
             discussion_id: Some("chain-disc"),
             test_acp_transport: Some(transport.clone()),
+            full_access: true,
             ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt1, &tokens)
         })
         .await
@@ -7468,12 +7485,15 @@ mod resume_delta_tests {
             "the delta must not resend what the runtime already saw"
         );
 
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+
         let mut turn2 = runner::start_agent_with_config(runner::AgentStartConfig {
             cli_resume_id: resume_id2.as_deref(),
             native_acp_full_prompt: Some(&full_prompt_t2),
             acp_session_store: Some(store2.clone()),
             discussion_id: Some("chain-disc"),
             test_acp_transport: Some(transport.clone()),
+            full_access: true,
             ..runner::AgentStartConfig::new(&AgentType::OpenCode, project_path, &prompt2, &tokens)
         })
         .await

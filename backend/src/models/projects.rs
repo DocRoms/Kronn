@@ -943,6 +943,8 @@ pub struct AuditProgress {
     pub step_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens_so_far: Option<u64>,
+    /// The current tool call's category (`ActivityCategory::as_str`), never
+    /// the tool's own name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool: Option<String>,
     /// 0.8.4 (#319 / B3) — running count of `tool_call` events the
@@ -966,6 +968,30 @@ pub struct AuditProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub connection_id: Option<String>,
+    /// The running step's latest actions, for users who think a long step is
+    /// stuck. In memory only, already sanitized and bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recent_activity: Option<AuditRecentActivity>,
+    /// The running step's headline parts, beside `step_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub step_breakdown: Option<AuditTokenBreakdown>,
+}
+
+/// The running step's latest tool calls, newest first, by category only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditRecentActivity {
+    pub entries: Vec<AuditActivityEntry>,
+}
+
+/// One tool call: its category and when it started, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditActivityEntry {
+    pub category: crate::models::ActivityCategory,
+    pub at: DateTime<Utc>,
 }
 
 /// One row in the `audit_runs` table — one record per audit invocation.
@@ -1114,6 +1140,53 @@ pub struct AuditRunStep {
     /// duration and cost are that run's, not spent again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carried_from_run_id: Option<String>,
+    /// Without a reported cost: Kronn's estimate from the step's counters and
+    /// its run's served model. Computed on read, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub estimated_cost_usd_micros: Option<u64>,
+    /// Why neither a reported nor an estimated cost exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost_unknown_reason: Option<String>,
+    /// The headline's parts, computed on read. Absent for a row stored before
+    /// its accounting was recorded: its headline is then the one it was stored with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub breakdown: Option<AuditTokenBreakdown>,
+    /// What the row's input contains (`db::audit_runs::TokenAccounting`);
+    /// `None` for a row stored before it was recorded. Not sent.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub token_accounting: Option<String>,
+}
+
+/// What a step's headline (`step_tokens`) is made of. When the cache split is
+/// known (`uncached_input` set), the headline is the fresh traffic — uncached
+/// input plus output — and `total_with_cache` the vendor's full traffic. When
+/// it is not, the headline is `input_as_reported` plus output. Each part is
+/// absent when unknown, never 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AuditTokenBreakdown {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub uncached_input: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_as_reported: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_read: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_write: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_with_cache: Option<u64>,
 }
 
 /// Recommendation emitted by the completion-time cluster detector. Lives in

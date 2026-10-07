@@ -7535,6 +7535,14 @@ class AuditToolsTests(unittest.TestCase):
         self.assertEqual(out["latest"]["run_id"], "r-1")
         self.assertIn("never means 'completed'", out["note"])
 
+    def test_audit_status_never_hands_the_agent_the_recent_actions(self):
+        live = {"phase": "auditing", "current_tool": "Read", "current_tool_call_count": 3,
+                "recent_activity": {"entries": [{"tool": "Bash", "target": "psql", "at": "x"}]}}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": live}):
+            out = self.mod.call_audit_status({"project_id": "p1"})
+        self.assertNotIn("recent_activity", out["live"])
+        self.assertEqual(out["live"]["current_tool_call_count"], 3, "the counts stay")
+
     # ── audit_launch ─────────────────────────────────────────────────
 
     def test_partial_with_empty_steps_is_refused_before_any_http(self):

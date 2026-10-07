@@ -30,3 +30,18 @@ export function isFullAccess(config: AgentsConfig | null | undefined, agent: Age
   const support = FULL_ACCESS_AGENTS[agent];
   return support ? config?.[support.key]?.full_access ?? false : false;
 }
+
+/**
+ * Native ACP agents load repository plugins, tools and MCP servers before any
+ * permission check, so Kronn runs them only with full access (0.14.3). Mirrors
+ * the backend `runner::requires_explicit_full_access`.
+ */
+export const FULL_ACCESS_REQUIRED_AGENTS: readonly AgentType[] = ['OpenCode', 'Vibe', 'CopilotCli', 'GeminiCli', 'Kiro'];
+
+/**
+ * True when the agent cannot run until its full-access setting is turned on.
+ * Unknown while the settings are loading: the backend refuses on its own.
+ */
+export function requiresFullAccessToRun(config: AgentsConfig | null | undefined, agent: AgentType): boolean {
+  return Boolean(config) && FULL_ACCESS_REQUIRED_AGENTS.includes(agent) && !isFullAccess(config, agent);
+}

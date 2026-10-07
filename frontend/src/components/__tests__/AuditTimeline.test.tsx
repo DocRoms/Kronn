@@ -1,6 +1,6 @@
 // KT-977 — the audit tab as a timeline.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { I18nProvider } from '../../lib/I18nContext';
 
@@ -31,12 +31,12 @@ const step = (index: number, extra: Record<string, unknown> = {}) => ({
 type RunStub = { id: string; kind?: string; td_total?: number; status?: string; started_at?: string };
 
 /** The timeline's single request: runs, their steps, the branch's recorded audits. */
-function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = []) {
+function mockTimeline(runs: RunStub[], steps: unknown[], recorded: unknown[] = [], latestValidation: unknown = null) {
   vi.mocked(projectsApi.auditTimeline).mockResolvedValue({
     runs: runs.map(r => ({
       project_id: 'p1', agent_type: 'ClaudeCode', started_at: '', status: 'Completed', td_total: 0, kind: 'Full', ...r,
     })),
-    steps, recorded_audits: recorded, recorded_validated_at: null,
+    steps, recorded_audits: recorded, recorded_validated_at: null, latest_validation: latestValidation,
   } as never);
 }
 
@@ -48,7 +48,8 @@ function props(over: Partial<AuditTimelineProps> = {}): AuditTimelineProps {
     briefingDone: false, onBriefingSaved: vi.fn(), auditActive: false, liveStep: 0, liveTotal: 0,
     liveFile: '', liveElapsed: null, liveTool: null, liveStartedAt: null, liveToolCalls: null, liveStepTokens: null,
     liveTotalTokens: null, onResumeBriefingDiscussion: null, onCancel: vi.fn(), resumable: null,
-    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(), onViewTechDebts: vi.fn(),
+    onLaunch: vi.fn(), validationInProgress: false, onValidate: vi.fn(),
+    onMarkValid: vi.fn().mockResolvedValue(undefined), onOpenValidation: vi.fn(), onViewTechDebts: vi.fn(),
     refreshTrigger: 0, toast: vi.fn(), ...over,
   };
 }
@@ -84,7 +85,10 @@ describe('AuditTimeline', () => {
 
   it('shows each step its tokens, the live step its running count (KT-994)', async () => {
     const steps = [
-      step(1, { started_at: '2026-10-03T09:46:30Z', step_tokens: 48_213, input_tokens: 40_000, output_tokens: 8_213, cache_read_tokens: 12_000 }),
+      step(1, {
+        started_at: '2026-10-03T09:46:30Z', step_tokens: 48_213, input_tokens: 52_000, output_tokens: 8_213, cache_read_tokens: 12_000,
+        breakdown: { uncached_input: 40_000, output: 8_213, cache_read: 12_000, cache_write: 500, total_with_cache: 60_713 },
+      }),
       step(2, { ended_at: null, duration_ms: null, step_tokens: null, started_at: '2026-10-03T09:50:00Z' }),
     ];
     mockTimeline([{ id: 'run-1', started_at: '2026-10-03T09:46:00Z' }], steps);
@@ -96,8 +100,33 @@ describe('AuditTimeline', () => {
 
     const done = await screen.findByTestId('audit-timeline-step-tokens-1');
     expect(done).toHaveTextContent(/48[.,]2 k tk/);
-    expect(done.getAttribute('title')).toMatch(/40[\s,.\u202f]?000.*8[\s,.\u202f]?213.*12[\s,.\u202f]?000/);
+    // The headline is the fresh traffic; the hover adds the cache and the total with it.
+    expect(done.getAttribute('title')).toMatch(/40[\s,.\u202f]?000.*8[\s,.\u202f]?213.*12[\s,.\u202f]?000.*500.*60[\s,.\u202f]?713/);
     expect(screen.getByTestId('audit-timeline-step-tokens-2')).toHaveTextContent(/1[.,]31 M tk/);
+  });
+
+  it('offers the running step, and only it, the agent\'s latest actions', async () => {
+    const steps = [
+      step(1, { started_at: '2026-10-03T09:46:30Z' }),
+      step(2, { ended_at: null, duration_ms: null, step_tokens: null, started_at: '2026-10-03T09:50:00Z' }),
+    ];
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-03T09:46:00Z' }], steps);
+    const p = props({
+      auditActive: true, liveStep: 2, liveTotal: 16, liveFile: 'docs/step-2.md',
+      liveStartedAt: Date.parse('2026-10-03T09:46:00Z'),
+      liveTool: 'Read',
+      liveActivity: { entries: [{ category: 'Read', at: new Date().toISOString() }] },
+    });
+    wrap(<AuditTimeline {...p} />);
+
+    const running = await screen.findByTestId('audit-timeline-step-2');
+    expect(screen.getByTestId('audit-timeline-step-1').querySelector('[data-testid="audit-step-activity"]')).toBeNull();
+    const toggle = running.querySelector('button[aria-expanded]') as HTMLButtonElement;
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(running).toHaveTextContent(/Lecture|Read/);
+    // The chip shows the category's label too.
+    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent(/Lecture|Read/);
   });
 
   it('does not present its own choice as the running agent when the server does not say (KT-994)', async () => {
@@ -156,7 +185,7 @@ describe('AuditTimeline', () => {
     }] as never);
     const p = props({
       auditActive: true, liveStep: 1, liveTotal: 16, liveFile: 'docs/AGENTS.md',
-      liveTool: 'read_file · package.json', liveToolCalls: 7,
+      liveTool: 'Read', liveToolCalls: 7,
       selectedAgent: 'ClaudeCode', selectedTier: 'default',
       liveAuditor: { agent: 'Custom', tier: 'reasoning', connectionId: 'conn-or' },
     });
@@ -178,7 +207,7 @@ describe('AuditTimeline', () => {
     expect(launch).toHaveTextContent(/Audit en cours|Audit running/);
     // The audit read the briefing at start: editing it now would change nothing.
     expect(screen.getByTestId('audit-timeline-briefing-open')).toBeDisabled();
-    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent('read_file · package.json');
+    expect(screen.getByTestId('audit-timeline-live')).toHaveTextContent(/(Lecture|Read) \(7\)/);
   });
 
   it('resumes a failed step through the resume launcher and says consolidation reruns', async () => {
@@ -392,6 +421,41 @@ describe('AuditTimeline', () => {
     expect(total).toHaveTextContent(/1/);
   });
 
+  it('says the cache split is unknown for an agent pricing does not know', async () => {
+    mockTimeline([{ id: 'run-1' }], [
+      step(1, { step_tokens: 1_500, breakdown: { input_as_reported: 1_000, output: 500, cache_read: 300 } }),
+    ]);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expandAll(container);
+    const figure = await screen.findByTestId('audit-timeline-step-tokens-1');
+    expect(figure.getAttribute('title')).toMatch(/inconnue|unknown/);
+    expect(figure.getAttribute('title')).not.toMatch(/total/i);
+  });
+
+  it('shows an estimated cost apart from a reported one, and why a cost is unknown', async () => {
+    const steps = [
+      step(1, { cost_usd_micros: 420_000 }),
+      step(2, { estimated_cost_usd_micros: 30_000 }),
+      step(3, { cost_unknown_reason: 'no confirmed rate for the serving model' }),
+    ];
+    mockTimeline([{ id: 'run-1', started_at: '2026-10-02T09:59:00Z' }], steps);
+    const { container } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
+    await waitFor(() => expect(container.querySelector('.audit-tl-group-head')).not.toBeNull());
+    expandAll(container);
+
+    expect(await screen.findByTestId('audit-timeline-step-cost-1')).toHaveTextContent(/~0[.,]42 \$/);
+    const estimated = screen.getByTestId('audit-timeline-step-cost-2');
+    expect(estimated).toHaveTextContent(/≈0[.,]03 \$/);
+    expect(estimated.getAttribute('title')).toBeTruthy();
+    const unknown = screen.getByTestId('audit-timeline-step-cost-3');
+    expect(unknown).toHaveTextContent(/\?/);
+    // A known pricing reason reads in the UI's language.
+    expect(unknown.getAttribute('title')).toMatch(/aucun tarif confirmé|no confirmed rate/);
+    // One estimated step makes the total estimated; the unknown one makes it a floor.
+    expect(screen.getByTestId('audit-timeline-cost-total')).toHaveTextContent(/≥ ≈0[.,]45 \$/);
+  });
+
   it('totals the run exactly when every step reported, and unknown when none did (KT-997)', async () => {
     mockTimeline([{ id: 'run-1' }], [step(1, { cost_usd_micros: 400_000 }), step(2, { cost_usd_micros: 20_000 })]);
     const { unmount } = wrap(<AuditTimeline {...props({ auditStatus: 'Audited' })} />);
@@ -436,5 +500,29 @@ describe('AuditTimeline', () => {
     fireEvent.click(live.querySelector('button')!);
     expect(p.onCancel).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('audit-timeline-launch')).toBeDisabled();
+  });
+  it('validates directly from a finished linked validation, archived, and opens it', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1)], [], { discussion_id: 'd-val', finished: true, archived: true });
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    const block = await screen.findByTestId('audit-timeline-validation-finished');
+    fireEvent.click(within(block).getByRole('button', { name: /Valider l'audit/ }));
+    await waitFor(() => expect(p.onMarkValid).toHaveBeenCalledTimes(1));
+    expect(p.onValidate).not.toHaveBeenCalled();
+    fireEvent.click(within(block).getByRole('button', { name: /Voir la discussion de validation/ }));
+    expect(p.onOpenValidation).toHaveBeenCalledWith('d-val');
+  });
+
+  it('keeps starting or resuming a validation while the linked one is unfinished', async () => {
+    mockTimeline([{ id: 'run-1' }], [step(1)], [], { discussion_id: 'd-val', finished: false, archived: false });
+    const p = props({ auditStatus: 'Audited' });
+    wrap(<AuditTimeline {...p} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Valider l'audit/ }));
+    expect(p.onValidate).toHaveBeenCalledTimes(1);
+    expect(p.onMarkValid).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('audit-timeline-validation-finished')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Voir la discussion de validation/ })).toBeNull();
   });
 });

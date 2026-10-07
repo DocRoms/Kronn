@@ -34,6 +34,13 @@ progress_phase?: string, };
 export type ActiveWorkflowStep = { agent_type: AgentType, started_at: string, run_id: string, workflow_id: string, workflow_name: string, step_key: string, step_name: string, };
 
 /**
+ * What kind of action an agent's tool call is, from a fixed table
+ * (`agents::activity::category_of`). The only description of a call that
+ * leaves the agent's run: its name, arguments and targets never do.
+ */
+export type ActivityCategory = "Read" | "Search" | "Edit" | "Execute" | "Web" | "Mcp" | "Kronn" | "Think" | "Other";
+
+/**
  * Result of adding a contact, with optional diagnostic hint for unreachable peers.
  */
 export type AddContactResult = { contact: Contact,
@@ -60,14 +67,11 @@ scope: HostScope,
 name: string, };
 
 /**
- * The latest tool call an agent started, as its runtime reported it.
+ * The latest tool call an agent started: its category and the count. A row
+ * stored before 0.14.3 also held the tool's name and target; they are not
+ * read back, so they are never served again.
  */
-export type AgentActivity = { tool: string,
-/**
- * The call's most informative input (file, command, pattern or URL),
- * truncated. `None` until the input is complete or when it has none.
- */
-target?: string | null, at: string,
+export type AgentActivity = { category: ActivityCategory, at: string,
 /**
  * Tool calls the launch has started so far, this one included.
  */
@@ -663,6 +667,11 @@ path: string,
  */
 format?: string | null, };
 
+/**
+ * One tool call: its category and when it started, nothing else.
+ */
+export type AuditActivityEntry = { category: ActivityCategory, at: string, };
+
 export type AuditEntry = {
 /**
  * ISO date `YYYY-MM-DD` — when the audit completed.
@@ -755,7 +764,12 @@ kind: string,
  * chips from these fields. Optional so the JSON shape stays
  * backwards-compatible with old clients.
  */
-step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?: string | null,
+step_tokens?: number | null, total_tokens_so_far?: number | null,
+/**
+ * The current tool call's category (`ActivityCategory::as_str`), never
+ * the tool's own name.
+ */
+current_tool?: string | null,
 /**
  * 0.8.4 (#319 / B3) — running count of `tool_call` events the
  * agent has fired DURING the current step. Reset on every
@@ -774,9 +788,23 @@ agent?: AgentType, tier?: ModelTier,
 /**
  * The named external connection, for an HTTP agent that uses one.
  */
-connection_id?: string, };
+connection_id?: string,
+/**
+ * The running step's latest actions, for users who think a long step is
+ * stuck. In memory only, already sanitized and bounded.
+ */
+recent_activity?: AuditRecentActivity,
+/**
+ * The running step's headline parts, beside `step_tokens`.
+ */
+step_breakdown?: AuditTokenBreakdown, };
 
 export type AuditProvenance = "kronn_audit" | "human_attestation" | "legacy_evidence";
+
+/**
+ * The running step's latest tool calls, newest first, by category only.
+ */
+export type AuditRecentActivity = { entries: Array<AuditActivityEntry>, };
 
 /**
  * Recommendation emitted by the completion-time cluster detector. Lives in
@@ -911,7 +939,21 @@ cost_usd_micros?: number | null,
  * For a step a resume inherited: the run that actually ran it. Its tokens,
  * duration and cost are that run's, not spent again.
  */
-carried_from_run_id?: string | null, };
+carried_from_run_id?: string | null,
+/**
+ * Without a reported cost: Kronn's estimate from the step's counters and
+ * its run's served model. Computed on read, never stored.
+ */
+estimated_cost_usd_micros?: number,
+/**
+ * Why neither a reported nor an estimated cost exists.
+ */
+cost_unknown_reason?: string,
+/**
+ * The headline's parts, computed on read. Absent for a row stored before
+ * its accounting was recorded: its headline is then the one it was stored with.
+ */
+breakdown?: AuditTokenBreakdown, };
 
 /**
  * KT-977 — one step of the Full audit, known before any run: lets the UI
@@ -935,9 +977,30 @@ steps: Array<AuditRunStep>,
  * Audits the branch's `docs/.kronn.json` records (another instance, an
  * attestation, legacy evidence), oldest first. Empty without the file.
  */
-recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null, };
+recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
+/**
+ * The validation discussion linked to the latest run when that run is
+ * Completed, archived or not: the timeline offers to validate once it
+ * has finished.
+ */
+latest_validation: AuditTimelineValidation | null, };
+
+export type AuditTimelineValidation = { discussion_id: string,
+/**
+ * Same terminal-signal parser as the validate-audit gate.
+ */
+finished: boolean, archived: boolean, };
 
 export type AuditTodo = { file: string, line: number, text: string, };
+
+/**
+ * What a step's headline (`step_tokens`) is made of. When the cache split is
+ * known (`uncached_input` set), the headline is the fresh traffic — uncached
+ * input plus output — and `total_with_cache` the vendor's full traffic. When
+ * it is not, the headline is `input_as_reported` plus output. Each part is
+ * absent when unknown, never 0.
+ */
+export type AuditTokenBreakdown = { uncached_input?: number, input_as_reported?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.

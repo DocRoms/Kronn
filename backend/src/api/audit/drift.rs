@@ -607,19 +607,29 @@ pub async fn partial_audit(
                             agent_type.clone(),
                         )
                     });
+                    let mut recent = super::agent_launch::StepRecentFeed::new(
+                        (!is_stream_json).then(|| process.tool_activity_probe()),
+                    );
                     let mut activity_tick = tokio::time::interval(super::agent_launch::ACTIVITY_TICK);
                     activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     let mut stream_cost: Option<u64> = None;
                     loop {
                         let wake = tokio::select! {
                             maybe_line = process.next_line() => super::agent_launch::StepWake::Line(maybe_line),
-                            _ = activity_tick.tick(), if activity.is_some() => super::agent_launch::StepWake::Tick,
+                            _ = activity_tick.tick() => super::agent_launch::StepWake::Tick,
                         };
                         let line = match wake {
                             super::agent_launch::StepWake::Line(Some(line)) => line,
                             super::agent_launch::StepWake::Line(None) => break,
                             super::agent_launch::StepWake::Idle => continue,
                             super::agent_launch::StepWake::Tick => {
+                                if let Some(snapshot) = recent.moved() {
+                                    let payload = serde_json::json!({ "step": step, "recent": &snapshot });
+                                    if let Ok(mut t) = audit_tracker.lock() {
+                                        t.set_recent_activity(&project_id_for_progress, snapshot);
+                                    }
+                                    yield Event::default().event("activity").data(payload.to_string());
+                                }
                                 let Some(watch) = activity.as_mut() else { continue };
                                 if let Some((tool, calls)) = watch.tool_moved() {
                                     if let Ok(mut t) = audit_tracker.lock() {
@@ -635,12 +645,14 @@ pub async fn partial_audit(
                                         let cumulative = run_tokens.with(step_tokens);
                                         if let Ok(mut t) = audit_tracker.lock() {
                                             t.update_chips(&project_id_for_progress, Some(step_tokens), Some(cumulative), None);
+                                            t.set_step_breakdown(&project_id_for_progress, step_usage.breakdown());
                                         }
                                         yield Event::default().event("step_progress").data(
                                             serde_json::json!({
                                                 "step": step,
                                                 "step_tokens": step_tokens,
                                                 "total_tokens_so_far": cumulative,
+                                                "breakdown": step_usage.breakdown(),
                                             }).to_string()
                                         );
                                     }
@@ -650,6 +662,17 @@ pub async fn partial_audit(
                         };
                         if is_stream_json {
                             let event = runner::parse_claude_stream_line(&line);
+                            // The chip and its count, as in the Full pipeline:
+                            // the tool's category only.
+                            if let Some(category) = recent.on_stream_event(&event) {
+                                let tool = category.as_str();
+                                if let Ok(mut t) = audit_tracker.lock() {
+                                    t.update_chips(&project_id_for_progress, None, None, Some(tool.to_owned()));
+                                }
+                                yield Event::default().event("tool_call").data(
+                                    serde_json::json!({ "step": step, "tool": tool }).to_string()
+                                );
+                            }
                             let reported_cost = match &event {
                                 runner::StreamJsonEvent::Usage { cost_usd, .. } => *cost_usd,
                                 runner::StreamJsonEvent::TerminalError(failure) => failure.cost_usd,
@@ -670,6 +693,7 @@ pub async fn partial_audit(
                                         output: Some(output_tokens),
                                         cache_read: prompt_cache.cached_prompt_tokens,
                                         cache_write: prompt_cache.cache_write_prompt_tokens,
+                                        accounting: Default::default(),
                                     }.inclusive_for(&agent_type);
                                 }
                             }

@@ -1569,6 +1569,35 @@ async fn a_non_json_body_is_refused() {
     );
 }
 
+/// The bridge sends `Content-Type: application/json` on every request, a
+/// body-less GET included (`_http` in disc-introspection-mcp.py).
+#[tokio::test]
+async fn a_body_less_get_labelled_json_reaches_its_handler() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let (status, response) = raw_call(
+        &app,
+        "GET",
+        "/api/discussions/room-a/meta",
+        guard.value(),
+        "application/json",
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    // A labelled body that is not JSON is still refused.
+    let (status, response) = raw_call(
+        &app,
+        "POST",
+        "/api/disc/append",
+        guard.value(),
+        "application/json",
+        "",
+    )
+    .await;
+    assert_eq!(status, 400, "{response}");
+}
+
 // ─── Layer B round 3 (review-layer-b3) ──────────────────────────────────────
 
 async fn send(

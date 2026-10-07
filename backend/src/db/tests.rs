@@ -2914,8 +2914,7 @@ fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
     let activity = AgentActivity {
-        tool: "Edit".into(),
-        target: Some("src/é.rs".into()),
+        category: crate::models::ActivityCategory::Edit,
         at: Utc::now(),
         calls: 1,
     };
@@ -2942,6 +2941,46 @@ fn in_flight_step_activity_lands_only_on_the_running_step_it_names() {
     assert!(!set(1, "build"));
     let finished = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
     assert_eq!(finished.step_results[1].last_activity, None);
+}
+
+/// An activity a run stored before 0.14.3 held the tool's name and target: a
+/// read of the run drops them, so no route ever serves them again.
+#[test]
+fn a_legacy_in_flight_activity_is_served_without_its_name_and_target() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    let mut step: StepResult = serde_json::from_value(serde_json::json!({
+        "step_name": "build", "status": "Success", "output": "", "duration_ms": 0
+    }))
+    .unwrap();
+    step.status = RunStatus::Running;
+    run.step_results = vec![step];
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let sentinel = crate::agents::activity::tests::SENTINEL;
+    conn.execute(
+        "UPDATE workflow_runs SET step_results_json = json_set(step_results_json,
+            '$[0].last_activity', json(?1)) WHERE id = 'r1'",
+        rusqlite::params![serde_json::json!({
+            "tool": sentinel, "target": format!("cat {sentinel}"),
+            "at": "2026-10-01T00:00:00Z", "calls": 2
+        })
+        .to_string()],
+    )
+    .unwrap();
+    let stored = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    let served = serde_json::to_string(&stored).unwrap();
+    assert!(
+        !served.contains("SENTINEL") && !served.contains("hunter2"),
+        "{served}"
+    );
+    assert_eq!(
+        stored.step_results[0]
+            .last_activity
+            .as_ref()
+            .map(|a| a.calls),
+        Some(2)
+    );
 }
 
 #[test]

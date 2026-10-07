@@ -1,26 +1,37 @@
-//! The latest tool call of a running agent, published for readers other than
+//! The latest tool calls of a running agent, published for readers other than
 //! the client streaming its output.
+//!
+//! A call leaves the run as a fixed category only (`ActivityCategory`), mapped
+//! here from the agents' built-in tool names and ACP kinds. Its name,
+//! arguments, targets and titles are never carried: any string an agent
+//! controls can hold a secret.
 
-use crate::models::AgentActivity;
+use std::collections::{HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use serde_json::Value;
+
+use crate::models::{ActivityCategory, AgentActivity, AuditActivityEntry, AuditRecentActivity};
 
 /// Holds the latest activity of one launch; `None` until a tool call starts.
 pub type AgentActivitySink = tokio::sync::watch::Sender<Option<AgentActivity>>;
 
-/// Longest target kept, in characters.
-const TARGET_MAX_CHARS: usize = 120;
+/// Entries kept by [`RecentActivity`].
+pub const RECENT_MAX_ENTRIES: usize = 15;
+/// Call ids remembered to count each call once, well past the display buffer.
+const SEEN_CALLS_MAX: usize = 4096;
 
-pub fn tool_started(sink: Option<&AgentActivitySink>, tool: &str) {
+/// One more tool call of `category`, counted where every call passes: a
+/// reader polling the sink would miss the calls between two reads.
+pub fn tool_started(sink: Option<&AgentActivitySink>, category: ActivityCategory) {
     if let Some(sink) = sink {
-        // Counted here, where every call passes: a reader polling the sink
-        // would miss the calls that land between two reads.
         sink.send_modify(|current| {
             let calls = current
                 .as_ref()
                 .map_or(0, |previous| previous.calls)
                 .saturating_add(1);
             *current = Some(AgentActivity {
-                tool: tool.to_owned(),
-                target: None,
+                category,
                 at: chrono::Utc::now(),
                 calls,
             });
@@ -28,86 +39,209 @@ pub fn tool_started(sink: Option<&AgentActivitySink>, tool: &str) {
     }
 }
 
-/// Attach the completed input's target to the call started last.
-pub fn tool_target(sink: Option<&AgentActivitySink>, target: String) {
-    if let Some(sink) = sink {
-        sink.send_if_modified(|current| match current {
-            Some(activity) if activity.target.as_deref() != Some(target.as_str()) => {
-                activity.target = Some(target);
-                true
-            }
-            _ => false,
-        });
+/// The category of a tool, by its name as the agent's runtime reports it.
+/// Unknown and custom names are `Other`; MCP tools are `Mcp`, Kronn's own
+/// `Kronn`.
+pub fn category_of(name: &str) -> ActivityCategory {
+    use ActivityCategory::*;
+    let name = name.trim();
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        return if rest.starts_with("kronn") {
+            Kronn
+        } else {
+            Mcp
+        };
+    }
+    match name {
+        // Claude Code, Codex, OpenCode, Vibe, Copilot, Gemini, Kronn's HTTP loop.
+        "Read" | "NotebookRead" | "LS" | "read" | "list" | "read_file" | "list_dir"
+        | "list_directory" | "read_many_files" | "view" | "view_image" | "list_files"
+        | "git_status" | "git_diff" | "git_log" => Read,
+        "Glob"
+        | "Grep"
+        | "ToolSearch"
+        | "glob"
+        | "grep"
+        | "grep_files"
+        | "search_file_content"
+        | "search_text" => Search,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "write" | "edit" | "multiedit"
+        | "patch" | "apply_patch" | "write_file" | "search_replace" | "create" | "str_replace"
+        | "str_replace_editor" | "insert" | "replace" | "edit_file" | "edit_lines"
+        | "git_commit" => Edit,
+        "Bash" | "BashOutput" | "KillShell" | "KillBash" | "bash" | "shell" | "local_shell"
+        | "exec_command" | "write_stdin" | "run_shell_command" => Execute,
+        "WebFetch" | "WebSearch" | "webfetch" | "websearch" | "web_search" | "web_fetch"
+        | "google_web_search" | "api_call" | "api_endpoints" => Web,
+        "TodoWrite" | "TodoRead" | "todowrite" | "todoread" | "todo" | "update_plan"
+        | "ExitPlanMode" | "Task" | "Agent" | "task" | "Skill" | "SlashCommand"
+        | "report_intent" | "save_memory" => Think,
+        _ if KRONN_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) => Kronn,
+        _ => Other,
     }
 }
 
-/// The most informative field of a tool's JSON input — file path, command,
-/// pattern or URL — on one line and truncated.
-pub fn tool_input_target(raw_input: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(raw_input).ok()?;
-    let detail = ["file_path", "path", "command", "pattern", "url"]
-        .iter()
-        .find_map(|key| value.get(*key).and_then(|field| field.as_str()))?
-        .replace('\n', " ");
-    if detail.chars().count() > TARGET_MAX_CHARS {
-        let mut truncated: String = detail.chars().take(TARGET_MAX_CHARS).collect();
-        truncated.push('…');
-        Some(truncated)
-    } else {
-        Some(detail)
+/// Kronn's own tools in the HTTP tool loop.
+const KRONN_PREFIXES: &[&str] = &[
+    "disc_",
+    "task_",
+    "plan_",
+    "qa_",
+    "qe_",
+    "qp_",
+    "agent_",
+    "media_",
+    "mcp_list",
+    "tool_manual",
+    "tools_load",
+];
+
+/// The category of a generic ACP tool kind.
+pub fn category_of_acp_kind(kind: &str) -> ActivityCategory {
+    use ActivityCategory::*;
+    match kind {
+        "read" => Read,
+        "search" => Search,
+        "edit" | "delete" | "move" => Edit,
+        "execute" => Execute,
+        "fetch" => Web,
+        "think" | "switch_mode" => Think,
+        _ => Other,
+    }
+}
+
+/// One step in a tool call's life: its start, or a later update of it.
+/// Updates carrying the same id refine one call; they never announce another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolActivityUpdate {
+    /// The call id's hash: bounded whatever the runtime sends, and two ids
+    /// sharing a long prefix stay apart.
+    id: Option<u64>,
+    category: Option<ActivityCategory>,
+}
+
+fn call_identity(id: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl ToolActivityUpdate {
+    /// A call of the tool named `raw_name` started.
+    pub fn named(id: Option<String>, raw_name: &str) -> Self {
+        Self {
+            id: id.as_deref().map(call_identity),
+            category: Some(category_of(raw_name)),
+        }
+    }
+
+    /// A call of a known category, as a runtime that reports kinds gives it.
+    pub fn of_category(id: Option<&str>, category: ActivityCategory) -> Self {
+        Self {
+            id: id.map(call_identity),
+            category: Some(category),
+        }
+    }
+
+    pub fn category(&self) -> Option<ActivityCategory> {
+        self.category
+    }
+
+    /// A generic ACP `tool_call` / `tool_call_update`: its id and kind. Its
+    /// title, raw input and locations are never read.
+    pub fn from_acp(update: &Value) -> Option<Self> {
+        let call = update.get("toolCall").unwrap_or(update);
+        let id = call
+            .get("toolCallId")
+            .or_else(|| update.get("toolCallId"))
+            .and_then(Value::as_str)
+            .map(call_identity);
+        let category = call
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(category_of_acp_kind);
+        (id.is_some() || category.is_some()).then_some(Self { id, category })
+    }
+
+    /// Whether it says more than the call's id.
+    pub fn carries_detail(&self) -> bool {
+        self.category.is_some()
+    }
+}
+
+/// The latest tool calls of a running agent, shown to users. In memory only.
+/// Which calls were already counted is tracked apart from the 15 shown, so a
+/// call's later update never counts it again once its entry scrolled away.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RecentActivity {
+    entries: VecDeque<(Option<u64>, AuditActivityEntry)>,
+    seen: HashSet<u64>,
+    seen_order: VecDeque<u64>,
+}
+
+impl RecentActivity {
+    /// Apply one update; `true` when it announced a call not seen before. A
+    /// call first seen without a kind counts, as `Other`.
+    pub fn apply(&mut self, update: &ToolActivityUpdate) -> bool {
+        match update.id {
+            Some(id) if self.seen.contains(&id) => {
+                if let (Some(category), Some((_, entry))) = (
+                    update.category,
+                    self.entries
+                        .iter_mut()
+                        .find(|(known, _)| *known == Some(id)),
+                ) {
+                    entry.category = category;
+                }
+                false
+            }
+            Some(id) => {
+                if self.seen_order.len() == SEEN_CALLS_MAX {
+                    if let Some(oldest) = self.seen_order.pop_front() {
+                        self.seen.remove(&oldest);
+                    }
+                }
+                self.seen.insert(id);
+                self.seen_order.push_back(id);
+                self.push(Some(id), update.category.unwrap_or_default());
+                true
+            }
+            None => match update.category {
+                Some(category) => {
+                    self.push(None, category);
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    fn push(&mut self, id: Option<u64>, category: ActivityCategory) {
+        if self.entries.len() == RECENT_MAX_ENTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((
+            id,
+            AuditActivityEntry {
+                category,
+                at: chrono::Utc::now(),
+            },
+        ));
+    }
+
+    /// Newest first.
+    pub fn snapshot(&self) -> AuditRecentActivity {
+        AuditRecentActivity {
+            entries: self
+                .entries
+                .iter()
+                .rev()
+                .map(|(_, entry)| entry.clone())
+                .collect(),
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_target_completes_the_call_started_last_and_never_invents_one() {
-        let (sink, rx) = tokio::sync::watch::channel(None);
-        tool_target(Some(&sink), "orphan".into());
-        assert_eq!(*rx.borrow(), None, "no call started, nothing to complete");
-
-        tool_started(Some(&sink), "Read");
-        tool_target(Some(&sink), "src/lib.rs".into());
-        let first = rx.borrow().clone().unwrap();
-        assert_eq!(
-            (first.tool.as_str(), first.target.as_deref()),
-            ("Read", Some("src/lib.rs"))
-        );
-
-        tool_started(Some(&sink), "Bash");
-        let second = rx.borrow().clone().unwrap();
-        assert_eq!((second.tool.as_str(), second.target), ("Bash", None));
-        assert!(second.at >= first.at);
-        assert_eq!((first.calls, second.calls), (1, 2));
-    }
-
-    #[test]
-    fn every_call_is_counted_even_when_nobody_reads_in_between() {
-        let (sink, rx) = tokio::sync::watch::channel(None);
-        for _ in 0..50 {
-            tool_started(Some(&sink), "Read");
-            tool_target(Some(&sink), "src/é.rs".into());
-        }
-        assert_eq!(rx.borrow().as_ref().unwrap().calls, 50);
-    }
-
-    #[test]
-    fn the_target_is_the_informative_field_on_one_line_and_bounded() {
-        assert_eq!(
-            tool_input_target(r#"{"file_path":"docs/é.md","content":"x"}"#).as_deref(),
-            Some("docs/é.md")
-        );
-        assert_eq!(
-            tool_input_target(r#"{"command":"cargo test\n--lib"}"#).as_deref(),
-            Some("cargo test --lib")
-        );
-        let long = format!(r#"{{"pattern":"{}"}}"#, "é".repeat(200));
-        let target = tool_input_target(&long).unwrap();
-        assert_eq!(target.chars().count(), TARGET_MAX_CHARS + 1);
-        assert!(target.ends_with('…'));
-        assert_eq!(tool_input_target(r#"{"todos":[]}"#), None);
-        assert_eq!(tool_input_target("{not json"), None);
-    }
-}
+#[path = "activity_tests.rs"]
+pub(crate) mod tests;

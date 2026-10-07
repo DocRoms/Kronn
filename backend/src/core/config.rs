@@ -22,6 +22,100 @@ pub fn config_dir() -> Result<PathBuf> {
         .context("Cannot determine config directory")
 }
 
+/// Refuses a write into the real data directory from a test binary: a test
+/// without `KRONN_DATA_DIR` would otherwise write into the developer's own
+/// Kronn data (profiles, skills, directives). Same rule as the config.toml guard.
+pub fn refuse_real_data_dir_in_tests() -> Result<(), String> {
+    if crate::core::child_env::var("KRONN_DATA_DIR").is_ok() {
+        return Ok(());
+    }
+    let in_test_binary = cfg!(test)
+        || std::env::current_exe()
+            .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
+            .unwrap_or(false);
+    if in_test_binary {
+        return Err(
+            "test binary attempted to write into the real Kronn data directory; set KRONN_DATA_DIR"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The agent's full-access setting as saved in config.toml, read without any
+/// other effect. Absent, unreadable or not `true`: `false`.
+pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
+    #[cfg(test)]
+    {
+        // A test states the setting per thread; KRONN_DATA_DIR is process-wide
+        // and other tests change it concurrently.
+        test_saved_access::get(agent).unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(path) = config_path() else {
+            return false;
+        };
+        saved_full_access_in(&std::fs::read_to_string(path).unwrap_or_default(), agent)
+    }
+}
+
+/// The saved full-access setting a test states, per thread (each tokio test
+/// runs on its own thread).
+#[cfg(test)]
+pub(crate) mod test_saved_access {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static SAVED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+    }
+
+    /// Restores the previous value when dropped.
+    pub(crate) struct SavedAccess(String, Option<bool>);
+
+    impl Drop for SavedAccess {
+        fn drop(&mut self) {
+            SAVED.with(|saved| match self.1 {
+                Some(value) => saved.borrow_mut().insert(self.0.clone(), value),
+                None => saved.borrow_mut().remove(&self.0),
+            });
+        }
+    }
+
+    pub(crate) fn set(agent: &crate::models::AgentType, value: bool) -> SavedAccess {
+        let key = format!("{agent:?}");
+        let previous = SAVED.with(|saved| saved.borrow_mut().insert(key.clone(), value));
+        SavedAccess(key, previous)
+    }
+
+    pub(crate) fn get(agent: &crate::models::AgentType) -> Option<bool> {
+        SAVED.with(|saved| saved.borrow().get(&format!("{agent:?}")).copied())
+    }
+}
+
+pub(crate) fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> bool {
+    use crate::models::AgentType;
+    let key = match agent {
+        AgentType::ClaudeCode => "claude_code",
+        AgentType::Codex => "codex",
+        AgentType::OpenCode => "open_code",
+        AgentType::GeminiCli => "gemini_cli",
+        AgentType::Kiro => "kiro",
+        AgentType::Vibe => "vibe",
+        AgentType::CopilotCli => "copilot_cli",
+        AgentType::Ollama => "ollama",
+        AgentType::LiteLlm => "lite_llm",
+        AgentType::Nvidia => "nvidia",
+        AgentType::Custom => return false,
+    };
+    content
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|table| table.get("agents")?.get(key)?.get("full_access")?.as_bool())
+        .unwrap_or(false)
+}
+
 /// Full path to config.toml
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join(CONFIG_FILE))
@@ -837,6 +931,27 @@ pub async fn is_first_run() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_saved_full_access_setting_is_read_without_guessing() {
+        use crate::models::AgentType;
+        let content =
+            "[agents.open_code]\nfull_access = true\n\n[agents.vibe]\nfull_access = false\n";
+        assert!(saved_full_access_in(content, &AgentType::OpenCode));
+        assert!(!saved_full_access_in(content, &AgentType::Vibe));
+        assert!(
+            !saved_full_access_in(content, &AgentType::CopilotCli),
+            "absent: off"
+        );
+        assert!(
+            !saved_full_access_in("not toml [", &AgentType::OpenCode),
+            "unreadable: off"
+        );
+        assert!(!saved_full_access_in(
+            "[agents.open_code]\nfull_access = \"yes\"\n",
+            &AgentType::OpenCode
+        ));
+    }
     use serial_test::serial;
 
     /// Tests that mutate `KRONN_DATA_DIR` (a process-wide env var) must

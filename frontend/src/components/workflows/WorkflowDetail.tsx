@@ -3,6 +3,7 @@ import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
+import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
 import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType, ModelTier, Project, UnsafeExecStep } from '../../types/generated';
@@ -817,7 +818,12 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
           />
         )}
         {isAgentLike && !onChangeAgent && <TierBadge step={step} t={t} />}
-        {isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
+        {isAgentLike && requiresFullAccessToRun(agentAccess, step.agent) ? (
+          <span className="flex-row gap-1 text-xs text-warning" data-testid="step-full-access-required">
+            <AlertTriangle size={10} />
+            {t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)}
+          </span>
+        ) : isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
           <span className="flex-row gap-1 text-xs text-warning">
             <AlertTriangle size={10} />
             {t('config.restrictedStep')}

@@ -133,10 +133,7 @@ mod tests {
             ["claude-opus-5-5-20260915"]
         );
         let latest = activity_rx.borrow().clone().expect("tool call recorded");
-        assert_eq!(
-            (latest.tool.as_str(), latest.target.as_deref()),
-            ("Read", Some("src/lib.rs"))
-        );
+        assert_eq!(latest.category, crate::models::ActivityCategory::Read);
     }
 
     struct RestoreAdapterToggles([(&'static str, Option<std::ffi::OsString>); 2]);
@@ -235,6 +232,7 @@ mod tests {
                 resumed: std::sync::atomic::AtomicUsize::new(0),
                 prompts: Mutex::new(Vec::new()),
             });
+            let _saved = crate::core::config::test_saved_access::set(&agent, true);
             let result = start_agent_with_config(AgentStartConfig {
                 full_access: true,
                 task_worker_context: Some(&worker),
@@ -257,6 +255,115 @@ mod tests {
         }
     }
 
+    /// Every route launches through `start_agent_with_config`, and the
+    /// authority there is the agent's own saved setting, read for the agent
+    /// actually launched: with it off a native launch is refused before its
+    /// transport is touched, whatever `full_access` the route passed (a
+    /// reviewer inheriting its author's, a value cached at the start of a run),
+    /// on a fresh launch and on a resume alike. With it on, the launch runs.
+    #[tokio::test]
+    async fn a_native_agent_without_its_saved_full_access_never_reaches_its_transport() {
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        for agent in [
+            AgentType::OpenCode,
+            AgentType::Vibe,
+            AgentType::CopilotCli,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+        ] {
+            assert!(requires_explicit_full_access(&agent), "{agent:?}");
+            let _saved = crate::core::config::test_saved_access::set(&agent, false);
+            for (passed, resume) in [(false, None), (true, None), (true, Some("native-session"))] {
+                let fixture = Arc::new(NativeRouteFixture {
+                    created: std::sync::atomic::AtomicUsize::new(0),
+                    resumed: std::sync::atomic::AtomicUsize::new(0),
+                    prompts: Mutex::new(Vec::new()),
+                });
+                let result = start_agent_with_config(AgentStartConfig {
+                    full_access: passed,
+                    cli_resume_id: resume,
+                    test_acp_transport: Some(fixture.clone()),
+                    ..AgentStartConfig::new(
+                        &agent,
+                        project.path().to_str().unwrap(),
+                        "hello",
+                        &tokens,
+                    )
+                })
+                .await;
+                let error = result
+                    .err()
+                    .expect("a native launch without its setting is refused");
+                assert!(
+                    error.starts_with(NATIVE_FULL_ACCESS_REQUIRED),
+                    "{agent:?}: {error}"
+                );
+                assert!(
+                    error.contains(&format!(
+                        "Config › Agents › {} › Full access",
+                        agent_settings_label(&agent)
+                    )),
+                    "{error}"
+                );
+                assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(fixture.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert!(fixture.prompts.lock().unwrap().is_empty());
+            }
+        }
+        // Claude, Codex and the HTTP agents keep their own access model.
+        for agent in [AgentType::ClaudeCode, AgentType::Codex, AgentType::Ollama] {
+            assert!(!requires_explicit_full_access(&agent), "{agent:?}");
+        }
+        // With the setting on the launch reaches the runtime, even from a route
+        // that passed `false`: the setting is the user's choice.
+        for agent in [
+            AgentType::OpenCode,
+            AgentType::Vibe,
+            AgentType::CopilotCli,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+        ] {
+            let _saved = crate::core::config::test_saved_access::set(&agent, true);
+            let fixture = Arc::new(NativeRouteFixture {
+                created: std::sync::atomic::AtomicUsize::new(0),
+                resumed: std::sync::atomic::AtomicUsize::new(0),
+                prompts: Mutex::new(Vec::new()),
+            });
+            let mut process = start_agent_with_config(AgentStartConfig {
+                test_acp_transport: Some(fixture.clone()),
+                ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "hello", &tokens)
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{agent:?}: {error}"));
+            while process.next_line().await.is_some() {}
+            assert_eq!(
+                fixture.created.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{agent:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_setting_in_the_user_s_language() {
+        for (language, path) in [
+            ("en", "Config › Agents › OpenCode › Full access"),
+            ("fr", "Config › Agents › OpenCode › Accès complet"),
+            ("es", "Config › Agentes › OpenCode › Acceso completo"),
+            ("zh", "配置 › 智能体 › OpenCode › 完全访问"),
+        ] {
+            let message = native_full_access_refusal_in(&AgentType::OpenCode, language);
+            assert!(message.contains(path), "{language}: {message}");
+        }
+    }
+
     #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
@@ -273,8 +380,10 @@ mod tests {
             disabled_overrides: Vec::new(),
         };
         let agent = AgentType::OpenCode;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
         let mut first = start_agent_with_config(AgentStartConfig {
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(
                 &agent,
                 project.path().to_str().unwrap(),
@@ -287,10 +396,13 @@ mod tests {
         while first.next_line().await.is_some() {}
         assert!(first.child.wait().await.unwrap().success());
 
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+
         let mut second = start_agent_with_config(AgentStartConfig {
             cli_resume_id: Some("native-route-session"),
             native_acp_full_prompt: Some("full history"),
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(
                 &agent,
                 project.path().to_str().unwrap(),
@@ -365,10 +477,12 @@ mod tests {
             variables: Vec::new(),
         };
         let agent = AgentType::OpenCode;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
         let mut process = start_agent_with_config(AgentStartConfig {
             skill_ids: &["repository:p1:block-migration".to_string()],
             repository_skills: std::slice::from_ref(&skill),
             test_acp_transport: Some(fixture.clone()),
+            full_access: true,
             ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "migrate", &tokens)
         })
         .await
@@ -4455,8 +4569,82 @@ mod tests {
         );
         let captured = process.stderr_capture.lock().unwrap().join(" ");
         assert!(
-            captured.contains("refused undeclared tool `task_create`"),
+            captured.contains("refused an undeclared tool (undeclared Kronn)"),
             "the fail-closed decision must be observable: {captured}"
+        );
+    }
+
+    /// R24 — the name of a call the model made up is its own string: the refusal
+    /// is logged and traced by category only.
+    #[tokio::test]
+    async fn a_refused_made_up_tool_is_logged_by_category_never_by_name() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let requests_for_mock = requests.clone();
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let response = if requests_for_mock.fetch_add(1, Ordering::SeqCst) == 0 {
+                    sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"made-up","function":{"name":"hunter2","arguments":"{\"secret\":\"hunter2\"}"}}]}}]}"#,
+                    ])
+                } else {
+                    sse(&[
+                        r#"{"choices":[{"index":0,"delta":{"content":"The unavailable planning tool was not executed."}}]}"#,
+                    ])
+                };
+                ResponseTemplate::new(200).set_body_string(response)
+            })
+            .mount(&server)
+            .await;
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut process = start_ollama_http(
+            &AgentType::LiteLlm,
+            "complete the worker task",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(std::sync::Arc::new(WorkerTools { seen: seen.clone() })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("start");
+
+        let mut out = String::new();
+        while let Some(line) = process.next_line().await {
+            out.push_str(&line);
+        }
+        let status = process.child.wait().await.expect("lifeline");
+
+        assert!(
+            !status.success(),
+            "a worker that neither executes a valid tool nor delivers must fail"
+        );
+        assert!(out.contains("was not executed"));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "an undeclared governance tool must never reach the executor"
+        );
+        let captured = process.stderr_capture.lock().unwrap().join(" ");
+        assert!(
+            !captured.contains("hunter2"),
+            "a made-up name is never logged: {captured}"
+        );
+        assert!(
+            captured.contains("refused an undeclared tool (undeclared Other)"),
+            "the refusal stays observable by category: {captured}"
         );
     }
 
@@ -7413,7 +7601,7 @@ mod tests {
         );
         let captured = process.stderr_capture.lock().unwrap().join(" ");
         assert!(
-            captured.contains("refused undeclared tool `api_call`"),
+            captured.contains("refused an undeclared tool (undeclared Web)"),
             "the refusal must be observable to the model and operator: {captured}"
         );
         for transition in [
@@ -7616,12 +7804,12 @@ mod tests {
             if same_batch {
                 assert!(captured.contains("refused finalization read_file beyond the 3-call"));
             } else {
-                assert!(captured.contains("refused undeclared tool `read_file`"));
+                assert!(captured.contains("refused an undeclared tool (undeclared Read)"));
             }
             assert!(captured
                 .contains("worker finalization read refusal — entering one-shot repair read"));
-            assert!(captured.contains("refused undeclared tool `git_status`"));
-            assert!(captured.contains("refused undeclared tool `read_file`"));
+            assert!(captured.contains("refused an undeclared tool (undeclared Read)"));
+            assert!(captured.contains("refused an undeclared tool (undeclared Read)"));
             assert_eq!(
                 calls.iter().filter(|name| *name == "edit_lines").count(),
                 2,
@@ -9745,9 +9933,58 @@ Suite de la réponse.";
         );
     }
 
+    /// The Copilot account preflight starts the CLI only with Copilot's saved
+    /// full-access setting on, read at each attempt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copilot_preflight_never_starts_the_cli_without_its_full_access_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let attempt = || {
+            super::super::run_copilot_task_worker_preflight_with_timeout(
+                (
+                    "sh".into(),
+                    vec![
+                        "-c".into(),
+                        format!("touch '{}'; printf account", marker.display()),
+                    ],
+                    false,
+                ),
+                dir.path(),
+                super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT,
+            )
+        };
+        {
+            let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, false);
+            assert_eq!(
+                attempt().await.err(),
+                Some(CopilotTaskWorkerPreflight::FullAccessOff)
+            );
+            assert_eq!(
+                super::super::probe_copilot_task_worker_preflight(
+                    "copilot",
+                    Some("@github/copilot"),
+                    dir.path()
+                )
+                .await,
+                CopilotTaskWorkerPreflight::FullAccessOff,
+                "neither the direct attempt nor the npx fallback starts"
+            );
+            assert!(!marker.exists(), "no process was started");
+        }
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
+        attempt().await.expect("with the setting on the probe runs");
+        assert!(marker.exists());
+        assert_eq!(
+            CopilotTaskWorkerPreflight::FullAccessOff.reason_code(),
+            Some("copilot_full_access_off")
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn copilot_preflight_capture_keeps_stdout_stderr_and_spawn_failure() {
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
         let dir = tempfile::tempdir().unwrap();
         let output = super::super::run_copilot_task_worker_preflight_with_timeout(
             (
@@ -9784,6 +10021,7 @@ Suite de la réponse.";
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn copilot_preflight_full_spawn_path_preserves_its_four_second_deadline() {
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::CopilotCli, true);
         let dir = tempfile::tempdir().unwrap();
         let timeout = super::super::COPILOT_TASK_WORKER_PREFLIGHT_TIMEOUT;
         assert_eq!(timeout, std::time::Duration::from_secs(4));
@@ -15142,11 +15380,66 @@ sleep 3600
         assert_eq!(process.reported_token_usage(), Some(312));
         assert_eq!(usage.prompt_cache.cached_prompt_tokens, Some(40));
         assert_eq!(usage.prompt_cache.cache_write_prompt_tokens, None);
-        // KT-994 — the card shows what an HTTP agent is doing, as for a CLI.
+        // KT-994 — the card shows what an HTTP agent is doing, by category.
         assert_eq!(
             process.tool_activity_probe().read(),
-            Some(("read_file · docs/result.md".to_string(), 1))
+            Some((crate::models::ActivityCategory::Read, 1))
         );
+    }
+
+    /// R24 — an HTTP launch's own activity sink (a workflow step's live
+    /// activity) gets each call's category and count, never its name or input.
+    #[tokio::test]
+    async fn an_http_launch_publishes_its_calls_on_its_activity_sink_by_category() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let round = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let n = round.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let frame = if n == 0 {
+                    serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                        "index":0,"id":"r1","function":{"name":"read_file","arguments":"{\"path\":\"hunter2.md\"}"}
+                    }]}}]})
+                } else { serde_json::json!({"choices":[{"index":0,"delta":{"content":"done"}}]}) };
+                ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string()]))
+            }).expect(2).mount(&server).await;
+        let (sink, activity_rx) = tokio::sync::watch::channel(None);
+        let mut process = start_ollama_http_with_idle(
+            &AgentType::LiteLlm,
+            "read the audit document",
+            "",
+            "test-model",
+            None,
+            Some(&server.uri()),
+            None,
+            Some(Arc::new(AuditMutationTools {
+                revision: std::sync::atomic::AtomicUsize::new(0),
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(sink),
+        )
+        .await
+        .unwrap();
+        while process.next_line().await.is_some() {}
+        assert!(process.child.wait().await.unwrap().success());
+        let latest = activity_rx
+            .borrow()
+            .clone()
+            .expect("the call reached the sink");
+        assert_eq!(
+            (latest.category, latest.calls),
+            (crate::models::ActivityCategory::Read, 1)
+        );
+        assert!(!serde_json::to_string(&latest).unwrap().contains("hunter2"));
     }
 
     #[test]

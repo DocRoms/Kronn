@@ -969,24 +969,6 @@ pub(crate) fn timeout_routing(
     )
 }
 
-/// Build the suffix that closes a `🔧 ToolName` live-progress line.
-/// Tries to parse `raw_input` (the assembled JSON the model emitted as the
-/// tool's input) and surface the most informative field for the operator
-/// watching the live view: file path, command, pattern, URL.
-///
-/// Returns either ` · <detail>\n` (parseable JSON with a known field) or
-/// just `\n` (unparseable input or unknown shape — keeps the tool name
-/// readable but adds no detail).
-///
-/// Char-truncates at 120 to keep the live feed on one line; multi-byte
-/// codepoints at the cut are safe by construction.
-fn format_tool_input_suffix(raw_input: &str) -> String {
-    match crate::agents::activity::tool_input_target(raw_input) {
-        Some(detail) => format!(" · {detail}\n"),
-        None => "\n".into(),
-    }
-}
-
 /// Wrap a `TypedSchema` step's author schema in the canonical envelope shape
 /// ({data, status, summary}) so Ollama's grammar-constrained `format` emits a
 /// bare envelope object that `extract_step_envelope` (strategy-2) recovers —
@@ -1430,8 +1412,7 @@ async fn drive_agent_to_output(
     // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
     // stream-json emits tool input as partial JSON deltas; we buffer them and
     // surface a `🔧 Edit · src/foo.rs` one-liner on ToolEnd.
-    let mut current_tool: Option<String> = None;
-    let mut current_tool_input = String::new();
+    let mut current_tool: Option<()> = None;
     // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
     // stream lines.
     let raw_stream = process.raw_token_stream();
@@ -1471,38 +1452,24 @@ async fn drive_agent_to_output(
                             stream_json_failure = Some(failure);
                         }
                         StreamJsonEvent::ToolStart(name) => {
-                            // Emit the tool name immediately — gives the user
-                            // a sign of life before the first input delta.
-                            // The actual file/command will follow on ToolEnd
-                            // once we've assembled the partial JSON.
+                            // A sign of life as soon as a tool starts: its
+                            // category only, never its name or its input.
+                            let category = crate::agents::activity::category_of(&name);
                             if let Some(tx) = progress_tx {
-                                let _ = tx.send(format!("\n🔧 {}", name)).await;
+                                let _ = tx.send(format!("\n🔧 {}", category.as_str())).await;
                             }
-                            crate::agents::activity::tool_started(activity, &name);
-                            current_tool = Some(name);
-                            current_tool_input.clear();
+                            crate::agents::activity::tool_started(activity, category);
+                            current_tool = Some(());
                         }
-                        StreamJsonEvent::ToolInputDelta(partial) => {
-                            current_tool_input.push_str(&partial);
-                        }
+                        StreamJsonEvent::ToolInputDelta(_) => {}
                         StreamJsonEvent::ToolEnd => {
                             text_blocks.block_ended();
-                            // Closes the `🔧 ToolName` line streamed at
-                            // ToolStart with the tool's most informative
-                            // input field (cf. format_tool_input_suffix).
+                            // Closes the `🔧 Category` line streamed at ToolStart.
                             if current_tool.take().is_some() {
                                 if let Some(tx) = progress_tx {
-                                    let _ = tx
-                                        .send(format_tool_input_suffix(&current_tool_input))
-                                        .await;
-                                }
-                                if let Some(target) =
-                                    crate::agents::activity::tool_input_target(&current_tool_input)
-                                {
-                                    crate::agents::activity::tool_target(activity, target);
+                                    let _ = tx.send("\n".to_owned()).await;
                                 }
                             }
-                            current_tool_input.clear();
                         }
                         // A workflow step shares no thread with the next one.
                         StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {}
@@ -1767,6 +1734,12 @@ async fn run_multi_agent_debate(
     let reviewer_model = reviewer_shares_the_step_connection
         .then(|| step_model_override(&reviewer_step, author_connection))
         .flatten();
+    // The reviewer runs with its own agent's access, never its author's.
+    let reviewer_full_access = if cfg.reviewer_agent == step.agent {
+        full_access
+    } else {
+        crate::core::config::saved_full_access(&cfg.reviewer_agent)
+    };
 
     for round in 0..max_rounds {
         // ---- reviewer challenges ----
@@ -1794,7 +1767,7 @@ async fn run_multi_agent_debate(
             &rprompt,
             &[],
             tokens_config,
-            full_access,
+            reviewer_full_access,
             model_tiers,
             http_endpoints,
             ollama_context_overrides,
@@ -2645,76 +2618,6 @@ mod tests {
         let action = evaluate_conditions(&rules, output);
         assert!(action.is_none());
     }
-
-    // ── format_tool_input_suffix (live-progress tool-call surfacing) ──
-
-    #[test]
-    fn tool_suffix_extracts_file_path() {
-        let s = format_tool_input_suffix(
-            r#"{"file_path": "src/foo.rs", "old_string": "x", "new_string": "y"}"#,
-        );
-        assert_eq!(s, " · src/foo.rs\n");
-    }
-
-    #[test]
-    fn tool_suffix_extracts_command_for_bash() {
-        let s = format_tool_input_suffix(
-            r#"{"command": "cargo test --lib", "description": "run tests"}"#,
-        );
-        assert_eq!(s, " · cargo test --lib\n");
-    }
-
-    #[test]
-    fn tool_suffix_extracts_pattern_for_grep() {
-        let s = format_tool_input_suffix(r#"{"pattern": "TODO", "path": "."}"#);
-        // priority list checks file_path → path before pattern, so `path: "."`
-        // wins. Fine: directory is what matters for the operator's mental model.
-        assert_eq!(s, " · .\n");
-    }
-
-    #[test]
-    fn tool_suffix_extracts_url_for_webfetch() {
-        let s =
-            format_tool_input_suffix(r#"{"url": "https://example.com/foo", "prompt": "summary"}"#);
-        assert_eq!(s, " · https://example.com/foo\n");
-    }
-
-    #[test]
-    fn tool_suffix_unparseable_falls_back_to_newline() {
-        // ToolInputDelta sometimes truncates mid-emission; we don't crash.
-        let s = format_tool_input_suffix("not json at all");
-        assert_eq!(s, "\n");
-    }
-
-    #[test]
-    fn tool_suffix_unknown_shape_falls_back_to_newline() {
-        // No recognized field → no detail to show, just close the line.
-        let s = format_tool_input_suffix(r#"{"weird": "shape", "no": "match"}"#);
-        assert_eq!(s, "\n");
-    }
-
-    #[test]
-    fn tool_suffix_truncates_long_command_with_ellipsis() {
-        let long_cmd = "echo ".to_string() + &"x".repeat(200);
-        let s = format_tool_input_suffix(&format!(r#"{{"command": "{}"}}"#, long_cmd));
-        assert!(s.ends_with("…\n"), "got: {:?}", s);
-        // 120 char body + " · " prefix + "…\n" suffix → ≤ 130 bytes is the
-        // ASCII case, but we just verify the truncation happened.
-        assert!(s.chars().count() < long_cmd.chars().count() + 5);
-    }
-
-    #[test]
-    fn tool_suffix_handles_utf8_safely() {
-        // Multi-byte codepoint at the cut point: `é` is 2 bytes. 120 chars
-        // of `é` = 240 bytes. The char-based truncation must not split.
-        let path: String = "é".repeat(150);
-        let s = format_tool_input_suffix(&format!(r#"{{"file_path": "{}"}}"#, path));
-        // No panic + ends with the ellipsis suffix.
-        assert!(s.ends_with("…\n"));
-        // The truncated body should be exactly 120 `é` chars.
-        let body = s.trim_start_matches(" · ").trim_end_matches("…\n");
-        assert_eq!(body.chars().count(), 120);
-    }
 }
 
 #[cfg(test)]
@@ -2862,7 +2765,7 @@ mod drive_agent_to_output_tests {
     async fn stream_json_reports_cache_usage_and_the_latest_tool_call() {
         let proc = ScriptedProcess::stream_json([
             tool_start("Grep"),
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"StepProgress\"}"}}}"#.to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"pattern\":\"StepProgress\",\"path\":\"src\"}"}}}"#.to_string(),
             r#"{"type":"stream_event","event":{"type":"content_block_stop"}}"#.to_string(),
             text_delta("done"),
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":48,"cache_creation_input_tokens":80271,"cache_read_input_tokens":1554330,"output_tokens":21545}}"#.to_string(),
@@ -2887,10 +2790,7 @@ mod drive_agent_to_output_tests {
             }
         );
         let latest = activity_rx.borrow().clone().expect("tool call recorded");
-        assert_eq!(
-            (latest.tool.as_str(), latest.target.as_deref()),
-            ("Grep", Some("StepProgress"))
-        );
+        assert_eq!(latest.category, crate::models::ActivityCategory::Search);
     }
 
     #[tokio::test]

@@ -4661,6 +4661,40 @@ describe('DiscussionsPage', () => {
     expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id });
   });
 
+  it('validation CTA still shows in the auto-archived validation discussion', async () => {
+    const proj = makeProject('p-archived', 'Audited', 'context');
+    const disc: Discussion = {
+      ...makeProjectDisc('d-archived', proj.id, 'Validation audit AI'),
+      archived: true,
+      messages: [
+        { id: 'm-user', role: 'User', channel: 'main', content: 'Validate', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm-agent', role: 'Agent', channel: 'main', content: 'Fin.\nKRONN:VALIDATION_COMPLETE', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:01:00Z', tokens_used: 10, auth_mode: null },
+      ],
+      message_count: 2,
+      non_system_message_count: 2,
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+
+    await wrap(
+      <DiscussionsPage
+        projects={[proj]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={vi.fn()}
+        refetchProjects={vi.fn()}
+        onNavigate={vi.fn()}
+        toast={toastFn}
+        initialActiveDiscussionId={disc.id}
+        {...liftedProps()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
+    await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
+  });
+
   // ─── Audit-running MCP filter banner (0.8.3 #280) ────────────────────
   //
   // When an audit is in progress on the same project as the active

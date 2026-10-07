@@ -322,6 +322,7 @@ pub fn save_custom_directive(
     conflicts: &[String],
 ) -> Result<String, String> {
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create directives dir: {}", e))?;
 
     let slug = unique_directive_slug(&dir, name);
@@ -356,6 +357,7 @@ pub fn update_custom_directive(
         return Err(format!("Invalid directive id '{}'", id));
     }
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid directive id '{}'", id));
@@ -382,6 +384,7 @@ pub fn delete_custom_directive(id: &str) -> Result<bool, String> {
         return Err(format!("Invalid directive id '{}'", id));
     }
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
+    crate::core::config::refuse_real_data_dir_in_tests()?;
     let path = dir.join(format!("{}.md", slug));
     if path.parent() != Some(dir.as_path()) {
         return Err(format!("Invalid directive id '{}'", id));

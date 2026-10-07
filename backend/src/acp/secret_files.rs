@@ -130,6 +130,12 @@ pub fn opencode_config_content() -> String {
     )
 }
 
+/// The inline configuration OpenCode starts with, or `None` to leave the
+/// operator's own untouched. OpenCode runs only with full access.
+pub fn opencode_full_access_config(operator: Option<&str>) -> Option<String> {
+    operator.is_none().then(opencode_config_content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +263,14 @@ mod tests {
                     > deny
             );
         }
+    }
+
+    #[test]
+    fn the_operator_s_inline_config_is_theirs() {
+        assert_eq!(opencode_full_access_config(Some("{}")), None);
+        assert_eq!(
+            opencode_full_access_config(None),
+            Some(opencode_config_content())
+        );
     }
 }

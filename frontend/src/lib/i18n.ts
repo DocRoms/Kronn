@@ -94,7 +94,9 @@ export function t(locale: UILocale, key: string, ...args: (string | number)[]): 
   const fallback = loadedDictionaries.fr;
   let str = dict?.[key] ?? fallback?.[key] ?? key;
   for (let i = 0; i < args.length; i++) {
-    str = str.replace(`{${i}}`, String(args[i]));
+    // A function replacer: `$&`, `$'` and the like in an argument stay literal.
+    const arg = String(args[i]);
+    str = str.replace(`{${i}}`, () => arg);
   }
   return str;
 }

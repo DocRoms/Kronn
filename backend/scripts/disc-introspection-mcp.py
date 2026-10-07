@@ -10384,6 +10384,9 @@ def call_audit_status(args):
         bridge_stream = _audit_entry_public(entry) if entry else None
 
     live = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-status"))
+    if isinstance(live, dict):
+        # The audit agent's recent actions are for the user's panel only.
+        live.pop("recent_activity", None)
     out = {
         "bridge_stream": bridge_stream,
         "live": live,
