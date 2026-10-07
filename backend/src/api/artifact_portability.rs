@@ -291,6 +291,140 @@ pub async fn export(
 mod tests {
     use super::*;
 
+    fn state() -> crate::AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn prompt(id: &str, name: &str) -> crate::models::QuickPrompt {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": name, "icon": "x", "prompt_template": "Review it",
+            "variables": [], "agent": "ClaudeCode", "project_id": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    /// KT-1037: an Artifact import that brings a Quick Prompt shadowing a
+    /// shared `ref:` disables the enabled workflow already using it.
+    #[tokio::test]
+    async fn an_artifact_import_that_shadows_a_shared_reference_disables_its_user() {
+        // Source instance: a page whose action runs a workflow using "Review".
+        let source = state();
+        let content = source
+            .db
+            .with_conn(|conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &prompt("qp-src", "Review"))?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-src', 'uses review', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"step_type\":{\"type\":\"Agent\"},\"quick_prompt_id\":\"qp-src\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                let now = chrono::Utc::now();
+                let page = crate::models::LivePage {
+                    id: "page-src".into(),
+                    project_id: None,
+                    title: "Board".into(),
+                    slug: "board".into(),
+                    current_revision_id: "rev-src".into(),
+                    data_revision: 0,
+                    created_at: now,
+                    updated_at: now,
+                    last_published_at: None,
+                    pinned: false,
+                    archived: false,
+                };
+                let revision = crate::models::LivePageRevision {
+                    id: "rev-src".into(),
+                    page_id: "page-src".into(),
+                    revision: 1,
+                    html: r#"<script type="application/kronn-action" data-action-id="go">{"kind":"workflow","target_id":"wf-src"}</script>"#.into(),
+                    created_by_agent: None,
+                    created_at: now,
+                };
+                let tx = conn.unchecked_transaction()?;
+                crate::db::live_pages::create_live_page_in_transaction(&tx, &page, &revision, &[], None)?;
+                tx.commit()?;
+                Ok(serde_json::to_string(&export_bundle(conn, "page-src")?)?)
+            })
+            .await
+            .unwrap();
+
+        // Destination: an enabled unscoped workflow using the shared "Review".
+        let target = state();
+        target
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &prompt("qp-global", "Review"))?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-user', 'shared user', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_prompt_id\":\"ref:prompt:review\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request = |digest: Option<String>| ArtifactImportRequest {
+            content: content.clone(),
+            project_id: Some("proj-p".into()),
+            choices: vec![],
+            approved_quick_exec_ids: vec![],
+            preview_digest: digest,
+            allow_embed_origins: vec![],
+        };
+        let axum::Json(preview) = import::preview(
+            axum::extract::State(target.clone()),
+            axum::Json(request(None)),
+        )
+        .await;
+        let preview = preview.data.expect("preview");
+        let axum::Json(imported) = import::import(
+            axum::extract::State(target.clone()),
+            axum::Json(request(Some(preview.digest.clone()))),
+        )
+        .await;
+        assert!(imported.success, "{:?}", imported.error);
+        let enabled = target
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-user'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the shadowed reference's user is disabled");
+        let records = target
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        let record = records
+            .iter()
+            .find(|item| item.id == "wf-user")
+            .expect("listed");
+        assert!(
+            record.summary.contains("shadows a shared reference"),
+            "{}",
+            record.summary
+        );
+    }
+
     #[test]
     fn action_dependencies_follow_runtime_first_occurrence_and_unicode() {
         let html = r#"<h1>Équipe 🦀</h1>

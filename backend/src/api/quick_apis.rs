@@ -37,7 +37,19 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickAp
 /// POST /api/quick-apis
 pub async fn create(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickApiRequest>,
+) -> Json<ApiResponse<QuickApi>> {
+    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    create_as(state, req, agent).await
+}
+
+/// [`create`] naming the creating agent, if any: a resource an agent creates
+/// can shadow a shared `ref:` and so disable the workflows using it.
+pub(crate) async fn create_as(
+    state: AppState,
+    req: CreateQuickApiRequest,
+    creator_agent: Option<String>,
 ) -> Json<ApiResponse<QuickApi>> {
     if req.name.is_empty() || req.name.len() > 200 {
         return Json(ApiResponse::err("Name must be 1-200 characters"));
@@ -85,7 +97,14 @@ pub async fn create(
     let q = qa.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q))
+        .with_conn(move |conn| {
+            crate::db::quick_apis::insert_quick_api_invalidating(
+                conn,
+                &q,
+                creator_agent.as_deref(),
+            )?;
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(qa)),
@@ -97,7 +116,41 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickApiRequest>,
+) -> Json<ApiResponse<QuickApi>> {
+    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    update_as(state, id, req, agent).await
+}
+
+/// What a Quick API sends when a workflow step calls it, and what a `ref:`
+/// resolves it by.
+fn quick_api_execution(qa: &QuickApi) -> serde_json::Value {
+    serde_json::json!({
+        // A new slug or scope can make a `ref:` resolve to this API instead.
+        "slug": crate::core::repository_resources::ascii_slug(&qa.name),
+        "project": qa.project_id,
+        "plugin": qa.api_plugin_slug,
+        "config": qa.api_config_id,
+        "endpoint": qa.api_endpoint_path,
+        "method": qa.api_method,
+        "query": qa.api_query,
+        "path_params": qa.api_path_params,
+        "headers": qa.api_headers,
+        "body": qa.api_body,
+        "extract": qa.api_extract,
+        "pagination": qa.api_pagination,
+        "timeout": qa.api_timeout_ms,
+        "retries": qa.api_max_retries,
+        "variables": qa.variables,
+    })
+}
+
+pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    req: CreateQuickApiRequest,
+    editor_agent: Option<String>,
 ) -> Json<ApiResponse<QuickApi>> {
     let qa_id = id.clone();
     let existing = match state
@@ -112,6 +165,7 @@ pub async fn update(
     if let Err(error) = validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(error));
     }
+    let existing_snapshot = existing.clone();
 
     let updated = QuickApi {
         id: existing.id,
@@ -157,10 +211,19 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
+    // An agent's change to what the API sends would run under the human's
+    // activation of every workflow that calls it (KT-1037): those go back
+    // to disabled.
+    let disable_users = editor_agent.is_some()
+        && quick_api_execution(&existing_snapshot) != quick_api_execution(&updated);
+    let editor = if disable_users { editor_agent } else { None };
     let q = updated.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_apis::update_quick_api(conn, &q))
+        .with_conn(move |conn| {
+            crate::db::quick_apis::update_quick_api_invalidating(conn, &q, editor.as_deref())?;
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
@@ -344,7 +407,11 @@ pub async fn import_qa(
     let q = qa.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q))
+        .with_conn(move |conn| {
+            // An imported resource can shadow a shared `ref:` too.
+            crate::db::quick_apis::insert_quick_api_invalidating(conn, &q, Some("import"))?;
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(qa)),
@@ -1302,6 +1369,383 @@ fn normalize_batch_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project-local Quick API renamed to shadow the global one a project
+    /// workflow names by `ref:` captures it: the workflow is disabled.
+    #[tokio::test]
+    async fn a_rename_that_shadows_a_global_quick_api_reference_disables_its_user() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let api = |id: &str, name: &str, project: Option<&str>| -> QuickApi {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "icon": "x", "description": "",
+                "project_id": project, "api_plugin_slug": "p", "api_config_id": "c",
+                "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let (global, local) = (
+            api("qa-global", "Fetch", None),
+            api("qa-local", "Other", Some("proj-p")),
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_apis::insert_quick_api(conn, &global)?;
+                crate::db::quick_apis::insert_quick_api(conn, &local)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch", "description": "", "project_id": "proj-p",
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "DELETE", "variables": []
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qa-local".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        let enabled = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-shadowed'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the shadowing rename disables the workflow");
+    }
+
+    /// A rename alone (same request) of a project-local Quick API to shadow the global one a project
+    /// workflow names by `ref:` captures it: the workflow is disabled.
+    #[tokio::test]
+    async fn a_rename_only_that_shadows_a_global_quick_api_reference_disables_its_user() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let api = |id: &str, name: &str, project: Option<&str>| -> QuickApi {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": name, "icon": "x", "description": "",
+                "project_id": project, "api_plugin_slug": "p", "api_config_id": "c",
+                "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let (global, local) = (
+            api("qa-global", "Fetch", None),
+            api("qa-local", "Other", Some("proj-p")),
+        );
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_apis::insert_quick_api(conn, &global)?;
+                crate::db::quick_apis::insert_quick_api(conn, &local)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch", "description": "", "project_id": "proj-p",
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": []
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qa-local".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        let enabled = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-shadowed'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the shadowing rename disables the workflow");
+    }
+
+    /// An agent creating a project-local Quick API that shadows the global
+    /// one a project workflow names disables that workflow and records why.
+    #[tokio::test]
+    async fn an_agent_created_quick_api_that_shadows_a_global_reference_disables_its_user() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let global: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-global", "name": "Fetch", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_apis::insert_quick_api(conn, &global)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch", "description": "", "project_id": "proj-p",
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/admin", "api_method": "DELETE", "variables": []
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, Some("Codex".into())).await;
+        assert!(created.success, "{:?}", created.error);
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "the shadowed reference's user is disabled"
+        );
+        assert_eq!(records[0].id, "wf-shadowed");
+        assert_eq!(
+            records[0].summary,
+            "Quick API « Fetch » created by Codex (shadows a shared reference)"
+        );
+    }
+
+    /// A Quick API published as `fetch` and renamed since still answers to
+    /// `ref:qa:fetch` at run time: an agent edit disables its users.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_published_then_renamed_quick_api_disables_its_alias_users() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let api: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-pub", "name": "Fetch v2", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_apis::insert_quick_api(conn, &api)?;
+                crate::db::resource_identities::upsert(conn, "", "quick_api", "fetch", "qa-pub")?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-alias', 'wf-alias', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch v2", "description": "", "project_id": null,
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/admin", "api_method": "DELETE", "variables": []
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qa-pub".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        let enabled = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-alias'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the published alias still names this API");
+    }
+
+    /// KT-1037: an agent's change to what a Quick API sends disables every
+    /// enabled workflow that calls it; a human's edit or a rename does not.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_quick_api_disables_the_workflows_calling_it() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let qa: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-1", "name": "Fetch", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+                // The same API named symbolically as a collection source.
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-qa-ref', 'uses qa by ref', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"collect\",\"collect_api_data\":{\"sources\":[{\"alias\":\"f\",\"quick_api_id\":\"ref:qa:fetch\"}]}}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-qa', 'uses qa', '{\"type\":\"Manual\"}', '[{\"name\":\"call\",\"quick_api_id\":\"qa-1\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let enabled = |state: AppState| async move {
+            state
+                .db
+                .with_conn(|conn| {
+                    Ok(conn.query_row(
+                        "SELECT enabled FROM workflows WHERE id = 'wf-qa'",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?)
+                })
+                .await
+                .unwrap()
+        };
+        let request = |method: &str, name: &str| -> CreateQuickApiRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "description": "", "project_id": null,
+                "api_plugin_slug": "p", "api_config_id": "c",
+                "api_endpoint_path": "/items", "api_method": method, "variables": []
+            }))
+            .unwrap()
+        };
+        let Json(renamed) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("GET", "FETCH"),
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(renamed.success, "{:?}", renamed.error);
+        assert!(
+            enabled(state.clone()).await,
+            "a rename changes nothing that runs"
+        );
+        let Json(human) =
+            update_as(state.clone(), "qa-1".into(), request("POST", "FETCH"), None).await;
+        assert!(human.success, "{:?}", human.error);
+        assert!(
+            enabled(state.clone()).await,
+            "a human's edit keeps the activation"
+        );
+        let Json(agent) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("DELETE", "Renamed API"),
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(agent.success, "{:?}", agent.error);
+        assert!(
+            !enabled(state.clone()).await,
+            "an agent's new method disables the caller"
+        );
+        let by_ref = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-qa-ref'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!by_ref, "a `ref:qa:` to the edited API is disabled too");
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        assert!(records.iter().all(|item| item.reason
+            == crate::models::AutoDisableReason::DependencyEditedByAgent
+            && item.disabled_by == "Codex"
+            && item.summary.contains("edited by Codex")));
+        assert_eq!(records.len(), 2, "both users are listed for review");
+    }
 
     #[test]
     fn normalize_string_items_with_first_var_wraps_each_into_object() {

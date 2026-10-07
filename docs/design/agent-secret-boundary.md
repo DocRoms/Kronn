@@ -70,7 +70,7 @@ The evidence for every cell is a test or a real probe listed in section 7.
 | 3 | Secret-returning or secret-moving routes open to that trust | `/api/mcps/configs/{id}/reveal`, `/api/external-api/connections/{id}/reveal`, `/api/execution-context/.../reveal`, `/api/mcps/bundles/export?include_values`, `GET /api/config/export` (bundles `recovery.key`, `api/setup.rs:1655-1662`), `POST /api/config/import`, `POST /api/config/recovery/set` (wraps the key under a caller-chosen passphrase **and** overwrites `recovery.key`, `setup.rs:2310`), `POST /api/config/sync-agent-tokens` (writes provider keys to `~/.codex/auth.json`, `~/.gemini`, `setup.rs:1126-1154`), `POST /api/config/discover-keys` (`setup.rs:1158-1210`), `POST /api/config/auth-token/regenerate` (`lib.rs:891`). `GET /api/config/auth-token` exists (`setup.rs:1018`) but is not routed |
 | 4 | **Exec routes hand out the backend environment and any file** | `POST /api/projects/{id}/exec` (`lib.rs:1268`) runs `sh -c` with no env scrub (`api/git_ops.rs:1571-1588`); the allow-list includes `env`, `cat`, `find`, `stat` with absolute paths (`git_ops.rs:1520-1524`). Workflow Exec steps also inherit the backend env (`workflows/exec_step.rs:377`) |
 | 5 | Key next to the database | sidecar `encryption_key` (`core/keyvault.rs` tier 3); `encryption_secret` still serialized in `config.toml` (`models/setup.rs:39-41`) and set again at each boot (`core/keystore.rs:135-147`) |
-| 6 | Credentials in plaintext `config.toml` | `tokens.keys[].value` (`api/external_api_connections.rs:1690-1701`), `server.auth_token` |
+| 6 | Credentials in plaintext `config.toml` | Fixed by Layer C (KT-1007): provider and connection keys and the auth token live in the encrypted `stored_credentials` table. Residual cases (key kept in `config.toml` without two durable copies, locked boot, set-aside file): `docs/tech-debt/TD-20260901-plaintext-connection-credentials.md` |
 | 7 | Key-loss traps | reconcile reads only `mcp_configs.env_encrypted` (`keystore.rs:72-83`) and mints a new key when it is empty even if other columns hold ciphertext; `OsKeychain::retrieve` returns `Ok(None)` on any keychain error (`keyvault.rs:72-88`) and `mirror()` then overwrites the item (`keyvault.rs:238-246`) |
 | 8 | Publication admin secret in a plaintext file | `core/operator_secret.rs:31` |
 | 9 | Trusted files the agent can write | natively, the bridge script path and the project `.mcp.json` (used as the canonical registry by the ACP broker) sit where the agent writes |
@@ -767,3 +767,101 @@ secrets or a signed challenge replace this in 0.15.
    http://127.0.0.1:3140/api/config/export`: expect HTTP 403.
 6. After the turn ends, the same `curl` with that token value on
    `/api/discussions` answers 401.
+
+**Outbound HTTP — shipped (KT-1039).** `backend/src/core/safe_http.rs` is the
+one transport for requests whose destination a user, a plugin spec, a
+provider payload or an agent supplies. A `SafeClient` resolves names through
+its own resolver: the answer is classified by `safe_http::is_global` (one
+rule; IPv4-mapped, IPv4-compatible, NAT64 and 6to4 forms count as their IPv4
+host; IPv4 follows the IANA special-purpose registry, and IPv6 must be in
+2000::/3 outside that registry's non-global blocks, so loopback, private,
+link-local, shared 100.64/10, documentation, benchmarking, reserved,
+unique-local, local-use NAT64, SRv6 and Teredo are refused), a host with any
+refused answer is refused, and the connection uses exactly the checked
+addresses, so a second DNS answer cannot reach the socket. Literal-IP URLs
+are checked by the same rule before every send and every hop; proxies are
+off. A `SafeRequest` can only leave through that checked `send`. Redirects
+are either followed by reqwest on the same origin only, or by
+`send_following`, which re-checks each hop (5 at most), refuses an https→http
+downgrade, a hop off the plugin host and any cross-origin hop that would
+resend a body (307/308 always, 301/302 on PUT and other non-POST methods),
+and on a cross-origin hop drops every header and query key the plugin, the
+step or the webhook supplied (whatever its name, `User-Agent` included).
+
+| Client | Policy |
+|---|---|
+| ApiCall: every page, retry and hop (`workflows/api_call_executor.rs`) | public; `send_following` pinned to the plugin host |
+| OAuth2 client credentials and token exchange (`core/oauth2_cache.rs`) | public; same-origin redirects only |
+| Notify (`workflows/notify_step.rs`) | public; `send_following`, every configured header is a secret slot |
+| Gate webhook (`workflows/runner.rs` `fire_gate_webhook`) | public; same-origin redirects only |
+| Media asset download (`agents/media_runner.rs`) | off the configured origin: public, `send_following`; on it: configured, same-origin only |
+| Remote MCP probe, SSE and streamable (`api/mcps.rs`) | configured (the operator's URL may be local); same-origin only |
+| Page `web_fetch` (`api/agent_workspace_tools.rs`) | public; redirects reported, not followed |
+| GitHub tracker (`workflows/tracker/github.rs`) | public; same-origin only |
+| Peer attachment fetch and remote join (`api/federation.rs`, `api/disc_invite.rs`) | configured (the contact's LAN or Tailscale address); redirects never followed |
+| Repository discovery, GitHub and GitLab (`api/discover.rs`) | configured (a self-hosted GitLab may be local); same-origin only; a token only goes to the host it was configured with, never an imported host with the process token |
+
+What comes back is scrubbed by value (`core/secret_scrub.rs`, KT-1035): an
+API call builds one set from every value it takes from the env or the
+credential store, wherever it lands, base URL included (no plugin metadata
+marks a value public), the resolved auth (Basic
+decoded) and its default headers, and carries it through the success
+output, summaries, errors and the call log. Each value is masked raw,
+URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
+characters, before truncation; shorter ones only as whole tokens. A
+successful token response is never quoted. Stored text from before this (call
+log, run detail and MCP `workflow_run_get`, MCP run status) gets URL
+query/userinfo stripping and the heuristics of `core/redact.rs` only;
+value-based scrubbing of legacy rows is impossible because their credential
+context is gone.
+
+Every automatic disable is recorded on the workflow (reason, who, when, a
+short summary; migration 223) and listed on the Automations page for review;
+`GET /api/workflows/auto-disabled` and `POST /api/workflows/reenable` are
+human-only (a bridge token is refused), and a human enable clears the record.
+
+*Known residuals.* Invalidation acts on the stored workflow, for future
+runs: a run already in flight, a human-resumed one included, can still load a
+Quick API or Prompt an agent changed during that run (rollback and fan-out
+included). The planned fix is revision pinning, the approved workflow and its
+dependencies frozen at approval, a 0.15 priority. An endpoint that
+transforms what it echoes (another encoding, a split, a cipher) defeats any
+finite list of forms, and a secret under 8 characters glued inside another
+token is not masked. With localhost
+trust on (auth off, or `auth_strict_localhost = false`), a local process
+without a bridge token is indistinguishable from the human, so it can enable
+a workflow as the human can: the same trust model as the HTTP API and the
+WebSocket (section 3, row 2). `server.auth_strict_localhost = true` is the
+mitigation; positive human authorization for such actions is a 0.15 item
+with KT-1034.
+
+Deliberately left on plain reqwest, because the destination is set by the
+operator in Settings or in code, never by a request or an agent: HTTP agents
+and their probes on a configured connection (`agents/runner.rs`,
+`api/ollama.rs`, `core/ollama_registry.rs`,
+`core/model_catalog/ollama_discovery.rs`, `api/lite_llm.rs`, `api/nvidia.rs`,
+`api/external_api_connections.rs`, `agents/vision.rs`, `api/media.rs`, media
+provider calls in `agents/media_runner.rs`); contact probes (`api/contacts.rs`, LAN or Tailscale by design);
+fixed hosts (`core/versions.rs`, `api/version.rs`,
+`core/github_connection.rs`); the operator's failure webhook (`core/run_notify.rs`); the local docs
+sidecar (`api/docs.rs`); the gate auto-approve self-call to `127.0.0.1`
+(`workflows/runner.rs`).
+
+**Workflow activation is human-only (KT-1037).** In line with KT-1017 (an
+agent's lines wait for a human), an agent never arms a trigger: a bridge
+token's create lands disabled and its `enabled: true` is refused
+(`api/workflows.rs` `AGENT_ENABLE_REFUSAL`), its update cannot enable and
+any change it makes to what an enabled workflow executes (steps, rollback,
+trigger, Exec allowlist, actions, workspace, guards, variables, concurrency,
+project) disables it, and its change to what a Quick API sends or what a
+Quick Prompt runs (or its creation, when it shadows a shared `ref:`) disables
+every enabled workflow using it (Quick Exec is
+not in this rule: an agent's Quick Exec line already waits for a human's
+approval under KT-1017); a disabled definition does not run (a
+parent refuses a disabled child, manual and TriggerWorkflow launches and the
+scheduler skip it, and only a human resumes a disabled workflow's run; a
+dependency is matched without resolving anything: every enabled workflow, in
+any project, that names its id or holds a `ref:` of its kind with its old or
+new slug, or any slug `resource_identities` maps to it, is disabled, in the write's transaction, so no project resolution or
+ambiguity can let one through); JSON imports, accepted
+agent bundles and proposals land disabled. Only a human request enables.

@@ -287,6 +287,75 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Inserts `item`; when an `agent` (or "import") created it, also disables
+/// and records, in the same transaction, every enabled workflow that names
+/// its id or a `ref:` with its slug (it may shadow a shared reference).
+pub fn insert_quick_api_invalidating(
+    conn: &Connection,
+    item: &QuickApi,
+    agent: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    insert_quick_api(&tx, item)?;
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
+            &tx,
+            "qa",
+            &item.id,
+            &[crate::core::repository_resources::ascii_slug(&item.name)],
+            if agent == "import" {
+                crate::models::AutoDisableReason::Imported
+            } else {
+                crate::models::AutoDisableReason::DependencyEditedByAgent
+            },
+            agent,
+            &format!(
+                "Quick API « {} » created by {agent} (shadows a shared reference)",
+                item.name
+            ),
+        )?,
+        None => 0,
+    };
+    tx.commit()?;
+    Ok(disabled)
+}
+
+/// Saves `item`; when an `agent` made the edit, also disables and records,
+/// in the same transaction, every enabled workflow that names its id or a
+/// `ref:` with its old or new slug (a rename may leave one or capture one).
+pub fn update_quick_api_invalidating(
+    conn: &Connection,
+    item: &QuickApi,
+    agent: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let old_name = tx
+        .query_row(
+            "SELECT name FROM quick_apis WHERE id = ?1",
+            params![item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    update_quick_api(&tx, item)?;
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
+            &tx,
+            "qa",
+            &item.id,
+            &[
+                crate::core::repository_resources::ascii_slug(&old_name),
+                crate::core::repository_resources::ascii_slug(&item.name),
+            ],
+            crate::models::AutoDisableReason::DependencyEditedByAgent,
+            agent,
+            &format!("Quick API « {} » edited by {agent}", item.name),
+        )?,
+        None => 0,
+    };
+    tx.commit()?;
+    Ok(disabled)
+}
+
 /// Number of workflow steps blocking deletion of this API.
 pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(workflow_step_references(conn, id)?.len().try_into()?)

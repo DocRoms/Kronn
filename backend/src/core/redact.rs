@@ -533,6 +533,36 @@ pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
     }
 }
 
+static URL_IN_TEXT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)\bhttps?://[^\s"'<>`]+"#).expect("static URL regex"));
+
+/// Drops the query string and userinfo of every URL in `text`: both may
+/// carry a credential, and a diagnostic only needs the endpoint.
+pub fn strip_url_secrets(text: &str) -> String {
+    URL_IN_TEXT
+        .replace_all(text, |caps: &regex_lite::Captures<'_>| {
+            let raw = &caps[0];
+            match reqwest::Url::parse(raw) {
+                Ok(mut url) => {
+                    url.set_query(None);
+                    let _ = url.set_username("");
+                    let _ = url.set_password(None);
+                    url.to_string()
+                }
+                // Unparseable: keep only what precedes a query or userinfo.
+                Err(_) => raw.split(['?', '@']).next().unwrap_or("").to_string(),
+            }
+        })
+        .into_owned()
+}
+
+/// For stored text whose credentials are unknown (history, logs, run output
+/// excerpts): URL queries and userinfo dropped, then the vendor and
+/// secret-assignment heuristics. It cannot catch a bare secret by value.
+pub fn redact_stored_text(text: &str) -> String {
+    redact_for_audit_artifact(&strip_url_secrets(text)).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

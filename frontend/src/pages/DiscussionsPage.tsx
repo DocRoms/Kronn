@@ -4872,6 +4872,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="accent">
                       <Zap size={14} /> {t('wf.aiBundleReady', qpCount, qaCount, caCount)}
                     </p>
+                    <p className="text-xs" data-testid="ai-created-disabled">{t('wf.aiCreatedDisabled')}</p>
                     {execLines.length > 0 && (
                       <div className="disc-cta-exec-lines">
                         <p className="text-xs">{t('wf.aiExecLines')}</p>
@@ -4921,6 +4922,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="accent">
                       <Zap size={14} /> {t('wf.aiWorkflowReady')}
                     </p>
+                    <p className="text-xs" data-testid="ai-created-disabled">{t('wf.aiCreatedDisabled')}</p>
                     {execLines.length > 0 && (
                       <div className="disc-cta-exec-lines">
                         <p className="text-xs">{t('wf.aiExecLines')}</p>

@@ -133,16 +133,26 @@ pub fn truncate_excerpt(s: Option<&str>) -> Option<String> {
 /// module so `learning_candidates` (0.10.0) can reuse it.
 pub use crate::core::redact::redact_secrets;
 
+/// Text stored or served from the log: URL query strings and userinfo
+/// dropped, then the name and vendor heuristics. Value-based scrubbing
+/// happened at the source; rows older than it only get this.
+fn redact_stored(text: &str) -> String {
+    crate::core::redact::redact_stored_text(text)
+}
+
 /// Insert one row. Never panics — on DB errors we log and swallow so an
 /// audit-trail failure cannot abort a successful API call.
 pub fn record(conn: &Connection, log: NewApiCallLog<'_>) -> rusqlite::Result<String> {
     let id = Uuid::new_v4().to_string();
     let request_excerpt = log
         .request_excerpt
-        .and_then(|s| truncate_excerpt(Some(&redact_secrets(s))));
+        .and_then(|s| truncate_excerpt(Some(&redact_stored(s))));
     let response_excerpt = log
         .response_excerpt
-        .and_then(|s| truncate_excerpt(Some(&redact_secrets(s))));
+        .and_then(|s| truncate_excerpt(Some(&redact_stored(s))));
+    let error_message = log
+        .error_message
+        .and_then(|s| truncate_excerpt(Some(&redact_stored(s))));
     conn.execute(
         "INSERT INTO api_call_logs (
             id, source, project_id, run_id, disc_id, agent,
@@ -166,7 +176,7 @@ pub fn record(conn: &Connection, log: NewApiCallLog<'_>) -> rusqlite::Result<Str
             log.duration_ms as i64,
             request_excerpt,
             response_excerpt,
-            log.error_message,
+            error_message,
         ],
     )?;
     Ok(id)
@@ -230,9 +240,9 @@ pub fn list(conn: &Connection, filter: ListFilter<'_>) -> rusqlite::Result<Vec<A
                     .as_db_str()
                     .to_string(),
                 duration_ms: row.get(12)?,
-                request_excerpt: row.get(13)?,
-                response_excerpt: row.get(14)?,
-                error_message: row.get(15)?,
+                request_excerpt: row.get::<_, Option<String>>(13)?.map(|s| redact_stored(&s)),
+                response_excerpt: row.get::<_, Option<String>>(14)?.map(|s| redact_stored(&s)),
+                error_message: row.get::<_, Option<String>>(15)?.map(|s| redact_stored(&s)),
                 called_at: row.get(16)?,
             })
         })?
@@ -340,9 +350,9 @@ pub fn get(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiCallLog>> 
                 http_status: row.get(10)?,
                 status: row.get(11)?,
                 duration_ms: row.get(12)?,
-                request_excerpt: row.get(13)?,
-                response_excerpt: row.get(14)?,
-                error_message: row.get(15)?,
+                request_excerpt: row.get::<_, Option<String>>(13)?.map(|s| redact_stored(&s)),
+                response_excerpt: row.get::<_, Option<String>>(14)?.map(|s| redact_stored(&s)),
+                error_message: row.get::<_, Option<String>>(15)?.map(|s| redact_stored(&s)),
                 called_at: row.get(16)?,
             })
         },
@@ -564,6 +574,62 @@ mod tests {
         let stored = rows[0].request_excerpt.as_deref().unwrap();
         assert!(stored.contains("REDACTED"));
         assert!(!stored.contains("1234567890abcdef"));
+    }
+
+    #[test]
+    fn record_redacts_error_message_and_strips_url_secrets() {
+        let conn = mkconn();
+        let mut bad = sample("api-test");
+        bad.status = ApiCallStatus::Error;
+        bad.error_message = Some(
+            "HTTP request failed: error sending request for url \
+             (https://user:pw@api.example.com/v1/items?apikey=Qk7SecretValue9&lang=fr) — \
+             {\"access_token\":\"tok-abcdefghijklmnop\"} token=rawTokenValue42",
+        );
+        record(&conn, bad).unwrap();
+        let rows = list(&conn, ListFilter::default()).unwrap();
+        let stored = rows[0].error_message.as_deref().unwrap();
+        for secret in [
+            "Qk7SecretValue9",
+            "tok-abcdefghijklmnop",
+            "rawTokenValue42",
+            "user:pw",
+        ] {
+            assert!(!stored.contains(secret), "{secret} leaked: {stored}");
+        }
+        assert!(
+            stored.contains("https://api.example.com/v1/items"),
+            "{stored}"
+        );
+        let by_id = get(&conn, &rows[0].id).unwrap().unwrap();
+        assert_eq!(by_id.error_message.as_deref(), Some(stored));
+    }
+
+    #[test]
+    fn rows_written_raw_before_the_fix_are_redacted_on_read() {
+        let conn = mkconn();
+        let id = record(&conn, sample("api-test")).unwrap();
+        conn.execute(
+            "UPDATE api_call_logs SET error_message = ?1, response_excerpt = ?1 WHERE id = ?2",
+            params![
+                "HTTP 401 on GET https://u:pw0rdValue@api.example.com/x?credential=Qk7SecretValue9 — token=rawTokenValue42",
+                id
+            ],
+        )
+        .unwrap();
+        let listed = list(&conn, ListFilter::default()).unwrap();
+        let fetched = get(&conn, &id).unwrap().unwrap();
+        for row in [&listed[0], &fetched] {
+            for field in [
+                row.error_message.as_deref(),
+                row.response_excerpt.as_deref(),
+            ] {
+                let text = field.unwrap();
+                assert!(!text.contains("Qk7SecretValue9"), "{text}");
+                assert!(!text.contains("rawTokenValue42"), "{text}");
+                assert!(!text.contains("pw0rdValue"), "{text}");
+            }
+        }
     }
 
     #[test]

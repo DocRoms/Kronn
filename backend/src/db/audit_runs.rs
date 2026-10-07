@@ -702,13 +702,11 @@ impl TokenAccounting {
 }
 
 impl StepTokens {
-    /// Sum reported usage across independent attempts. A component absent
-    /// from every attempt remains unknown, as with the run-level counter.
+    /// Sum reported usage across two executed attempts. A component either
+    /// attempt did not report stays unknown: a partial sum would read as
+    /// complete and be priced (KT-1094).
     pub(crate) fn plus(self, other: Self) -> Self {
-        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
-            (None, None) => None,
-            _ => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
-        };
+        let sum = |a: Option<u64>, b: Option<u64>| Some(a?.saturating_add(b?));
         let reported = |tokens: &Self| tokens.input.is_some() || tokens.output.is_some();
         Self {
             input: sum(self.input, other.input),
@@ -722,6 +720,12 @@ impl StepTokens {
             },
         }
     }
+    /// The usage of a step's attempts so far, `previous` being `None` before
+    /// the first one: no attempt yet is not an attempt that reported nothing.
+    pub(crate) fn after_attempt(previous: Option<Self>, attempt: Self) -> Self {
+        previous.map_or(attempt, |previous| previous.plus(attempt))
+    }
+
     /// Nothing was reported.
     pub const UNKNOWN: Self = Self {
         input: None,
@@ -1388,6 +1392,88 @@ mod tests {
             (steps[0].cost_usd_micros, steps[0].estimated_cost_usd_micros),
             (Some(42), None)
         );
+    }
+
+    fn codex_attempt(cache_read: Option<u64>) -> StepTokens {
+        StepTokens {
+            input: Some(1_000),
+            output: Some(100),
+            cache_read,
+            ..StepTokens::UNKNOWN
+        }
+        .inclusive_for(&crate::models::AgentType::Codex)
+    }
+
+    #[test]
+    fn a_counter_missing_from_one_attempt_leaves_the_sum_unknown() {
+        let (absent, present) = (codex_attempt(None), codex_attempt(Some(900)));
+        for (first, second) in [(absent, present), (present, absent)] {
+            let merged = StepTokens::after_attempt(Some(first), second);
+            assert_eq!(merged.cache_read, None);
+            assert_eq!(
+                merged.input,
+                Some(2_000),
+                "fully reported parts still add up"
+            );
+            assert!(
+                merged.counters().is_none(),
+                "never a complete-looking split"
+            );
+        }
+        let merged = StepTokens::after_attempt(Some(present), present);
+        assert_eq!(merged.cache_read, Some(1_800));
+        assert!(merged.counters().is_some());
+
+        // An attempt that reported nothing at all makes every part unknown.
+        let merged = StepTokens::after_attempt(Some(StepTokens::UNKNOWN), present);
+        assert_eq!(
+            (merged.input, merged.output, merged.cache_read),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn the_first_attempt_is_not_merged_with_the_empty_accumulator() {
+        let present = codex_attempt(Some(900));
+        assert_eq!(StepTokens::after_attempt(None, present), present);
+        assert_eq!(
+            StepTokens::after_attempt(None, StepTokens::UNKNOWN),
+            StepTokens::UNKNOWN
+        );
+    }
+
+    #[test]
+    fn a_retried_step_with_an_incomplete_attempt_is_never_estimated() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r", "p1", "Full", "Codex", Utc::now()).unwrap();
+        set_run_model(&conn, "r", "gpt-5").unwrap();
+        let first = StepTokens::after_attempt(None, codex_attempt(None));
+        finished_step(
+            &conn,
+            "r",
+            StepTokens::after_attempt(Some(first), codex_attempt(Some(900))),
+        );
+        let mut steps = list_audit_steps(&conn, "r").unwrap();
+        price_steps(&conn, &mut steps).unwrap();
+        assert_eq!(steps[0].cache_read_tokens, None);
+        assert_eq!(steps[0].estimated_cost_usd_micros, None);
+        assert!(steps[0].cost_unknown_reason.is_some());
+
+        // Both attempts complete: the cumulative step is still priced.
+        let conn = fresh_conn();
+        insert_running(&conn, "r", "p1", "Full", "Codex", Utc::now()).unwrap();
+        set_run_model(&conn, "r", "gpt-5").unwrap();
+        let first = StepTokens::after_attempt(None, codex_attempt(Some(900)));
+        finished_step(
+            &conn,
+            "r",
+            StepTokens::after_attempt(Some(first), codex_attempt(Some(900))),
+        );
+        let mut steps = list_audit_steps(&conn, "r").unwrap();
+        price_steps(&conn, &mut steps).unwrap();
+        assert!(steps[0]
+            .estimated_cost_usd_micros
+            .is_some_and(|micros| micros > 0));
     }
 
     #[test]

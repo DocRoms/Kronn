@@ -87,7 +87,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
             "# Prior finding\nPreserve this work.\n",
         )
         .unwrap();
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let attempts = Arc::new(Mutex::new(0usize));
         let (seen, launched) = (requests.clone(), attempts.clone());

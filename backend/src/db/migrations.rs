@@ -861,6 +861,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "222_workflow_runs_project_summary_index",
         include_str!("sql/222_workflow_runs_project_summary_index.sql"),
     ),
+    (
+        "223_workflow_auto_disable_reason",
+        include_str!("sql/223_workflow_auto_disable_reason.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
@@ -1387,6 +1391,77 @@ pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn receipts_per_migration(conn: &Connection) -> Vec<(String, i64)> {
+        MIGRATIONS
+            .iter()
+            .map(|(name, _)| {
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM _migrations WHERE name = ?1",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                (name.to_string(), count)
+            })
+            .collect()
+    }
+
+    fn assert_fully_migrated_once(conn: &Connection) {
+        for (name, count) in receipts_per_migration(conn) {
+            assert_eq!(count, 1, "migration {name} must have exactly one receipt");
+        }
+        assert!(conn
+            .prepare("SELECT declared_embed_origins FROM live_pages LIMIT 1")
+            .is_ok());
+        assert!(conn
+            .prepare("SELECT disabled_reason FROM workflows LIMIT 1")
+            .is_ok());
+    }
+
+    #[test]
+    fn both_209_migrations_reach_a_database_from_either_line() {
+        // A 0.14.3 database: everything but main's 209 already ran.
+        let from_0143 = Connection::open_in_memory().unwrap();
+        from_0143
+            .execute_batch(
+                "CREATE TABLE _migrations (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );",
+            )
+            .unwrap();
+        for (name, sql) in MIGRATIONS {
+            if *name == "209_live_page_declared_embed_origins" {
+                continue;
+            }
+            let tx = from_0143.unchecked_transaction().unwrap();
+            apply_migration(&tx, name, sql).unwrap();
+            tx.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])
+                .unwrap();
+            tx.commit().unwrap();
+        }
+        run(&from_0143).unwrap();
+        assert_fully_migrated_once(&from_0143);
+        run(&from_0143).unwrap();
+        assert_fully_migrated_once(&from_0143);
+
+        // A main database: up to main's 209, none of 0.14.3's.
+        let from_main = Connection::open_in_memory().unwrap();
+        run_through(&from_main, "209_live_page_declared_embed_origins").unwrap();
+        let applied_0143: i64 = from_main
+            .query_row(
+                "SELECT COUNT(*) FROM _migrations WHERE name = '209_audit_run_provenance'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied_0143, 0);
+        run(&from_main).unwrap();
+        assert_fully_migrated_once(&from_main);
+    }
 
     #[test]
     fn migration_161_installs_the_durable_acp_runtime_session_store() {

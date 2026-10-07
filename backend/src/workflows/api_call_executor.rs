@@ -17,7 +17,6 @@
 //! See `docs/operations/deagent-apicall.md` for scope + decisions.
 
 use std::collections::{BTreeSet, HashMap};
-use std::error::Error as _;
 use std::time::{Duration, Instant};
 
 use reqwest::{
@@ -35,6 +34,7 @@ use super::api_call_binary::{
 use super::api_call_security::{
     assert_host_matches_base, assert_public_ip, redact_url_query, ResolvedAuth,
 };
+use crate::core::safe_http::{self, ClientOptions, Outbound, Redirects, SafeClient, SendError};
 
 /// Logging context plumbed through `execute_api_call_step_with_db` so the
 /// audit table (`api_call_logs`) can attribute each call to its source +
@@ -119,6 +119,16 @@ impl SecurityPolicy {
         Self::default()
     }
 
+    /// The outbound transport policy: public addresses only, except the
+    /// test-only loopback allowance.
+    pub fn destinations(self) -> safe_http::SafeHttpPolicy {
+        #[cfg(test)]
+        if !self.enforce_public_ip {
+            return safe_http::SafeHttpPolicy::PublicOrLoopbackForTests;
+        }
+        safe_http::SafeHttpPolicy::Public
+    }
+
     /// For integration tests that MUST hit localhost (wiremock). Host-match
     /// guard stays on because the plugin base URL is the same localhost —
     /// so the actual allowlist path still runs.
@@ -141,6 +151,83 @@ pub async fn execute_api_call_step_core(
     env: &HashMap<String, String>,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
+) -> StepOutcome {
+    let mut secrets = call_secrets(plugin, env);
+    // The inner call adds what it resolves (default headers) to the same set,
+    // so errors, the summary and the success output share one complete set.
+    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets).await;
+    // Every byte the step hands on (success JSON, summary, error) loses the
+    // credentials this call resolved, in every wire form.
+    outcome.result.output = secrets.scrub(&outcome.result.output);
+    outcome
+}
+
+/// Every value this call takes from the env or the credential store is a
+/// secret wherever it lands, base URL included: no plugin metadata declares
+/// a config value public. The resolved auth adds its wire forms (Basic
+/// decoded to its password, bearer and header tokens).
+pub(crate) fn call_secrets(
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+) -> crate::core::secret_scrub::SecretSet {
+    let mut set = crate::core::secret_scrub::SecretSet::new();
+    let Some(spec) = plugin.api_spec.as_ref() else {
+        return set;
+    };
+    for (key, value) in env {
+        // `__token_error__` and friends carry a diagnostic, not a credential.
+        if key.starts_with("__") && key.ends_with("_error__") {
+            continue;
+        }
+        set.add(value);
+    }
+    if let ApiAuthKind::Basic {
+        user_env,
+        password_env,
+    } = &spec.auth
+    {
+        if let (Some(user), Some(password)) = (env.get(user_env), env.get(password_env)) {
+            set.add_basic(user, password);
+        }
+    }
+    if let Ok(auth) = resolve_auth(&spec.auth, env) {
+        add_resolved_auth(&mut set, &auth);
+    }
+    set
+}
+
+fn add_resolved_auth(set: &mut crate::core::secret_scrub::SecretSet, auth: &ResolvedAuth) {
+    use base64::Engine as _;
+    if let Some(bearer) = &auth.bearer {
+        set.add(bearer);
+    }
+    for value in auth.headers.values().chain(auth.query.values()) {
+        set.add(value);
+        for scheme in ["Bearer ", "Token "] {
+            if let Some(token) = value.strip_prefix(scheme) {
+                set.add(token);
+            }
+        }
+        if let Some(encoded) = value.strip_prefix("Basic ") {
+            set.add(encoded);
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            if let Some((user, password)) = decoded.as_deref().and_then(|d| d.split_once(':')) {
+                set.add_basic(user, password);
+            }
+        }
+    }
+}
+
+async fn execute_core_unscrubbed(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    secrets: &mut crate::core::secret_scrub::SecretSet,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -304,6 +391,27 @@ pub async fn execute_api_call_step_core(
     let pagination_truncated: bool;
     let empty_response_status: Option<u16>;
 
+    // 0.8.2 — explicit User-Agent: GitHub refuses requests without one.
+    let client = match safe_http::client(
+        policy.destinations(),
+        ClientOptions::new(Redirects::Manual)
+            .timeout(timeout)
+            .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION"))),
+    ) {
+        Ok(client) => client,
+        Err(e) => return fail(step, start, e),
+    };
+    // Default headers rendered into `auth` may hold more credentials.
+    add_resolved_auth(secrets, &auth);
+    let transport = ApiTransport {
+        client,
+        secrets: secrets.clone(),
+        pinned_base: if policy.enforce_host_match {
+            Url::parse(&resolved_base_url).ok()
+        } else {
+            None
+        },
+    };
     let response = match walk_pages(
         method.clone(),
         full_url.clone(),
@@ -311,12 +419,12 @@ pub async fn execute_api_call_step_core(
         &extra_headers,
         body.as_ref(),
         &query,
-        timeout,
         max_retries,
         &pagination,
         plugin_slug,
         config_id,
         binary.as_ref(),
+        &transport,
     )
     .await
     {
@@ -474,7 +582,7 @@ pub async fn execute_api_call_probe(
     policy: SecurityPolicy,
 ) -> StepOutcome {
     let mut resolved_env = env.clone();
-    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env).await;
+    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env, policy).await;
     execute_api_call_step_core(step, plugin, &resolved_env, ctx, policy).await
 }
 
@@ -670,7 +778,7 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
-    resolve_dynamic_auth(&plugin, config_id, state, &mut env).await;
+    resolve_dynamic_auth(&plugin, config_id, state, &mut env, policy).await;
 
     execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
 }
@@ -684,6 +792,7 @@ async fn resolve_dynamic_auth(
     config_id: &str,
     state: &crate::AppState,
     env: &mut HashMap<String, String>,
+    policy: SecurityPolicy,
 ) {
     if let Some(spec) = plugin.api_spec.as_ref() {
         if matches!(spec.auth, ApiAuthKind::OAuth2ClientCredentials { .. }) {
@@ -692,6 +801,7 @@ async fn resolve_dynamic_auth(
                 config_id,
                 &spec.auth,
                 env,
+                policy.destinations(),
             )
             .await
             {
@@ -715,6 +825,7 @@ async fn resolve_dynamic_auth(
                 &spec.auth,
                 &spec.base_url,
                 env,
+                policy.destinations(),
             )
             .await
             {
@@ -1375,12 +1486,12 @@ async fn walk_pages(
     extra_headers: &HashMap<String, String>,
     body: Option<&Value>,
     base_query: &HashMap<String, String>,
-    timeout: Duration,
     max_retries: u8,
     pagination: &PaginationSpec,
     plugin_slug: &str,
     config_id: &str,
     binary: Option<&BinaryPolicy>,
+    transport: &ApiTransport,
 ) -> Result<(Value, bool, Option<u16>), String> {
     // Returns `(merged_response, truncated, empty_response_status)`. The HTTP
     // code is kept separate from API data when the first response has no body.
@@ -1503,9 +1614,9 @@ async fn walk_pages(
             auth,
             extra_headers,
             body,
-            timeout,
             max_retries,
             binary,
+            transport,
         )
         .await?;
 
@@ -1741,23 +1852,12 @@ async fn send_with_retry(
     auth: &ResolvedAuth,
     extra_headers: &HashMap<String, String>,
     body: Option<&Value>,
-    timeout: Duration,
     max_retries: u8,
     binary: Option<&BinaryPolicy>,
+    transport: &ApiTransport,
 ) -> Result<(Value, Option<String>, Option<u16>), String> {
-    // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
-    // "Request forbidden by administrative rules" without it — see
-    // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required).
-    // reqwest's default is to send NO User-Agent header, which is fine
-    // for most APIs but breaks GitHub. Setting a generic one is also
-    // useful for ops: backends log it so you can identify Kronn traffic
-    // in tracker access logs.
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("HTTP client build failed: {e}"))?;
     let headers = build_request_headers(auth, extra_headers)?;
+    let (secret_headers, secret_query_keys) = secret_slots(auth, extra_headers, url);
 
     // 2026-06-10 audit P1 — automatic retries are only safe on idempotent
     // verbs. A network timeout can land AFTER the server processed a POST:
@@ -1774,20 +1874,30 @@ async fn send_with_retry(
     };
     let mut attempt: u8 = 0;
     loop {
-        let mut req = client
-            .request(method.clone(), url.clone())
-            .headers(headers.clone());
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-
-        let response = match req.send().await {
+        let attach_body = |req: safe_http::SafeRequest| match body {
+            Some(b) => req.json(b),
+            None => req,
+        };
+        let response = match safe_http::send_following(
+            &transport.client,
+            Outbound {
+                method: method.clone(),
+                url: url.clone(),
+                headers: headers.clone(),
+                secret_headers: &secret_headers,
+                secret_query_keys: &secret_query_keys,
+                attach_body: &attach_body,
+                has_body: body.is_some(),
+                pinned_base: transport.pinned_base.as_ref(),
+            },
+        )
+        .await
+        {
             Ok(r) => r,
-            Err(e) => {
-                let detail = e
-                    .source()
-                    .map(|source| format!("{e}: {source}"))
-                    .unwrap_or_else(|| e.to_string());
+            Err(SendError::Blocked(reason)) => return Err(format!("Security: {reason}")),
+            Err(error @ SendError::Transport(_)) => {
+                // SendError's Display never carries the URL.
+                let detail = transport.secrets.scrub(&error.to_string());
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
                     return Err(format!(
@@ -1828,7 +1938,10 @@ async fn send_with_retry(
         // Non-success. Retry only on 5xx + 429, never 4xx.
         let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         if !retryable || attempt >= max_retries {
-            let excerpt = response.text().await.unwrap_or_default();
+            // An upstream error body may echo the credential it rejected.
+            let excerpt = transport
+                .secrets
+                .scrub(&response.text().await.unwrap_or_default());
             let redacted_url = redact_url_query(url);
             return Err(format!(
                 "HTTP {} on {} {} — {}",
@@ -1841,6 +1954,38 @@ async fn send_with_retry(
         sleep_backoff(attempt).await;
         attempt += 1;
     }
+}
+
+/// Every request a step makes (each page, retry and hop) goes through one
+/// guarded client and, when the host is enforced, the plugin's base.
+struct ApiTransport {
+    client: SafeClient,
+    /// Applied to error text before it is truncated.
+    secrets: crate::core::secret_scrub::SecretSet,
+    pinned_base: Option<Url>,
+}
+
+/// The header and query slots that hold the resolved credential, whatever
+/// their names; a cross-origin hop drops them.
+fn secret_slots(
+    auth: &ResolvedAuth,
+    extra_headers: &HashMap<String, String>,
+    url: &Url,
+) -> (Vec<HeaderName>, Vec<String>) {
+    // Every header the plugin or the step supplied, and every query key of
+    // the request: any of them may carry a substituted credential.
+    let mut headers: Vec<HeaderName> = auth
+        .headers
+        .keys()
+        .chain(extra_headers.keys())
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect();
+    if auth.bearer.is_some() {
+        headers.push(AUTHORIZATION);
+    }
+    let mut query: Vec<String> = auth.query.keys().cloned().collect();
+    query.extend(url.query_pairs().map(|(k, _)| k.into_owned()));
+    (headers, query)
 }
 
 /// Parse every header before constructing the request. Besides producing a
@@ -3362,6 +3507,169 @@ mod tests {
 
     // ─── Pagination walk ────────────────────────────────────────────
 
+    // ─── Redirect hops (KT-1039) ────────────────────────────────────
+
+    fn bearer_env() -> HashMap<String, String> {
+        HashMap::from([("TOK".to_string(), "tok-secret".to_string())])
+    }
+
+    async fn run_redirecting_step(server: &MockServer, location: &str) -> StepOutcome {
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location))
+            .mount(server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::Bearer {
+                env_key: "TOK".into(),
+            },
+            vec![mk_endpoint("GET", "/start")],
+        );
+        execute_api_call_step_core(
+            &mk_step("/start"),
+            &plugin,
+            &bearer_env(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn redirect_to_cloud_metadata_is_refused() {
+        let server = MockServer::start().await;
+        let out = run_redirecting_step(&server, "http://169.254.169.254/latest/meta-data/").await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security: redirect refused"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_to_another_loopback_host_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"leak": true})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let port = server.address().port();
+        let out = run_redirecting_step(&server, &format!("http://localhost:{port}/admin")).await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security: redirect refused"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn same_host_redirect_is_followed_with_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/moved"))
+            .and(header("authorization", "Bearer tok-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let out = run_redirecting_step(&server, "/moved").await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "got: {}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_header_named_user_agent_does_not_cross_to_another_port() {
+        let origin = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header(
+                "location",
+                format!("http://127.0.0.1:{}/sink", other.address().port()),
+            ))
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sink"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": 1})))
+            .expect(1)
+            .mount(&other)
+            .await;
+        let plugin = mk_plugin(
+            &origin.uri(),
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "User-Agent".into(),
+                env_key: "KEY".into(),
+            },
+            vec![mk_endpoint("GET", "/start")],
+        );
+        let env = HashMap::from([("KEY".to_string(), "ua-secret-value".to_string())]);
+        let out = execute_api_call_step_core(
+            &mk_step("/start"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        let received = other.received_requests().await.unwrap();
+        let ua = received[0]
+            .headers
+            .get("user-agent")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_ne!(ua.as_deref(), Some("ua-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn a_mapped_ipv6_metadata_base_is_refused_in_production() {
+        let plugin = mk_plugin(
+            "http://[::ffff:169.254.169.254]",
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/latest")],
+        );
+        let out = execute_api_call_step_core(
+            &mk_step("/latest"),
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::production(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("Security"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_stops_at_the_hop_cap() {
+        let server = MockServer::start().await;
+        let out = run_redirecting_step(&server, "/start").await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("redirects"),
+            "got: {}",
+            out.result.output
+        );
+    }
+
     #[tokio::test]
     async fn walk_pages_offset_concatenates_three_pages() {
         // Simulates Jira: page 1 issues 0-1, page 2 issues 2-3, page 3 issue 4.
@@ -4581,6 +4889,382 @@ mod tests {
             api_body: None,
             ..Default::default()
         }
+    }
+
+    // ─── Secrets in error text (KT-1035) ────────────────────────────
+
+    const QUERY_KEY: &str = "Qk7SecretValue9";
+
+    fn query_key_plugin(base: &str) -> McpServer {
+        mk_plugin(
+            base,
+            ApiAuthKind::ApiKeyQuery {
+                param_name: "apikey".into(),
+                env_key: "KEY".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        )
+    }
+
+    async fn logged_error(
+        state: &crate::AppState,
+        step: &WorkflowStep,
+        outcome: &StepOutcome,
+    ) -> String {
+        record_api_call_log(state, step, None, outcome, &ApiCallLogContext::workflow()).await;
+        let rows = state
+            .db
+            .with_conn(|conn| {
+                crate::db::api_call_logs::list(conn, Default::default())
+                    .map_err(|e| anyhow::anyhow!("list: {e}"))
+            })
+            .await
+            .unwrap();
+        rows[0].error_message.clone().expect("error row")
+    }
+
+    #[tokio::test]
+    async fn transport_error_keeps_the_query_key_out_of_output_and_log() {
+        // Port 1 on loopback refuses the connection: a reqwest transport error.
+        let plugin = query_key_plugin("http://127.0.0.1:1");
+        let step = mk_step("/items");
+        let env = HashMap::from([("KEY".to_string(), QUERY_KEY.to_string())]);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("HTTP request failed"),
+            "got: {}",
+            outcome.result.output
+        );
+        assert!(
+            !outcome.result.output.contains(QUERY_KEY),
+            "{}",
+            outcome.result.output
+        );
+        let state = test_app_state();
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(!stored.contains(QUERY_KEY), "{stored}");
+    }
+
+    #[tokio::test]
+    async fn an_error_body_echoing_the_key_is_scrubbed_in_output_and_log() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_string(format!("invalid api key {QUERY_KEY} for this account")),
+            )
+            .mount(&server)
+            .await;
+        let plugin = query_key_plugin(&server.uri());
+        let step = mk_step("/items");
+        let env = HashMap::from([("KEY".to_string(), QUERY_KEY.to_string())]);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("HTTP 401"),
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            !outcome.result.output.contains(QUERY_KEY),
+            "{}",
+            outcome.result.output
+        );
+        let state = test_app_state();
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(stored.contains("HTTP 401"), "{stored}");
+        assert!(!stored.contains(QUERY_KEY), "{stored}");
+    }
+
+    // ─── Value-based scrubbing (KT-1035 round 2) ───────────────────
+
+    #[tokio::test]
+    async fn a_body_env_value_with_no_secret_looking_name_is_scrubbed_from_an_echo() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/echo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "you_sent": "Pw7EchoedValue",
+                "header": "Dh3DefaultHeaderValue",
+                "host": "tenant-acme"
+            })))
+            .mount(&server)
+            .await;
+        let mut plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("POST", "/echo")],
+        );
+        if let Some(spec) = plugin.api_spec.as_mut() {
+            spec.default_headers = vec![ApiDefaultHeader {
+                name: "X-Org".into(),
+                value: "${ENV.ORG_HEADER}".into(),
+            }];
+        }
+        let mut step = mk_step("/echo");
+        step.api_method = Some("POST".into());
+        step.api_body = Some(json!({"pw": "${ENV.PASSWORD}"}));
+        let env = HashMap::from([
+            ("PASSWORD".to_string(), "Pw7EchoedValue".to_string()),
+            (
+                "ORG_HEADER".to_string(),
+                "Dh3DefaultHeaderValue".to_string(),
+            ),
+        ]);
+        let out = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Pw7EchoedValue"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Dh3DefaultHeaderValue"),
+            "{}",
+            out.result.output
+        );
+        assert!(
+            out.result.output.contains("tenant-acme"),
+            "non-env data stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_placed_in_the_base_url_never_shows_in_the_summary() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/Bu8BaseUrlSecret/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([1])))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &format!("{}/v1/{{PASSWORD}}", server.uri()),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([("PASSWORD".to_string(), "Bu8BaseUrlSecret".to_string())]);
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Bu8BaseUrlSecret"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_json_echoing_the_key_is_scrubbed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "echo": "Hk4SecretHeaderValue",
+                "auth": "X-Api-Key: Hk4SecretHeaderValue"
+            })))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Api-Key".into(),
+                env_key: "TOKEN_VALUE".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([(
+            "TOKEN_VALUE".to_string(),
+            "Hk4SecretHeaderValue".to_string(),
+        )]);
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Hk4SecretHeaderValue"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn an_env_key_in_a_harmless_query_param_is_scrubbed_from_the_summary() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2])))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let mut step = mk_step("/items");
+        step.api_query = Some(HashMap::from([("q".to_string(), "${ENV.KEY}".to_string())]));
+        let env = HashMap::from([("KEY".to_string(), "Zq9QuerySecretValue".to_string())]);
+        let out = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        assert!(
+            !out.result.output.contains("Zq9QuerySecretValue"),
+            "{}",
+            out.result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn url_encoded_and_base64_forms_of_a_basic_credential_are_scrubbed() {
+        use base64::Engine as _;
+        let password = "p@ss/w0rd+Value=";
+        let header = base64::engine::general_purpose::STANDARD.encode(format!("bob:{password}"));
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "seen_header": format!("Basic {header}"),
+                "seen_form": "p%40ss%2Fw0rd%2BValue%3D",
+                "seen_raw": password
+            })))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::Basic {
+                user_env: "USER".into(),
+                password_env: "PASS".into(),
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("USER".to_string(), "bob".to_string()),
+            ("PASS".to_string(), password.to_string()),
+        ]);
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "{}",
+            out.result.output
+        );
+        for leaked in [header.as_str(), "p%40ss%2Fw0rd%2BValue%3D", "w0rd"] {
+            assert!(
+                !out.result.output.contains(leaked),
+                "{leaked}: {}",
+                out.result.output
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_misnamed_token_field_never_reaches_the_run_or_the_log() {
+        let server = MockServer::start().await;
+        Mock::given(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "SECRETVALUE"})))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: format!("{}/token", server.uri()),
+                client_id_env: "CID".into(),
+                client_secret_env: "CSECRET".into(),
+                scope: String::new(),
+                extra_headers: vec![],
+            },
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let env = HashMap::from([
+            ("CID".to_string(), "id".to_string()),
+            ("CSECRET".to_string(), "client-secret-value".to_string()),
+        ]);
+        let state = test_app_state();
+        let step = mk_step("/items");
+        let outcome = execute_api_call_probe(
+            &step,
+            &plugin,
+            "cfg-misnamed",
+            &env,
+            &state,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            !outcome.result.output.contains("SECRETVALUE"),
+            "{}",
+            outcome.result.output
+        );
+        let stored = logged_error(&state, &step, &outcome).await;
+        assert!(!stored.contains("SECRETVALUE"), "{stored}");
     }
 
     #[tokio::test]

@@ -4314,7 +4314,9 @@ mod tests {
     /// in the response. Also persists `batman` into
     /// `config.unlocked_profiles` so subsequent /api/profiles includes it.
     #[tokio::test]
+    #[serial] // the unlock saves config.toml into KRONN_DATA_DIR
     async fn theme_unlock_batman_bundle_unlocks_profile_and_theme() {
+        isolate_config_dir();
         let state = test_state();
 
         let req = Request::builder()

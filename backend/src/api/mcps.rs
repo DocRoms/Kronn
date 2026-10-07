@@ -684,17 +684,45 @@ async fn probe_mcp_stdio_with_timeout(
         .map_err(|_| "MCP initialize handshake timed out".to_string())?
 }
 
+/// The configured MCP URL may be a local server on purpose, so any address is
+/// allowed; a redirect may never leave that origin.
+fn mcp_probe_client(
+    url: &str,
+    policy: crate::core::safe_http::SafeHttpPolicy,
+) -> Result<(crate::core::safe_http::SafeClient, reqwest::Url), String> {
+    use crate::core::safe_http::{self, ClientOptions, Redirects};
+    let url = reqwest::Url::parse(url).map_err(|_| "The remote MCP URL is invalid".to_string())?;
+    let client = safe_http::client(
+        policy,
+        ClientOptions::new(Redirects::SameOrigin).timeout(Duration::from_secs(10)),
+    )
+    .map_err(|_| "Could not initialize the MCP probe client".to_string())?;
+    Ok((client, url))
+}
+
+fn mcp_probe_send_error(error: crate::core::safe_http::SendError, what: &str) -> String {
+    if error.is_blocked() {
+        error.to_string()
+    } else {
+        format!("Could not connect to the remote MCP {what}")
+    }
+}
+
 async fn probe_mcp_sse(url: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| "Could not initialize the MCP probe client".to_string())?;
+    probe_mcp_sse_with(url, crate::core::safe_http::SafeHttpPolicy::Configured).await
+}
+
+async fn probe_mcp_sse_with(
+    url: &str,
+    policy: crate::core::safe_http::SafeHttpPolicy,
+) -> Result<(), String> {
+    let (client, url) = mcp_probe_client(url, policy)?;
     let response = client
         .get(url)
-        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .header("accept", "text/event-stream")
         .send()
         .await
-        .map_err(|_| "Could not connect to the remote MCP SSE endpoint".to_string())?;
+        .map_err(|e| mcp_probe_send_error(e, "SSE endpoint"))?;
     if !response.status().is_success() {
         return Err(format!(
             "Remote MCP SSE endpoint rejected the connection (HTTP {})",
@@ -713,16 +741,10 @@ async fn probe_mcp_sse(url: &str) -> Result<(), String> {
 }
 
 async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|_| "Could not initialize the MCP probe client".to_string())?;
+    let (client, url) = mcp_probe_client(url, crate::core::safe_http::SafeHttpPolicy::Configured)?;
     let response = client
         .post(url)
-        .header(
-            reqwest::header::ACCEPT,
-            "application/json, text/event-stream",
-        )
+        .header("accept", "application/json, text/event-stream")
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -738,7 +760,7 @@ async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
         }))
         .send()
         .await
-        .map_err(|_| "Could not connect to the remote MCP endpoint".to_string())?;
+        .map_err(|e| mcp_probe_send_error(e, "endpoint"))?;
     if !response.status().is_success() {
         return Err(format!(
             "Remote MCP initialize was rejected (HTTP {})",
@@ -3224,6 +3246,27 @@ pub async fn import_custom_plugin_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_remote_mcp_probe_does_not_follow_a_redirect_to_an_internal_address() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/sse"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+        let err = probe_mcp_sse_with(
+            &format!("{}/sse", server.uri()),
+            crate::core::safe_http::SafeHttpPolicy::Configured,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Security"), "{err}");
+    }
 
     /// A probed MCP server, possibly chosen by a repository's `.mcp.json`,
     /// sees its own configured values and no backend secret (B4-04).

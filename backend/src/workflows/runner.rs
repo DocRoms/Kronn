@@ -642,6 +642,28 @@ pub async fn execute_run(
     .await
 }
 
+/// The gate's webhook URL is templated, so it may come from step output:
+/// sent through the guarded transport, no redirect may leave its origin.
+async fn fire_gate_webhook(
+    url: &str,
+    payload: &serde_json::Value,
+    policy: crate::core::safe_http::SafeHttpPolicy,
+) -> Result<u16, String> {
+    use crate::core::safe_http::{self, ClientOptions, Redirects};
+    let url = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let client = safe_http::client(
+        policy,
+        ClientOptions::new(Redirects::SameOrigin).timeout(std::time::Duration::from_secs(10)),
+    )?;
+    let response = client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(response.status().as_u16())
+}
+
 /// The production binary has only the enforcing variant. The loopback variant
 /// is compiled exclusively into Rust tests, so no environment variable, API
 /// payload or runtime configuration can weaken Notify's SSRF boundary.
@@ -2850,28 +2872,21 @@ async fn execute_run_body(
                         let url_clone = rendered_url.clone();
                         let run_id_for_log = run.id.clone();
                         tokio::spawn(async move {
-                            let client = match reqwest::Client::builder()
-                                .timeout(std::time::Duration::from_secs(10))
-                                .build()
+                            match fire_gate_webhook(
+                                &url_clone,
+                                &payload,
+                                crate::core::safe_http::SafeHttpPolicy::Public,
+                            )
+                            .await
                             {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        target: "kronn::gate_webhook",
-                                        run_id = %run_id_for_log,
-                                        "Gate webhook client build failed: {}", e);
-                                    return;
-                                }
-                            };
-                            match client.post(&url_clone).json(&payload).send().await {
-                                Ok(resp) => tracing::info!(
+                                Ok(status) => tracing::info!(
                                     target: "kronn::gate_webhook",
-                                    run_id = %run_id_for_log, status = resp.status().as_u16(),
+                                    run_id = %run_id_for_log, status,
                                     "Gate webhook fired"
                                 ),
                                 Err(e) => tracing::warn!(
                                     target: "kronn::gate_webhook",
-                                    run_id = %run_id_for_log, url = %url_clone,
+                                    run_id = %run_id_for_log,
                                     "Gate webhook failed: {}", e
                                 ),
                             }
@@ -4149,6 +4164,36 @@ fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_gate_webhook_does_not_follow_a_redirect_to_an_internal_address() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(path("/hook"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "http://169.254.169.254/latest/meta-data/"),
+            )
+            .mount(&server)
+            .await;
+        let err = fire_gate_webhook(
+            &format!("{}/hook", server.uri()),
+            &serde_json::json!({"run_id": "r"}),
+            crate::core::safe_http::SafeHttpPolicy::PublicOrLoopbackForTests,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Security"), "{err}");
+        let literal = fire_gate_webhook(
+            "http://[::ffff:127.0.0.1]:3140/api/config",
+            &serde_json::json!({}),
+            crate::core::safe_http::SafeHttpPolicy::Public,
+        )
+        .await
+        .unwrap_err();
+        assert!(literal.contains("Security"), "{literal}");
+    }
 
     // ─── inject_and_consume_gate_feedback — gate feedback, approach B ───
     #[test]
@@ -8927,6 +8972,20 @@ mod tests {
             .exec_script_files
             .iter()
             .all(|file| file.sha256.is_empty()));
+        // An agent's workflow lands disabled (KT-1037); a human enables it.
+        assert!(!workflow.enabled);
+        let enable: crate::models::UpdateWorkflowRequest =
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+        let workflow = crate::api::workflows::update_as(
+            state.clone(),
+            workflow.id.clone(),
+            enable,
+            crate::api::workflows::WorkflowWriter::Human,
+        )
+        .await
+        .0
+        .data
+        .expect("enabled by a human");
 
         let run = run_scripts(&state, &workflow, "proj-kt918-agent").await;
         let output = &run.step_results.last().unwrap().output;

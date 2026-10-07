@@ -126,6 +126,7 @@ export function WorkflowStepAgents({ workflowId, value, onChange, disabled = fal
                 <ModelCatalogPicker
                   agent={current.agent}
                   connectionId={connectionId}
+                  tier={step.agent_settings?.tier ?? 'default'}
                   value={current.model ?? ''}
                   onChange={model => choose(step, { ...current, model: model || undefined })}
                   reasoningEffort={current.reasoning_effort ?? ''}

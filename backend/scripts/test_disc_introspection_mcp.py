@@ -6491,30 +6491,14 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         self.assertEqual((method, path), ("PUT", "/api/workflows/wf-1"))
         self.assertFalse(body["enabled"])
 
-    def test_set_enabled_manual_enables(self):
-        fake = mock.MagicMock(side_effect=[
-            self._env({"id": "wf-1", "trigger": {"type": "Manual"}}),   # GET
-            self._env({"id": "wf-1", "enabled": True}),                  # PUT
-        ])
-        with mock.patch.object(self.mod, "_http", fake):
-            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True})
-        self.assertEqual(fake.call_args_list[1].args[:2], ("PUT", "/api/workflows/wf-1"))
-
-    def test_set_enabled_cron_refused_without_force(self):
-        fake = mock.MagicMock(return_value=self._env(
-            {"id": "wf-1", "trigger": {"type": "Cron", "schedule": "* * * * *"}}))
-        with mock.patch.object(self.mod, "_http", fake):
-            with self.assertRaises(RuntimeError) as ctx:
-                self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True})
-        self.assertIn("Cron", str(ctx.exception))
-        self.assertEqual(fake.call_count, 1)             # GET only, never PUT
-
-    def test_set_enabled_cron_allowed_with_force_skips_guard(self):
-        fake = mock.MagicMock(return_value=self._env({"id": "wf-1", "enabled": True}))
-        with mock.patch.object(self.mod, "_http", fake):
-            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True, "force": True})
-        self.assertEqual(fake.call_count, 1)             # force → straight PUT, no GET
-        self.assertEqual(fake.call_args.args[:2], ("PUT", "/api/workflows/wf-1"))
+    def test_set_enabled_never_enables_whatever_the_trigger_or_force(self):
+        for args in ({"enabled": True}, {"enabled": True, "force": True}):
+            fake = mock.MagicMock()
+            with mock.patch.object(self.mod, "_http", fake):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", **args})
+            self.assertIn("human", str(ctx.exception))
+            self.assertEqual(fake.call_count, 0)
 
     def test_set_enabled_requires_enabled(self):
         with self.assertRaises(RuntimeError):

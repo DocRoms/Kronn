@@ -17,8 +17,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 INDEX = ROOT / "docs" / "inconsistencies-tech-debt.md"
 DETAILS = ROOT / "docs" / "tech-debt"
 
-# A row another 0.14.3 change removes; drop this entry once it is gone.
-PENDING_REMOVAL = {"TD-20260901-plaintext-connection-credentials"}
+# Rows allowed without a detail file while another change lands one.
+PENDING_REMOVAL: set[str] = set()
 
 _ROW_RE = re.compile(r"^\|\s*(TD-\d{8}-[a-z0-9-]+)\s*\|(.*)\|\s*$")
 _STATUS_RE = re.compile(r"\*\*Status\*\*\s*:\s*(.*)", re.I)

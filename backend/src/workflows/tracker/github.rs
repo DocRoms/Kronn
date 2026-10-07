@@ -11,7 +11,7 @@ pub struct GitHubTracker {
     owner: String,
     repo: String,
     token: String,
-    client: reqwest::Client,
+    client: crate::core::safe_http::SafeClient,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,20 +37,26 @@ struct GhPr {
 }
 
 impl GitHubTracker {
-    pub fn new(owner: String, repo: String, token: String) -> Self {
-        Self {
+    pub fn new(owner: String, repo: String, token: String) -> Result<Self> {
+        Ok(Self {
             owner,
             repo,
             token,
             // Bounded: this client is awaited INLINE from the engine's single
             // tick loop — an unbounded hang here stalls every cron and tracker
             // in the system until restart, not just this poll.
-            client: reqwest::Client::builder()
+            // A redirect may not leave api.github.com, and every connection
+            // goes through the guarded resolver.
+            client: crate::core::safe_http::client(
+                crate::core::safe_http::SafeHttpPolicy::Public,
+                crate::core::safe_http::ClientOptions::new(
+                    crate::core::safe_http::Redirects::SameOrigin,
+                )
                 .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
-        }
+                .timeout(std::time::Duration::from_secs(30)),
+            )
+            .map_err(|e| anyhow::anyhow!(e))?,
+        })
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -72,7 +78,7 @@ impl TrackerSource for GitHubTracker {
 
         let response = self
             .client
-            .get(&url)
+            .get(reqwest::Url::parse(&url)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -118,7 +124,7 @@ impl TrackerSource for GitHubTracker {
 
         let response = self
             .client
-            .patch(&url)
+            .patch(reqwest::Url::parse(&url)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -140,7 +146,7 @@ impl TrackerSource for GitHubTracker {
 
         let response = self
             .client
-            .post(&url)
+            .post(reqwest::Url::parse(&url)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -162,7 +168,7 @@ impl TrackerSource for GitHubTracker {
 
         let response = self
             .client
-            .post(&url)
+            .post(reqwest::Url::parse(&url)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -191,7 +197,7 @@ mod tests {
     use super::*;
 
     fn make_tracker() -> GitHubTracker {
-        GitHubTracker::new("my-owner".into(), "my-repo".into(), "fake-token".into())
+        GitHubTracker::new("my-owner".into(), "my-repo".into(), "fake-token".into()).unwrap()
     }
 
     // ─── api_url ─────────────────────────────────────────────────────────

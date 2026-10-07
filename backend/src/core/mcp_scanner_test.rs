@@ -2951,6 +2951,7 @@ args = ["@example/old-mcp"]
     // silently passing on an empty no-op.
 
     #[test]
+    #[serial] // KRONN_DISC_INTROSPECTION_MCP is process-wide
     fn inject_kronn_internal_writes_python3_entry() {
         // Sanity: the bridge script must resolve in dev mode. If this
         // fires, the inject_kronn_internal helper has no path to ship,

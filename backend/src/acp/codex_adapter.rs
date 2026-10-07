@@ -1042,6 +1042,8 @@ exec sleep 30"#,
     }
 
     #[tokio::test]
+    // The bridge command reads KRONN_DISC_INTROSPECTION_MCP, which other tests set.
+    #[serial_test::serial]
     async fn kronn_internal_mcp_override_forwards_only_env_var_names_never_values() {
         // The adapter replaces Codex's global MCP table with this project's
         // canonical non-secret servers plus the internal bridge. Only the
@@ -1103,6 +1105,8 @@ exec sleep 30"#,
     }
 
     #[test]
+    // The bridge command reads KRONN_DISC_INTROSPECTION_MCP, which other tests set.
+    #[serial_test::serial]
     fn project_internal_bridge_is_replaced_once_in_valid_toml() {
         let dir = tempfile::tempdir().unwrap();
         let launch = crate::agents::runner::disc_introspection_mcp_command().unwrap();

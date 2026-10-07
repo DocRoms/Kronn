@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronDown, Search, X } from 'lucide-react';
 
 export interface SearchableSelectOption {
@@ -37,6 +37,12 @@ interface SearchableSelectProps {
   customValueHint?: string;
 }
 
+// Mirrors the CSS cap: min(420px, 50vh). The gap is the menu's offset from
+// the control plus a margin from the viewport edge.
+const MENU_MAX_HEIGHT = 420;
+const MENU_VIEWPORT_SHARE = 0.5;
+const MENU_EDGE_GAP = 13;
+
 export function SearchableSelect({
   value,
   options,
@@ -56,8 +62,10 @@ export function SearchableSelect({
 }: SearchableSelectProps) {
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<'bottom' | 'top'>('bottom');
+  const [menuMaxHeight, setMenuMaxHeight] = useState<number>();
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const selected = options.find(option => option.value === value);
@@ -93,13 +101,36 @@ export function SearchableSelect({
     ? activeIndex
     : Math.max(firstEnabledIndex, 0);
 
-  useLayoutEffect(() => {
-    if (!open || !rootRef.current) return;
+  // Open on the side the list fits, else the roomier one, and never taller
+  // than that side's room, so the whole menu stays in the viewport.
+  const placeMenu = useCallback(() => {
+    if (!rootRef.current) return;
     const bounds = rootRef.current.getBoundingClientRect();
-    const roomBelow = window.innerHeight - bounds.bottom;
-    const roomAbove = bounds.top;
-    setPlacement(roomBelow < 220 && roomAbove > roomBelow ? 'top' : 'bottom');
-  }, [open, displayedOptions.length]);
+    const cap = Math.min(MENU_MAX_HEIGHT, window.innerHeight * MENU_VIEWPORT_SHARE);
+    const roomBelow = Math.max(0, window.innerHeight - bounds.bottom - MENU_EDGE_GAP);
+    const roomAbove = Math.max(0, bounds.top - MENU_EDGE_GAP);
+    const menu = menuRef.current;
+    // Without layout (jsdom) scrollHeight is 0: assume the list fills the cap.
+    const natural = menu?.scrollHeight ? menu.scrollHeight + menu.offsetHeight - menu.clientHeight : cap;
+    const needed = Math.min(cap, natural);
+    const next = needed <= roomBelow || roomBelow >= roomAbove ? 'bottom' : 'top';
+    setPlacement(next);
+    setMenuMaxHeight(Math.floor(Math.min(cap, next === 'bottom' ? roomBelow : roomAbove)));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    placeMenu();
+    const onScroll = (event: Event) => {
+      if (event.target !== menuRef.current) placeMenu();
+    };
+    window.addEventListener('resize', placeMenu);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('resize', placeMenu);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, displayedOptions.length, placeMenu]);
 
   const choose = (option: SearchableSelectOption) => {
     if (option.disabled) return;
@@ -198,7 +229,14 @@ export function SearchableSelect({
       </div>
 
       {open && !disabled && (
-        <div id={listId} className="searchable-select-menu" role="listbox" aria-label={label}>
+        <div
+          ref={menuRef}
+          id={listId}
+          className="searchable-select-menu"
+          role="listbox"
+          aria-label={label}
+          style={menuMaxHeight === undefined ? undefined : { maxHeight: menuMaxHeight }}
+        >
           {displayedOptions.length === 0 ? (
             <p className="searchable-select-empty" role="status">{emptyLabel}</p>
           ) : displayedOptions.map((option, index) => (

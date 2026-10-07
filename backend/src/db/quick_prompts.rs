@@ -461,6 +461,75 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(n as u32)
 }
 
+/// Inserts `item`; when an `agent` (or "import") created it, also disables
+/// and records, in the same transaction, every enabled workflow that names
+/// its id or a `ref:` with its slug (it may shadow a shared reference).
+pub fn insert_quick_prompt_invalidating(
+    conn: &Connection,
+    item: &QuickPrompt,
+    agent: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    insert_quick_prompt(&tx, item)?;
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
+            &tx,
+            "prompt",
+            &item.id,
+            &[crate::core::repository_resources::ascii_slug(&item.name)],
+            if agent == "import" {
+                crate::models::AutoDisableReason::Imported
+            } else {
+                crate::models::AutoDisableReason::DependencyEditedByAgent
+            },
+            agent,
+            &format!(
+                "Quick Prompt « {} » created by {agent} (shadows a shared reference)",
+                item.name
+            ),
+        )?,
+        None => 0,
+    };
+    tx.commit()?;
+    Ok(disabled)
+}
+
+/// Saves `item`; when an `agent` made the edit, also disables and records,
+/// in the same transaction, every enabled workflow that names its id or a
+/// `ref:` with its old or new slug (a rename may leave one or capture one).
+pub fn update_quick_prompt_invalidating(
+    conn: &Connection,
+    item: &QuickPrompt,
+    agent: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    let old_name = tx
+        .query_row(
+            "SELECT name FROM quick_prompts WHERE id = ?1",
+            params![item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+    update_quick_prompt(&tx, item)?;
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
+            &tx,
+            "prompt",
+            &item.id,
+            &[
+                crate::core::repository_resources::ascii_slug(&old_name),
+                crate::core::repository_resources::ascii_slug(&item.name),
+            ],
+            crate::models::AutoDisableReason::DependencyEditedByAgent,
+            agent,
+            &format!("Quick Prompt « {} » edited by {agent}", item.name),
+        )?,
+        None => 0,
+    };
+    tx.commit()?;
+    Ok(disabled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
