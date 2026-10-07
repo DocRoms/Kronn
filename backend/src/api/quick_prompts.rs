@@ -103,7 +103,33 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickPromptRequest>,
+) -> Json<ApiResponse<QuickPrompt>> {
+    update_as(state, id, req, bridge.is_some()).await
+}
+
+/// What a Quick Prompt makes an agent do when a workflow step runs it.
+fn quick_prompt_execution(qp: &QuickPrompt) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": qp.prompt_template,
+        "variables": qp.variables,
+        "agent": qp.agent,
+        "connection": qp.connection_id,
+        "project": qp.project_id,
+        "skills": qp.skill_ids,
+        "profiles": qp.profile_ids,
+        "directives": qp.directive_ids,
+        "tier": qp.tier,
+        "agent_settings": qp.agent_settings,
+    })
+}
+
+pub(crate) async fn update_as(
+    state: AppState,
+    id: String,
+    req: CreateQuickPromptRequest,
+    by_agent: bool,
 ) -> Json<ApiResponse<QuickPrompt>> {
     let qp_id = id.clone();
     let existing = match state
@@ -118,6 +144,7 @@ pub async fn update(
     if let Err(error) = validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(error));
     }
+    let before = quick_prompt_execution(&existing);
 
     let agent = req.agent.unwrap_or(existing.agent.clone());
     let connection_id = match validate_connection_target(&state, &agent, req.connection_id).await {
@@ -154,10 +181,19 @@ pub async fn update(
         updated_at: Utc::now(),
     };
 
+    // An agent's change to what the prompt runs would execute under the
+    // human's activation of every workflow using it (KT-1037).
+    let disable_users = by_agent && before != quick_prompt_execution(&updated);
     let q = updated.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_prompts::update_quick_prompt(conn, &q))
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::update_quick_prompt(conn, &q)?;
+            if disable_users {
+                crate::db::quick_prompts::disable_workflows_using(conn, &q.id)?;
+            }
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(updated)),
@@ -1117,6 +1153,104 @@ pub async fn compare_agents(
 #[cfg(test)]
 mod compare_tests {
     use super::*;
+
+    /// KT-1037: an agent's change to what a Quick Prompt runs disables every
+    /// enabled workflow using it (direct, batch, chained); a human's edit or
+    /// a rename does not.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_quick_prompt_disables_the_workflows_using_it() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let qp: QuickPrompt = serde_json::from_value(serde_json::json!({
+            "id": "qp-1", "name": "Review", "icon": "x", "prompt_template": "Review it",
+            "variables": [], "agent": "ClaudeCode", "project_id": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &qp)?;
+                for (id, step) in [
+                    ("wf-direct", r#"[{"name":"a","quick_prompt_id":"qp-1"}]"#),
+                    ("wf-batch", r#"[{"name":"b","batch_quick_prompt_id":"qp-1"}]"#),
+                    ("wf-chain", r#"[{"name":"c","batch_chain_prompt_ids":["qp-0","qp-1"]}]"#),
+                    ("wf-other", r#"[{"name":"d","quick_prompt_id":"qp-2"}]"#),
+                ] {
+                    conn.execute(
+                        "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                         VALUES (?1, ?1, '{\"type\":\"Manual\"}', ?2, 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                        rusqlite::params![id, step],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let enabled = |state: AppState| async move {
+            state
+                .db
+                .with_conn(|conn| {
+                    let mut stmt =
+                        conn.prepare("SELECT id FROM workflows WHERE enabled = 1 ORDER BY id")?;
+                    let ids = stmt
+                        .query_map([], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(ids)
+                })
+                .await
+                .unwrap()
+        };
+        let request = |prompt: &str, name: &str| -> CreateQuickPromptRequest {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "prompt_template": prompt, "agent": "ClaudeCode", "project_id": null
+            }))
+            .unwrap()
+        };
+        let all = vec!["wf-batch", "wf-chain", "wf-direct", "wf-other"];
+        let Json(renamed) = update_as(
+            state.clone(),
+            "qp-1".into(),
+            request("Review it", "Renamed"),
+            true,
+        )
+        .await;
+        assert!(renamed.success, "{:?}", renamed.error);
+        assert_eq!(
+            enabled(state.clone()).await,
+            all,
+            "a rename changes nothing that runs"
+        );
+        let Json(human) = update_as(
+            state.clone(),
+            "qp-1".into(),
+            request("Review harder", "Renamed"),
+            false,
+        )
+        .await;
+        assert!(human.success, "{:?}", human.error);
+        assert_eq!(
+            enabled(state.clone()).await,
+            all,
+            "a human's edit keeps the activation"
+        );
+        let Json(agent) = update_as(
+            state.clone(),
+            "qp-1".into(),
+            request("Exfiltrate", "Renamed"),
+            true,
+        )
+        .await;
+        assert!(agent.success, "{:?}", agent.error);
+        assert_eq!(
+            enabled(state.clone()).await,
+            vec!["wf-other"],
+            "every user of the prompt is disabled"
+        );
+    }
 
     #[test]
     fn compare_targets_keep_same_agent_at_distinct_model_tiers() {

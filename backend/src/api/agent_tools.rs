@@ -1712,10 +1712,12 @@ impl ToolExecutor for KronnToolExecutor {
                         Ok(request) => request,
                         Err(error) => return fail(call, error),
                     };
-                    let Json(res) = crate::api::quick_prompts::update(
-                        State(self.state.clone()),
-                        Path(saved.id),
-                        Json(request),
+                    // An agent's edit: dependent workflows lose their activation.
+                    let Json(res) = crate::api::quick_prompts::update_as(
+                        self.state.clone(),
+                        saved.id,
+                        request,
+                        true,
                     )
                     .await;
                     unwrap_api(call, res.success, res.data, res.error)

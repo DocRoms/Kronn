@@ -328,8 +328,10 @@ Release notes for 0.9.3 and earlier are available in the
   change to what an enabled workflow executes (steps, rollback, trigger, Exec
   allowlist, actions, workspace, guards, variables, concurrency limit and
   key, project) disables it until the user enables it again, and so does
-  its change to what a Quick API sends, for every enabled workflow calling
-  that API. A disabled definition never runs: a parent refuses a disabled
+  its change to what a Quick API sends or what a Quick Prompt runs (prompt,
+  variables, agent, connection, tier, skills, profiles, directives, agent
+  settings), for every enabled workflow using it. Quick Exec lines keep their
+  own KT-1017 rule: an agent's line waits for a human's approval. A disabled definition never runs: a parent refuses a disabled
   sub-workflow, manual and TriggerWorkflow launches, the scheduler and
   trackers skip it, and only a human can resume an interrupted run of a
   disabled workflow. With localhost trust on (auth off, or
