@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { AGENT_COLORS, AGENT_LABELS, AGENT_MENTIONS, ALL_AGENT_TYPES, MODEL_TIER_ICONS, agentColor, agentTextColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive, modelForAgentTier, isAgentRestricted, hasAgentFullAccess } from '../constants';
+import { requiresFullAccessToRun } from '../agentFullAccess';
 
 describe('constants', () => {
   describe('agent registry completeness', () => {
@@ -252,6 +253,17 @@ describe('constants', () => {
       expect(hasAgentFullAccess(restricted, 'OpenCode')).toBe(false);
       expect(isAgentRestricted(restricted, 'OpenCode')).toBe(true);
     });
+
+    it.each(['OpenCode', 'Vibe', 'CopilotCli', 'GeminiCli', 'Kiro'] as const)(
+      'warns for %s, a native agent that needs its full access to run',
+      agentType => {
+        const key = { OpenCode: 'open_code', Vibe: 'vibe', CopilotCli: 'copilot_cli', GeminiCli: 'gemini_cli', Kiro: 'kiro' }[agentType];
+        expect(isAgentRestricted({ [key]: { full_access: false } } as never, agentType)).toBe(true);
+        expect(requiresFullAccessToRun({ [key]: { full_access: false } } as never, agentType)).toBe(true);
+        expect(requiresFullAccessToRun({ [key]: { full_access: true } } as never, agentType)).toBe(false);
+        expect(requiresFullAccessToRun(null, agentType)).toBe(false);
+      },
+    );
 
     it.each(['Ollama', 'LiteLlm', 'Nvidia'] as const)(
       'does not advertise an impossible full-access setting for %s',

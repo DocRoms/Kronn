@@ -25,11 +25,19 @@ use crate::AppState;
 pub async fn audit_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
 ) -> Json<ApiResponse<Option<AuditProgress>>> {
-    let snapshot = match state.audit_tracker.lock() {
+    let mut snapshot = match state.audit_tracker.lock() {
         Ok(t) => t.get_progress(&id),
         Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
     };
+    // An agent keeps the counts-only view: the audit agent's recent actions
+    // are for the user's panel.
+    if bridge.is_some() {
+        if let Some(progress) = snapshot.as_mut() {
+            progress.recent_activity = None;
+        }
+    }
     Json(ApiResponse::ok(snapshot))
 }
 
@@ -136,7 +144,11 @@ pub async fn audit_run_steps(
 ) -> Json<ApiResponse<Vec<crate::models::AuditRunStep>>> {
     let result = state
         .db
-        .with_conn(move |conn| crate::db::audit_runs::list_audit_steps(conn, &run_id))
+        .with_conn(move |conn| {
+            let mut steps = crate::db::audit_runs::list_audit_steps(conn, &run_id)?;
+            crate::db::audit_runs::price_steps(conn, &mut steps)?;
+            Ok(steps)
+        })
         .await;
     match result {
         Ok(steps) => Json(ApiResponse::ok(steps)),
@@ -161,6 +173,19 @@ pub struct AuditTimelineData {
     /// attestation, legacy evidence), oldest first. Empty without the file.
     pub recorded_audits: Vec<crate::core::kronn_state::AuditEntry>,
     pub recorded_validated_at: Option<String>,
+    /// The validation discussion linked to the latest run when that run is
+    /// Completed, archived or not: the timeline offers to validate once it
+    /// has finished.
+    pub latest_validation: Option<AuditTimelineValidation>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AuditTimelineValidation {
+    pub discussion_id: String,
+    /// Same terminal-signal parser as the validate-audit gate.
+    pub finished: bool,
+    pub archived: bool,
 }
 
 /// GET /api/projects/{id}/audit-timeline
@@ -181,12 +206,27 @@ pub async fn audit_timeline(
             {
                 steps.extend(crate::db::audit_runs::list_audit_steps(conn, &run.id)?);
             }
-            Ok((project, runs, steps))
+            crate::db::audit_runs::price_steps(conn, &mut steps)?;
+            // The latest run of any kind, as the validate-audit gate reads it.
+            let latest_validation = match runs.first() {
+                Some(run) if run.status == "Completed" => match &run.validation_discussion_id {
+                    Some(disc_id) => crate::db::discussions::get_discussion(conn, disc_id)?
+                        .filter(|disc| disc.project_id.as_deref() == Some(id.as_str()))
+                        .map(|disc| AuditTimelineValidation {
+                            finished: super::validate::validation_discussion_finished(&disc),
+                            archived: disc.archived,
+                            discussion_id: disc.id,
+                        }),
+                    None => None,
+                },
+                _ => None,
+            };
+            Ok((project, runs, steps, latest_validation))
         })
         .await;
-    let (project, runs, steps) = match result {
-        Ok((Some(project), runs, steps)) => (project, runs, steps),
-        Ok((None, _, _)) => return Json(ApiResponse::err("Project not found")),
+    let (project, runs, steps, latest_validation) = match result {
+        Ok((Some(project), runs, steps, latest)) => (project, runs, steps, latest),
+        Ok((None, _, _, _)) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("db: {e}"))),
     };
     let recorded = tokio::task::spawn_blocking(move || {
@@ -204,6 +244,7 @@ pub async fn audit_timeline(
         steps,
         recorded_audits,
         recorded_validated_at,
+        latest_validation,
     }))
 }
 
@@ -324,5 +365,63 @@ mod audit_steps_tests {
                 .count(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_status_tests {
+    use super::*;
+
+    /// An agent's bridge token reads the counts, never the recent actions.
+    #[tokio::test]
+    async fn a_bridge_caller_never_reads_the_recent_actions() {
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            )),
+            std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap()),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        {
+            let mut tracker = state.audit_tracker.lock().unwrap();
+            tracker.start_progress("p1", 16, "full_audit");
+            tracker.update_chips("p1", None, None, Some("Bash".into()));
+            tracker.set_recent_activity(
+                "p1",
+                crate::models::AuditRecentActivity {
+                    entries: vec![crate::models::AuditActivityEntry {
+                        category: crate::models::ActivityCategory::Execute,
+                        at: chrono::Utc::now(),
+                    }],
+                },
+            );
+        }
+        let read = |bridge: bool| {
+            let state = state.clone();
+            async move {
+                let caller = bridge.then(|| {
+                    axum::Extension(crate::core::bridge_token::BridgeCaller {
+                        token_id: "t".into(),
+                        project: Some("p1".into()),
+                        own_discussions: Vec::new(),
+                        own_run: None,
+                    })
+                });
+                audit_status(State(state), Path("p1".into()), caller)
+                    .await
+                    .0
+                    .data
+                    .flatten()
+                    .unwrap()
+            }
+        };
+        let user = read(false).await;
+        assert!(
+            user.recent_activity.is_some(),
+            "the user's panel reads them"
+        );
+        let agent = read(true).await;
+        assert_eq!(agent.recent_activity, None);
+        assert_eq!(agent.current_tool_call_count, Some(1), "the counts stay");
     }
 }

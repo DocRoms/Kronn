@@ -145,7 +145,17 @@ impl AcpTransport for ScriptedAgent {
                         })
                         .await;
                     let _ = events
-                        .send(AcpSessionEvent::ToolTarget(format!("src/é{call}.rs")))
+                        .send(AcpSessionEvent::ToolActivity(
+                            // As a generic ACP runtime reports it: a secret in
+                            // the title and the raw input, neither ever shown.
+                            crate::agents::activity::ToolActivityUpdate::from_acp(&json!({
+                                "toolCallId": call.to_string(), "kind": "read",
+                                "title": format!("cat {}", crate::agents::activity::tests::SENTINEL),
+                                "rawInput": {"file_path": crate::agents::activity::tests::SENTINEL},
+                                "locations": [{"path": crate::agents::activity::tests::SENTINEL}]
+                            }))
+                            .unwrap(),
+                        ))
                         .await;
                     let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
                     let _ = events
@@ -182,11 +192,21 @@ const REPORTED: Reported = Reported {
     cache_read: Some(30),
 };
 
+/// OpenCode runs only with its full-access setting on: the user turned it on.
 fn new_state() -> AppState {
+    let mut config = crate::core::config::default_config();
+    config.agents.open_code.full_access = true;
+    // The launch boundary reads the saved setting: this test's thread says on.
+    std::mem::forget(crate::core::config::test_saved_access::set(
+        &AgentType::OpenCode,
+        true,
+    ));
+    state_with(config)
+}
+
+fn state_with(config: crate::models::AppConfig) -> AppState {
     AppState::new_defaults(
-        Arc::new(tokio::sync::RwLock::new(
-            crate::core::config::default_config(),
-        )),
+        Arc::new(tokio::sync::RwLock::new(config)),
         Arc::new(crate::db::Database::open_in_memory().unwrap()),
         crate::DEFAULT_MAX_CONCURRENT_AGENTS,
     )
@@ -397,6 +417,7 @@ async fn an_acp_step_records_the_tokens_its_runtime_reported(pipeline: Pipeline)
         .await
         .unwrap();
 
+    // OpenCode's cache accounting is unknown to pricing: input as reported.
     let done = first_step_done(&body);
     assert_eq!(done["tokens"], json!(120), "{pipeline:?}: {done}");
     assert_eq!(done["total_tokens"], json!(120), "{pipeline:?}: {done}");
@@ -532,7 +553,7 @@ async fn a_partial_audit_on_opencode_gets_the_read_policy_and_survives_a_refused
     assert_eq!(config["permission"]["read"]["*.env.dist"], "allow");
     assert_eq!(config["experimental"]["continue_loop_on_deny"], true);
     // The step ran on to its end: its text reached the stream and its usage was
-    // counted — 100 in, 20 out.
+    // counted — 100 in, 20 out, as OpenCode reports them.
     assert!(body.contains("carried on after the refusal"), "{body}");
     let done = first_step_done(&body);
     assert_eq!(done["tokens"], json!(120), "{done}");
@@ -656,14 +677,27 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         progress().is_some_and(|p| {
             p.current_tool_call_count == Some(CALLS)
                 && p.step_tokens == Some(u64::from(CALLS) * 110)
+                && p.recent_activity.as_ref().is_some_and(|recent| {
+                    recent.entries.len() == crate::agents::activity::RECENT_MAX_ENTRIES
+                })
         })
     })
     .await;
     let shown = progress().unwrap();
-    assert_eq!(
-        shown.current_tool.as_deref(),
-        Some(format!("Read · src/é{CALLS}.rs").as_str()),
-        "{pipeline:?}"
+    // The chip and the details panel: categories only, bounded.
+    assert_eq!(shown.current_tool.as_deref(), Some("Read"), "{pipeline:?}");
+    let recent = shown
+        .recent_activity
+        .clone()
+        .expect("the step's recent actions");
+    assert!(recent
+        .entries
+        .iter()
+        .all(|e| e.category == crate::models::ActivityCategory::Read));
+    let progress_json = serde_json::to_string(&shown).unwrap();
+    assert!(
+        !progress_json.contains("SENTINEL") && !progress_json.contains("hunter2"),
+        "{pipeline:?}: {progress_json}"
     );
 
     let response = crate::api::audit::full::cancel_audit(
@@ -684,6 +718,22 @@ async fn a_tool_chain_without_text_shows_progress_and_stops(pipeline: Pipeline) 
         .find(|(name, _)| name == "tool_call")
         .unwrap_or_else(|| panic!("{pipeline:?}: no tool_call: {body}"));
     assert_eq!(tool.1["calls"], json!(CALLS), "{pipeline:?}");
+    let activity = events
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "activity")
+        .unwrap_or_else(|| panic!("{pipeline:?}: no activity: {body}"));
+    assert_eq!(
+        activity.1["recent"]["entries"][0],
+        json!({"category": "Read", "at": activity.1["recent"]["entries"][0]["at"]}),
+        "{pipeline:?}"
+    );
+    // Neither the `tool_call` nor the `activity` events, nor anything else in
+    // the stream, carry the title or the raw input.
+    assert!(
+        !body.contains("SENTINEL") && !body.contains("hunter2"),
+        "{pipeline:?}: {body}"
+    );
     let progress_event = events
         .iter()
         .rev()
@@ -715,4 +765,75 @@ async fn a_full_audit_tool_chain_without_text_shows_progress_and_stops() {
 #[tokio::test]
 async fn a_partial_audit_tool_chain_without_text_shows_progress_and_stops() {
     a_tool_chain_without_text_shows_progress_and_stops(Pipeline::Partial).await;
+}
+
+/// An audit is no explicit choice: OpenCode without its own full-access
+/// setting is refused before the audit starts, and OpenCode never starts.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn an_audit_on_opencode_without_its_full_access_setting_is_refused_before_spawn() {
+    let bin = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    crate::acp::test_support::write_fake_opencode(bin.path());
+    let _environment = ScriptedOpenCodeOnPath::install(bin.path(), out.path());
+    let mut config = crate::core::config::default_config();
+    config.agents.open_code.full_access = false;
+    config.language = "en".into();
+    let state = state_with(config);
+    let project = tempfile::tempdir().unwrap();
+    add_project(&state, "proj-refused", project.path()).await;
+    for pipeline in [Pipeline::Full, Pipeline::Partial] {
+        let body = launch(&state, pipeline, "proj-refused", AgentType::OpenCode)
+            .await
+            .unwrap();
+        assert!(
+            body.contains("Config › Agents › OpenCode › Full access"),
+            "{body}"
+        );
+    }
+    assert!(
+        !out.path().join("config.json").exists(),
+        "the scripted OpenCode was never started"
+    );
+}
+
+/// Revoking full access between two steps of a running audit refuses the next
+/// spawn: the launcher's own value, taken at the start, is not the authority.
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(acp_adapter_env_toggle)]
+async fn revoking_full_access_during_an_audit_refuses_its_next_step() {
+    let bin = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    crate::acp::test_support::write_fake_opencode(bin.path());
+    let _environment = ScriptedOpenCodeOnPath::install(bin.path(), out.path());
+    let state = new_state();
+    let project = tempfile::tempdir().unwrap();
+    let launcher = AuditAgentLauncher::for_request(&state, &AgentType::OpenCode, None)
+        .await
+        .expect("full access is on when the audit starts");
+    let tokens = state.config.read().await.tokens.clone();
+    let path = project.path().to_string_lossy().into_owned();
+    let start = || {
+        launcher.start(
+            &AgentType::OpenCode,
+            crate::models::ModelTier::Default,
+            project.path(),
+            &path,
+            "step",
+            &tokens,
+            None,
+            "step-1",
+            None,
+        )
+    };
+    let mut first = start().await.expect("the first step starts");
+    while first.next_line().await.is_some() {}
+    let _revoked = crate::core::config::test_saved_access::set(&AgentType::OpenCode, false);
+    let refused = start().await.err().expect("the next step is refused");
+    assert!(
+        refused.starts_with(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED),
+        "{refused}"
+    );
 }

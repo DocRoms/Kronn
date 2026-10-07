@@ -89,6 +89,10 @@ pub(super) struct AuditAgentLauncher {
     /// agents, and Claude and Codex through their adapters. What `start` hands
     /// back is then a lifeline process, not the agent (KT-927).
     acp: bool,
+    /// Whether a CLI agent runs with full access. A native ACP agent needs its
+    /// own full-access setting (an audit is no explicit choice); every other
+    /// agent keeps the audit's established full access.
+    full_access: bool,
     /// The named connection the user picked for an HTTP agent (KT-980), with
     /// its resolved endpoint and key. `None` uses the provider's default slot.
     connection: Option<(
@@ -120,10 +124,13 @@ impl AuditAgentLauncher {
             route,
             crate::acp::AcpProductionRoute::NativeAcp | crate::acp::AcpProductionRoute::AdaptedAcp
         );
+        let full_access = route != crate::acp::AcpProductionRoute::NativeAcp
+            || state.config.read().await.agents.full_access_for(agent);
         Self {
             state: state.clone(),
             http,
             acp,
+            full_access,
             connection: None,
             provenance: Default::default(),
         }
@@ -137,6 +144,11 @@ impl AuditAgentLauncher {
         connection_id: Option<&str>,
     ) -> Result<Self, String> {
         let mut launcher = Self::new(state, agent).await;
+        // Refused before the audit starts rather than at its first step.
+        if !launcher.full_access {
+            let language = state.config.read().await.language.clone();
+            return Err(runner::native_full_access_refusal_in(agent, &language));
+        }
         let Some(id) =
             crate::http_transport::validate_connection_target(state, agent, connection_id).await?
         else {
@@ -226,7 +238,7 @@ impl AuditAgentLauncher {
             return runner::start_agent_with_config(AgentStartConfig {
                 provenance: Some(self.provenance.clone()),
                 activity,
-                full_access: true,
+                full_access: self.full_access,
                 tier,
                 // A CLI agent reaches the project through its own filesystem;
                 // native tools stay absent rather than inherited by omission.
@@ -288,16 +300,14 @@ impl AuditActivityProbe {
         Self { http, acp }
     }
 
-    /// The last tool called and the step's call count, `None` before the first.
+    /// The last tool call's category and the step's call count, `None`
+    /// before the first.
     pub(super) fn tool(&self) -> Option<(String, u32)> {
-        self.http.read().or_else(|| {
+        let (category, calls) = self.http.read().or_else(|| {
             let activity = self.acp.as_ref()?.borrow().clone()?;
-            let label = match activity.target {
-                Some(target) => format!("{} · {target}", activity.tool),
-                None => activity.tool,
-            };
-            Some((label, activity.calls))
-        })
+            Some((activity.category, activity.calls))
+        })?;
+        Some((category.as_str().to_owned(), calls))
     }
 
     pub(super) fn usage(&self) -> Option<runner::ReportedUsage> {
@@ -340,6 +350,62 @@ impl StepActivityWatch {
         let current = self.probe.tool()?;
         (self.seen_tool.as_ref() != Some(&current)).then(|| {
             self.seen_tool = Some(current.clone());
+            current
+        })
+    }
+}
+
+/// The running step's latest actions for the details panel, by category,
+/// fed by whichever pipeline runs the agent: a CLI's stream-json lines here,
+/// an HTTP or ACP run's calls through its probe.
+pub(super) struct StepRecentFeed {
+    local: crate::agents::activity::RecentActivity,
+    probe: Option<runner::ToolActivityProbe>,
+    calls: u64,
+    seen: Option<crate::models::AuditRecentActivity>,
+}
+
+impl StepRecentFeed {
+    /// `probe` is the run's, for an agent whose tool calls are not in its lines.
+    pub(super) fn new(probe: Option<runner::ToolActivityProbe>) -> Self {
+        Self {
+            local: Default::default(),
+            probe,
+            calls: 0,
+            seen: None,
+        }
+    }
+
+    /// One parsed stream-json event of a CLI agent: a tool's start counts, by
+    /// its category, which is returned for the chip. Its input and the prose
+    /// are never read.
+    pub(super) fn on_stream_event(
+        &mut self,
+        event: &runner::StreamJsonEvent,
+    ) -> Option<crate::models::ActivityCategory> {
+        let runner::StreamJsonEvent::ToolStart(name) = event else {
+            return None;
+        };
+        self.calls += 1;
+        let update =
+            crate::agents::activity::ToolActivityUpdate::named(Some(self.calls.to_string()), name);
+        self.local.apply(&update);
+        update.category()
+    }
+
+    /// The current snapshot when it changed since the last call.
+    pub(super) fn moved(&mut self) -> Option<crate::models::AuditRecentActivity> {
+        let mut current = self.local.snapshot();
+        if current.entries.is_empty() {
+            if let Some(remote) = self.probe.as_ref().and_then(|probe| probe.recent()) {
+                current = remote;
+            }
+        }
+        if current.entries.is_empty() {
+            return None;
+        }
+        (self.seen.as_ref() != Some(&current)).then(|| {
+            self.seen = Some(current.clone());
             current
         })
     }

@@ -13,9 +13,14 @@ import { projects as projectsApi, externalApi, type ExternalApiConnectionView } 
 import { AGENT_LABELS, MODEL_TIER_ICONS, isUsable } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
 import { formatStepList } from '../lib/audit-resume';
-import { formatUsd, summarizeAuditCost } from '../lib/audit-cost';
+import { costReasonKey, formatUsd, summarizeAuditCost, tokenBreakdownTitle } from '../lib/audit-cost';
 import { BriefingForm } from './BriefingForm';
-import type { AgentDetection, AgentType, AuditEntry, ModelTier, ModelTiersConfig } from '../types/generated';
+import { AuditStepActivity } from './AuditStepActivity';
+import { activityCategoryLabel } from '../lib/activity-category';
+import type {
+  AgentDetection, AgentType, AuditEntry, AuditRecentActivity, AuditTimelineValidation, AuditTokenBreakdown,
+  ModelTier, ModelTiersConfig,
+} from '../types/generated';
 import './AuditTimeline.css';
 
 type StepStatus = 'done' | 'failed' | 'warned' | 'running' | 'pending' | 'todo';
@@ -34,6 +39,10 @@ interface StepRow {
   cache_read_tokens?: number | null;
   /** What the step's agent reported it cost; absent = unknown, never 0. */
   cost_usd_micros?: number | null;
+  /** Kronn's estimate when the agent reported none; why there is neither. */
+  estimated_cost_usd_micros?: number | null;
+  cost_unknown_reason?: string | null;
+  breakdown?: AuditTokenBreakdown | null;
   carried_from_run_id?: string | null;
 }
 
@@ -59,7 +68,11 @@ export interface AuditTimelineProps {
   /** Wall-clock start of the live audit, to tell its steps from older runs'. */
   liveStartedAt: number | null;
   liveToolCalls: number | null;
+  /** The running step's latest actions, for its details panel. */
+  liveActivity?: AuditRecentActivity | null;
   liveStepTokens: number | null;
+  /** The running step's headline parts, for its tooltip. */
+  liveStepBreakdown?: AuditTokenBreakdown | null;
   liveTotalTokens: number | null;
   /** Who runs the live audit, as the server reports it: shown and frozen in
    *  the agent panel, whichever client launched the audit. */
@@ -71,6 +84,10 @@ export interface AuditTimelineProps {
   onLaunch: () => void;
   validationInProgress: boolean;
   onValidate: () => void;
+  /** Records the validation once the linked discussion has finished. */
+  onMarkValid: () => Promise<void>;
+  /** Opens a discussion, archived ones included. */
+  onOpenValidation: (discussionId: string) => void;
   onViewTechDebts: () => void;
   refreshTrigger: number;
   toast: (msg: string, kind: 'success' | 'error' | 'info' | 'warning') => void;
@@ -129,6 +146,12 @@ function formatTokens(n: number, locale: string): string {
   return fmt(n, 0);
 }
 
+/** A pricing reason in the UI's language; an unknown one keeps the server's text. */
+function localizedCostReason(reason: string, t: (key: string, ...args: (string | number)[]) => string): string {
+  const key = costReasonKey(reason);
+  return key ? t(key) : reason;
+}
+
 function formatDuration(ms?: number | null): string {
   if (ms == null) return '';
   const s = Math.round(ms / 1000);
@@ -153,6 +176,8 @@ export function AuditTimeline(props: AuditTimelineProps) {
   const [plan, setPlan] = useState<Map<number, string>>(new Map());
   // Audits the branch's `.kronn.json` records: another instance, an attestation.
   const [recorded, setRecorded] = useState<AuditEntry[]>([]);
+  const [linkedValidation, setLinkedValidation] = useState<AuditTimelineValidation | null>(null);
+  const [marking, setMarking] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -189,13 +214,19 @@ export function AuditTimeline(props: AuditTimelineProps) {
         }
       }
       const latest = data.runs.find(run => run.kind === 'Full');
-      return { id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0, recorded: data.recorded_audits };
+      return {
+        id: ids[0] ?? null, rows: [...merged.values()], td: latest?.td_total ?? 0,
+        recorded: data.recorded_audits, validation: data.latest_validation ?? null,
+      };
     };
     load()
-      .then(({ id, rows, td, recorded: entries }) => {
-        if (alive) { setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries); setStepsLoaded(true); }
+      .then(({ id, rows, td, recorded: entries, validation }) => {
+        if (alive) {
+          setRunId(id); setSteps(rows); setTdTotal(td); setRecorded(entries);
+          setLinkedValidation(validation); setStepsLoaded(true);
+        }
       })
-      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setStepsLoaded(true); } });
+      .catch(() => { if (alive) { setSteps([]); setRecorded([]); setLinkedValidation(null); setStepsLoaded(true); } });
     return () => { alive = false; };
   }, [projectId, resumable, refreshTrigger, auditActive, liveStep]);
 
@@ -396,9 +427,14 @@ export function AuditTimeline(props: AuditTimelineProps) {
               <>
                 <p className="audit-tl-muted">{t('auditTimeline.audit.summary', done, total)}</p>
                 {cost.kind !== 'none' && (
-                  <p className="audit-tl-muted audit-tl-mono" data-testid="audit-timeline-cost-total" title={t('auditTimeline.cost.totalTitle')}>
-                    {cost.kind === 'exact' ? t('auditTimeline.cost.total', formatUsd(cost.usdMicros, locale))
-                      : cost.kind === 'floor' ? t('auditTimeline.cost.totalFloor', formatUsd(cost.usdMicros, locale), cost.unknownSteps)
+                  <p className="audit-tl-muted audit-tl-mono" data-testid="audit-timeline-cost-total"
+                    title={(cost.kind === 'exact' || cost.kind === 'floor') && cost.estimated
+                      ? `${t('auditTimeline.cost.totalTitle')} ${t('auditTimeline.cost.estimatedTitle')}`
+                      : t('auditTimeline.cost.totalTitle')}>
+                    {cost.kind === 'exact'
+                      ? t(cost.estimated ? 'auditTimeline.cost.totalEstimated' : 'auditTimeline.cost.total', formatUsd(cost.usdMicros, locale))
+                      : cost.kind === 'floor'
+                        ? t(cost.estimated ? 'auditTimeline.cost.totalEstimatedFloor' : 'auditTimeline.cost.totalFloor', formatUsd(cost.usdMicros, locale), cost.unknownSteps)
                         : t('auditTimeline.cost.totalUnknown')}
                   </p>
                 )}
@@ -414,12 +450,12 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 {props.liveElapsed && <span className="audit-tl-muted">{props.liveElapsed}</span>}
                 {props.liveTool && (
                   <span className="audit-tl-muted">
-                    {t('audit.currentTool', props.liveTool)}
+                    {t('audit.currentTool', activityCategoryLabel(t, props.liveTool))}
                     {props.liveToolCalls != null && props.liveToolCalls > 0 && ` (${props.liveToolCalls})`}
                   </span>
                 )}
                 {props.liveTotalTokens != null && props.liveTotalTokens > 0 && (
-                  <span className="audit-tl-muted">{t('audit.totalTokens', formatTokens(props.liveTotalTokens, locale))}</span>
+                  <span className="audit-tl-muted" title={t('auditTimeline.tokens.freshTitle')}>{t('audit.totalTokens', formatTokens(props.liveTotalTokens, locale))}</span>
                 )}
                 <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onCancel}>
                   <StopCircle size={12} /> {t('audit.cancelAudit')}
@@ -467,6 +503,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
                             {r.descriptionKey && (
                               <span className="audit-tl-step-desc">{t(r.descriptionKey)}</span>
                             )}
+                            {r.status === 'running' && (
+                              <AuditStepActivity projectId={projectId} recent={props.liveActivity ?? null} />
+                            )}
                             {r.row?.step_warning ? (
                               <span className={`audit-tl-reason is-${r.status}`} title={r.row.step_warning}>
                                 {stepReason(r.row.step_warning, t)}
@@ -502,16 +541,15 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                 );
                               }
                               if (tokens == null || (r.status === 'running' && tokens <= 0)) return null;
-                              const part = (v?: number | null) => (v == null ? '—' : v.toLocaleString(locale));
+                              const breakdown = r.status === 'running' ? props.liveStepBreakdown : r.row?.breakdown;
                               return (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-tokens-${r.index}`}
-                                  title={r.status === 'running' ? undefined : [
-                                    t('auditTimeline.tokens.detail',
-                                      part(r.row?.input_tokens), part(r.row?.output_tokens), part(r.row?.cache_read_tokens)),
-                                    r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
-                                  ].filter(Boolean).join(' · ')}
+                                  title={[
+                                    tokenBreakdownTitle(breakdown, t, locale),
+                                    r.status !== 'running' && r.row?.carried_from_run_id ? t('auditTimeline.tokens.carried', r.row.carried_from_run_id.slice(0, 8)) : '',
+                                  ].filter(Boolean).join(' · ') || undefined}
                                 >
                                   {t('auditTimeline.tokens.short', formatTokens(tokens, locale))}
                                 </span>
@@ -523,11 +561,21 @@ export function AuditTimeline(props: AuditTimelineProps) {
                                 <span className="audit-tl-mono audit-tl-muted" data-testid={`audit-timeline-step-cost-${r.index}`}>
                                   {t('auditTimeline.cost.short', formatUsd(r.row.cost_usd_micros, locale))}
                                 </span>
+                              ) : typeof r.row.estimated_cost_usd_micros === 'number' ? (
+                                <span
+                                  className="audit-tl-mono audit-tl-muted"
+                                  data-testid={`audit-timeline-step-cost-${r.index}`}
+                                  title={t('auditTimeline.cost.estimatedTitle')}
+                                >
+                                  {t('auditTimeline.cost.estimated', formatUsd(r.row.estimated_cost_usd_micros, locale))}
+                                </span>
                               ) : (
                                 <span
                                   className="audit-tl-mono audit-tl-muted"
                                   data-testid={`audit-timeline-step-cost-${r.index}`}
-                                  title={t('auditTimeline.cost.unknownTitle')}
+                                  title={[t('auditTimeline.cost.unknownTitle'),
+                                    r.row.cost_unknown_reason ? t('auditTimeline.cost.unknownReason', localizedCostReason(r.row.cost_unknown_reason, t)) : '',
+                                  ].filter(Boolean).join(' ')}
                                 >
                                   {t('auditTimeline.cost.unknown')}
                                 </span>
@@ -576,7 +624,30 @@ export function AuditTimeline(props: AuditTimelineProps) {
             {audited && tdTotal > 0 && (
               <p className="audit-tl-muted" data-testid="audit-timeline-td-count">{t('auditTimeline.validation.tdCount', tdTotal)}</p>
             )}
-            {audited && !validated && (
+            {auditStatus === 'Audited' && linkedValidation?.finished ? (
+              // The finished discussion is auto-archived: validate from here, never start a new one.
+              <div className="audit-tl-validation-actions" data-testid="audit-timeline-validation-finished">
+                <p className="audit-tl-muted">{t('auditTimeline.validation.finished')}</p>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  disabled={marking}
+                  onClick={() => {
+                    setMarking(true);
+                    void props.onMarkValid().finally(() => setMarking(false));
+                  }}
+                >
+                  {marking ? <Loader2 size={12} className="spin" /> : <ShieldCheck size={12} />} {t('audit.validate')}
+                </button>
+                <button
+                  type="button"
+                  className="audit-tl-btn audit-tl-btn-small"
+                  onClick={() => props.onOpenValidation(linkedValidation.discussion_id)}
+                >
+                  <FileText size={12} /> {t('auditTimeline.validation.viewDiscussion')}
+                </button>
+              </div>
+            ) : audited && !validated && (
               <button type="button" className="audit-tl-btn audit-tl-btn-small" onClick={props.onValidate}>
                 <ShieldCheck size={12} /> {props.validationInProgress ? t('audit.resumeValidation') : t('audit.validate')}
               </button>

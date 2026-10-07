@@ -23,6 +23,10 @@ describe('i18n', () => {
       expect(t(locale, 'pages.open', 'Report')).toContain('Report');
     });
 
+    it('keeps dollar sequences in an argument literal', () => {
+      expect(t('en', 'auditTimeline.cost.unknownReason', "a $& b $' c $` d $$")).toContain("a $& b $' c $` d $$");
+    });
+
     it('returns French translation by default', () => {
       expect(t('fr', 'nav.projects')).toBe('Projets');
     });

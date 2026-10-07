@@ -263,6 +263,68 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    /// GET /api/runs and /api/runs/{id}: a projection an older build stored
+    /// with a step's tool name and target serves neither.
+    #[tokio::test]
+    async fn the_run_routes_never_serve_a_legacy_activitys_name_or_target() {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory db"));
+        let config = Arc::new(RwLock::new(crate::core::config::default_config()));
+        let state = AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS);
+        state
+            .db
+            .with_conn(|conn| {
+                let now = Utc::now();
+                crate::db::shared_runs::upsert(
+                    conn,
+                    &SharedRun {
+                        exec_details: None,
+                        id: "legacy".into(),
+                        kind: crate::models::SharedRunKind::Workflow,
+                        source_id: "wf".into(),
+                        project_id: None,
+                        discussion_id: None,
+                        status: crate::models::SharedRunStatus::Failed,
+                        started_at: Some(now),
+                        finished_at: Some(now),
+                        duration_ms: Some(1),
+                        result: Some(serde_json::json!({"steps": [{
+                            "step_name": "build", "status": "Running", "output": "",
+                            "duration_ms": 0,
+                            "last_activity": {"tool": "hunter2-tool",
+                                "target": "cat hunter2-target",
+                                "at": "2026-10-01T00:00:00Z", "calls": 2}
+                        }]})),
+                        diagnostic: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        let one = get(State(state.clone()), Path("legacy".into())).await.0;
+        let all = list(
+            State(state.clone()),
+            Query(ListRunsQuery {
+                kind: None,
+                source_id: None,
+                project_id: None,
+                discussion_id: None,
+                limit: 20,
+                offset: 0,
+            }),
+        )
+        .await
+        .0;
+        for served in [
+            serde_json::to_string(&one).unwrap(),
+            serde_json::to_string(&all).unwrap(),
+        ] {
+            assert!(served.contains("\"calls\":2"), "{served}");
+            assert!(!served.contains("hunter2"), "{served}");
+        }
+    }
+
     #[tokio::test]
     async fn completing_a_media_job_tells_the_open_discussion_its_files_changed() {
         let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory db"));

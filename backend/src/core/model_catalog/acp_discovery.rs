@@ -35,15 +35,25 @@ pub async fn discover_in(agent_type: &AgentType, dir: &Path) -> DiscoveryOutcome
     let Some(acp_agent_id) = acp_agent(agent_type) else {
         return DiscoveryOutcome::Unsupported;
     };
+    // A native runtime is started only with its full-access setting on, even
+    // to list its models: it loads the directory's plugins and tools at once.
+    if crate::agents::runner::requires_explicit_full_access(agent_type)
+        && !crate::core::config::saved_full_access(agent_type)
+    {
+        return DiscoveryOutcome::ProviderError(
+            crate::agents::runner::native_full_access_refusal_in(agent_type, "en"),
+        );
+    }
     let cwd = dir.to_string_lossy().into_owned();
 
     let scope = AcpSessionScope::new(None, "model-catalog-discovery");
     let transport = match AcpJsonRpcTransport::spawn_native(
         acp_agent_id,
         &cwd,
-        false,
+        true,
         Default::default(),
         scope,
+        Vec::new(),
     )
     .await
     {

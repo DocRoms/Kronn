@@ -2,6 +2,7 @@ import '../pages/Dashboard.css';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { planning, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { userError } from '../lib/userError';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
 import { canRunAudit } from '../lib/agentCapabilities';
@@ -15,7 +16,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse } from '../types/generated';
+import type { Project, AgentDetection, AgentType, ModelTier, ModelTiersConfig, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, AuditEvidenceResponse, ContextAuditResponse, AuditRecentActivity, AuditTokenBreakdown } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -432,6 +433,9 @@ export function ProjectCard({
   // sees forward motion even when the agent goes through a long
   // tool-only phase without `Usage` events to refresh tokens.
   const [auditToolCallCount, setAuditToolCallCount] = useState<number | null>(null);
+  // The running step's latest actions, for the timeline's details panel.
+  const [auditRecent, setAuditRecent] = useState<AuditRecentActivity | null>(null);
+  const [auditStepBreakdown, setAuditStepBreakdown] = useState<AuditTokenBreakdown | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
@@ -749,6 +753,8 @@ export function ProjectCard({
     setAuditTotalTokens(null);
     setAuditCurrentTool(null);
     setAuditToolCallCount(null);
+    setAuditRecent(null);
+    setAuditStepBreakdown(null);
     // Seed the resume checkpoint immediately so a tab-away during phase 1
     // (template install) still leaves a breadcrumb to poll against.
     const startedAt = new Date().toISOString();
@@ -806,14 +812,17 @@ export function ProjectCard({
           setAuditCurrentTool(null);
           // 0.8.4 (#319 / B3) — reset the per-step tool-call counter.
           setAuditToolCallCount(null);
+          setAuditRecent(null);
+          setAuditStepBreakdown(null);
         },
         // 0.8.3 (#281) — live token tick during a step. Backend
         // emits this every time it sees a `Usage` event in the
         // stream-json. Updates the same chip as `onStepDone` so
         // the counter ticks DURING the step instead of jumping at
         // the end.
-        onStepProgress: (_step, stepTokens, totalTokensSoFar) => {
+        onStepProgress: (_step, stepTokens, totalTokensSoFar, breakdown) => {
           setAuditLastStepTokens(stepTokens);
+          setAuditStepBreakdown(breakdown ?? null);
           if (totalTokensSoFar > 0) setAuditTotalTokens(totalTokensSoFar);
         },
         // 0.8.3 (#281) — name of the tool the agent just started
@@ -832,6 +841,7 @@ export function ProjectCard({
           // forward motion in a tool-only phase).
           setAuditToolCallCount(prev => (prev ?? 0) + 1);
         },
+        onActivity: (_step, recent) => setAuditRecent(recent),
         // 0.8.3 root-cause fix — the CLI exited 0, but validation
         // FAILED the step (target_file empty / truncated: agent crashed
         // mid-Write, or the sandbox blocked the write without the CLI
@@ -932,7 +942,8 @@ export function ProjectCard({
           });
         },
         onChunk: () => {},
-        onStepDone: () => {},
+        onStepDone: () => { setAuditRecent(null); setAuditStepBreakdown(null); },
+        onActivity: (_step, recent) => setAuditRecent(recent),
         // NON-terminal: the step closes with its own step_done and the loop
         // continues — the `done interrupted` toast owns the terminal UX.
         onStepError: (error) => { console.warn('Partial audit step failed:', error); },
@@ -1084,6 +1095,8 @@ export function ProjectCard({
           // count; the frontend just mirrors it.
           if (typeof p.current_tool_call_count === 'number') setAuditToolCallCount(p.current_tool_call_count);
           else if (p.current_tool_call_count === null) setAuditToolCallCount(null);
+          setAuditRecent(p.recent_activity ?? null);
+          setAuditStepBreakdown(p.step_breakdown ?? null);
         } else {
           // Server reports nothing → either the audit wrapped up while we
           // were away, the checkpoint is orphaned (server restart, etc.),
@@ -1107,6 +1120,8 @@ export function ProjectCard({
           setAuditTotalTokens(null);
           setAuditCurrentTool(null);
           setAuditToolCallCount(null);
+          setAuditRecent(null);
+          setAuditStepBreakdown(null);
           if (wasActive) setAuditCompletedTick((t) => t + 1);
           if (auditPollRef.current) {
             clearInterval(auditPollRef.current);
@@ -2396,7 +2411,9 @@ export function ProjectCard({
                     liveStartedAt={auditStartedAt}
                     liveAuditor={auditAuditor}
                     liveToolCalls={auditToolCallCount ?? null}
+                    liveActivity={auditRecent}
                     liveStepTokens={auditLastStepTokens}
+                    liveStepBreakdown={auditStepBreakdown}
                     liveTotalTokens={auditTotalTokens}
                     onResumeBriefingDiscussion={briefingDisc && !briefingDone
                       ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }
@@ -2417,6 +2434,24 @@ export function ProjectCard({
                         prompt: t('audit.validationPrompt'),
                         locked: true,
                       });
+                      onNavigate('discussions');
+                    }}
+                    onMarkValid={async () => {
+                      try {
+                        await projectsApi.validateAudit(proj.id);
+                        await Promise.all([
+                          Promise.resolve(onRefetch()),
+                          Promise.resolve(onRefetchDiscussions()),
+                        ]);
+                        setAuditCompletedTick(n => n + 1);
+                        toast(t('audit.done'), 'success');
+                        if (detailMode) selectDetailView('audit');
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
+                    onOpenValidation={(discussionId) => {
+                      onOpenDiscussion(discussionId);
                       onNavigate('discussions');
                     }}
                     onViewTechDebts={() => {

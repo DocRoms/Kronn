@@ -17,6 +17,22 @@ use crate::core::{kronn_state, scanner};
 use crate::models::*;
 use crate::AppState;
 
+/// Whether a validation discussion's last Agent message ends on the terminal
+/// signal: the gate below and the audit timeline must agree on "finished".
+pub(crate) fn validation_discussion_finished(discussion: &Discussion) -> bool {
+    discussion
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, MessageRole::Agent))
+        .is_some_and(|message| {
+            crate::api::discussions::ends_with_terminal_signal(
+                &message.content,
+                "KRONN:VALIDATION_COMPLETE",
+            )
+        })
+}
+
 /// POST /api/projects/:id/validate-audit
 /// Records `validated_at` in `docs/.kronn.json` and refreshes the project's audit status.
 pub async fn validate_audit(
@@ -83,19 +99,7 @@ pub async fn validate_audit(
                 Some(disc_id) => crate::db::discussions::get_discussion(conn, &disc_id)?,
                 None => None,
             };
-            let linked_is_finished = disc.as_ref().is_some_and(|discussion| {
-                discussion
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|message| matches!(message.role, crate::models::MessageRole::Agent))
-                    .is_some_and(|message| {
-                        crate::api::discussions::ends_with_terminal_signal(
-                            &message.content,
-                            "KRONN:VALIDATION_COMPLETE",
-                        )
-                    })
-            });
+            let linked_is_finished = disc.as_ref().is_some_and(validation_discussion_finished);
             if disc.as_ref().is_some_and(|discussion| discussion.archived) && !linked_is_finished {
                 let mut statement = conn.prepare(
                     "SELECT id FROM discussions
@@ -112,18 +116,7 @@ pub async fn validate_audit(
                     else {
                         continue;
                     };
-                    let finished = candidate
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|message| matches!(message.role, crate::models::MessageRole::Agent))
-                        .is_some_and(|message| {
-                            crate::api::discussions::ends_with_terminal_signal(
-                                &message.content,
-                                "KRONN:VALIDATION_COMPLETE",
-                            )
-                        });
-                    if finished {
+                    if validation_discussion_finished(&candidate) {
                         if let Some(run) = latest.as_ref() {
                             crate::db::audit_runs::set_validation_discussion(
                                 conn,
@@ -163,19 +156,7 @@ pub async fn validate_audit(
                     "The linked validation discussion belongs to another project — refusing.",
                 ));
             }
-            let finished = disc
-                .messages
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, crate::models::MessageRole::Agent))
-                .map(|m| {
-                    crate::api::discussions::ends_with_terminal_signal(
-                        &m.content,
-                        "KRONN:VALIDATION_COMPLETE",
-                    )
-                })
-                .unwrap_or(false);
-            if !finished {
+            if !validation_discussion_finished(&disc) {
                 return Json(ApiResponse::err(
                     "The validation discussion has not finished — the agent must end on KRONN:VALIDATION_COMPLETE before the project can be marked validated.",
                 ));
@@ -643,6 +624,77 @@ mod validate_gate_tests {
             .await
             .unwrap();
         assert_eq!(linked.as_deref(), Some("d-resumed"));
+    }
+
+    async fn timeline_validation(
+        state: &AppState,
+    ) -> Option<crate::api::audit::run::AuditTimelineValidation> {
+        crate::api::audit::run::audit_timeline(State(state.clone()), AxPath("p1".to_string()))
+            .await
+            .0
+            .data
+            .expect("timeline")
+            .latest_validation
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archived_finished_validation_is_reported_by_the_timeline_and_validates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Fin.\nKRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute("UPDATE discussions SET archived=1 WHERE id='d1'", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let reported = timeline_validation(&state)
+            .await
+            .expect("linked validation");
+        assert_eq!(reported.discussion_id, "d1");
+        assert!(reported.finished && reported.archived);
+        let response = call(&state).await;
+        assert!(response.success, "{:?}", response.error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeline_reports_an_unfinished_validation_and_none_for_an_interrupted_run() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE puis la suite"),
+        )
+        .await;
+        let reported = timeline_validation(&state)
+            .await
+            .expect("linked validation");
+        assert!(!reported.finished && !reported.archived);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = test_state();
+        seed(
+            &state,
+            tmp.path(),
+            "Interrupted",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        assert!(timeline_validation(&state).await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

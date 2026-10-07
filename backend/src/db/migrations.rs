@@ -849,6 +849,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "219_quick_exec_agent_written",
         include_str!("sql/219_quick_exec_agent_written.sql"),
     ),
+    (
+        "220_audit_step_token_accounting",
+        include_str!("sql/220_audit_step_token_accounting.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

@@ -240,6 +240,9 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
+    // wiremock pools servers: a dropped one comes back under the same URI, where
+    // the first pass's validation discussion would still reach it.
+    let mut servers = Vec::new();
     for reference in ["code.rs:1", "invented.rs:1"] {
         let correct = reference == "code.rs:1";
         use sha2::{Digest, Sha256};
@@ -382,6 +385,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         assert!(requests.lock().unwrap()[0]
             .to_string()
             .contains("targeted correction required"));
+        servers.push(server);
     }
 }
 
@@ -1560,12 +1564,9 @@ async fn minutes_of_tool_turns_without_text_move_the_counters_at_each_tick() {
             assert_eq!(watch.tool_moved(), None, "turn {turn}: nothing happened");
             assert_eq!(watch.tokens_moved(), None, "turn {turn}: nothing happened");
         }
-        http.record_turn(90, 10, Some(&format!("read_file · src/é{turn}.rs")));
+        http.record_turn(90, 10, Some("read_file"));
         tick.tick().await;
-        assert_eq!(
-            watch.tool_moved(),
-            Some((format!("read_file · src/é{turn}.rs"), turn as u32))
-        );
+        assert_eq!(watch.tool_moved(), Some(("Read".to_string(), turn as u32)));
         let tokens = watch.tokens_moved().expect("the turn's usage shows");
         assert_eq!(tokens.total(), Some(100 * turn));
     }
@@ -1584,10 +1585,135 @@ fn the_activity_probe_reads_the_acp_sink_when_the_http_run_is_silent() {
     let http = runner::ToolActivityProbe::scripted();
     let probe = AuditActivityProbe::new(http.clone(), Some(rx));
     assert_eq!(probe.tool(), None);
-    crate::agents::activity::tool_started(Some(&sink), "Bash");
-    crate::agents::activity::tool_started(Some(&sink), "Read");
-    crate::agents::activity::tool_target(Some(&sink), "docs/é.md".into());
-    assert_eq!(probe.tool(), Some(("Read · docs/é.md".to_string(), 2)));
+    crate::agents::activity::tool_started(Some(&sink), crate::models::ActivityCategory::Execute);
+    crate::agents::activity::tool_started(Some(&sink), crate::models::ActivityCategory::Read);
+    assert_eq!(probe.tool(), Some(("Read".to_string(), 2)));
     http.record_turn(1, 1, Some("write_file"));
-    assert_eq!(probe.tool(), Some(("write_file".to_string(), 1)));
+    assert_eq!(probe.tool(), Some(("Edit".to_string(), 1)));
+}
+
+fn stream_line(event: serde_json::Value) -> runner::StreamJsonEvent {
+    runner::parse_claude_stream_line(
+        &serde_json::json!({ "type": "stream_event", "event": event }).to_string(),
+    )
+}
+
+/// A CLI's stream-json feeds the details panel and the chip by category only:
+/// a tool's name, its input and the prose never reach them.
+#[test]
+fn a_cli_stream_feeds_the_recent_actions_by_category_only() {
+    use crate::agents::activity::tests::SENTINEL;
+    let mut feed = StepRecentFeed::new(None);
+    assert_eq!(
+        feed.moved(),
+        None,
+        "nothing to show before the first action"
+    );
+    let tool = |feed: &mut StepRecentFeed, name: &str, input: serde_json::Value| {
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_start", "content_block": { "type": "tool_use", "name": name }
+        })));
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_delta", "delta": { "type": "input_json_delta", "partial_json": input.to_string() }
+        })));
+        feed.on_stream_event(&stream_line(
+            serde_json::json!({ "type": "content_block_stop" }),
+        ));
+    };
+    feed.on_stream_event(&stream_line(serde_json::json!({
+        "type": "content_block_delta", "delta": { "type": "text_delta", "text": SENTINEL }
+    })));
+    tool(
+        &mut feed,
+        "Read",
+        serde_json::json!({ "file_path": SENTINEL }),
+    );
+    tool(
+        &mut feed,
+        "Grep",
+        serde_json::json!({ "pattern": SENTINEL, "path": SENTINEL }),
+    );
+    tool(
+        &mut feed,
+        "Bash",
+        serde_json::json!({ "command": format!("mysql -p{SENTINEL}") }),
+    );
+    tool(&mut feed, SENTINEL, serde_json::json!({}));
+    tool(
+        &mut feed,
+        &format!("mcp__{SENTINEL}__x"),
+        serde_json::json!({}),
+    );
+
+    // The drift pipeline's chip reads the category each start returns.
+    assert_eq!(
+        feed.on_stream_event(&stream_line(serde_json::json!({
+            "type": "content_block_start", "content_block": { "type": "tool_use", "name": "Bash" }
+        }))),
+        Some(crate::models::ActivityCategory::Execute)
+    );
+    assert_eq!(
+        feed.on_stream_event(&stream_line(
+            serde_json::json!({ "type": "content_block_stop" })
+        )),
+        None
+    );
+    let shown = feed.moved().expect("the actions show");
+    let categories: Vec<_> = shown.entries.iter().map(|e| e.category).collect();
+    use crate::models::ActivityCategory::*;
+    assert_eq!(categories, [Execute, Mcp, Other, Execute, Search, Read]);
+    let all = serde_json::to_string(&shown).unwrap();
+    assert!(
+        !all.contains("hunter2") && !all.contains("SENTINEL"),
+        "{all}"
+    );
+    assert_eq!(feed.moved(), None, "unchanged, nothing new to send");
+}
+
+/// An HTTP agent's run feeds the same panel and its chip label through its
+/// probe, recorded the way its tool loop records each call.
+#[test]
+fn an_http_run_feeds_the_recent_actions_and_its_label_by_category_only() {
+    use crate::agents::activity::tests::SENTINEL;
+    let http = runner::ToolActivityProbe::scripted();
+    let mut feed = StepRecentFeed::new(Some(http.clone()));
+    assert_eq!(feed.moved(), None);
+    for turn in 0..20 {
+        http.record_http_call(&ToolCall {
+            id: format!("c{turn}"),
+            name: "read_file".into(),
+            arguments: json!({ "path": SENTINEL }),
+        });
+    }
+    http.record_http_call(&ToolCall {
+        id: "x".into(),
+        name: SENTINEL.into(),
+        arguments: json!({ "command": SENTINEL }),
+    });
+    let shown = feed.moved().expect("the run's calls show");
+    assert_eq!(
+        shown.entries.len(),
+        crate::agents::activity::RECENT_MAX_ENTRIES
+    );
+    assert_eq!(
+        shown.entries[0].category,
+        crate::models::ActivityCategory::Other
+    );
+    assert_eq!(
+        shown.entries[1].category,
+        crate::models::ActivityCategory::Read
+    );
+    assert_eq!(
+        http.read(),
+        Some((crate::models::ActivityCategory::Other, 21))
+    );
+    let all = format!(
+        "{} {:?}",
+        serde_json::to_string(&shown).unwrap(),
+        http.read()
+    );
+    assert!(
+        !all.contains("hunter2") && !all.contains("SENTINEL"),
+        "{all}"
+    );
 }

@@ -116,6 +116,9 @@ discussion (or one task execution, or one workflow run) and to its project.
   when the discussion or run is deleted. A subprocess that outlives its launch
   holds a dead token. Tests cover cross-room and cross-project refusals for
   path and body ids.
+- A body-less GET labelled `application/json` (the bridge labels every
+  request) is read as having no body; any other labelled body that is not
+  JSON is refused.
 - The agent can read this token. Its scope is by design what the agent may do
   through room tools.
 
@@ -226,6 +229,23 @@ Security only helps if the user can see it:
 - Locked secrets (4.3) and reconfiguration mode are shown on each affected
   item, with the action that unlocks it.
 - The GitHub connection shows its real scope or "scope not verified" (4.5).
+
+### 4.8 Agent text and activity: the project is the boundary (0.14.3)
+
+- **Activity views show categories only.** The audit Details list, the live
+  tool chip, the audit stream's `tool_call` and `activity` events, an HTTP
+  agent's label and a workflow step's live activity carry a fixed
+  `ActivityCategory`, a count and a time. A tool's name, arguments, targets
+  and runtime titles never reach them. Logs and traces of a tool call the model
+  made up name its category, not the name it chose.
+- **Agent text and tool metadata stay visible inside their project, by
+  design.** Transcripts, the audit stream's `chunk` events and the tool
+  records of workflow runs are readable by the project's humans and by agents
+  holding a bridge token for that project, as in rooms. Whatever an agent
+  writes there, including a secret it read, is visible to them.
+- **Cross-project access is refused.** A bridge token is scoped to its project.
+- **Planned for 0.15:** filtering agent text toward other agents of the same
+  project.
 
 ### Layer C — storage consolidation (KT-1007) — implemented in 0.14.3
 
@@ -438,6 +458,33 @@ routes); workspace hooks and Kronn's internal Quick Exec callers (task
 validations, probes) carry no project and get none.
 Native ACP agents now receive their configured key and their room and workflow
 contexts (KT-1013).
+
+*Native ACP runtimes run only with full access (0.14.3).* OpenCode, Vibe,
+GitHub Copilot, Gemini CLI and Kiro load repository code before any permission
+check: OpenCode project plugins and LSP commands, Vibe project tools imported at
+load, Copilot hooks and workspace MCP servers, every runtime's MCP servers at
+initialisation. A per-tool broker or a Kronn-owned config cannot stop that, so
+no restricted mode is offered: `runner::start_agent_with_config`, through which
+every route launches (discussions, rooms, workflow steps, Quick Prompts,
+summaries, audits, resume), refuses such a launch unless the agent's own
+`[agents.<agent>] full_access` setting, read from the saved configuration at
+that moment for the agent actually launched, is on, before anything is spawned
+(the runner then launches with full access, whatever the route passed);
+`AcpJsonRpcTransport::spawn_native` refuses unless both its caller's value and
+the saved setting are on; model discovery and Copilot's account preflight read
+the setting before starting the CLI, and the worker catalogue starts no Copilot
+probe at all. Version detection (`<cli> --version`) runs no prompt. No boolean a route passes counts
+for these agents: not an audit's hard-coded full access, not a value cached at
+the start of a run, not a workflow reviewer's author's; a workflow reviewer
+otherwise runs with its own agent's setting. Kronn never writes the
+setting. The ACP broker still answers their permission requests (full access:
+everything inside the project scope, never a real secret file); it trusts
+`rawInput` identities only on opt-in, which no runtime gets, and only the exact
+bridge id the runtime registered. Copilot receives the bridge through
+`--additional-mcp-config` under a per-launch name with `kronn-internal`
+disabled; a project server named `kronn-internal*` is dropped. Known
+limitation: these agents are unavailable for restricted work; the 0.15 plan is
+a per-launch isolated runner (own mounts, credentials and network).
 
 *Spawn inventory.* The compiler enforces it. `core::cmd::{async_cmd,sync_cmd}`
 take a `ChildRoute` and build the environment before returning the command

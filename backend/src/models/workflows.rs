@@ -1638,15 +1638,48 @@ impl WorkflowAgentProvenance {
     }
 }
 
-/// The latest tool call an agent started, as its runtime reported it.
+/// What kind of action an agent's tool call is, from a fixed table
+/// (`agents::activity::category_of`). The only description of a call that
+/// leaves the agent's run: its name, arguments and targets never do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum ActivityCategory {
+    Read,
+    Search,
+    Edit,
+    Execute,
+    Web,
+    Mcp,
+    Kronn,
+    Think,
+    #[default]
+    Other,
+}
+
+impl ActivityCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "Read",
+            Self::Search => "Search",
+            Self::Edit => "Edit",
+            Self::Execute => "Execute",
+            Self::Web => "Web",
+            Self::Mcp => "Mcp",
+            Self::Kronn => "Kronn",
+            Self::Think => "Think",
+            Self::Other => "Other",
+        }
+    }
+}
+
+/// The latest tool call an agent started: its category and the count. A row
+/// stored before 0.14.3 also held the tool's name and target; they are not
+/// read back, so they are never served again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentActivity {
-    pub tool: String,
-    /// The call's most informative input (file, command, pattern or URL),
-    /// truncated. `None` until the input is complete or when it has none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    #[serde(default)]
+    pub category: ActivityCategory,
     pub at: DateTime<Utc>,
     /// Tool calls the launch has started so far, this one included.
     #[serde(default)]

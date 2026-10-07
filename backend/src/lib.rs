@@ -236,6 +236,8 @@ impl AuditTracker {
                 agent: None,
                 tier: None,
                 connection_id: None,
+                recent_activity: None,
+                step_breakdown: None,
             },
         );
     }
@@ -285,12 +287,35 @@ impl AuditTracker {
         }
     }
 
+    /// The running step's headline parts, read by a client polling the progress.
+    pub fn set_step_breakdown(
+        &mut self,
+        project_id: &str,
+        breakdown: crate::models::AuditTokenBreakdown,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.step_breakdown = Some(breakdown);
+        }
+    }
+
     /// An HTTP agent's tool activity: it reports its last tool and running
     /// count rather than one event per call, so both are set, not bumped.
     pub fn set_tool_activity(&mut self, project_id: &str, tool: String, calls: u32) {
         if let Some(entry) = self.progress.get_mut(project_id) {
             entry.current_tool = Some(tool);
             entry.current_tool_call_count = Some(calls);
+        }
+    }
+
+    /// The running step's latest actions, replaced whole: the step's feed owns
+    /// the bounds and the sanitizing.
+    pub fn set_recent_activity(
+        &mut self,
+        project_id: &str,
+        recent: crate::models::AuditRecentActivity,
+    ) {
+        if let Some(entry) = self.progress.get_mut(project_id) {
+            entry.recent_activity = Some(recent);
         }
     }
 
@@ -304,6 +329,8 @@ impl AuditTracker {
             // not cumulative across the audit. Reset on every
             // `step_start` so chip reads `🔧 Tool (1)` then `(2)` etc.
             entry.current_tool_call_count = None;
+            entry.recent_activity = None;
+            entry.step_breakdown = None;
         }
     }
 
@@ -857,10 +884,15 @@ async fn bridge_gate(
                 "bridge request body too large",
             );
         };
-        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body");
-        };
-        (axum::body::Body::from(bytes), Some(json))
+        // The bridge labels every request JSON, a body-less GET included.
+        if bytes.is_empty() && method == "GET" {
+            (axum::body::Body::from(bytes), None)
+        } else {
+            let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return bridge_refusal(StatusCode::BAD_REQUEST, "invalid JSON body");
+            };
+            (axum::body::Body::from(bytes), Some(json))
+        }
     } else if multipart_upload || method == "GET" {
         (body, None)
     } else {

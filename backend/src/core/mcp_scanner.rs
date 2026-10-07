@@ -2537,10 +2537,26 @@ pub fn sync_affected_projects(conn: &rusqlite::Connection, project_ids: &[String
     // Iterate through every registered HostMcpSync impl. Adding a 5th
     // CLI = one more entry in this slice; everything else (mtime guard,
     // workflow-run gate above, log shape) flows through `run_host_sync`.
+    if !host_mcp_sync_enabled(
+        crate::core::child_env::var("KRONN_HOST_MCP_SYNC")
+            .ok()
+            .as_deref(),
+    ) {
+        tracing::info!(
+            "MCP host sync disabled by KRONN_HOST_MCP_SYNC; host CLI configs left untouched"
+        );
+        return;
+    }
     let registry: &[&dyn HostMcpSync] = &[&CodexSync, &CopilotSync, &ClaudeSync, &GeminiSync];
     for sync in registry {
         run_host_sync(*sync, conn, secret);
     }
+}
+
+/// `KRONN_HOST_MCP_SYNC=0` (or `false`) keeps a second, isolated instance from
+/// repointing the host CLIs' global configs at its own bridge script.
+fn host_mcp_sync_enabled(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false"))
 }
 
 pub fn sync_project_with_report(conn: &rusqlite::Connection, project_id: &str, secret: &str) {
@@ -4486,6 +4502,16 @@ mod host_sync_tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
+    #[test]
+    fn host_mcp_sync_switch_only_disables_on_an_explicit_off_value() {
+        assert!(host_mcp_sync_enabled(None));
+        assert!(host_mcp_sync_enabled(Some("1")));
+        assert!(host_mcp_sync_enabled(Some("")));
+        assert!(host_mcp_sync_enabled(Some("no")));
+        assert!(!host_mcp_sync_enabled(Some("0")));
+        assert!(!host_mcp_sync_enabled(Some(" FALSE ")));
+    }
+
     /// Restores the test process environment even if an assertion panics.
     /// Callers are `#[serial]` because Rust process environments are global.
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -5563,6 +5589,40 @@ Always send emails from contact@example.com
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    #[serial]
+    fn host_mcp_sync_switch_leaves_every_host_cli_config_untouched() {
+        let _restore = EnvRestore::capture(&["KRONN_HOST_HOME", "KRONN_HOST_MCP_SYNC"]);
+        let root = tempfile::tempdir().unwrap();
+        crate::core::child_env::set_var("KRONN_HOST_HOME", root.path());
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let written = |root: &Path| {
+            [
+                ".copilot/mcp-config.json",
+                ".codex/config.toml",
+                ".claude.json",
+                ".gemini/settings.json",
+            ]
+            .into_iter()
+            .filter(|path| root.join(path).exists())
+            .collect::<Vec<_>>()
+        };
+
+        crate::core::child_env::set_var("KRONN_HOST_MCP_SYNC", "0");
+        sync_affected_projects(&conn, &[], "test-secret");
+        assert!(
+            written(root.path()).is_empty(),
+            "{:?}",
+            written(root.path())
+        );
+
+        // Control: without the switch the same call does write the bridge entry.
+        crate::core::child_env::remove_var("KRONN_HOST_MCP_SYNC");
+        sync_affected_projects(&conn, &[], "test-secret");
+        assert!(written(root.path()).contains(&".copilot/mcp-config.json"));
     }
 
     #[test]

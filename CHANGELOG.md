@@ -23,6 +23,21 @@ Release notes for 0.9.3 and earlier are available in the
   fine-grained token, or why it could not be verified) and recommends a
   fine-grained token when the gh token reaches every repository. Turning it
   off applies to new launches; agents already running keep what they received.
+- A running audit step now has a "Details" toggle listing the agent's latest
+  actions, newest first: each one only as a fixed category (read, search,
+  edit, command, web, MCP tool, Kronn, plan, other) with its age. Tool names,
+  paths, commands, URLs and titles are never shown or kept, whatever the agent
+  or runtime. The same categories replace the tool name and target in the live
+  tool chip, the audit stream's events, an HTTP agent's label and a workflow
+  step's live activity; an activity a workflow run stored before keeps its
+  count only when read, in workflow runs and their shared-run projections.
+  Agents' bridge tokens get the counts, not the list. Logs and traces of a
+  tool call the model made up name its category, never the name it chose. The
+  open state is remembered per project for the session. Known limitation: the
+  boundary is the project. Agent text and tool metadata in transcripts, audit
+  streams and run records stay visible to the project's humans and to agents
+  holding a bridge token for that project; filtering them toward other agents
+  of the same project is planned for 0.15.
 - The Agents page shows a one-time notice listing the agents that really run
   with full access, whether by setting or forced in Docker, with the risks and a
   link to the switches (KT-975).
@@ -190,6 +205,14 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A project whose validation discussion has finished no longer stays stuck at
+  Audited: that discussion archives itself on its last word, which hid the
+  "Mark audit valid" banner, while the audit timeline's "Validate the audit"
+  only opened a form to start a whole new validation. The timeline now reads
+  the latest run's linked validation (same terminal-signal check as the
+  validate gate), validates the audit directly with an error toast on refusal,
+  and opens the finished discussion even when archived. A new validation can
+  only be started while no finished one is linked.
 - A Kronn-launched agent's bridge token is checked against what each request
   really does: ids nested anywhere in a body or in an imported workflow, task
   references, offers, invites and sessions are resolved before the check;
@@ -240,6 +263,34 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
+- **Known limitation: OpenCode, Vibe, GitHub Copilot, Gemini CLI and Kiro run
+  only with full access.** These native ACP runtimes load repository plugins,
+  custom tools, hooks and MCP servers before any permission check, so no
+  restricted mode can be promised for them. Every launch (discussion, room,
+  workflow step, Quick Prompt, summary, audit, resume, model discovery)
+  requires the agent's own setting in Config › Agents › <agent> › Full access,
+  read from the saved configuration at each launch for the agent actually
+  started (a workflow reviewer does not inherit its author's access, and
+  turning the setting off stops the next spawn of a running audit or
+  workflow); without it Kronn refuses before starting anything, with a
+  translated message that names the setting, and never turns it on itself. The agent pickers say
+  "requires full access" beforehand. An audit's own full access no longer
+  counts for these agents. A per-launch isolated runner is the 0.15 plan.
+- Copilot receives Kronn's bridge through `--additional-mcp-config` under a
+  per-launch name, with `--disable-mcp-server kronn-internal`, so a workspace
+  `.mcp.json` server named `kronn-internal` is never loaded in its place; a
+  step's tool list reaches the bridge on every native runtime. A project server
+  named `kronn-internal*` is dropped, and only the exact bridge id the runtime
+  registered is trusted.
+- The ACP broker no longer takes a tool's identity from `rawInput`, which holds
+  the model's arguments on every native runtime.
+- A bridge-token request with no body labelled `application/json`, as the
+  bridge sends every GET, was refused with "invalid JSON body": every reading
+  tool (`disc_meta`…) failed under a bridge token.
+- `KRONN_HOST_MCP_SYNC=0` keeps a second Kronn instance (a test or an isolated
+  check) from rewriting the host CLIs' global MCP configs
+  (`~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json`,
+  `~/.gemini/settings.json`) to its own bridge path.
 - The other processes Kronn starts get a built environment too (KT-1006):
   dependency checks (`npm`, `cargo`, `go`, `bundle`, `dotnet`, `poetry`,
   `composer`, Renovate through `npx`, and Composer through Docker) keep only
@@ -482,10 +533,20 @@ Release notes for 0.9.3 and earlier are available in the
 - A resumed audit keeps the tokens, duration and cost of the steps it inherits
   and names the run that spent them, refuses to start when it cannot record
   them, and warns when the sources moved since the run it continues (KT-1021):
-  each audit run now records its commit, branch and source fingerprint. Token
-  figures count cached prompt tokens the same way for every agent, and the
+  each audit run now records its commit, branch and source fingerprint. The
   timeline shows a step whose agent reported nothing as unknown instead of
   hiding it.
+- An audit step's token figure is now its fresh traffic, uncached input plus
+  output, for the agents whose cache accounting Kronn's pricing knows (Claude,
+  Codex); for the others it stays input plus output as reported, and the hover
+  says the cache split is unknown. Hovering lists uncached input, output,
+  cache read, cache write and the total with cache. The live counter, the
+  run's total and the audit recap use the same figure; rows recorded before
+  this keep the figure they were stored with, without a breakdown. A step whose
+  agent reported no cost gets an estimate from Kronn's rate table for the model
+  its run served (shown "≈"), only where that split is known; otherwise the
+  reason is shown in the user's language. One estimated step makes the run's
+  total estimated.
 - Natively, a Claude discussion kept none of its project's MCP servers once
   one of them carried a credential in its environment (KT-1003): the whole
   `.mcp.json` was refused. Each authorized server now stays on its own. Its
@@ -734,6 +795,7 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- Settings: in every agent card (agents, Ollama, external APIs) each tier's model picker now spans the card's full width, one tier per line, and its list opens taller. Model names share long provider prefixes such as "OpenCode Zen/…" and were unreadable in the narrow control.
 - Agents no longer receive the machine's GitHub token by default (KT-1006, D2):
   `GH_TOKEN`, `GITHUB_TOKEN` and `COPILOT_GITHUB_TOKEN` reach Claude and Codex
   launches only for a connected project, and are removed from the inherited

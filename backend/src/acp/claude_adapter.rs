@@ -391,8 +391,7 @@ impl AcpTransport for ClaudeAcpAdapter {
 
         let mut lines = crate::agents::runner::lossy_lines(stdout);
         let mut failure: Option<String> = None;
-        // Input of the tool call in progress, streamed as partial JSON.
-        let mut tool_input: Option<String> = None;
+        let mut tool_calls: u64 = 0;
         let mut text_blocks = crate::agents::runner::TextBlockJoiner::default();
         loop {
             match lines.next_line().await {
@@ -439,22 +438,21 @@ impl AcpTransport for ClaudeAcpAdapter {
                             }
                         }
                         StreamJsonEvent::ToolStart(name) => {
-                            tool_input = Some(String::new());
+                            tool_calls += 1;
+                            let _ = events
+                                .send(AcpSessionEvent::ToolActivity(
+                                    crate::agents::activity::ToolActivityUpdate::named(
+                                        Some(tool_calls.to_string()),
+                                        &name,
+                                    ),
+                                ))
+                                .await;
                             let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
                         }
-                        StreamJsonEvent::ToolInputDelta(partial) => {
-                            if let Some(input) = tool_input.as_mut() {
-                                input.push_str(&partial);
-                            }
-                        }
+                        // A tool's input is never read: nothing of it is shown.
+                        StreamJsonEvent::ToolInputDelta(_) => {}
                         StreamJsonEvent::ToolEnd => {
                             text_blocks.block_ended();
-                            let target = tool_input.take().and_then(|input| {
-                                crate::agents::activity::tool_input_target(&input)
-                            });
-                            if let Some(target) = target {
-                                let _ = events.send(AcpSessionEvent::ToolTarget(target)).await;
-                            }
                         }
                         StreamJsonEvent::TerminalError(terminal_failure) => {
                             failure = Some(terminal_failure.user_message());
@@ -627,11 +625,18 @@ mod tests {
                     }
             })
             .expect("tool call reported");
-        let tool_target = events
-            .iter()
-            .position(|event| *event == AcpSessionEvent::ToolTarget("src/lib.rs".into()))
-            .expect("tool target reported");
-        assert!(tool_call < tool_target, "{events:?}");
+        // The call reaches the live views as its category only.
+        assert!(
+            events
+                .iter()
+                .skip(tool_call.saturating_sub(1))
+                .any(|event| matches!(
+                    event,
+                    AcpSessionEvent::ToolActivity(update)
+                        if update.category() == Some(crate::models::ActivityCategory::Read)
+                )),
+            "{events:?}"
+        );
         assert!(events.contains(&AcpSessionEvent::Usage {
             input_tokens: 48,
             output_tokens: 21_545,

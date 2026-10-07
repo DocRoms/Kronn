@@ -406,6 +406,26 @@ pub async fn orchestrate(
         )
     };
 
+    // A native participant without full access is refused before anything
+    // is written or spawned (the runner refuses it too).
+    if let Some(agent) = agents.iter().find(|agent| {
+        runner::requires_explicit_full_access(agent)
+            && !agent_access
+                .get(&format!("{agent:?}"))
+                .copied()
+                .unwrap_or(false)
+    }) {
+        let error = runner::native_full_access_refusal_in(agent, &disc_language);
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "error": error }).to_string()),
+            )
+        }));
+        return Sse::new(stream);
+    }
+
     // Resolve the exact connection-backed model for every participant before
     // any orchestration state is written or a process is spawned. The regular
     // discussion path performs this catalog gate in `make_agent_stream`; this
@@ -1332,7 +1352,7 @@ pub async fn generate_summary_on_demand(
             block_truncated
         ),
     };
-    let (model_tiers, http_endpoints, ollama_context_overrides, http_request_timeout) = {
+    let (model_tiers, http_endpoints, ollama_context_overrides, http_request_timeout, full_access) = {
         let cfg = state.config.read().await;
         (
             cfg.agents.model_tiers.clone(),
@@ -1343,6 +1363,9 @@ pub async fn generate_summary_on_demand(
             } else {
                 cfg.server.agent_global_timeout_min
             }),
+            // A native runtime needs its own full-access setting, like any
+            // other launch of the discussion's agent.
+            cfg.agents.full_access_for(&disc.agent),
         )
     };
     let (connection, model_override) = checked_launch_connection(
@@ -1368,6 +1391,7 @@ pub async fn generate_summary_on_demand(
         // Same boundary as automatic summarisation: the requested message
         // slice is already in the prompt, so tools add risk but no capability.
         tools: None,
+        full_access,
         ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
     })
     .await
