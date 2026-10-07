@@ -24,7 +24,7 @@ vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
 import { ProjectCard } from '../ProjectCard';
 import { projects as projectsApi } from '../../lib/api';
-import type { Project } from '../../types/generated';
+import type { MigrateDocsResponse, Project } from '../../types/generated';
 
 const noop = () => {};
 const toast = vi.fn();
@@ -91,7 +91,7 @@ describe('ProjectCard — docs migration banner', () => {
 
   it('calls migrateDocs with create_symlink=true by default and refetches on success', async () => {
     (projectsApi.migrateDocs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: 'Migrated',
+      status: 'migrated',
       files_moved: 7,
       refs_rewritten: 3,
       symlink_created: true,
@@ -108,7 +108,7 @@ describe('ProjectCard — docs migration banner', () => {
 
   it('passes create_symlink=false when the operator unchecks the opt-out', async () => {
     (projectsApi.migrateDocs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: 'Migrated',
+      status: 'migrated',
       files_moved: 4,
     });
     renderCard(legacyProject());
@@ -123,16 +123,13 @@ describe('ProjectCard — docs migration banner', () => {
     );
   });
 
-  it('renders the inline error when the backend returns Failed', async () => {
-    (projectsApi.migrateDocs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: 'Failed',
-      reason: 'docs/ exists with non-empty content — manual merge required',
-    });
+  it('shows the success toast for the status the backend sends', async () => {
+    // KT-1076 — the backend sends snake_case statuses; a mismatch hid the toast.
+    const response: MigrateDocsResponse = { status: 'migrated', files_moved: 2 };
+    (projectsApi.migrateDocs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(response);
     renderCard(legacyProject());
     fireEvent.click(screen.getByTestId('migrate-docs-btn-p-legacy'));
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/manual merge required/);
-    });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('migration.successToast 2', 'success'));
   });
 
   it('renders the inline error when the request itself throws', async () => {
@@ -146,7 +143,7 @@ describe('ProjectCard — docs migration banner', () => {
 
   it('refetches on AlreadyMigrated outcome (banner stale)', async () => {
     (projectsApi.migrateDocs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      status: 'AlreadyMigrated',
+      status: 'already_migrated',
     });
     const { onRefetch } = renderCard(legacyProject());
     fireEvent.click(screen.getByTestId('migrate-docs-btn-p-legacy'));
@@ -172,7 +169,7 @@ describe('ProjectCard — docs migration banner', () => {
 
       // Resolve the API → success row should appear, refetch is delayed.
       await vi.waitFor(() => expect(resolveMigrate).toBeDefined());
-      resolveMigrate({ status: 'Migrated', files_moved: 12 });
+      resolveMigrate({ status: 'migrated', files_moved: 12 });
       await vi.waitFor(() =>
         expect(screen.getByText(/migration.successInline 12/)).toBeInTheDocument()
       );
@@ -197,7 +194,7 @@ describe('ProjectCard — docs migration banner', () => {
     await waitFor(() => expect(btn).toBeDisabled());
     expect(screen.getByText('migration.ctaPending')).toBeInTheDocument();
 
-    resolveMigrate({ status: 'Migrated', files_moved: 1 });
+    resolveMigrate({ status: 'migrated', files_moved: 1 });
     await waitFor(() => expect(screen.getByText('migration.ctaDone')).toBeInTheDocument());
     expect(btn).toBeDisabled();
   });

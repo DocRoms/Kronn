@@ -69,6 +69,7 @@ pub mod resource_snapshot;
 pub mod resume_bundle;
 pub mod review_payload;
 pub mod root_agent_files;
+pub mod rooted_io;
 pub mod rtk_detect;
 pub mod rtk_state;
 pub mod run_eta;

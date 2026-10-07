@@ -218,16 +218,31 @@ Release notes for 0.9.3 and earlier are available in the
   - `make test-backend` runs the whole suite CI runs, integration tests
     included; `make test-backend-lib` keeps the quick library loop (KT-1054).
   - A sub-workflow child respects its own workflow's concurrency limit: a
-    refused child fails the step with the reason, a refused foreach item is
-    skipped and counted as failed (KT-1045).
+    refused single child fails the step with the reason; a foreach item waits
+    for a free slot and is skipped only shortly before the run's timeout (as
+    set when each run started), with a SKIPPED signal that the run keeps. A
+    resumed child keeps its concurrency key, and no child is started or
+    resumed once its parent's cancellation has settled or its run's timeout
+    has passed; every guard stop, and every cancellation, settles the run's
+    whole subtree of children (KT-1045).
   - Run retention and a bridge token's workflow list read indexes instead of
     whole tables (migrations 221 and 222, KT-1048, KT-1050).
   - A SubWorkflow foreach file must be a relative path inside the worktree:
-    absolute paths, `..` and symlinks leading out are refused on save and at
-    run time (KT-1038).
+    absolute paths, `..` and symlinks leading out are refused on save (editor,
+    bundle, restore) and at run time. Foreach reads and writes in the worktree
+    never follow a symlink or a hard link (best effort on Windows); a write
+    replaces the file through a synced temporary file, keeps its permission
+    bits (a new file follows the umask) and refuses sockets, FIFOs and
+    devices. Known residual, tracked in
+    KT-1055 for 0.15: a read can still be fooled by a process that mutates
+    the worktree while it runs (KT-1038).
   - The pre-migration backup now includes the writes still in the
-    write-ahead log; when another connection blocks that, the upgrade stops
-    and says why instead of saving a stale backup (KT-1049).
+    write-ahead log, checked on the WAL file SQLite itself uses (symlinked
+    databases included); when another connection blocks that, the upgrade
+    stops and says why instead of saving a stale backup (KT-1049).
+  - The desktop app refuses to serve an unauthenticated API on `::`, as it
+    already did on `0.0.0.0` (KT-1065).
+  - The docs-migration success toast shows again (KT-1076).
   - The CORS allowlist has router-level tests, with and without a domain
     (KT-1058).
   - `docs/stack.md`, `docs/repo-map.md` and `SECURITY.md` match the code

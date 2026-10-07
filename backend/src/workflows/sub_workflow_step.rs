@@ -50,6 +50,9 @@ pub struct ChildLaunch<'a> {
     pub ctx: &'a TemplateContext,
     pub parent_variables: &'a [PromptVariable],
     pub parent_project_id: Option<&'a str>,
+    /// The parent runner's own cancellation token. The registry entry is
+    /// removed before the token is cancelled, so it cannot be looked up.
+    pub cancel: Option<&'a tokio_util::sync::CancellationToken>,
 }
 
 /// A mapping may not read a parent variable resolved from the project
@@ -414,10 +417,16 @@ pub async fn execute_sub_workflow_step(
     // workflow's concurrency_limit fails the step instead of running twice.
     let to_insert = child_run.clone();
     let admission = child_wf.clone();
+    let enforced_deadline = budget.deadline().map(|(deadline, _)| deadline);
     match state
         .db
         .with_conn(move |c| {
-            crate::workflows::concurrency::insert_run_within_limit(c, &admission, &to_insert)
+            crate::workflows::concurrency::insert_child_within_limit(
+                c,
+                &admission,
+                &to_insert,
+                enforced_deadline,
+            )
         })
         .await
     {
@@ -559,21 +568,74 @@ pub(crate) fn validate_foreach_file(path: &str) -> Result<(), String> {
     })
 }
 
-/// Run-time resolution: the saved shape again (a workflow stored before the
-/// check, or edited by hand), then symlinks followed and kept in the worktree.
+/// How often a foreach item re-checks its child workflow's capacity.
+#[cfg(not(test))]
+const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const CAPACITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Time kept between the end of a capacity wait and the runner's timeout, so
+/// the foreach can still record its skipped items before the runner drops it.
+fn capacity_margin(timeout_seconds: u64) -> chrono::Duration {
+    let tenth = std::time::Duration::from_secs(timeout_seconds) / 10;
+    let margin = tenth.clamp(CAPACITY_POLL * 2, std::time::Duration::from_secs(60));
+    chrono::Duration::from_std(margin).unwrap_or_else(|_| chrono::Duration::seconds(60))
+}
+
+/// Until when a foreach item may wait for capacity: a margin before the
+/// earliest deadline the runners above it enforce, as captured when each run
+/// started. A budget without one (a caller outside a runner) gives no wait.
+fn capacity_deadline(budget: &super::runner::SharedBudget) -> chrono::DateTime<Utc> {
+    match budget.deadline() {
+        Some((deadline, timeout_seconds)) => deadline - capacity_margin(timeout_seconds),
+        None => Utc::now(),
+    }
+}
+
+fn parent_cancelled(cancel: Option<&tokio_util::sync::CancellationToken>) -> bool {
+    cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+}
+
+/// Retries `attempt` while the child workflow's concurrency limit refuses it,
+/// until `deadline` or a parent cancel. A restart meanwhile interrupts the
+/// parent, and its resume retries the item: nothing was inserted yet.
+async fn wait_for_capacity<F, Fut>(
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    deadline: chrono::DateTime<Utc>,
+    mut attempt: F,
+) -> anyhow::Result<Result<(), String>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Result<(), String>>>,
+{
+    let started = Instant::now();
+    loop {
+        match attempt().await? {
+            Ok(()) => return Ok(Ok(())),
+            Err(reason) => {
+                if Utc::now() >= deadline || parent_cancelled(cancel) {
+                    return Ok(Err(format!(
+                        "{reason} Waited {} s for capacity, until the run's timeout or cancel.",
+                        started.elapsed().as_secs()
+                    )));
+                }
+                let left = (deadline - Utc::now()).to_std().unwrap_or_default();
+                tokio::time::sleep(CAPACITY_POLL.min(left)).await;
+            }
+        }
+    }
+}
+
+/// Run-time read: the saved shape again (a workflow stored before the check,
+/// or edited by hand), then a worktree-rooted read that follows no symlink.
 /// The items reach child agents, so a file outside it must never be read.
-fn resolve_foreach_file(worktree: &str, path: &str) -> Result<std::path::PathBuf, String> {
+fn read_foreach_file(worktree: &str, path: &str) -> Result<String, String> {
     validate_foreach_file(path)?;
-    crate::core::fs_guard::resolve_contained_read(
-        std::path::Path::new(worktree),
-        std::path::Path::new(path.trim()),
-    )
-    .map_err(|_| {
-        format!(
-            "foreach file `{}` resolves outside the worktree",
-            path.trim()
-        )
-    })
+    let path = path.trim();
+    let bytes =
+        crate::core::rooted_io::read(std::path::Path::new(worktree), std::path::Path::new(path))
+            .map_err(|e| format!("Cannot read foreach file `{path}` inside the worktree: {e}"))?;
+    String::from_utf8(bytes).map_err(|_| format!("foreach file `{path}` is not UTF-8"))
 }
 
 /// Phase 3b — parse the foreach file content into items. Pure for tests.
@@ -766,19 +828,9 @@ async fn execute_foreach(
         Some(w) if !w.trim().is_empty() => w,
         _ => return fail(step, start, "SubWorkflow foreach requires the parent to run in a git worktree (the items file lives there).".into()),
     };
-    let items_path = match resolve_foreach_file(&ws, foreach_file) {
-        Ok(path) => path,
+    let content = match read_foreach_file(&ws, foreach_file) {
+        Ok(content) => content,
         Err(error) => return fail(step, start, error),
-    };
-    let content = match std::fs::read_to_string(&items_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return fail(
-                step,
-                start,
-                format!("Cannot read foreach file `{foreach_file}` in the worktree: {e}"),
-            )
-        }
     };
     let items = match parse_foreach_items(&content) {
         Ok(i) => i,
@@ -906,27 +958,25 @@ async fn execute_foreach(
             .unwrap_or_default()
     };
 
-    let task_file = std::path::Path::new(&ws).join(".kronn/current_task.json");
-    // `.kronn/` is usually untracked, so a fresh isolated worktree lacks it.
-    if let Some(parent) = task_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // Written through rooted_io: a symlink planted at `.kronn` or at the file
+    // must not redirect the write outside the worktree. Missing `.kronn/`
+    // (untracked, so absent from a fresh worktree) is created on the way.
+    let ws_root = std::path::Path::new(&ws).to_path_buf();
+    let task_file = std::path::Path::new(".kronn/current_task.json");
+    let capacity_deadline = capacity_deadline(&budget);
+    // The deadline itself (no margin), checked inside each admission.
+    let enforced_deadline = budget.deadline().map(|(deadline, _)| deadline);
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
     let mut failed = 0usize;
+    let mut skipped_for_capacity = 0usize;
     let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
 
     for (idx, item) in items.iter().enumerate() {
         // Parent cancel between items — stop fan-out, keep what's done.
-        let cancelled = state
-            .cancel_registry
-            .lock()
-            .ok()
-            .and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
-            .unwrap_or(false);
-        if cancelled {
+        if parent_cancelled(launch.cancel) {
             tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, "foreach cancelled at item {idx}");
             break;
         }
@@ -981,11 +1031,11 @@ async fn execute_foreach(
                 Ok(files) => {
                     let mut write_err = None;
                     for (rel, content) in &files {
-                        let p = std::path::Path::new(&ws).join(rel);
-                        if let Some(parent) = p.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        if let Err(e) = std::fs::write(&p, content) {
+                        if let Err(e) = crate::core::rooted_io::write(
+                            &ws_root,
+                            std::path::Path::new(rel),
+                            content.as_bytes(),
+                        ) {
                             write_err = Some(format!("{rel}: {e}"));
                             break;
                         }
@@ -995,14 +1045,12 @@ async fn execute_foreach(
                     } else {
                         // Journal + commit (deterministic, mirrors the child's commit step).
                         let what = item.get("what").and_then(|w| w.as_str()).unwrap_or("");
-                        let _ = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(std::path::Path::new(&ws).join(".kronn/decisions.md"))
-                            .and_then(|mut f| {
-                                use std::io::Write;
-                                writeln!(f, "\n[{item_id}] engine-applied (mechanical): {what}")
-                            });
+                        let _ = crate::core::rooted_io::append(
+                            &ws_root,
+                            std::path::Path::new(".kronn/decisions.md"),
+                            format!("\n[{item_id}] engine-applied (mechanical): {what}\n")
+                                .as_bytes(),
+                        );
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
                         let _ = crate::core::cmd::async_git_cmd()
@@ -1052,9 +1100,12 @@ async fn execute_foreach(
         }
 
         // Expose the item to the child via the shared worktree.
-        if let Err(e) = std::fs::write(
-            &task_file,
-            serde_json::to_string_pretty(item).unwrap_or_default(),
+        if let Err(e) = crate::core::rooted_io::write(
+            &ws_root,
+            task_file,
+            serde_json::to_string_pretty(item)
+                .unwrap_or_default()
+                .as_bytes(),
         ) {
             // A per-item infra hiccup (transient FS error on ONE item) must NOT
             // abort the whole sweep — record it as a failed item and move on so
@@ -1120,12 +1171,41 @@ async fn execute_foreach(
         let mut resumed = false;
         let mut child_run = if let Some(mut child) = interrupted_child {
             child.trigger_context = Some(trigger_context.clone());
-            if let Err(e) = super::runner::claim_interrupted_run_row(state, &mut child).await {
-                tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx, error=%e,
-                    "foreach: interrupted child could not be claimed");
-                failed += 1;
-                results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "ResumeClaimFailed", "error": e.to_string() }));
-                continue;
+            // Re-rendered key, persisted with the claim: a child interrupted
+            // before keys were stored must not resume outside its bucket.
+            child.concurrency_key = concurrency_key;
+            let claim = std::sync::Arc::new(tokio::sync::Mutex::new(child));
+            let claimed = wait_for_capacity(launch.cancel, capacity_deadline, || {
+                let claim = claim.clone();
+                async move {
+                    let mut child = claim.lock().await;
+                    super::runner::try_claim_interrupted_run_row(
+                        state,
+                        &mut child,
+                        enforced_deadline,
+                    )
+                    .await
+                }
+            })
+            .await;
+            let child = claim.lock().await.clone();
+            match claimed {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx,
+                        "foreach: interrupted child still refused by its concurrency limit ({reason}) — skipping this item");
+                    failed += 1;
+                    skipped_for_capacity += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "SkippedConcurrencyLimit", "error": reason }));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child.id, item=%idx, error=%e,
+                        "foreach: interrupted child could not be claimed");
+                    failed += 1;
+                    results.push(json!({ "item": idx, "id": item_id, "child_run_id": child.id, "status": "ResumeClaimFailed", "error": e.to_string() }));
+                    continue;
+                }
             }
             resumed = true;
             child
@@ -1157,21 +1237,32 @@ async fn execute_foreach(
                 parent_workflow_name: None,
                 parent_run_started_at: None,
             };
-            let to_insert = child.clone();
-            let admission = child_wf.clone();
-            match state
-                .db
-                .with_conn(move |c| {
-                    crate::workflows::concurrency::insert_run_within_limit(
-                        c, &admission, &to_insert,
-                    )
-                })
-                .await
-            {
+            // Another run of the child workflow may hold its slot: wait for it
+            // (bounded by the parent's timeout) rather than skip the item.
+            let admitted = wait_for_capacity(launch.cancel, capacity_deadline, || {
+                let to_insert = child.clone();
+                let admission = child_wf.clone();
+                async move {
+                    state
+                        .db
+                        .with_conn(move |c| {
+                            crate::workflows::concurrency::insert_child_within_limit(
+                                c,
+                                &admission,
+                                &to_insert,
+                                enforced_deadline,
+                            )
+                        })
+                        .await
+                }
+            })
+            .await;
+            match admitted {
                 Ok(Ok(())) => {}
                 Ok(Err(reason)) => {
                     tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: child refused by its concurrency limit ({reason}) — skipping this item");
                     failed += 1;
+                    skipped_for_capacity += 1;
                     results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedConcurrencyLimit", "error": reason }));
                     continue;
                 }
@@ -1268,15 +1359,21 @@ async fn execute_foreach(
                 json!({"idx": idx, "id": item_id, "status": "Success", "child_run_id": child_run.id})).await;
         }
     }
-    let _ = std::fs::remove_file(&task_file); // best-effort cleanup
+    let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
     let (status_str, signal) = aggregate_foreach(succeeded, failed);
+    let skipped_note = if skipped_for_capacity > 0 {
+        format!(", dont {skipped_for_capacity} sautée(s) faute de place (limite de concurrence)")
+    } else {
+        String::new()
+    };
     let summary = format!(
-        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s) ({})",
+        "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s){} ({})",
         child_wf.name,
         results.len(),
         succeeded,
         failed,
+        skipped_note,
         tokens_label(total_tokens),
     );
     let data = json!({
@@ -1285,12 +1382,20 @@ async fn execute_foreach(
         "total": results.len(),
         "succeeded": succeeded,
         "failed": failed,
+        "skipped_concurrency_limit": skipped_for_capacity,
         "items": results,
         "child_run_id": last_child_id,
         "last_output": last_output,
     });
+    // SKIPPED is branchable on its own: a step with skipped items never
+    // reports a plain OK (aggregate_foreach already gives PARTIAL or failed).
+    let signals: Vec<&str> = if skipped_for_capacity > 0 {
+        vec![signal, "SKIPPED"]
+    } else {
+        vec![signal]
+    };
     let output =
-        super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
+        super::step_output_format::format_step_output(data, status_str, &summary, None, &signals);
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
         crate::models::ConditionAction::Stop => "Stop".to_string(),
@@ -1548,12 +1653,13 @@ mod tests {
             step,
             tokens,
             agents,
-            crate::workflows::runner::SharedBudget::root(50),
+            budget_with_timeout(3600),
             Some(ws.path().to_string_lossy().to_string()),
             super::ChildLaunch {
                 ctx: &ctx,
                 parent_variables: &[],
                 parent_project_id: None,
+                cancel: None,
             },
         )
         .await;
@@ -1932,6 +2038,7 @@ mod tests {
                         ctx: &ctx,
                         parent_variables: &variables,
                         parent_project_id: None,
+                        cancel: None,
                     },
                 )
                 .await
@@ -2082,6 +2189,7 @@ mod tests {
                     ctx: &ctx,
                     parent_variables: &[],
                     parent_project_id: None,
+                    cancel: None,
                 },
             )
             .await;
@@ -2103,7 +2211,73 @@ mod tests {
         assert_eq!(data["items"].as_array().map(Vec::len), Some(2), "{data}");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreach_never_writes_through_a_planted_symlink() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let outside = tempfile::TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::os::unix::fs::symlink(&victim, ws.path().join(".kronn/current_task.json")).unwrap();
+        let ctx = crate::workflows::template::TemplateContext::new();
+        let outcome = super::execute_sub_workflow_step(
+            &state,
+            "parent-run",
+            0,
+            &step,
+            &tokens,
+            &agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            Some(ws.path().to_string_lossy().to_string()),
+            super::ChildLaunch {
+                ctx: &ctx,
+                parent_variables: &[],
+                parent_project_id: None,
+                cancel: None,
+            },
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "the outside file is untouched"
+        );
+        // The link is replaced, not written through, so the items still run.
+        assert_eq!(
+            outcome.result.status,
+            crate::models::RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+    }
+
     // ─── KT-1045 — a child goes through its workflow's admission ───
+    /// A budget bounded like a runner whose timeout guard of `seconds`
+    /// started now: the foreach waits for capacity until just before it.
+    fn budget_with_timeout(seconds: u64) -> crate::workflows::runner::SharedBudget {
+        crate::workflows::runner::SharedBudget::root(50).within_deadline(
+            chrono::Utc::now() + chrono::Duration::seconds(seconds as i64),
+            seconds,
+        )
+    }
+
+    async fn finish_run_later(state: &crate::AppState, run_id: &'static str, after_ms: u64) {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(after_ms)).await;
+            state
+                .db
+                .with_conn(move |c| {
+                    c.execute(
+                        "UPDATE workflow_runs SET status = 'Success', finished_at = datetime('now') WHERE id = ?1",
+                        [run_id],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+    }
 
     #[tokio::test]
     async fn a_child_over_its_concurrency_limit_is_not_started() {
@@ -2150,6 +2324,7 @@ mod tests {
             ctx: &ctx,
             parent_variables: &[],
             parent_project_id: None,
+            cancel: None,
         };
         let single = step_json(serde_json::json!({
             "name": "child", "step_type": {"type": "SubWorkflow"},
@@ -2183,6 +2358,7 @@ mod tests {
             "no child row was inserted"
         );
 
+        // The wait for capacity ends just before the runner's timeout.
         let foreach = super::execute_sub_workflow_step(
             &state,
             "parent-run",
@@ -2190,7 +2366,7 @@ mod tests {
             &foreach_step,
             &tokens,
             &agents,
-            crate::workflows::runner::SharedBudget::root(50),
+            budget_with_timeout(1),
             Some(ws.path().to_string_lossy().to_string()),
             launch(),
         )
@@ -2208,6 +2384,19 @@ mod tests {
             !statuses.is_empty() && statuses.iter().all(|s| s == "SkippedConcurrencyLimit"),
             "{}",
             foreach.result.output
+        );
+        assert_eq!(data["skipped_concurrency_limit"], 2);
+        assert!(
+            foreach.result.output.contains("SKIPPED"),
+            "{}",
+            foreach.result.output
+        );
+        assert!(
+            data["items"][0]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Waited"),
+            "{data}"
         );
         assert_eq!(children(state.clone()).await, 0);
 
@@ -2241,6 +2430,649 @@ mod tests {
             "{}",
             admitted.result.output
         );
+    }
+
+    #[tokio::test]
+    async fn a_foreach_item_waits_for_capacity_then_runs() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let mut active = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "parent-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        active.id = "holder".into();
+        active.workflow_id = "child-wf".into();
+        state
+            .db
+            .with_conn(move |c| {
+                let mut child = crate::db::workflows::get_workflow(c, "child-wf")?.unwrap();
+                child.concurrency_limit = Some(1);
+                crate::db::workflows::update_workflow(c, &child)?;
+                crate::db::workflows::insert_run(c, &active)
+            })
+            .await
+            .unwrap();
+        finish_run_later(&state, "holder", 300).await;
+        let started = std::time::Instant::now();
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+        let items = data["items"].as_array().unwrap();
+        assert!(
+            items.iter().all(|item| item["status"] == "Success"),
+            "{data}"
+        );
+        assert_eq!(data["skipped_concurrency_limit"], 0);
+    }
+
+    /// A top-level run "outer-run" of parent-wf whose only step fans out
+    /// over child-wf, the child's single slot being held by "holder".
+    async fn outer_foreach_run(
+        state: &crate::AppState,
+        step: &crate::models::WorkflowStep,
+        timeout_seconds: u64,
+        ws: &tempfile::TempDir,
+    ) -> (crate::models::Workflow, crate::models::WorkflowRun) {
+        let step = step.clone();
+        // No project: the run keeps this path as the worktree its steps use.
+        let ws = ws.path().to_string_lossy().to_string();
+        state
+            .db
+            .with_conn(move |c| {
+                let mut child = crate::db::workflows::get_workflow(c, "child-wf")?.unwrap();
+                child.concurrency_limit = Some(1);
+                crate::db::workflows::update_workflow(c, &child)?;
+                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                parent.steps = vec![step];
+                parent.guards = Some(crate::models::WorkflowGuards {
+                    timeout_seconds: Some(timeout_seconds),
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(c, &parent)?;
+                let mut holder = crate::db::workflows::get_run(c, "parent-run")?.unwrap();
+                holder.id = "holder".into();
+                holder.workflow_id = "child-wf".into();
+                crate::db::workflows::insert_run(c, &holder)?;
+                let mut outer = holder.clone();
+                outer.id = "outer-run".into();
+                outer.workflow_id = "parent-wf".into();
+                outer.status = crate::models::RunStatus::Pending;
+                outer.started_at = chrono::Utc::now();
+                outer.workspace_path = Some(ws);
+                crate::db::workflows::insert_run(c, &outer)?;
+                Ok((parent, outer))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_runner_records_skipped_items_before_its_timeout() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 2, &ws).await;
+        // A later edit of the saved guard must not move the running deadline.
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                state
+                    .db
+                    .with_conn(|c| {
+                        let mut parent =
+                            crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                        parent.guards = Some(crate::models::WorkflowGuards {
+                            timeout_seconds: Some(3600),
+                            ..Default::default()
+                        });
+                        crate::db::workflows::update_workflow(c, &parent)?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            });
+        }
+        let _ = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let stored = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "outer-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let fanout = stored
+            .step_results
+            .iter()
+            .find(|r| r.step_name == "fanout")
+            .expect("the foreach step result is persisted");
+        assert!(fanout.output.contains("SKIPPED"), "{}", fanout.output);
+        assert!(
+            fanout.output.contains("SkippedConcurrencyLimit"),
+            "{}",
+            fanout.output
+        );
+        assert_ne!(fanout.status, crate::models::RunStatus::StoppedByGuard);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_run_ends_a_capacity_wait_without_starting_the_child() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 3600, &ws).await;
+        let canceller = {
+            let state = state.clone();
+            async move {
+                for _ in 0..200 {
+                    if state
+                        .cancel_registry
+                        .lock()
+                        .unwrap()
+                        .contains_key("outer-run")
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                crate::workflows::cancellation::cancel_run_tree(
+                    &state,
+                    "outer-run",
+                    crate::workflows::cancellation::CancellationScope::RunTree,
+                    "cancelled_by_operator",
+                )
+                .await
+                .unwrap();
+            }
+        };
+        let started = std::time::Instant::now();
+        let run = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        );
+        let (_, ()) = tokio::join!(run, canceller);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert_eq!(outer.status, crate::models::RunStatus::Cancelled);
+        let children = state
+            .db
+            .with_conn(|c| crate::db::workflows::subworkflow_children(c, "outer-run"))
+            .await
+            .unwrap();
+        assert!(children.is_empty(), "no child started after the cancel");
+    }
+
+    #[tokio::test]
+    async fn no_pending_child_survives_a_settled_cancellation() {
+        let (state, _, _, _ws, _) = foreach_fixture().await;
+        let (child_wf, parent) = state
+            .db
+            .with_conn(|c| {
+                Ok((
+                    crate::db::workflows::get_workflow(c, "child-wf")?.unwrap(),
+                    crate::db::workflows::get_run(c, "parent-run")?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        let child = |id: &str| {
+            let mut run = parent.clone();
+            run.id = id.into();
+            run.workflow_id = "child-wf".into();
+            run.parent_run_id = Some("parent-run".into());
+            run.run_type = "subworkflow".into();
+            run.status = crate::models::RunStatus::Pending;
+            run
+        };
+        let admit = |run: crate::models::WorkflowRun| {
+            let (state, wf) = (state.clone(), child_wf.clone());
+            async move {
+                state
+                    .db
+                    .with_conn(move |c| {
+                        crate::workflows::concurrency::insert_child_within_limit(c, &wf, &run, None)
+                    })
+                    .await
+            }
+        };
+
+        // A blocked connection queues an admission and the cancellation;
+        // whichever runs first, no child is left Pending or Running.
+        let blocker = state.db.with_conn(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(())
+        });
+        let cancel = crate::workflows::cancellation::cancel_run_tree(
+            &state,
+            "parent-run",
+            crate::workflows::cancellation::CancellationScope::RunTree,
+            "cancelled_by_operator",
+        );
+        let (blocked, _admitted, cancelled) = tokio::join!(blocker, admit(child("racing")), cancel);
+        blocked.unwrap();
+        cancelled.unwrap();
+        let live: i64 = state
+            .db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs
+                      WHERE parent_run_id = 'parent-run' AND status IN ('Pending', 'Running')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(live, 0);
+
+        // Once settled, an admission is refused and inserts nothing.
+        let late = admit(child("late")).await;
+        assert!(
+            late.as_ref()
+                .is_err_and(|e| e.to_string().contains("is Cancelled")),
+            "{late:?}"
+        );
+        let found = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "late"))
+            .await
+            .unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_admission_queued_across_the_timeout_inserts_nothing() {
+        let (state, _, _, _ws, _) = foreach_fixture().await;
+        let (child_wf, mut child) = state
+            .db
+            .with_conn(|c| {
+                Ok((
+                    crate::db::workflows::get_workflow(c, "child-wf")?.unwrap(),
+                    crate::db::workflows::get_run(c, "parent-run")?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        child.id = "late-child".into();
+        child.workflow_id = "child-wf".into();
+        child.parent_run_id = Some("parent-run".into());
+        child.run_type = "subworkflow".into();
+        child.status = crate::models::RunStatus::Pending;
+        // The parent row still says Running, but its runner's deadline passes
+        // while the admission waits behind a blocked connection.
+        let deadline = chrono::Utc::now() + chrono::Duration::milliseconds(100);
+        let blocker = state.db.with_conn(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(())
+        });
+        let admission = {
+            let state = state.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                state
+                    .db
+                    .with_conn(move |c| {
+                        crate::workflows::concurrency::insert_child_within_limit(
+                            c,
+                            &child_wf,
+                            &child,
+                            Some(deadline),
+                        )
+                    })
+                    .await
+            }
+        };
+        let (blocked, admitted) = tokio::join!(blocker, admission);
+        blocked.unwrap();
+        assert!(
+            admitted
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("timeout passed")),
+            "{admitted:?}"
+        );
+        let found = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "late-child"))
+            .await
+            .unwrap();
+        assert!(found.is_none(), "no orphan Pending child");
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_step_settles_the_children_it_left_behind() {
+        let (state, tokens, agents, ws, _) = foreach_fixture().await;
+        // An Exec step that outlives the guard stands in for any step kind.
+        let mut sleep = step_json(serde_json::json!({
+            "name": "slow", "step_type": {"type": "Exec"},
+            "exec_command": "sleep", "exec_args": ["5"],
+        }));
+        sleep.exec_timeout_secs = Some(30);
+        let (mut parent, mut outer) = outer_foreach_run(&state, &sleep, 1, &ws).await;
+        // Exec needs a project directory; the run uses its main tree.
+        let now = chrono::Utc::now().to_rfc3339();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "timeout-project", "name": "timeout", "path": ws.path().to_string_lossy(),
+            "repo_url": null, "token_override": null,
+            "ai_config": {"detected": false, "configs": []},
+            "created_at": now, "updated_at": now,
+        }))
+        .unwrap();
+        parent.exec_allowlist = vec!["sleep".into()];
+        parent.project_id = Some("timeout-project".into());
+        outer.workspace_path = None;
+        let (saved_parent, saved_outer) = (parent.clone(), outer.clone());
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::projects::insert_project(c, &project)?;
+                crate::db::workflows::update_workflow(c, &saved_parent)?;
+                c.execute(
+                    "UPDATE workflow_runs SET workspace_path = NULL WHERE id = ?1",
+                    [&saved_outer.id],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let orphan = {
+            let mut run = outer.clone();
+            run.id = "orphan-child".into();
+            run.workflow_id = "child-wf".into();
+            run.parent_run_id = Some("outer-run".into());
+            run.run_type = "subworkflow".into();
+            run.workspace_path = None;
+            run
+        };
+        // A → B → C: the grandchild must not survive A's timeout either.
+        let grandchild = {
+            let mut run = orphan.clone();
+            run.id = "orphan-grandchild".into();
+            run.parent_run_id = Some("orphan-child".into());
+            run.status = crate::models::RunStatus::Running;
+            run
+        };
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::insert_run(c, &orphan)?;
+                crate::db::workflows::insert_run(c, &grandchild)
+            })
+            .await
+            .unwrap();
+        let _ = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            outer.status,
+            crate::models::RunStatus::StoppedByGuard,
+            "{:?}",
+            outer.step_results
+        );
+        let live: i64 = state
+            .db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs
+                      WHERE id IN ('orphan-child', 'orphan-grandchild')
+                        AND status IN ('Pending', 'Running')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(live, 0, "no Running or Pending descendant is left");
+    }
+
+    #[tokio::test]
+    async fn a_between_step_guard_stop_settles_a_fire_and_forget_batch() {
+        let (state, tokens, agents, ws, _) = foreach_fixture().await;
+        // A step that loops onto itself trips loop detection between steps.
+        let looping = step_json(serde_json::json!({
+            "name": "loop", "step_type": {"type": "JsonData"},
+            "json_data_payload": {"again": true},
+            "on_result": [{"contains": "OK", "action": {"type": "Goto", "step_name": "loop"}}],
+        }));
+        let (mut parent, mut outer) = outer_foreach_run(&state, &looping, 3600, &ws).await;
+        parent.guards = Some(crate::models::WorkflowGuards {
+            loop_detection_max_revisits: Some(1),
+            ..Default::default()
+        });
+        let saved = parent.clone();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::update_workflow(c, &saved)?;
+                // A batch child left running by an earlier fire-and-forget
+                // step, with a queued agent dispatch.
+                let now = chrono::Utc::now().to_rfc3339();
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, parent_run_id,
+                      step_results_json, started_at, batch_total)
+                     VALUES ('batch-child', 'child-wf', 'Running', 'batch', 'outer-run',
+                      '[]', ?1, 1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO discussions
+                     (id, title, agent, participants_json, workflow_run_id,
+                      awaiting_agent, created_at, updated_at, message_count, next_message_seq)
+                     VALUES ('batch-disc', 'item', 'ClaudeCode', '[\"ClaudeCode\"]',
+                      'batch-child', 1, ?1, ?1, 1, 1)",
+                    [&now],
+                )?;
+                c.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, channel, content, timestamp, sort_order)
+                     VALUES ('batch-msg', 'batch-disc', 'User', 'main', 'work', ?1, 0)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    c,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "batch-job",
+                        discussion_id: "batch-disc",
+                        trigger_message_id: "batch-msg",
+                        trigger_sort_order: 0,
+                        dedupe_key: "batch-job",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: Some("batch-child"),
+                        group_concurrency_limit: Some(1),
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let _ = crate::workflows::runner::execute_run(
+            state.clone(),
+            &parent,
+            &mut outer,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(
+            outer.status,
+            crate::models::RunStatus::StoppedByGuard,
+            "{:?}",
+            outer.step_results
+        );
+        let (batch, job): (String, String) = state
+            .db
+            .with_conn(|c| {
+                Ok((
+                    c.query_row(
+                        "SELECT status FROM workflow_runs WHERE id = 'batch-child'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    c.query_row(
+                        "SELECT status FROM agent_dispatch_jobs WHERE id = 'batch-job'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!((batch.as_str(), job.as_str()), ("Cancelled", "Cancelled"));
+    }
+
+    #[tokio::test]
+    async fn the_retained_token_ends_a_capacity_wait() {
+        // Cancellation removes the registry entry first: only the token the
+        // runner kept can tell the wait to stop.
+        let token = tokio_util::sync::CancellationToken::new();
+        let far = chrono::Utc::now() + chrono::Duration::hours(1);
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let refuse = || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(Err("Concurrency limit reached (1/1)".to_string())) }
+        };
+        let canceller = async {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            token.cancel();
+        };
+        let (waited, ()) = tokio::join!(
+            super::wait_for_capacity(Some(&token), far, refuse),
+            canceller
+        );
+        assert!(waited.unwrap().is_err());
+        assert!(attempts.load(std::sync::atomic::Ordering::Relaxed) >= 2);
+    }
+
+    #[tokio::test]
+    async fn a_pre_upgrade_child_resumes_under_its_rendered_key() {
+        let (state, tokens, agents, ws, _) = foreach_fixture().await;
+        std::fs::write(ws.path().join("tasks.json"), r#"[{"id":"T1"}]"#).unwrap();
+        let keyed: crate::models::Workflow = serde_json::from_value(serde_json::json!({
+            "id": "keyed", "name": "keyed", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "steps": [{"name": "noop", "step_type": {"type": "JsonData"}, "json_data_payload": {"ok": true}}],
+            "actions": [], "safety": {}, "workspace_config": null,
+            "concurrency_limit": 1, "concurrency_key": "{{ticketKey}}",
+            "variables": [{"name": "ticketKey", "label": "Ticket", "placeholder": ""}],
+            "enabled": true,
+            "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::insert_workflow(c, &keyed)?;
+                // Interrupted by an older version: no key stored.
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, parent_run_id, concurrency_key,
+                      trigger_context, step_results_json, started_at, finished_at)
+                     VALUES ('old-child', 'keyed', 'Interrupted', 'subworkflow', 'parent-run', NULL,
+                      '{\"__subwf_item__\":0,\"__subwf_item_id__\":\"T1\"}', '[]',
+                      datetime('now'), datetime('now'))",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO workflow_runs
+                     (id, workflow_id, status, run_type, concurrency_key,
+                      trigger_context, step_results_json, started_at)
+                     VALUES ('t1-holder', 'keyed', 'Running', 'linear', 'T1', NULL, '[]', datetime('now'))",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let step = step_json(serde_json::json!({
+            "name": "fanout", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "keyed",
+            "sub_workflow_foreach_file": "tasks.json",
+            "sub_workflow_variables": {"ticketKey": "{{current_task.id}}"},
+        }));
+        let run = |state: crate::AppState, timeout: u64| {
+            let (tokens, agents, ws, step) = (
+                tokens.clone(),
+                agents.clone(),
+                ws.path().to_path_buf(),
+                step.clone(),
+            );
+            async move {
+                let ctx = crate::workflows::template::TemplateContext::new();
+                super::execute_sub_workflow_step(
+                    &state,
+                    "parent-run",
+                    0,
+                    &step,
+                    &tokens,
+                    &agents,
+                    budget_with_timeout(timeout),
+                    Some(ws.to_string_lossy().to_string()),
+                    super::ChildLaunch {
+                        ctx: &ctx,
+                        parent_variables: &[],
+                        parent_project_id: None,
+                        cancel: None,
+                    },
+                )
+                .await
+            }
+        };
+        let stored = |state: crate::AppState| async move {
+            state
+                .db
+                .with_conn(|c| crate::db::workflows::get_run(c, "old-child"))
+                .await
+                .unwrap()
+                .unwrap()
+        };
+
+        // The rendered key T1 is held: the old child does not slip through.
+        let refused = run(state.clone(), 1).await;
+        assert!(
+            refused.result.output.contains("SkippedConcurrencyLimit"),
+            "{}",
+            refused.result.output
+        );
+        assert_eq!(
+            stored(state.clone()).await.status,
+            crate::models::RunStatus::Interrupted
+        );
+
+        // Once T1 is free, it resumes and keeps the rendered key.
+        finish_run_later(&state, "t1-holder", 0).await;
+        let resumed = run(state.clone(), 3600).await;
+        assert!(
+            resumed.result.output.contains("\"old-child\""),
+            "{}",
+            resumed.result.output
+        );
+        let child = stored(state.clone()).await;
+        assert_eq!(child.status, crate::models::RunStatus::Success);
+        assert_eq!(child.concurrency_key.as_deref(), Some("T1"));
     }
 
     #[tokio::test]
@@ -2300,6 +3132,7 @@ mod tests {
                     ctx: &ctx,
                     parent_variables: &parent_variables,
                     parent_project_id: None,
+                    cancel: None,
                 },
             )
             .await;
