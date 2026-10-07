@@ -417,7 +417,7 @@ pub async fn execute_sub_workflow_step(
     match state
         .db
         .with_conn(move |c| {
-            crate::workflows::concurrency::insert_run_within_limit(c, &admission, &to_insert)
+            crate::workflows::concurrency::insert_child_within_limit(c, &admission, &to_insert)
         })
         .await
     {
@@ -1242,7 +1242,7 @@ async fn execute_foreach(
                     state
                         .db
                         .with_conn(move |c| {
-                            crate::workflows::concurrency::insert_run_within_limit(
+                            crate::workflows::concurrency::insert_child_within_limit(
                                 c, &admission, &to_insert,
                             )
                         })
@@ -2599,6 +2599,84 @@ mod tests {
             .await
             .unwrap();
         assert!(children.is_empty(), "no child started after the cancel");
+    }
+
+    #[tokio::test]
+    async fn no_pending_child_survives_a_settled_cancellation() {
+        let (state, _, _, _ws, _) = foreach_fixture().await;
+        let (child_wf, parent) = state
+            .db
+            .with_conn(|c| {
+                Ok((
+                    crate::db::workflows::get_workflow(c, "child-wf")?.unwrap(),
+                    crate::db::workflows::get_run(c, "parent-run")?.unwrap(),
+                ))
+            })
+            .await
+            .unwrap();
+        let child = |id: &str| {
+            let mut run = parent.clone();
+            run.id = id.into();
+            run.workflow_id = "child-wf".into();
+            run.parent_run_id = Some("parent-run".into());
+            run.run_type = "subworkflow".into();
+            run.status = crate::models::RunStatus::Pending;
+            run
+        };
+        let admit = |run: crate::models::WorkflowRun| {
+            let (state, wf) = (state.clone(), child_wf.clone());
+            async move {
+                state
+                    .db
+                    .with_conn(move |c| {
+                        crate::workflows::concurrency::insert_child_within_limit(c, &wf, &run)
+                    })
+                    .await
+            }
+        };
+
+        // A blocked connection queues an admission and the cancellation;
+        // whichever runs first, no child is left Pending or Running.
+        let blocker = state.db.with_conn(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(())
+        });
+        let cancel = crate::workflows::cancellation::cancel_run_tree(
+            &state,
+            "parent-run",
+            crate::workflows::cancellation::CancellationScope::RunTree,
+            "cancelled_by_operator",
+        );
+        let (blocked, _admitted, cancelled) = tokio::join!(blocker, admit(child("racing")), cancel);
+        blocked.unwrap();
+        cancelled.unwrap();
+        let live: i64 = state
+            .db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM workflow_runs
+                      WHERE parent_run_id = 'parent-run' AND status IN ('Pending', 'Running')",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(live, 0);
+
+        // Once settled, an admission is refused and inserts nothing.
+        let late = admit(child("late")).await;
+        assert!(
+            late.as_ref()
+                .is_err_and(|e| e.to_string().contains("is Cancelled")),
+            "{late:?}"
+        );
+        let found = state
+            .db
+            .with_conn(|c| crate::db::workflows::get_run(c, "late"))
+            .await
+            .unwrap();
+        assert!(found.is_none());
     }
 
     #[tokio::test]

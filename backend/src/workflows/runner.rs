@@ -3775,6 +3775,14 @@ pub(crate) async fn try_claim_interrupted_run_row(
     let claimed = state
         .db
         .with_conn(move |conn| {
+            if candidate.run_type == "subworkflow" {
+                if let Some(reason) = super::concurrency::parent_refuses_children(
+                    conn,
+                    candidate.parent_run_id.as_deref(),
+                )? {
+                    anyhow::bail!("Run {} cannot resume: {reason}", candidate.id);
+                }
+            }
             if let Some(workflow) =
                 crate::db::workflows::get_workflow(conn, &candidate.workflow_id)?
             {
