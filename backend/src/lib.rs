@@ -370,9 +370,42 @@ impl AuditTracker {
     }
 }
 
+/// Runtime switch of P2P federation, apart from the config lock (KT-1033).
+/// Federation checks take the read side for a short critical section (never
+/// across an await); turning P2P off takes the write side, so it waits for
+/// those in progress and none starts after.
+#[derive(Debug, Default)]
+pub struct P2pGate(std::sync::RwLock<bool>);
+
+impl P2pGate {
+    pub fn new(enabled: bool) -> Self {
+        Self(std::sync::RwLock::new(enabled))
+    }
+
+    pub fn enabled(&self) -> bool {
+        *self.read()
+    }
+
+    /// Hold while checking and acting; the value cannot turn off meanwhile.
+    pub fn read(&self) -> std::sync::RwLockReadGuard<'_, bool> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn set(&self, enabled: bool) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = enabled;
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
+    /// P2P federation on/off, mirrored from `server.p2p_enabled`.
+    pub p2p: Arc<P2pGate>,
     pub db: Arc<Database>,
     pub agent_semaphore: Arc<Semaphore>,
     pub audit_tracker: Arc<Mutex<AuditTracker>>,
@@ -449,7 +482,13 @@ impl AppState {
         max_agents: usize,
     ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
+        // Nothing else holds the fresh config yet.
+        let p2p_enabled = config
+            .try_read()
+            .map(|config| config.server.p2p_enabled)
+            .unwrap_or(false);
         Self {
+            p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
             db,
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),

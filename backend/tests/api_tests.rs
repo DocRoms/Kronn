@@ -14938,6 +14938,7 @@ type WsSink = futures::stream::SplitSink<WsStream, tokio_tungstenite::tungstenit
 
 async fn enable_p2p(state: &AppState) {
     state.config.write().await.server.p2p_enabled = true;
+    state.p2p.set(true);
 }
 
 /// Invite code of the accepted contact `ws_send_presence` authenticates as.

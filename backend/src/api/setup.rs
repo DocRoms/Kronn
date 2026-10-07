@@ -909,6 +909,8 @@ pub async fn set_server_config(
     }
     if let Some(enabled) = req.p2p_enabled {
         config.server.p2p_enabled = enabled;
+        // Off waits for the federation work in progress; none starts after.
+        state.p2p.set(enabled);
     }
     if let Some(weight) = req.discussion_weight {
         config.server.discussion_weight = weight;
@@ -2570,6 +2572,8 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_strict_localhost = previous.server.auth_strict_localhost;
     cfg.server.auth_locked = previous.server.auth_locked;
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
+    // Defaults turn P2P off; the gate follows.
+    state.p2p.set(cfg.server.p2p_enabled);
 
     if key_locked {
         // Nothing encrypted is left: resolve the key and arm the store now

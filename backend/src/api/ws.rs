@@ -258,7 +258,7 @@ pub async fn ws_handler(
         && config.server.auth_enabled
         && config.server.auth_token.is_none();
     let strict_localhost = config.server.auth_strict_localhost;
-    let p2p_enabled = config.server.p2p_enabled;
+    let p2p_enabled = state.p2p.enabled();
     let has_valid_token =
         {
             let expected = config.server.auth_token.as_deref();
@@ -784,7 +784,7 @@ pub(crate) async fn admit_presence(
         rate_limit::charge(peer_ip);
         return None;
     }
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return None;
     }
     admit_peer_presence(state, invite_code, peer_ip)
@@ -1025,14 +1025,15 @@ impl PeerAuth {
 
     /// `membership` with P2P on; None when P2P is off or the DB fails.
     pub(crate) async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             return None;
         }
-        let (peer, sid, config) = (self.clone(), shared_id.to_owned(), state.config.clone());
+        let (peer, sid, gate) = (self.clone(), shared_id.to_owned(), state.p2p.clone());
         let member = state
             .db
             .with_conn(move |conn| {
-                if !crate::api::federation::p2p_enabled_now(&config) {
+                let on = gate.read();
+                if !*on {
                     return Ok(None);
                 }
                 peer.membership(conn, &sid)
@@ -1040,7 +1041,7 @@ impl PeerAuth {
             .await
             .ok()
             .flatten();
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             return None;
         }
         member
@@ -1056,19 +1057,20 @@ impl PeerAuth {
 
     /// P2P on and still an accepted contact (DB errors deny).
     pub(crate) async fn check(&self, state: &AppState) -> bool {
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             return false;
         }
-        let (peer, config) = (self.clone(), state.config.clone());
+        let (peer, gate) = (self.clone(), state.p2p.clone());
         let authorized = state
             .db
             .with_conn(move |conn| {
-                Ok(crate::api::federation::p2p_enabled_now(&config) && peer.authorized(conn)?)
+                let on = gate.read();
+                Ok(*on && peer.authorized(conn)?)
             })
             .await
             .unwrap_or(false);
         // The DB may have been busy while P2P was turned off.
-        authorized && state.config.read().await.server.p2p_enabled
+        authorized && state.p2p.enabled()
     }
 }
 
@@ -1137,7 +1139,7 @@ pub(crate) async fn ingest_relayable_frame(
 /// `None` when the peer is no longer authorized. Each write checks the peer
 /// inside the same DB call, so a revocation cannot slip between the two.
 async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -> Option<bool> {
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return None;
     }
     let peer = peer.clone();
@@ -2221,7 +2223,7 @@ mod origin_and_admission_tests {
             None,
             "P2P is off by default"
         );
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         assert_eq!(
             admit_presence(&state, "kronn:Ok@10.0.0.50:3456", ip, false).await,
             Some(Admission::Peer("kronn:Ok@10.0.0.50:3456".into()))
@@ -2240,7 +2242,7 @@ mod origin_and_admission_tests {
     /// Room A (shared with contact A) and room B, each with one message.
     async fn two_rooms(state: &AppState) -> &'static str {
         let code = "kronn:A@10.0.0.50:3456";
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         state
             .db
             .with_conn(move |conn| {
@@ -2464,13 +2466,96 @@ mod origin_and_admission_tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        state.config.write().await.server.p2p_enabled = false;
+        state.p2p.set(false);
         busy.await.unwrap();
         assert!(
             commit.await.unwrap().is_err(),
             "the queued publication is refused"
         );
         assert!(!target.exists(), "nothing published once P2P is off");
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_config_save_does_not_cut_an_authorized_peer() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        let peer = PeerAuth::InviteCode(code.into());
+        // Another setting being saved holds the config lock meanwhile.
+        let saving = state.config.write().await;
+        let wait = Duration::from_secs(2);
+        assert_eq!(
+            tokio::time::timeout(wait, peer.check(&state)).await,
+            Ok(true)
+        );
+        assert_eq!(
+            tokio::time::timeout(wait, peer.check_member(&state, "shared-a")).await,
+            Ok(Some(true))
+        );
+        drop(saving);
+    }
+
+    #[tokio::test]
+    async fn turning_p2p_off_waits_for_a_publication_in_progress_and_none_starts_after() {
+        let state = state();
+        let code = two_rooms(&state).await;
+        // A publication in progress holds the gate's read side.
+        let gate = state.p2p.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let publication = std::thread::spawn(move || {
+            let on = gate.read();
+            assert!(*on);
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            drop(on);
+            std::time::Instant::now()
+        });
+        held_rx.recv().unwrap();
+        let gate = state.p2p.clone();
+        let turning_off = std::thread::spawn(move || {
+            gate.set(false);
+            std::time::Instant::now()
+        });
+        let finished = publication.join().unwrap();
+        let off = turning_off.join().unwrap();
+        assert!(
+            off >= finished,
+            "off took effect only once the publication finished"
+        );
+
+        let base = tempfile::TempDir::new().unwrap();
+        let room_a = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::find_discussion_by_shared_id(conn, "shared-a")
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let staged = crate::core::context_files::stage_federated_file_in(
+            base.path(),
+            &room_a,
+            "f-after",
+            "doc.pdf",
+            b"abc",
+        )
+        .unwrap();
+        let target = staged.target().to_path_buf();
+        let attachment = crate::api::federation::FederatedAttachment {
+            host: PeerAuth::InviteCode(code.into()),
+            shared_id: "shared-a".into(),
+            discussion_id: room_a,
+            file_id: "f-after".into(),
+            message_id: "a-msg".into(),
+            filename: "doc.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 3,
+        };
+        assert!(
+            crate::api::federation::commit_federated_attachment(&state, staged, attachment)
+                .await
+                .is_err()
+        );
+        assert!(!target.exists(), "no publication starts after P2P is off");
     }
 
     #[test]

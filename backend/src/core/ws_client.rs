@@ -25,7 +25,7 @@ pub async fn run(state: AppState) {
     loop {
         // P2P off: no contact is dialled, and live connections end (aborting
         // a connection task drops both of its socket halves).
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             for (_, handle) in connections.drain() {
                 handle.abort();
             }
@@ -78,7 +78,7 @@ pub async fn run(state: AppState) {
 
 /// The contact as stored now, if this instance may still dial it.
 async fn dialable_contact(state: &AppState, id: &str) -> Option<crate::models::Contact> {
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return None;
     }
     let id = id.to_owned();
@@ -629,7 +629,7 @@ mod tests {
             tokio::spawn(async move { handle_peer_connection(stream, &state, &id).await })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        state.config.write().await.server.p2p_enabled = false;
+        state.p2p.set(false);
         busy.await.unwrap();
         tokio::time::timeout(Duration::from_secs(3), connection)
             .await
@@ -663,7 +663,7 @@ mod tests {
         let contact = insert(&state, "http://127.0.0.1:9/admin#").await;
         assert!(dialable_contact(&state, &contact.id).await.is_some());
         assert!(peer_ws_url(&contact.kronn_url).is_none());
-        state.config.write().await.server.p2p_enabled = false;
+        state.p2p.set(false);
         assert!(dialable_contact(&state, &contact.id).await.is_none());
     }
 }

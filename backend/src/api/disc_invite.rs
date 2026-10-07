@@ -326,7 +326,7 @@ pub async fn peer_join(
         match local {
             Ok(j) => (j.disc_id, j.session_pk, j.resume_token),
             Err(local_err) => {
-                if !state.config.read().await.server.p2p_enabled {
+                if !state.p2p.enabled() {
                     return Json(ApiResponse::err(format!(
                         "{local_err}. A room hosted on another Kronn needs P2P connections: \
                          enable \"Accept P2P connections\" in Settings > Identity to join it."
@@ -865,7 +865,7 @@ async fn try_remote_join(
         .build()?;
 
     for contact in contacts.into_iter().filter(|c| c.status == "accepted") {
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             return Ok(None);
         }
         let Some(base) = db::contacts::contact_base_url(&contact.kronn_url) else {
@@ -911,7 +911,7 @@ async fn try_remote_join(
             .unwrap_or("Discussion")
             .to_string();
         // P2P may have been turned off while the claim was in flight.
-        if !state.config.read().await.server.p2p_enabled {
+        if !state.p2p.enabled() {
             return Ok(None);
         }
         let (sid, ttl, from, host) = (
@@ -2296,7 +2296,7 @@ pub async fn claim_by_token(
     }
     // Peers are identified only by their code: off unless P2P is enabled,
     // answered exactly like an unknown code.
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return Json(ApiResponse::err(
             "unknown peer (invite code not in contacts)",
         ));
@@ -2442,7 +2442,7 @@ pub async fn fetch_file(
     }
     // Peers are identified only by their code: off unless P2P is enabled,
     // answered exactly like an unknown code.
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return Json(ApiResponse::err(
             "unknown peer (invite code not in contacts)",
         ));
@@ -2551,10 +2551,13 @@ pub async fn fetch_file(
     // The response is prepared, then checked once more, still under the
     // cancellation: nothing leaves unless the caller is entitled after it.
     let prepared = async {
-        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        fetch_entitled(&state, &caller_code, &cf.discussion_id)
-            .await
-            .then_some(data_base64)
+        if !fetch_entitled(&state, &caller_code, &cf.discussion_id).await {
+            return None;
+        }
+        // Encoded under the gate: P2P cannot turn off between the last
+        // check and the bytes being handed to the response.
+        let on = state.p2p.read();
+        (*on).then(|| base64::engine::general_purpose::STANDARD.encode(&bytes))
     };
     let data_base64 = tokio::select! {
         prepared = prepared => prepared,
@@ -2574,18 +2577,18 @@ pub async fn fetch_file(
 /// The caller may still receive files of `disc_id`: P2P on, still an
 /// accepted contact, and still listed in the discussion's `shared_with`.
 async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> bool {
-    if !state.config.read().await.server.p2p_enabled {
+    if !state.p2p.enabled() {
         return false;
     }
-    let (code, did, config) = (
+    let (code, did, gate) = (
         caller_code.to_owned(),
         disc_id.to_owned(),
-        state.config.clone(),
+        state.p2p.clone(),
     );
     let entitled = state
         .db
         .with_conn(move |conn| {
-            if !crate::api::federation::p2p_enabled_now(&config) {
+            if !*gate.read() {
                 return Ok(false);
             }
             let crate::db::contacts::InviteAuth::Accepted(caller) =
@@ -2608,7 +2611,7 @@ async fn fetch_entitled(state: &AppState, caller_code: &str, disc_id: &str) -> b
         .await
         .unwrap_or(false);
     // The DB may have been busy while P2P was turned off.
-    entitled && state.config.read().await.server.p2p_enabled
+    entitled && state.p2p.enabled()
 }
 
 /// Resolves once the caller loses its entitlement (checked every 250 ms).
@@ -2658,7 +2661,7 @@ mod tests {
     #[tokio::test]
     async fn a_file_is_released_only_while_the_caller_stays_entitled() {
         let state = make_state_with_disc("d-ent-1").await;
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         state
             .db
             .with_conn(|conn| {
@@ -2728,9 +2731,9 @@ mod tests {
             })
             .await
             .unwrap();
-        state.config.write().await.server.p2p_enabled = false;
+        state.p2p.set(false);
         assert!(!fetch_entitled(&state, "kr-inv-ent", "d-ent-1").await);
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         state
             .db
             .with_conn(|conn| crate::db::contacts::delete_contact(conn, "c-ent"))
@@ -2742,7 +2745,7 @@ mod tests {
     #[tokio::test]
     async fn the_final_file_check_queued_behind_a_busy_db_respects_p2p_turned_off() {
         let state = make_state_with_disc("d-busy-1").await;
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         state
             .db
             .with_conn(|conn| {
@@ -2784,7 +2787,7 @@ mod tests {
             tokio::spawn(async move { fetch_entitled(&state, "kr-inv-busy", "d-busy-1").await })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        state.config.write().await.server.p2p_enabled = false;
+        state.p2p.set(false);
         busy.await.unwrap();
         assert!(!check.await.unwrap(), "no bytes once P2P is off");
     }
@@ -2811,7 +2814,7 @@ mod tests {
         // Regression (Codex audit 2026-07-12): any accepted contact could
         // read ANY context file by id.
         let state = make_state_with_disc("d-fetch-1").await;
-        state.config.write().await.server.p2p_enabled = true;
+        state.p2p.set(true);
         let tmp = tempfile::TempDir::new().unwrap();
         let blob = tmp.path().join("doc.pdf");
         std::fs::write(&blob, b"BYTES").unwrap();
