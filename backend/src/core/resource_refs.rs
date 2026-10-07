@@ -327,6 +327,25 @@ pub fn enabled_workflows_using(
     Ok(ids)
 }
 
+/// A resource just created: every enabled workflow whose `ref:` now
+/// resolves to it (it shadows a shared one) is disabled and recorded. Call it
+/// inside the insert's transaction, after the insert ("before" is empty).
+pub fn disable_users_of_new(
+    conn: &Connection,
+    kind: &str,
+    id: &str,
+    reason: crate::models::AutoDisableReason,
+    by: &str,
+    summary: &str,
+) -> anyhow::Result<usize> {
+    let users = enabled_workflows_using(conn, kind, id)?;
+    let disabled = disable_workflows(conn, &users)?;
+    for user in &users {
+        crate::db::workflows::mark_auto_disabled(conn, user, reason, by, summary)?;
+    }
+    Ok(disabled)
+}
+
 /// Disables the given workflows; returns how many were still enabled.
 pub fn disable_workflows(conn: &Connection, ids: &[String]) -> anyhow::Result<usize> {
     let mut disabled = 0;

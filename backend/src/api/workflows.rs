@@ -3853,12 +3853,36 @@ async fn import_workflow_written(
                     conn, &page, &revision, &datasets, None,
                 )?;
             }
+            // A bundled resource can shadow a shared `ref:` an enabled
+            // workflow already uses: that workflow goes off too.
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
+                crate::core::resource_refs::disable_users_of_new(
+                    conn,
+                    "prompt",
+                    &qp.id,
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!(
+                        "Quick Prompt « {} » created by import (shadows a shared reference)",
+                        qp.name
+                    ),
+                )?;
             }
             for mut qa in qas {
                 rebind_quick_api_config(conn, &mut qa, rebind_project.as_deref());
                 crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+                crate::core::resource_refs::disable_users_of_new(
+                    conn,
+                    "qa",
+                    &qa.id,
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!(
+                        "Quick API « {} » created by import (shadows a shared reference)",
+                        qa.name
+                    ),
+                )?;
             }
             for qe in &qes {
                 crate::db::quick_execs::insert_quick_exec(conn, qe)?;

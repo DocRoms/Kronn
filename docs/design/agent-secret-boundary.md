@@ -854,7 +854,8 @@ token's create lands disabled and its `enabled: true` is refused
 any change it makes to what an enabled workflow executes (steps, rollback,
 trigger, Exec allowlist, actions, workspace, guards, variables, concurrency,
 project) disables it, and its change to what a Quick API sends or what a
-Quick Prompt runs disables every enabled workflow using it (Quick Exec is
+Quick Prompt runs (or its creation, when it shadows a shared `ref:`) disables
+every enabled workflow using it (Quick Exec is
 not in this rule: an agent's Quick Exec line already waits for a human's
 approval under KT-1017); a disabled definition does not run (a
 parent refuses a disabled child, manual and TriggerWorkflow launches and the

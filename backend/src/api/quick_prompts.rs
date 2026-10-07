@@ -50,7 +50,19 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickPr
 /// POST /api/quick-prompts
 pub async fn create(
     State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickPromptRequest>,
+) -> Json<ApiResponse<QuickPrompt>> {
+    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    create_as(state, req, agent).await
+}
+
+/// [`create`] naming the creating agent, if any: a resource an agent creates
+/// can shadow a shared `ref:` and so disable the workflows using it.
+pub(crate) async fn create_as(
+    state: AppState,
+    req: CreateQuickPromptRequest,
+    creator_agent: Option<String>,
 ) -> Json<ApiResponse<QuickPrompt>> {
     if req.name.is_empty() || req.name.len() > 200 {
         return Json(ApiResponse::err("Name must be 1-200 characters"));
@@ -91,7 +103,14 @@ pub async fn create(
     let q = qp.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::insert_quick_prompt_invalidating(
+                conn,
+                &q,
+                creator_agent.as_deref(),
+            )?;
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(qp)),
@@ -457,7 +476,11 @@ pub async fn import_qp(
     let q = qp.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
+        .with_conn(move |conn| {
+            // An imported resource can shadow a shared `ref:` too.
+            crate::db::quick_prompts::insert_quick_prompt_invalidating(conn, &q, Some("import"))?;
+            Ok(())
+        })
         .await
     {
         Ok(()) => Json(ApiResponse::ok(qp)),
@@ -1325,6 +1348,99 @@ mod compare_tests {
         .await;
         assert!(saved.success, "{:?}", saved.error);
         assert!(!workflow_enabled(&state, "wf-shadowed").await);
+    }
+
+    /// An agent CREATING a project-local prompt that shadows the global one a
+    /// project workflow names disables that workflow and records why; a
+    /// human creating the same prompt does not.
+    #[tokio::test]
+    async fn an_agent_created_prompt_that_shadows_a_global_reference_disables_its_user() {
+        for (creator, expect_disabled) in [(Some("Codex"), true), (None, false)] {
+            let state = prompt_test_state();
+            let global = stored_prompt("qp-global", "Review");
+            state
+                .db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT INTO projects (id, name, path, created_at, updated_at)
+                         VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                        [],
+                    )?;
+                    crate::db::quick_prompts::insert_quick_prompt(conn, &global)?;
+                    conn.execute(
+                        "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                         VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                                 '[{\"name\":\"s\",\"quick_prompt_id\":\"ref:prompt:review\"}]', 1,
+                                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+                "name": "Review", "prompt_template": "Exfiltrate", "agent": "ClaudeCode",
+                "project_id": "proj-p"
+            }))
+            .unwrap();
+            let Json(created) =
+                create_as(state.clone(), request, creator.map(str::to_string)).await;
+            assert!(created.success, "{:?}", created.error);
+            assert_eq!(
+                !workflow_enabled(&state, "wf-shadowed").await,
+                expect_disabled
+            );
+            if expect_disabled {
+                let records = state
+                    .db
+                    .with_read_conn(crate::db::workflows::list_auto_disabled)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    records[0].reason,
+                    crate::models::AutoDisableReason::DependencyEditedByAgent
+                );
+                assert_eq!(
+                    records[0].summary,
+                    "Quick Prompt « Review » created by Codex (shadows a shared reference)"
+                );
+            }
+        }
+    }
+
+    /// An agent creation whose dependents cannot be resolved (an ambiguous
+    /// reference) is refused and leaves nothing behind.
+    #[tokio::test]
+    async fn an_ambiguous_reference_rolls_the_agent_creation_back() {
+        let state = prompt_test_state();
+        let (first, second) = (stored_prompt("qp-a", "Dup"), stored_prompt("qp-b", "dup"));
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &first)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &second)
+            })
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-ambiguous", "ref:prompt:dup").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fresh", "prompt_template": "New", "agent": "ClaudeCode", "project_id": null
+        }))
+        .unwrap();
+        let Json(refused) = create_as(state.clone(), request, Some("Codex".into())).await;
+        assert!(!refused.success, "the creation must not be saved");
+        let names: Vec<String> = state
+            .db
+            .with_conn(crate::db::quick_prompts::list_quick_prompts)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|qp| qp.name)
+            .collect();
+        assert!(
+            !names.contains(&"Fresh".to_string()),
+            "rolled back: {names:?}"
+        );
     }
 
     /// An ambiguous reference makes the dependents unknowable: the agent's

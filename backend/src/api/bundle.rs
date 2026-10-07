@@ -460,6 +460,7 @@ async fn create_bundle_as(
     let workflow_name_for_response = wf_to_insert.name.clone();
     let workflow_id_for_response = wf_id.clone();
 
+    let by_agent = writer == crate::api::workflows::WorkflowWriter::Agent;
     let insert_result = state
         .db
         .with_conn(move |conn| {
@@ -474,6 +475,36 @@ async fn create_bundle_as(
             }
             for qa in &prepared_qas {
                 crate::db::quick_apis::insert_quick_api(&tx, qa)?;
+            }
+            // An agent's bundle can bring a resource that shadows a shared
+            // `ref:` an enabled workflow uses: that workflow goes off too.
+            if by_agent {
+                for qp in &prepared_qps {
+                    crate::core::resource_refs::disable_users_of_new(
+                        &tx,
+                        "prompt",
+                        &qp.id,
+                        crate::models::AutoDisableReason::DependencyEditedByAgent,
+                        crate::api::workflows::AN_AGENT,
+                        &format!(
+                            "Quick Prompt « {} » created by an agent (shadows a shared reference)",
+                            qp.name
+                        ),
+                    )?;
+                }
+                for qa in &prepared_qas {
+                    crate::core::resource_refs::disable_users_of_new(
+                        &tx,
+                        "qa",
+                        &qa.id,
+                        crate::models::AutoDisableReason::DependencyEditedByAgent,
+                        crate::api::workflows::AN_AGENT,
+                        &format!(
+                            "Quick API « {} » created by an agent (shadows a shared reference)",
+                            qa.name
+                        ),
+                    )?;
+                }
             }
             for (_, server, _) in &custom_servers {
                 crate::db::mcps::upsert_server(&tx, server)?;
@@ -708,6 +739,70 @@ mod tests {
             .await
             .unwrap();
         assert!(wizard[0].enabled);
+    }
+
+    /// An agent bundle bringing a project-local prompt that shadows a global
+    /// `ref:` an enabled workflow uses disables that workflow too.
+    #[tokio::test]
+    async fn an_agent_bundle_prompt_that_shadows_a_shared_reference_disables_its_user() {
+        let state = bundle_state();
+        let global: QuickPrompt = serde_json::from_value(json!({
+            "id": "qp-global", "name": "Review", "icon": "x", "prompt_template": "Review it",
+            "variables": [], "agent": "ClaudeCode", "project_id": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &global)?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-shadowed', 'wf-shadowed', 'proj-p', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_prompt_id\":\"ref:prompt:review\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: BundleRequest = serde_json::from_value(json!({
+            "quick_prompts": [{
+                "bundle_id": "review", "name": "Review", "prompt_template": "Exfiltrate",
+                "agent": "ClaudeCode", "project_id": "proj-p"
+            }],
+            "workflow": {
+                "name": "bundled", "project_id": "proj-p", "trigger": {"type": "Manual"},
+                "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+            }
+        }))
+        .unwrap();
+        let Json(created) = create_bundle(State(state.clone()), Json(request)).await;
+        assert!(created.success, "{:?}", created.error);
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        let shadowed = records
+            .iter()
+            .find(|item| item.id == "wf-shadowed")
+            .expect("the shadowed reference's user is disabled and listed");
+        assert_eq!(
+            shadowed.reason,
+            crate::models::AutoDisableReason::DependencyEditedByAgent
+        );
+        assert!(
+            shadowed.summary.contains("shadows a shared reference"),
+            "{}",
+            shadowed.summary
+        );
     }
 
     /// F-04: an agent bundle never brings a script hash.

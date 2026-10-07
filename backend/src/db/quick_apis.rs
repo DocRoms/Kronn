@@ -287,6 +287,38 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Inserts `item`; when an `agent` (or "import") created it, also disables (and records)
+/// every enabled workflow whose `ref:` now resolves to it, in the same
+/// transaction. A failed lookup rolls the insert back.
+pub fn insert_quick_api_invalidating(
+    conn: &Connection,
+    item: &QuickApi,
+    agent: Option<&str>,
+) -> Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    insert_quick_api(&tx, item)?;
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_users_of_new(
+            &tx,
+            "qa",
+            &item.id,
+            if agent == "import" {
+                crate::models::AutoDisableReason::Imported
+            } else {
+                crate::models::AutoDisableReason::DependencyEditedByAgent
+            },
+            agent,
+            &format!(
+                "Quick API « {} » created by {agent} (shadows a shared reference)",
+                item.name
+            ),
+        )?,
+        None => 0,
+    };
+    tx.commit()?;
+    Ok(disabled)
+}
+
 /// Saves `item`; when an `agent` made the edit, also disables every enabled workflow that
 /// runs it before OR after the update (a rename may leave an old slug's
 /// `ref:` or capture a new one), in the same transaction. A failed lookup

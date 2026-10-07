@@ -1676,9 +1676,12 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(request) => request,
                     Err(error) => return fail(call, error),
                 };
-                let Json(res) =
-                    crate::api::quick_prompts::create(State(self.state.clone()), Json(request))
-                        .await;
+                let Json(res) = crate::api::quick_prompts::create_as(
+                    self.state.clone(),
+                    request,
+                    Some(self.actor_id.clone()),
+                )
+                .await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "qp_update" | "qp_run" => {
@@ -1808,8 +1811,12 @@ impl ToolExecutor for KronnToolExecutor {
                     Ok(request) => request,
                     Err(error) => return fail(call, format!("invalid Quick API: {error}")),
                 };
-                let Json(res) =
-                    crate::api::quick_apis::create(State(self.state.clone()), Json(request)).await;
+                let Json(res) = crate::api::quick_apis::create_as(
+                    self.state.clone(),
+                    request,
+                    Some(self.actor_id.clone()),
+                )
+                .await;
                 unwrap_api(call, res.success, res.data, res.error)
             }
             "qa_update" => {
