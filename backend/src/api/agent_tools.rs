@@ -1717,7 +1717,7 @@ impl ToolExecutor for KronnToolExecutor {
                         self.state.clone(),
                         saved.id,
                         request,
-                        true,
+                        Some(self.actor_id.clone()),
                     )
                     .await;
                     unwrap_api(call, res.success, res.data, res.error)
@@ -1842,7 +1842,7 @@ impl ToolExecutor for KronnToolExecutor {
                     self.state.clone(),
                     existing.id.clone(),
                     merged,
-                    true,
+                    Some(self.actor_id.clone()),
                 )
                 .await;
                 unwrap_api(call, res.success, res.data, res.error)

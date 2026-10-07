@@ -111,6 +111,7 @@ import type {
   WorkflowStep,
   WorkflowSummary,
   UnsafeExecStep,
+  AutoDisabledWorkflow,
   ExecLineCheck,
   ExecLineCheckRequest,
   ExecScriptFileStatus,
@@ -2440,6 +2441,10 @@ export const workflows = {
   createHumanBundle: (req: unknown) => api<BundleResponse>('POST', '/workflows/bundle/human', req),
   createAgentProposal: (req: unknown) => api<Workflow>('POST', '/workflows/agent-proposal', req),
   update: (id: string, req: UpdateWorkflowRequest) => api<Workflow>('PUT', `/workflows/${id}`, req),
+  /** KT-1037 — workflows Kronn disabled on its own, awaiting a human review. */
+  autoDisabled: () => api<AutoDisabledWorkflow[]>('GET', '/workflows/auto-disabled'),
+  /** KT-1037 — a human enables one workflow or several after review. */
+  reenable: (ids: string[]) => api<Workflow[]>('POST', '/workflows/reenable', { ids }),
   delete: (id: string) => api<void>('DELETE', `/workflows/${id}`),
   trigger: (id: string) => api<WorkflowRun>('POST', `/workflows/${id}/trigger`),
 

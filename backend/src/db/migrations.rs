@@ -855,6 +855,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "222_workflow_runs_project_summary_index",
         include_str!("sql/222_workflow_runs_project_summary_index.sql"),
     ),
+    (
+        "223_workflow_auto_disable_reason",
+        include_str!("sql/223_workflow_auto_disable_reason.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

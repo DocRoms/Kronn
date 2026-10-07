@@ -145,6 +145,76 @@ const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, 
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
                 pinned, concurrency_key, project_scope_json";
 
+/// Records why Kronn disabled `id` on its own; no-op if it is enabled.
+pub fn mark_auto_disabled(
+    conn: &Connection,
+    id: &str,
+    reason: AutoDisableReason,
+    by: &str,
+    summary: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE workflows SET disabled_reason = ?2, disabled_at = ?3, disabled_by = ?4,
+                disabled_summary = ?5
+          WHERE id = ?1 AND enabled = 0",
+        params![id, reason.as_db_str(), Utc::now().to_rfc3339(), by, summary],
+    )?;
+    Ok(())
+}
+
+/// Forgets why a workflow was disabled (a human enabled it).
+pub fn clear_auto_disabled(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE workflows SET disabled_reason = NULL, disabled_at = NULL, disabled_by = NULL,
+                disabled_summary = NULL
+          WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Workflows Kronn disabled on its own that no human has enabled since,
+/// most recent first.
+pub fn list_auto_disabled(conn: &Connection) -> Result<Vec<AutoDisabledWorkflow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, project_id, trigger_json, disabled_reason, disabled_at,
+                COALESCE(disabled_by, ''), COALESCE(disabled_summary, '')
+           FROM workflows
+          WHERE enabled = 0 AND disabled_reason IS NOT NULL
+          ORDER BY disabled_at DESC, name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, project_id, trigger, reason, at, by, summary) = row?;
+        let Some(reason) = AutoDisableReason::from_db_str(&reason) else {
+            continue;
+        };
+        out.push(AutoDisabledWorkflow {
+            id,
+            name,
+            project_id,
+            trigger: serde_json::from_str(&trigger).unwrap_or(WorkflowTrigger::Manual),
+            reason,
+            disabled_at: at.map(parse_dt).unwrap_or_else(Utc::now),
+            disabled_by: by,
+            summary,
+        });
+    }
+    Ok(out)
+}
+
 pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     // Filter out batch placeholders (prefix "qp:") — they shouldn't show
     // up in the Workflows page, they're a plumbing detail for the FK.

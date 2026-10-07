@@ -815,6 +815,11 @@ query/userinfo stripping and the heuristics of `core/redact.rs` only;
 value-based scrubbing of legacy rows is impossible because their credential
 context is gone.
 
+Every automatic disable is recorded on the workflow (reason, who, when, a
+short summary; migration 223) and listed on the Automations page for review;
+`GET /api/workflows/auto-disabled` and `POST /api/workflows/reenable` are
+human-only (a bridge token is refused), and a human enable clears the record.
+
 *Known residuals.* Invalidation acts on the stored workflow, for future
 runs: a run already in flight, a human-resumed one included, can still load a
 Quick API or Prompt an agent changed during that run (rollback and fan-out

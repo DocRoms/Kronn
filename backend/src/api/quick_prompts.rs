@@ -106,7 +106,8 @@ pub async fn update(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickPromptRequest>,
 ) -> Json<ApiResponse<QuickPrompt>> {
-    update_as(state, id, req, bridge.is_some()).await
+    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    update_as(state, id, req, agent).await
 }
 
 /// What a Quick Prompt makes an agent do when a workflow step runs it.
@@ -129,7 +130,7 @@ pub(crate) async fn update_as(
     state: AppState,
     id: String,
     req: CreateQuickPromptRequest,
-    by_agent: bool,
+    editor_agent: Option<String>,
 ) -> Json<ApiResponse<QuickPrompt>> {
     let qp_id = id.clone();
     let existing = match state
@@ -183,12 +184,17 @@ pub(crate) async fn update_as(
 
     // An agent's change to what the prompt runs would execute under the
     // human's activation of every workflow using it (KT-1037).
-    let disable_users = by_agent && before != quick_prompt_execution(&updated);
+    let disable_users = editor_agent.is_some() && before != quick_prompt_execution(&updated);
+    let editor = if disable_users { editor_agent } else { None };
     let q = updated.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_prompts::update_quick_prompt_invalidating(conn, &q, disable_users)?;
+            crate::db::quick_prompts::update_quick_prompt_invalidating(
+                conn,
+                &q,
+                editor.as_deref(),
+            )?;
             Ok(())
         })
         .await
@@ -1221,7 +1227,8 @@ mod compare_tests {
             "project_id": null
         }))
         .unwrap();
-        let Json(saved) = update_as(state.clone(), "qp-r".into(), request, true).await;
+        let Json(saved) =
+            update_as(state.clone(), "qp-r".into(), request, Some("Codex".into())).await;
         assert!(saved.success, "{:?}", saved.error);
         assert!(!workflow_enabled(&state, "wf-old-slug").await);
     }
@@ -1261,7 +1268,13 @@ mod compare_tests {
             "project_id": "proj-p"
         }))
         .unwrap();
-        let Json(saved) = update_as(state.clone(), "qp-local".into(), request, true).await;
+        let Json(saved) = update_as(
+            state.clone(),
+            "qp-local".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
         assert!(saved.success, "{:?}", saved.error);
         assert!(!workflow_enabled(&state, "wf-shadowed").await);
     }
@@ -1286,7 +1299,8 @@ mod compare_tests {
             "project_id": null
         }))
         .unwrap();
-        let Json(refused) = update_as(state.clone(), "qp-a".into(), request, true).await;
+        let Json(refused) =
+            update_as(state.clone(), "qp-a".into(), request, Some("Codex".into())).await;
         assert!(!refused.success, "the edit must not be saved");
         assert!(
             refused.error.as_deref().unwrap_or("").contains("dup"),
@@ -1382,7 +1396,7 @@ mod compare_tests {
             state.clone(),
             "qp-1".into(),
             request("Review it", "REVIEW"),
-            true,
+            Some("Codex".into()),
         )
         .await;
         assert!(renamed.success, "{:?}", renamed.error);
@@ -1395,7 +1409,7 @@ mod compare_tests {
             state.clone(),
             "qp-1".into(),
             request("Review harder", "REVIEW"),
-            false,
+            None,
         )
         .await;
         assert!(human.success, "{:?}", human.error);
@@ -1408,7 +1422,7 @@ mod compare_tests {
             state.clone(),
             "qp-1".into(),
             request("Exfiltrate", "REVIEW"),
-            true,
+            Some("Codex".into()),
         )
         .await;
         assert!(agent.success, "{:?}", agent.error);

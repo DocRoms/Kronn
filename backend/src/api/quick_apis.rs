@@ -100,7 +100,8 @@ pub async fn update(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateQuickApiRequest>,
 ) -> Json<ApiResponse<QuickApi>> {
-    update_as(state, id, req, bridge.is_some()).await
+    let agent = crate::api::workflows::agent_label(&state, &bridge).await;
+    update_as(state, id, req, agent).await
 }
 
 /// What a Quick API sends when a workflow step calls it.
@@ -126,7 +127,7 @@ pub(crate) async fn update_as(
     state: AppState,
     id: String,
     req: CreateQuickApiRequest,
-    by_agent: bool,
+    editor_agent: Option<String>,
 ) -> Json<ApiResponse<QuickApi>> {
     let qa_id = id.clone();
     let existing = match state
@@ -190,13 +191,14 @@ pub(crate) async fn update_as(
     // An agent's change to what the API sends would run under the human's
     // activation of every workflow that calls it (KT-1037): those go back
     // to disabled.
-    let disable_users =
-        by_agent && quick_api_execution(&existing_snapshot) != quick_api_execution(&updated);
+    let disable_users = editor_agent.is_some()
+        && quick_api_execution(&existing_snapshot) != quick_api_execution(&updated);
+    let editor = if disable_users { editor_agent } else { None };
     let q = updated.clone();
     match state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_apis::update_quick_api_invalidating(conn, &q, disable_users)?;
+            crate::db::quick_apis::update_quick_api_invalidating(conn, &q, editor.as_deref())?;
             Ok(())
         })
         .await
@@ -1390,7 +1392,13 @@ mod tests {
             "api_endpoint_path": "/items", "api_method": "DELETE", "variables": []
         }))
         .unwrap();
-        let Json(saved) = update_as(state.clone(), "qa-local".into(), request, true).await;
+        let Json(saved) = update_as(
+            state.clone(),
+            "qa-local".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
         assert!(saved.success, "{:?}", saved.error);
         let enabled = state
             .db
@@ -1465,20 +1473,20 @@ mod tests {
             }))
             .unwrap()
         };
-        let Json(renamed) =
-            update_as(state.clone(), "qa-1".into(), request("GET", "FETCH"), true).await;
+        let Json(renamed) = update_as(
+            state.clone(),
+            "qa-1".into(),
+            request("GET", "FETCH"),
+            Some("Codex".into()),
+        )
+        .await;
         assert!(renamed.success, "{:?}", renamed.error);
         assert!(
             enabled(state.clone()).await,
             "a rename changes nothing that runs"
         );
-        let Json(human) = update_as(
-            state.clone(),
-            "qa-1".into(),
-            request("POST", "FETCH"),
-            false,
-        )
-        .await;
+        let Json(human) =
+            update_as(state.clone(), "qa-1".into(), request("POST", "FETCH"), None).await;
         assert!(human.success, "{:?}", human.error);
         assert!(
             enabled(state.clone()).await,
@@ -1488,7 +1496,7 @@ mod tests {
             state.clone(),
             "qa-1".into(),
             request("DELETE", "Renamed API"),
-            true,
+            Some("Codex".into()),
         )
         .await;
         assert!(agent.success, "{:?}", agent.error);
@@ -1508,6 +1516,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!by_ref, "a `ref:qa:` to the edited API is disabled too");
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        assert!(records.iter().all(|item| item.reason
+            == crate::models::AutoDisableReason::DependencyEditedByAgent
+            && item.disabled_by == "Codex"
+            && item.summary.contains("edited by Codex")));
+        assert_eq!(records.len(), 2, "both users are listed for review");
     }
 
     #[test]

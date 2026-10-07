@@ -970,6 +970,24 @@ export type AuditTodo = { file: string, line: number, text: string, };
 export type AuditTokenBreakdown = { uncached_input?: number, input_as_reported?: number, output?: number, cache_read?: number, cache_write?: number, total_with_cache?: number, };
 
 /**
+ * A workflow Kronn disabled on its own and no human has enabled since.
+ */
+export type AutoDisabledWorkflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, reason: AutoDisableReason, disabled_at: string,
+/**
+ * The agent's name, or "import".
+ */
+disabled_by: string,
+/**
+ * What changed, in a few words ("steps changed by Codex").
+ */
+summary: string, };
+
+/**
+ * Why Kronn disabled a workflow on its own (KT-1037).
+ */
+export type AutoDisableReason = "agent_edit" | "dependency_edited_by_agent" | "created_by_agent" | "imported";
+
+/**
  * Auto-trigger regex buckets declared in a skill's frontmatter YAML.
  *
  * ```yaml
@@ -6311,6 +6329,11 @@ kind: string, resource_id: string, name: string,
  * Dotted location, e.g. `api_headers.Authorization` or `args.3`.
  */
 field: string, };
+
+/**
+ * `POST /api/workflows/reenable` body: one id or many.
+ */
+export type ReenableWorkflowsRequest = { ids: Array<string>, };
 
 /**
  * What `POST /api/config/recovery/reencrypt` did.

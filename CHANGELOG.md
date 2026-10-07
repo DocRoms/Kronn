@@ -350,6 +350,18 @@ Release notes for 0.9.3 and earlier are available in the
   (0.15, KT-1034). The import preview shows the trigger, the Exec steps and
   the Exec allowlist, and the agent banners say the workflow is created
   disabled (KT-1037).
+- Kronn now says why it turned a workflow off on its own. Each automatic
+  disable (an agent's edit or create, an agent's change to a Quick API or
+  Prompt it uses, an agent bundle or proposal, an import) is recorded on the
+  workflow with its reason, who and when, and a short summary ("steps changed
+  by Codex", "Quick API « fetch » edited by Claude"); migration 223. The
+  Automations page shows a banner when any is waiting ("N workflow(s) were
+  changed by an agent or imported and are disabled by default"), a details
+  panel with each one's reason, summary, author, date and link, a Re-enable
+  button per row and a Re-enable all button (a Cron or Tracker workflow is
+  always confirmed first), and a reason badge in the workflow list. A human
+  enable clears the record. `GET /api/workflows/auto-disabled` and `POST
+  /api/workflows/reenable` (one id or many) refuse a bridge token (KT-1037).
 - Outbound requests to a URL a user, a plugin, a provider or an agent supplies
   go through one guarded transport (`core::safe_http`): ApiCall (every page,
   retry and redirect), OAuth and token exchange, Notify, gate webhooks, media

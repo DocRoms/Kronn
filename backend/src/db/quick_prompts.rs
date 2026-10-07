@@ -461,16 +461,17 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(n as u32)
 }
 
-/// Saves `item`; with `invalidate`, also disables every enabled workflow that
+/// Saves `item`; when an `agent` made the edit, also disables every enabled workflow that
 /// runs it before OR after the update (a rename may leave an old slug's
 /// `ref:` or capture a new one), in the same transaction. A failed lookup
 /// (an ambiguous reference) rolls the whole update back.
 pub fn update_quick_prompt_invalidating(
     conn: &Connection,
     item: &QuickPrompt,
-    invalidate: bool,
+    agent: Option<&str>,
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
+    let invalidate = agent.is_some();
     let mut dependents = if invalidate {
         crate::core::resource_refs::enabled_workflows_using(&tx, "prompt", &item.id)?
     } else {
@@ -487,6 +488,18 @@ pub fn update_quick_prompt_invalidating(
         }
     }
     let disabled = crate::core::resource_refs::disable_workflows(&tx, &dependents)?;
+    if let Some(agent) = agent {
+        let summary = format!("Quick Prompt « {} » edited by {agent}", item.name);
+        for id in &dependents {
+            crate::db::workflows::mark_auto_disabled(
+                &tx,
+                id,
+                crate::models::AutoDisableReason::DependencyEditedByAgent,
+                agent,
+                &summary,
+            )?;
+        }
+    }
     tx.commit()?;
     Ok(disabled)
 }

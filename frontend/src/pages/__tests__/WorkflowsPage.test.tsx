@@ -26,6 +26,8 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   cancelRun: vi.fn().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 }),
   triggerStream: vi.fn(),
   importWorkflow: vi.fn(),
+  autoDisabled: vi.fn().mockResolvedValue([]),
+  reenable: vi.fn().mockResolvedValue([]),
 }));
 
 // 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
@@ -2468,6 +2470,27 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       fireEvent.change(input, { target: { files: [ambiguousFile] } });
     });
     expect(await screen.findByText(/Export Kronn ambigu/)).toBeInTheDocument();
+  });
+
+  it('shows the auto-disabled banner only when Kronn disabled workflows, and badges them in the list', async () => {
+    mockWorkflowsApi.list.mockResolvedValueOnce([{
+      id: 'wf-agent', name: 'Agent made', project_id: null, project_name: null, trigger_type: 'Cron',
+      step_count: 1, enabled: false, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    }]);
+    mockWorkflowsApi.autoDisabled.mockResolvedValueOnce([{
+      id: 'wf-agent', name: 'Agent made', project_id: null, trigger: { type: 'Cron', schedule: '* * * * *' },
+      reason: 'created_by_agent', disabled_at: '2026-10-07T09:00:00Z', disabled_by: 'Codex',
+      summary: 'created by Codex',
+    }]);
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />);
+    expect(await screen.findByTestId('auto-disabled-banner')).toHaveTextContent('1 workflow(s)');
+    expect(screen.getByTestId('auto-disabled-badge')).toHaveTextContent('Créé par un agent');
+  });
+
+  it('hides the auto-disabled banner when there is none', async () => {
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />);
+    await waitFor(() => expect(mockWorkflowsApi.autoDisabled).toHaveBeenCalled());
+    expect(screen.queryByTestId('auto-disabled-banner')).not.toBeInTheDocument();
   });
 
   it('previews a workflow import as disabled, with its trigger and Exec steps', async () => {

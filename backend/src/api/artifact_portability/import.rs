@@ -861,6 +861,13 @@ fn commit_plan(
                     request.project_id.as_deref(),
                 );
                 crate::db::workflows::insert_workflow(tx, &workflow)?;
+                crate::db::workflows::mark_auto_disabled(
+                    tx,
+                    &workflow.id,
+                    crate::models::AutoDisableReason::Imported,
+                    "import",
+                    "imported from an artifact",
+                )?;
             }
             ResourceKind::Artifact => unreachable!("filtered above"),
         }

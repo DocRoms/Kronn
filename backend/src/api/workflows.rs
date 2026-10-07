@@ -2101,7 +2101,66 @@ pub async fn create(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<CreateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    create_as(state, req, WorkflowWriter::from_bridge(&bridge)).await
+    let label = agent_label(&state, &bridge).await;
+    create_as_labeled(state, req, WorkflowWriter::from_bridge(&bridge), label).await
+}
+
+/// Who a bridge-token caller is, for the record of an automatic disable:
+/// the agent of the launch's discussion, else "an agent". `None` for a human.
+pub(crate) async fn agent_label(
+    state: &AppState,
+    bridge: &Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    let caller = bridge.as_ref()?;
+    let discussion = caller.own_discussions.first().cloned();
+    let agent = match discussion {
+        Some(id) => state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT agent FROM discussions WHERE id = ?1",
+                        [&id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?)
+            })
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    Some(agent.unwrap_or_else(|| AN_AGENT.to_string()))
+}
+
+/// Who an automatic disable names when the agent is unknown.
+pub(crate) const AN_AGENT: &str = "an agent";
+
+/// Records why Kronn disabled these workflows on its own (KT-1037); a
+/// failure is logged, never surfaced: the disable itself already happened.
+pub(crate) async fn record_auto_disable(
+    state: &AppState,
+    ids: Vec<String>,
+    reason: AutoDisableReason,
+    by: String,
+    summary: String,
+) {
+    if ids.is_empty() {
+        return;
+    }
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            for id in &ids {
+                crate::db::workflows::mark_auto_disabled(conn, id, reason, &by, &summary)?;
+            }
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!("could not record why workflows were disabled: {error}");
+    }
 }
 
 /// `POST /api/workflows/agent-proposal` — an agent's `KRONN:WORKFLOW_READY`
@@ -2113,7 +2172,67 @@ pub async fn create_agent_proposal(
 ) -> Json<ApiResponse<Workflow>> {
     // Accepting the proposal saves it; enabling it is a separate human step.
     req.enabled = Some(false);
-    create_as(state, req, WorkflowWriter::Agent).await
+    create_as_labeled(state, req, WorkflowWriter::Agent, Some(AN_AGENT.into())).await
+}
+
+/// `GET /api/workflows/auto-disabled` — workflows Kronn disabled on its own
+/// (agent edit or create, agent edit of a dependency, import) that no human
+/// has enabled since.
+pub async fn list_auto_disabled(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+) -> Json<ApiResponse<Vec<AutoDisabledWorkflow>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    match state
+        .db
+        .with_read_conn(crate::db::workflows::list_auto_disabled)
+        .await
+    {
+        Ok(items) => Json(ApiResponse::ok(items)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+    }
+}
+
+/// `POST /api/workflows/reenable` — a human enables one workflow or several
+/// after review; each goes through the ordinary human update, which clears
+/// the record of why it was off. Refused for a bridge token.
+pub async fn reenable(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<ReenableWorkflowsRequest>,
+) -> Json<ApiResponse<Vec<Workflow>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    reenable_as_human(state, req.ids).await
+}
+
+pub(crate) async fn reenable_as_human(
+    state: AppState,
+    ids: Vec<String>,
+) -> Json<ApiResponse<Vec<Workflow>>> {
+    let mut enabled = Vec::with_capacity(ids.len());
+    for id in ids {
+        let request: UpdateWorkflowRequest =
+            match serde_json::from_value(serde_json::json!({"enabled": true})) {
+                Ok(request) => request,
+                Err(e) => return Json(ApiResponse::err(e.to_string())),
+            };
+        let Json(response) =
+            update_as(state.clone(), id.clone(), request, WorkflowWriter::Human).await;
+        match response.data {
+            Some(workflow) if response.success => enabled.push(workflow),
+            _ => {
+                return Json(ApiResponse::err(format!(
+                    "Workflow {id} could not be enabled: {}",
+                    response.error.unwrap_or_default()
+                )))
+            }
+        }
+    }
+    Json(ApiResponse::ok(enabled))
 }
 
 /// Why an agent cannot resume a disabled workflow's run.
@@ -2151,7 +2270,31 @@ pub(crate) async fn create_as(
     req: CreateWorkflowRequest,
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = create_written(state, req, writer).await;
+    let label = (writer == WorkflowWriter::Agent).then(|| AN_AGENT.to_string());
+    create_as_labeled(state, req, writer, label).await
+}
+
+/// [`create_as`] naming the agent for the record of its disabled workflow.
+pub(crate) async fn create_as_labeled(
+    state: AppState,
+    req: CreateWorkflowRequest,
+    writer: WorkflowWriter,
+    label: Option<String>,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = create_written(state.clone(), req, writer).await;
+    if writer == WorkflowWriter::Agent {
+        if let Some(created) = response.data.as_ref().filter(|wf| !wf.enabled) {
+            let by = label.unwrap_or_else(|| AN_AGENT.to_string());
+            record_auto_disable(
+                &state,
+                vec![created.id.clone()],
+                AutoDisableReason::CreatedByAgent,
+                by.clone(),
+                format!("created by {by}"),
+            )
+            .await;
+        }
+    }
     Json(with_awaiting_notice(response))
 }
 
@@ -2471,7 +2614,8 @@ pub async fn update(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    update_as(state, id, req, WorkflowWriter::from_bridge(&bridge)).await
+    let label = agent_label(&state, &bridge).await;
+    update_as_labeled(state, id, req, WorkflowWriter::from_bridge(&bridge), label).await
 }
 
 pub(crate) async fn update_as(
@@ -2480,7 +2624,19 @@ pub(crate) async fn update_as(
     req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = update_written(state, id, req, writer).await;
+    let label = (writer == WorkflowWriter::Agent).then(|| AN_AGENT.to_string());
+    update_as_labeled(state, id, req, writer, label).await
+}
+
+/// [`update_as`] naming the agent for the record of a disable it caused.
+pub(crate) async fn update_as_labeled(
+    state: AppState,
+    id: String,
+    req: UpdateWorkflowRequest,
+    writer: WorkflowWriter,
+    label: Option<String>,
+) -> Json<ApiResponse<Workflow>> {
+    let Json(response) = update_written(state, id, req, writer, label).await;
     Json(with_awaiting_notice(response))
 }
 
@@ -2489,6 +2645,7 @@ async fn update_written(
     id: String,
     mut req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
+    label: Option<String>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -2721,8 +2878,25 @@ async fn update_written(
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
-    if agent_guard.is_some_and(|before| before != execution_fingerprint(&updated)) {
-        updated.enabled = false;
+    let was_enabled = agent_guard.is_some();
+    let mut auto_disable_summary = None;
+    if let Some(before) = agent_guard {
+        let after = execution_fingerprint(&updated);
+        if before != after {
+            updated.enabled = false;
+            let changed: Vec<&str> = before
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(key, value)| after.get(key.as_str()) != Some(*value))
+                .map(|(key, _)| key.as_str())
+                .collect();
+            let by = label.clone().unwrap_or_else(|| AN_AGENT.to_string());
+            auto_disable_summary = Some((
+                by.clone(),
+                format!("{} changed by {by}", changed.join(", ")),
+            ));
+        }
     }
 
     if let Err(e) = crate::workflows::concurrency::validate_key(
@@ -2775,12 +2949,33 @@ async fn update_written(
     }
 
     let w = updated.clone();
+    // A human turning it on has reviewed it: the record of why Kronn turned
+    // it off goes.
+    let clear_record = updated.enabled && writer == WorkflowWriter::Human;
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &w))
+        .with_conn(move |conn| {
+            let saved = crate::db::workflows::update_workflow(conn, &w)?;
+            if saved && clear_record {
+                crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
+            }
+            Ok(saved)
+        })
         .await
     {
-        Ok(true) => Json(ApiResponse::ok(updated)),
+        Ok(true) => {
+            if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
+                record_auto_disable(
+                    &state,
+                    vec![updated.id.clone()],
+                    AutoDisableReason::AgentEdit,
+                    by,
+                    summary,
+                )
+                .await;
+            }
+            Json(ApiResponse::ok(updated))
+        }
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
         Ok(false) => Json(ApiResponse::err_coded(
@@ -3652,11 +3847,23 @@ async fn import_workflow_written(
                 crate::db::quick_execs::insert_quick_exec(conn, qe)?;
             }
             let mut root_out: Option<Workflow> = None;
+            let bundle_name = prepared
+                .iter()
+                .find(|w| w.id == root_id_for_return)
+                .map(|w| w.name.clone())
+                .unwrap_or_default();
             for mut w in prepared {
                 // #9 — retarget ApiCall configs to this instance before insert.
                 rebind_api_configs(conn, &mut w.steps, rebind_project.as_deref());
                 rebind_api_configs(conn, &mut w.on_failure, rebind_project.as_deref());
                 crate::db::workflows::insert_workflow(conn, &w)?;
+                crate::db::workflows::mark_auto_disabled(
+                    conn,
+                    &w.id,
+                    AutoDisableReason::Imported,
+                    "import",
+                    &format!("imported from the file of « {bundle_name} »"),
+                )?;
                 if w.id == root_id_for_return {
                     root_out = Some(w);
                 }
@@ -8429,6 +8636,128 @@ mod tests {
         for leaked in ["pw0rdValue", "Qk7SecretValue9", "rawTokenValue42"] {
             assert!(!output.contains(leaked), "{leaked}: {output}");
         }
+    }
+
+    async fn auto_disabled(state: &AppState) -> Vec<AutoDisabledWorkflow> {
+        state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap()
+    }
+
+    /// KT-1037: every automatic disable records why; a human re-enable
+    /// clears it; the re-enable route refuses a bridge token.
+    #[tokio::test]
+    async fn automatic_disables_record_why_and_a_human_reenable_clears_it() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "by-agent", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as_labeled(
+            state.clone(),
+            request,
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let created = created.data.unwrap();
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].reason, AutoDisableReason::CreatedByAgent);
+        assert_eq!(listed[0].disabled_by, "Codex");
+        assert_eq!(listed[0].summary, "created by Codex");
+
+        let bridge = Some(axum::Extension(crate::core::bridge_token::BridgeCaller {
+            token_id: "t".into(),
+            project: None,
+            own_discussions: vec![],
+            own_run: None,
+        }));
+        let Json(refused) = reenable(
+            State(state.clone()),
+            bridge.clone(),
+            Json(ReenableWorkflowsRequest {
+                ids: vec![created.id.clone()],
+            }),
+        )
+        .await;
+        assert!(!refused.success, "a bridge token cannot re-enable");
+        let Json(refused_list) = list_auto_disabled(State(state.clone()), bridge).await;
+        assert!(!refused_list.success, "nor list what to re-enable");
+
+        let Json(enabled) = reenable(
+            State(state.clone()),
+            None,
+            Json(ReenableWorkflowsRequest {
+                ids: vec![created.id.clone()],
+            }),
+        )
+        .await;
+        assert!(enabled.success, "{:?}", enabled.error);
+        assert!(enabled.data.unwrap()[0].enabled);
+        assert!(
+            auto_disabled(&state).await.is_empty(),
+            "the human re-enable clears the record"
+        );
+
+        let swap: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"b": 2}}]
+        }))
+        .unwrap();
+        let Json(edited) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            swap,
+            WorkflowWriter::Agent,
+            Some("Claude".into()),
+        )
+        .await;
+        assert!(edited.success, "{:?}", edited.error);
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed[0].reason, AutoDisableReason::AgentEdit);
+        assert_eq!(listed[0].summary, "steps changed by Claude");
+
+        let mut wf = mk_workflow_for_export("imported");
+        wf.project_id = None;
+        let mut emit = mk_step("emit", StepType::JsonData);
+        emit.json_data_payload = Some(serde_json::json!({"a": 1}));
+        wf.steps = vec![emit];
+        let content = serde_json::to_string(&WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: wf,
+            referenced_quick_prompts: vec![],
+            referenced_quick_apis: vec![],
+            referenced_quick_execs: vec![],
+            referenced_pages: vec![],
+            referenced_workflows: vec![],
+            redacted_fields: vec![],
+        })
+        .unwrap();
+        let Json(imported) = import_workflow(
+            State(state.clone()),
+            None,
+            Json(ImportWorkflowRequest {
+                content,
+                project_id: None,
+            }),
+        )
+        .await;
+        assert!(imported.success, "{:?}", imported.error);
+        let imported = imported.data.unwrap();
+        let record = auto_disabled(&state)
+            .await
+            .into_iter()
+            .find(|item| item.id == imported.id)
+            .expect("the import is listed");
+        assert_eq!(record.reason, AutoDisableReason::Imported);
+        assert_eq!(record.disabled_by, "import");
+        assert!(record.summary.contains("imported"), "{}", record.summary);
     }
 
     /// KT-1037 / KT-1017: only a human turns a workflow on. An agent's

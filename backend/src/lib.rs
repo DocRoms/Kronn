@@ -2170,6 +2170,13 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // See `api::bundle` for the wire shape + ref-resolution
         // protocol (`@bundle:<id>` placeholders).
         .route("/api/workflows/bundle", post(api::bundle::create_bundle))
+        // KT-1037 — workflows Kronn disabled on its own, and their human-only
+        // re-enable (no bridge-token route: agents never reach these).
+        .route(
+            "/api/workflows/auto-disabled",
+            get(api::workflows::list_auto_disabled),
+        )
+        .route("/api/workflows/reenable", post(api::workflows::reenable))
         .route(
             "/api/workflows/bundle/human",
             post(api::bundle::create_human_bundle),

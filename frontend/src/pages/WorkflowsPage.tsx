@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
+import { AutoDisabledReview, AUTO_DISABLE_REASON_KEY } from '../components/workflows/AutoDisabledReview';
 import { WorkflowWizard } from '../components/workflows/WorkflowWizard';
 import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
@@ -418,7 +419,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // 0.8.5 — post-deploy focus: when the user lands here right after
   // clicking "Deploy improved QP" in DiscussionsPage, this state holds
   // the target QP id and briefly highlights the matching card.
-  const { data: workflowList, refetch } = useApi(() => workflowsApi.list(), []);
+  const { data: workflowList, refetch: refetchWorkflowList } = useApi(() => workflowsApi.list(), []);
+  // KT-1037 — workflows Kronn disabled on its own, refreshed with the list.
+  const { data: autoDisabledList, refetch: refetchAutoDisabled } = useApi(() => workflowsApi.autoDisabled(), []);
+  const refetch = useCallback(() => {
+    refetchWorkflowList();
+    refetchAutoDisabled();
+  }, [refetchWorkflowList, refetchAutoDisabled]);
+  const autoDisabled = useMemo(() => autoDisabledList ?? [], [autoDisabledList]);
+  const autoDisabledById = useMemo(
+    () => new Map(autoDisabled.map(item => [item.id, item])),
+    [autoDisabled],
+  );
   const { data: quickPromptList, refetch: refetchQP } = useApi(() => quickPromptsApi.list(), []);
   const { data: quickApiList, refetch: refetchQA } = useApi(() => quickApisApi.list(), []);
   const { data: quickExecList, refetch: refetchQE } = useApi(() => quickExecsApi.list(), []);
@@ -2654,6 +2666,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {!showCreate && !editingWorkflow && (
+        <AutoDisabledReview
+          items={autoDisabled}
+          onOpen={(id) => openDetail(id)}
+          onReenable={async (ids) => {
+            try {
+              await workflowsApi.reenable(ids);
+              if (toastProp) toastProp(t('wf.autoDisabled.reenabled', ids.length), 'success');
+            } catch (e) {
+              if (toastProp) toastProp(userError(e), 'error');
+            }
+            refetch();
+          }}
+        />
+      )}
+
+      {!showCreate && !editingWorkflow && (
         <RunRetentionBanner
           onOpenSetting={() => {
             try { sessionStorage.setItem(RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET); } catch { /* land on the page top */ }
@@ -2731,6 +2759,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           />
                         )}
                         <span className="wf-card-title">{wf.name}</span>
+                        {(() => {
+                          const record = autoDisabledById.get(wf.id);
+                          return record ? (
+                            <span
+                              className="wf-auto-disabled-badge"
+                              data-testid="auto-disabled-badge"
+                              title={record.summary}
+                            >
+                              {t(AUTO_DISABLE_REASON_KEY[record.reason])}
+                            </span>
+                          ) : null;
+                        })()}
                       </div>
                       <div className="wf-card-controls">
                         <button

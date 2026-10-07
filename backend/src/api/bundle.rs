@@ -484,6 +484,19 @@ async fn create_bundle_as(
                 crate::db::workflows::insert_workflow(&tx, child)?;
             }
             crate::db::workflows::insert_workflow(&tx, &wf_to_insert)?;
+            // An agent's bundle lands disabled: say so where a human reviews.
+            for workflow in prepared_children
+                .iter()
+                .chain(std::iter::once(&wf_to_insert))
+            {
+                crate::db::workflows::mark_auto_disabled(
+                    &tx,
+                    &workflow.id,
+                    crate::models::AutoDisableReason::CreatedByAgent,
+                    crate::api::workflows::AN_AGENT,
+                    &format!("bundle « {} » proposed by an agent", wf_to_insert.name),
+                )?;
+            }
             tx.commit()?;
             Ok::<_, anyhow::Error>(())
         })
@@ -672,6 +685,15 @@ mod tests {
             all.iter().all(|w| !w.enabled),
             "every bundled workflow lands disabled"
         );
+        let records = state
+            .db
+            .with_read_conn(crate::db::workflows::list_auto_disabled)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records
+            .iter()
+            .all(|item| item.reason == crate::models::AutoDisableReason::CreatedByAgent));
 
         let human = bundle_state();
         let Json(created) = create_human_bundle(

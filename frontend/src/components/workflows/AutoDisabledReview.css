@@ -1,0 +1,103 @@
+/* KT-1037 — review of workflows Kronn disabled on its own. */
+.wf-auto-disabled {
+  margin-bottom: var(--kr-sp-3);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+}
+
+.wf-auto-disabled-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.wf-auto-disabled-banner > svg {
+  color: var(--kr-warning);
+  flex-shrink: 0;
+}
+
+.wf-auto-disabled-panel {
+  border-top: 1px solid var(--kr-border-light);
+  padding: var(--kr-sp-2) var(--kr-sp-3) var(--kr-sp-3);
+}
+
+.wf-auto-disabled-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.wf-auto-disabled-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2);
+  border-radius: var(--kr-r-sm);
+}
+
+.wf-auto-disabled-row:hover {
+  background: var(--kr-bg-hover);
+}
+
+.wf-auto-disabled-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--kr-sp-1) var(--kr-sp-2);
+}
+
+.wf-auto-disabled-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.wf-auto-disabled-name:hover {
+  text-decoration: underline;
+}
+
+.wf-auto-disabled-reason {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-warning);
+}
+
+.wf-auto-disabled-summary {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.wf-auto-disabled-meta {
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.wf-auto-disabled-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--kr-sp-2);
+}
+
+.wf-auto-disabled-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--kr-sp-1);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-sm);
+  white-space: nowrap;
+}
