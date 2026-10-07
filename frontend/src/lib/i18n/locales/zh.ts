@@ -2855,6 +2855,7 @@ const zh: TranslationDict = {
   "contacts.warn.TAILSCALE_UNREACHABLE": "联系人已添加但不可达 — Tailscale 已启用但联系人无响应。检查其是否在线。",
   "contacts.warn.LAN_UNREACHABLE": "联系人已添加但不可达 — 此联系人位于本地网络。检查您是否在同一 Wi-Fi/LAN。",
   "contacts.warn.NETWORK_UNREACHABLE": "联系人已添加但不可达 — 检查地址并确保联系人在线。",
+  "contacts.warn.P2P_OFF": "已添加联系人但未连接：P2P 连接已关闭。请在 设置 > 身份 中启用。",
   "contacts.delete": "删除",
   "contacts.deleteConfirm": "删除此联系人？您将无法再与其消息或共享对话。",
   "contacts.deleted": "联系人已删除",

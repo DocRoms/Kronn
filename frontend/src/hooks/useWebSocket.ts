@@ -29,12 +29,24 @@ function stopSocket() {
   const active = socket; socket = null;
   if (active) { active.onopen = null; active.onclose = null; active.onmessage = null; active.onerror = null; active.close(); }
 }
+const WS_PROTOCOL = 'kronn';
+const WS_AUTH_PREFIX = 'kronn.auth.';
+
+/** base64url without padding: the only characters a subprotocol may carry. */
+export function base64Url(value: string): string {
+  let binary = '';
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 function connect() {
   if (subscribers.size === 0 || socket) return;
   clearTimeout(reconnectTimer);
   const endpoint = getApiBase() ? new URL(getApiBase()) : window.location;
   const token = getAuthToken();
-  const ws = new WebSocket(`${endpoint.protocol === 'https:' ? 'wss:' : 'ws:'}//${endpoint.host}/api/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`);
+  // The token rides as a subprotocol, never in the URL (proxy logs keep URLs).
+  const url = `${endpoint.protocol === 'https:' ? 'wss:' : 'ws:'}//${endpoint.host}/api/ws`;
+  const ws = token ? new WebSocket(url, [WS_PROTOCOL, `${WS_AUTH_PREFIX}${base64Url(token)}`]) : new WebSocket(url);
   socket = ws;
   ws.onopen = () => {
     if (socket !== ws) return;

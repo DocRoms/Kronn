@@ -269,10 +269,14 @@ cmd_start_dev() {
 
     success "Toolchain OK — launching native stack."
     echo
+    # One port for Vite and for the UI origin the backend's WebSocket accepts;
+    # an operator-supplied KRONN_DEV_UI_URL wins.
+    export VITE_DEV_PORT="${VITE_DEV_PORT:-5173}"
+    export KRONN_DEV_UI_URL="${KRONN_DEV_UI_URL:-http://localhost:${VITE_DEV_PORT}}"
     # Clickable hyperlink (OSC 8) when on a TTY; plain URL otherwise. Printed
     # directly — not via $(...) — so the TTY check sees the real terminal.
     printf "  ${BOLD}UI  → ${GREEN}"
-    hyperlink "http://localhost:5173"
+    hyperlink "$KRONN_DEV_UI_URL"
     printf "${RESET}   ${DIM}← click (or Cmd/Ctrl-click)${RESET}\n"
     printf "  ${DIM}API → http://localhost:3140  (backend only — not the UI)${RESET}\n"
     [[ "${KRONN_NO_OPEN:-0}" != "1" ]] && printf "  ${DIM}Opening your browser when the UI is ready (KRONN_NO_OPEN=1 to disable).${RESET}\n"
@@ -282,10 +286,9 @@ cmd_start_dev() {
     # /api → :3140) in the foreground. Ctrl+C ends the foreground frontend; the
     # trap then stops the backend so we never leak a detached watcher.
     #
-    # Tell the backend its startup banner should point users at the Vite UI:
-    # in native dev :3140 serves the API ONLY, so an unqualified "→ :3140" in the
-    # banner is misleading. See main.rs `banner_entry_url`.
-    export KRONN_DEV_UI_URL="http://localhost:5173"
+    # KRONN_DEV_UI_URL (exported above) points the backend banner at the Vite
+    # UI (see main.rs `banner_entry_url`) and is the dev origin its WebSocket
+    # accepts.
     KRONN_DEV_BACKEND_FAILURE_FILE="${TMPDIR:-/tmp}/kronn-dev-backend-failure-$$"
     export KRONN_DEV_BACKEND_FAILURE_FILE
     rm -f "$KRONN_DEV_BACKEND_FAILURE_FILE"
@@ -334,8 +337,8 @@ cmd_start_dev() {
     if [[ "${KRONN_NO_OPEN:-0}" != "1" ]]; then
         (
             for _ in $(seq 1 90); do
-                if curl -fsS -o /dev/null "http://localhost:5173" 2>/dev/null; then
-                    open_url "http://localhost:5173"
+                if curl -fsS -o /dev/null "$KRONN_DEV_UI_URL" 2>/dev/null; then
+                    open_url "$KRONN_DEV_UI_URL"
                     break
                 fi
                 sleep 1

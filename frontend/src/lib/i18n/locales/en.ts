@@ -2883,6 +2883,7 @@ const en: TranslationDict = {
   'contacts.warn.TAILSCALE_UNREACHABLE': 'Contact added but unreachable — Tailscale is active but the contact is not responding. Check that they are online.',
   'contacts.warn.LAN_UNREACHABLE': 'Contact added but unreachable — this contact is on a local network. Check that you are on the same Wi-Fi/LAN.',
   'contacts.warn.NETWORK_UNREACHABLE': 'Contact added but unreachable — check the address and that the contact is online.',
+  'contacts.warn.P2P_OFF': 'Contact added, not contacted: P2P connections are off. Enable them in Settings > Identity.',
   'contacts.delete': 'Delete',
   'contacts.deleteConfirm': 'Delete this contact? You will no longer be able to message them or share discussions.',
   'contacts.deleted': 'Contact deleted',

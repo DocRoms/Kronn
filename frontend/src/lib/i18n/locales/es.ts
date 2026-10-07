@@ -2883,6 +2883,7 @@ const es: TranslationDict = {
   'contacts.warn.TAILSCALE_UNREACHABLE': 'Contacto agregado pero inalcanzable — Tailscale está activo pero el contacto no responde. Verifique que esté en línea.',
   'contacts.warn.LAN_UNREACHABLE': 'Contacto agregado pero inalcanzable — este contacto está en una red local. Verifique que esté en la misma red Wi-Fi/LAN.',
   'contacts.warn.NETWORK_UNREACHABLE': 'Contacto agregado pero inalcanzable — verifique la dirección y que el contacto esté en línea.',
+  'contacts.warn.P2P_OFF': 'Contacto añadido sin contactarlo: las conexiones P2P están desactivadas. Actívalas en Ajustes > Identidad.',
   'contacts.delete': 'Eliminar',
   'contacts.deleteConfirm': '¿Eliminar este contacto? Ya no podrás enviarle mensajes ni compartir discusiones.',
   'contacts.deleted': 'Contacto eliminado',

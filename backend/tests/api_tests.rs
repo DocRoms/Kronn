@@ -14945,7 +14945,7 @@ const TEST_PEER_CODE: &str = "kronn:TestPeer@10.0.0.77:3456";
 
 async fn insert_test_contact(state: &AppState, code: &str, status: &str) {
     let contact = kronn::models::Contact {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: test_contact_id(code),
         pseudo: "TestPeer".into(),
         avatar_email: None,
         kronn_url: "http://10.0.0.77:3456".into(),
@@ -15615,6 +15615,157 @@ async fn ws_accepts_the_desktop_webview_origin() {
     }
 }
 
+/// KT-1033 — a discussion shared only with contact A never reaches accepted
+/// contact B, and B cannot write into it even knowing its shared id.
+#[tokio::test]
+async fn ws_a_share_reaches_only_its_members() {
+    let state = test_state();
+    let addr = start_test_server(state.clone()).await;
+    enable_p2p(&state).await;
+    let code_a = "kronn:Alice@10.0.0.81:3456";
+    let code_b = "kronn:Bob@10.0.0.82:3456";
+    insert_test_contact(&state, code_a, "accepted").await;
+    insert_test_contact(&state, code_b, "accepted").await;
+    let disc = seed_shared_discussion(&state, "shared-a-only").await;
+    share_with(&state, "shared-a-only", &[test_contact_id(code_a)]).await;
+
+    let mut peers = Vec::new();
+    for (pseudo, code) in [("Alice", code_a), ("Bob", code_b)] {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws"))
+            .await
+            .unwrap();
+        let (mut sender, receiver) = StreamExt::split(ws);
+        send_ws(
+            &mut sender,
+            &WsMessage::Presence {
+                from_pseudo: pseudo.into(),
+                from_invite_code: code.into(),
+                online: true,
+            },
+        )
+        .await;
+        peers.push((sender, receiver));
+    }
+    let invite = WsMessage::DiscussionInvite {
+        shared_discussion_id: "shared-a-only".into(),
+        title: "Topic".into(),
+        from_pseudo: "Host".into(),
+        from_invite_code: "kronn:Host@10.0.0.1:3456".into(),
+    };
+    state.ws_broadcast.send(invite).unwrap();
+    state
+        .ws_broadcast
+        .send(chat_frame(
+            "shared-a-only",
+            "host-msg",
+            "kronn:Host@10.0.0.1:3456",
+        ))
+        .unwrap();
+    let wait = std::time::Duration::from_millis(800);
+    let is_share = |m: &WsMessage| {
+        matches!(m, WsMessage::DiscussionInvite { shared_discussion_id, .. }
+            | WsMessage::ChatMessage { shared_discussion_id, .. } if shared_discussion_id == "shared-a-only")
+    };
+    let (mut bob_sender, mut bob_receiver) = peers.pop().unwrap();
+    let (_alice_sender, mut alice_receiver) = peers.pop().unwrap();
+    assert!(next_ws_matching(&mut alice_receiver, wait, is_share)
+        .await
+        .is_some());
+    assert!(
+        next_ws_matching(&mut bob_receiver, wait, is_share)
+            .await
+            .is_none(),
+        "a non-member never receives the share"
+    );
+
+    // Bob writes into it by its shared id: refused.
+    send_ws(
+        &mut bob_sender,
+        &chat_frame("shared-a-only", "bob-msg", code_b),
+    )
+    .await;
+    send_ws(
+        &mut bob_sender,
+        &WsMessage::DiscSyncRequest {
+            shared_discussion_id: "shared-a-only".into(),
+            since_timestamp: 0,
+        },
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let ids: Vec<String> = state
+        .db
+        .with_conn(move |conn| kronn::db::discussions::get_discussion(conn, &disc))
+        .await
+        .unwrap()
+        .unwrap()
+        .messages
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    assert!(!ids.contains(&"bob-msg".to_string()), "{ids:?}");
+}
+
+/// KT-1033 — the frontend authenticates with the token as a subprotocol: no
+/// query string, and the server selects the plain `kronn` protocol.
+#[tokio::test]
+async fn ws_frontend_authenticates_without_a_query_token() {
+    use base64::Engine as _;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let state = test_state();
+    {
+        let mut config = state.config.write().await;
+        config.server.auth_enabled = true;
+        config.server.auth_token = Some("operator-token".into());
+        config.server.auth_strict_localhost = true;
+    }
+    let addr = start_test_server(state.clone()).await;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("operator-token");
+    let mut request = format!("ws://{addr}/api/ws").into_client_request().unwrap();
+    let headers = request.headers_mut();
+    headers.insert("origin", format!("http://{addr}").parse().unwrap());
+    headers.insert(
+        "sec-websocket-protocol",
+        format!("kronn, kronn.auth.{encoded}").parse().unwrap(),
+    );
+    let (stream, response) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("the subprotocol credential opens the frontend connection");
+    assert_eq!(
+        response.headers().get("sec-websocket-protocol").unwrap(),
+        "kronn",
+        "only the plain protocol name is echoed"
+    );
+    let (mut sender, mut receiver) = StreamExt::split(stream);
+    send_ws(&mut sender, &frontend_presence()).await;
+    state.ws_broadcast.send(presence_of("BusEvent")).unwrap();
+    assert!(
+        next_ws_matching(&mut receiver, std::time::Duration::from_secs(2), |m| {
+            is_presence_of(m, "BusEvent")
+        })
+        .await
+        .is_some()
+    );
+}
+
+async fn share_with(state: &AppState, shared_id: &str, members: &[String]) {
+    let (sid, members) = (shared_id.to_owned(), members.to_vec());
+    state
+        .db
+        .with_conn(move |conn| {
+            let disc = kronn::db::discussions::find_discussion_by_shared_id(conn, &sid)?
+                .expect("shared discussion");
+            kronn::db::discussions::update_discussion_sharing(conn, &disc, &sid, &members)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn test_contact_id(code: &str) -> String {
+    format!("contact-{code}")
+}
+
 async fn seed_shared_discussion(state: &AppState, shared_id: &str) -> String {
     let shared_id = shared_id.to_owned();
     state
@@ -15948,7 +16099,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         summary_strategy: kronn::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: Some("shared-abc-123".into()),
-        shared_with: vec![],
+        shared_with: vec![test_contact_id(TEST_PEER_CODE)],
         workflow_run_id: None,
         test_mode_restore_branch: None,
         test_mode_stash_ref: None,
@@ -16060,11 +16211,17 @@ async fn disc_sync_request_resends_missing_messages() {
     state
         .db
         .with_conn(|conn| {
-            kronn::db::discussions::ensure_mirror_by_shared_id(
+            let disc = kronn::db::discussions::ensure_mirror_by_shared_id(
                 conn,
                 "shared-sync-1",
                 "Topic",
                 "Host",
+            )?;
+            kronn::db::discussions::update_discussion_sharing(
+                conn,
+                &disc,
+                "shared-sync-1",
+                &[test_contact_id(TEST_PEER_CODE)],
             )?;
             Ok(())
         })
@@ -16561,7 +16718,7 @@ async fn ws_chat_message_idempotent() {
         summary_strategy: kronn::models::SummaryStrategy::OnDemand,
         introspection_call_count: 0,
         shared_id: Some("shared-idem-001".into()),
-        shared_with: vec![],
+        shared_with: vec![test_contact_id(TEST_PEER_CODE)],
         workflow_run_id: None,
         test_mode_restore_branch: None,
         test_mode_stash_ref: None,

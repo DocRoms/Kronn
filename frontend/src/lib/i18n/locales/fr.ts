@@ -2893,6 +2893,7 @@ const fr: TranslationDict = {
   'contacts.warn.TAILSCALE_UNREACHABLE': "Contact ajouté mais injoignable — Tailscale est actif mais le contact ne répond pas. Vérifiez qu'il est en ligne.",
   'contacts.warn.LAN_UNREACHABLE': 'Contact ajouté mais injoignable — ce contact est sur un réseau local. Vérifiez que vous êtes sur le même Wi-Fi/LAN.',
   'contacts.warn.NETWORK_UNREACHABLE': "Contact ajouté mais injoignable — vérifiez l'adresse et que le contact est en ligne.",
+  'contacts.warn.P2P_OFF': 'Contact ajouté sans le joindre : les connexions P2P sont désactivées. Activez-les dans Réglages > Identité.',
   'contacts.delete': 'Supprimer',
   'contacts.deleteConfirm': 'Supprimer ce contact ? Vous ne pourrez plus lui envoyer de message ni partager de discussion.',
   'contacts.deleted': 'Contact supprimé',

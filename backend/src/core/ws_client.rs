@@ -260,9 +260,21 @@ async fn handle_peer_connection(
     // answers with ChatMessages we dedup on message_id, so it's a cheap no-op
     // when already in sync. Without this, messages authored while a peer was
     // disconnected were lost forever (fire-and-forget broadcast, no outbox).
+    // Only the shared discussions this contact belongs to: a sync request
+    // names its shared id.
+    let member_id = contact_id.to_owned();
     let sync_points = state
         .db
-        .with_conn(crate::db::discussions::list_shared_sync_points)
+        .with_conn(move |conn| {
+            let points = crate::db::discussions::list_shared_sync_points(conn)?;
+            Ok(points
+                .into_iter()
+                .filter(|(shared_id, _)| {
+                    crate::db::discussions::shared_member(conn, shared_id, &member_id)
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>())
+        })
         .await
         .unwrap_or_default();
     for (shared_discussion_id, since_timestamp) in sync_points {
@@ -309,8 +321,11 @@ async fn handle_peer_connection(
                                 continue;
                             }
                         }
-                        if !peer.check(state).await {
-                            break;
+                        // Only a member of that shared discussion gets it.
+                        match peer.may_receive(state, &msg).await {
+                            None => break,
+                            Some(false) => continue,
+                            Some(true) => {}
                         }
                         if let Ok(json) = serde_json::to_string(&msg) {
                             if ws_sender

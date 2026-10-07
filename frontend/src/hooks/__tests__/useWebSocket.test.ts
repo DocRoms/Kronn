@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useWebSocket } from '../useWebSocket';
+import { base64Url, useWebSocket } from '../useWebSocket';
 
 // Mock API runtime configuration
 import { getApiBase, getAuthToken } from '../../lib/api';
@@ -14,6 +14,7 @@ vi.mock('../../lib/api', () => ({
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   url: string;
+  protocols: string[] | undefined;
   readyState = 0; // CONNECTING
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
@@ -21,8 +22,9 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
   sent: string[] = [];
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string[]) {
     this.url = url;
+    this.protocols = protocols;
     MockWebSocket.instances.push(this);
   }
 
@@ -208,14 +210,18 @@ describe('useWebSocket', () => {
     expect(MockWebSocket.instances).toHaveLength(1);
   });
 
-  it('includes auth token in URL when available', () => {
+  it('offers the auth token as a subprotocol, never in the URL', () => {
     vi.mocked(getAuthToken).mockReturnValueOnce('my-secret-token');
 
     const handler = vi.fn();
     renderHook(() => useWebSocket(handler));
 
     const ws = MockWebSocket.instances[0];
-    expect(ws.url).toContain('token=my-secret-token');
+    expect(ws.url).not.toContain('token');
+    expect(ws.url).not.toContain('my-secret-token');
+    expect(ws.protocols).toEqual(['kronn', `kronn.auth.${base64Url('my-secret-token')}`]);
+    expect(base64Url('my-secret-token')).toBe('bXktc2VjcmV0LXRva2Vu');
+    expect(base64Url('a?b>')).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 
   it('sends Presence as the very first frame on open', () => {

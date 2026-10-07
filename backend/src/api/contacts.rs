@@ -45,15 +45,18 @@ pub async fn add(
     };
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
-    let health_url = format!("{}/api/health", kronn_url);
-    let ping_error = guarded_client().get(&health_url).send().await;
-
-    let (reachable, warning) = match &ping_error {
-        Ok(r) if r.status().is_success() => (true, None),
-        _ => {
-            // Diagnose WHY the peer is unreachable
-            let hint = diagnose_unreachable(&kronn_url).await;
-            (false, Some(hint))
+    // P2P off: no request leaves for the peer; the contact waits as pending.
+    let (reachable, warning) = if !state.config.read().await.server.p2p_enabled {
+        (false, Some("P2P_OFF".to_string()))
+    } else {
+        let health_url = format!("{}/api/health", kronn_url);
+        match guarded_client().get(&health_url).send().await {
+            Ok(r) if r.status().is_success() => (true, None),
+            _ => {
+                // Diagnose WHY the peer is unreachable
+                let hint = diagnose_unreachable(&kronn_url).await;
+                (false, Some(hint))
+            }
         }
     };
 
@@ -274,6 +277,9 @@ pub async fn ping(
         Ok(None) => return Json(ApiResponse::err("Contact not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
+    if !state.config.read().await.server.p2p_enabled {
+        return Json(ApiResponse::err("P2P connections are off"));
+    }
     // A request or a refused contact came from someone else's code: Kronn
     // never sends it a request.
     if !crate::db::contacts::dials_outbound(&contact.status) {

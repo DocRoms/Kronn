@@ -767,7 +767,11 @@ async fn ws_credential_refusal(
                 .map(crate::core::bridge_token::percent_decode)
         })
     });
-    let presented: Vec<String> = bearer.into_iter().chain(query_token).collect();
+    let presented: Vec<String> = bearer
+        .into_iter()
+        .chain(query_token)
+        .chain(crate::api::ws::subprotocol_credential(headers))
+        .collect();
     if presented.is_empty() {
         return None;
     }
@@ -1231,7 +1235,9 @@ pub(crate) fn logged_uri(uri: &axum::http::Uri) -> &str {
 }
 
 /// Browser origins of the local frontend, for CORS and the WS Origin check.
-pub(crate) fn frontend_origins(domain: &Option<String>, port: u16) -> Vec<String> {
+/// The nginx gateway ports exist only in the Docker deployment: a desktop or
+/// native backend on another port must not trust a page served there.
+pub(crate) fn frontend_origins(domain: &Option<String>, port: u16, in_docker: bool) -> Vec<String> {
     match domain {
         Some(d) => vec![
             format!("https://{}", d),
@@ -1239,18 +1245,24 @@ pub(crate) fn frontend_origins(domain: &Option<String>, port: u16) -> Vec<String
             format!("https://{}:{}", d, port),
             format!("http://{}:{}", d, port),
         ],
-        None => vec![
-            format!("http://localhost:{}", port),
-            format!("http://127.0.0.1:{}", port),
-            // Default gateway port
-            "http://localhost:3140".into(),
-            "http://localhost:3141".into(),
-        ],
+        None => {
+            let mut origins = vec![
+                format!("http://localhost:{}", port),
+                format!("http://127.0.0.1:{}", port),
+            ];
+            if in_docker {
+                for gateway in [3140, 3141] {
+                    origins.push(format!("http://localhost:{gateway}"));
+                    origins.push(format!("http://127.0.0.1:{gateway}"));
+                }
+            }
+            origins
+        }
     }
 }
 
 fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
-    let origins = frontend_origins(domain, port);
+    let origins = frontend_origins(domain, port, crate::core::env::is_docker());
     let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     CorsLayer::new()

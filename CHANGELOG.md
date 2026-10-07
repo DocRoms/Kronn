@@ -253,23 +253,32 @@ Release notes for 0.9.3 and earlier are available in the
   `ws://127.0.0.1:3140/api/ws` to read the event bus or inject chat messages
   (KT-1033). The upgrade checks `Origin` against exact origins: the frontend
   on the listening port (the desktop's runtime port included), the gateway
-  ports, the configured domain, the Tauri webview, the dev UI only under
-  `kronn start-dev`, and a new list of extra origins in Settings > Identity
-  for LAN or Tailscale names. A page on another port gets 403, and a
-  frontend still needs the token when auth is on, unless strict localhost
-  is off (unchanged rule). Heartbeats are answered on their own socket only,
-  and the request logs (backend span, gateway access log) no longer hold the
-  query string that carries the token.
+  ports only under Docker, the configured domain, the Tauri webview, the dev
+  UI under `kronn start-dev` (which now follows `VITE_DEV_PORT` and keeps an
+  operator-set `KRONN_DEV_UI_URL`), and a new list of extra origins in
+  Settings > Identity for LAN or Tailscale names, checked with a full URL
+  parser. A page on another port gets 403, and a frontend still needs the
+  token when auth is on, unless strict localhost is off (unchanged rule).
+  The frontend now sends the token as a WebSocket subprotocol instead of
+  `?token=` in the URL, so no proxy log can hold it (`?token=` is still read
+  from older clients, and dropped from the backend span and the gateway
+  access log). Heartbeats are answered on their own socket only.
 - Security: P2P federation is now a setting, "Accept P2P connections", off by
   default and never turned on by the upgrade (KT-1033). A peer is identified
   only by its invite code, so anyone who knows an accepted contact's code and
   can reach the port could impersonate it until pairing secrets arrive in
   0.15. While it is off, `/api/ws` refuses every non-frontend client, the
-  peer routes (`claim-by-token`, `fetch-file`) answer like an unknown code
-  and no contact is dialled. The contacts panel says why contacts are offline
+  peer routes (`claim-by-token`, `fetch-file`) answer like an unknown code,
+  no contact is dialled, pinged or asked to resolve a join code (the join
+  says P2P is off), and an attachment transfer in flight is cancelled. The contacts panel says why contacts are offline
   and enables P2P in one click. When it is on, only an accepted contact is
   admitted, checked again at every frame in both directions and every few
-  seconds: deleting or refusing a contact cuts its connection. An unknown
+  seconds: deleting or refusing a contact cuts its connection. A shared
+  discussion travels only between its members (the contacts it was shared
+  with, or on a mirror its host): another accepted contact never receives
+  it and cannot write into it or ask to sync it, even knowing its id. A
+  mirror joined before this release has no recorded host: join it again
+  with its code to resume syncing. An unknown
   code becomes a contact request (shown as "request", capped and expiring,
   never dialled or pinged until you add its code) and counts toward the ban,
   unadmitted sockets are capped per address, and contact addresses must be

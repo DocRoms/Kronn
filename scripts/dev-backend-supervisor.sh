@@ -24,7 +24,7 @@ BACKEND_BINARY="${KRONN_DEV_BACKEND_BINARY:-$CARGO_TARGET_DIR/debug/kronn}"
 HEALTH_URL="${KRONN_DEV_BACKEND_HEALTH_URL:-http://localhost:3140/api/health}"
 # The dev backend serves the Vite UI: its origin is the only extra one the
 # WebSocket accepts (KT-1033).
-export KRONN_DEV_UI_URL="${KRONN_DEV_UI_URL:-http://localhost:5173}"
+export KRONN_DEV_UI_URL="${KRONN_DEV_UI_URL:-http://localhost:${VITE_DEV_PORT:-5173}}"
 
 failure_file="${KRONN_DEV_BACKEND_FAILURE_FILE:-}"
 backend_pid=""

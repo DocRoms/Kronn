@@ -413,6 +413,10 @@ pub async fn fetch_and_store_attachment(
         return;
     }
 
+    // Nothing received is kept once P2P is off.
+    if !state.config.read().await.server.p2p_enabled {
+        return;
+    }
     // Mirror discs have no project work_dir → persistent config-dir store.
     let disk_path = match crate::core::context_files::save_file_to_disk(file_id, filename, &bytes) {
         Ok(p) => p,
@@ -439,16 +443,15 @@ pub async fn fetch_and_store_attachment(
         mime_type.to_string(),
     );
     let sz = size.max(0) as u64;
-    let host_code = host_invite_code.to_string();
+    let host = crate::api::ws::PeerAuth::InviteCode(host_invite_code.to_string());
+    let member_of = shared_id.to_string();
     if let Err(e) = state
         .db
         .with_conn(move |conn| {
-            // The host may have been revoked during the download.
-            if !matches!(
-                crate::db::contacts::authenticate_invite_code(conn, &host_code)?,
-                crate::db::contacts::InviteAuth::Accepted(_)
-            ) {
-                anyhow::bail!("host is no longer an accepted contact");
+            // The host may have been revoked, or removed from this shared
+            // discussion, during the download.
+            if host.membership(conn, &member_of)? != Some(true) {
+                anyhow::bail!("host is no longer an accepted member of this discussion");
             }
             crate::db::discussions::insert_federated_context_file(
                 conn, &fid, &did, &mid, &fname, &mime, sz, &disk_path,

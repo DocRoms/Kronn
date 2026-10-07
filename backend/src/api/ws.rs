@@ -197,8 +197,8 @@ pub(crate) fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> b
     invite_code.is_empty() && !is_local
 }
 
-/// Query string of the WS upgrade. The frontend appends `?token=` when it holds
-/// the API token (browsers cannot set an `Authorization` header on a WebSocket).
+/// Query string of the WS upgrade. `?token=` is what frontends before 0.14.3
+/// sent; current ones offer the token as a subprotocol instead.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct WsAuthQuery {
     #[serde(default)]
@@ -245,7 +245,7 @@ pub async fn ws_handler(
         headers
             .get(axum::http::header::ORIGIN)
             .map(|value| value.to_str().unwrap_or("null")),
-        &allowed_ws_origins(&config.server, dev_ui.as_deref()),
+        &allowed_ws_origins(&config.server, dev_ui.as_deref(), in_docker),
     );
     if origin == WsOrigin::Foreign {
         drop(config);
@@ -259,16 +259,18 @@ pub async fn ws_handler(
         && config.server.auth_token.is_none();
     let strict_localhost = config.server.auth_strict_localhost;
     let p2p_enabled = config.server.p2p_enabled;
-    let has_valid_token = {
-        let expected = config.server.auth_token.as_deref();
-        let bearer = crate::bearer_credential(&headers);
-        bearer.is_some_and(|bearer| {
-            crate::core::bridge_token::operator_token_matches(expected, bearer)
-        }) || query
-            .token
-            .as_deref()
-            .is_some_and(|token| crate::core::bridge_token::operator_token_matches(expected, token))
-    };
+    let has_valid_token =
+        {
+            let expected = config.server.auth_token.as_deref();
+            let bearer = crate::bearer_credential(&headers);
+            bearer.is_some_and(|bearer| {
+                crate::core::bridge_token::operator_token_matches(expected, bearer)
+            }) || query.token.as_deref().is_some_and(|token| {
+                crate::core::bridge_token::operator_token_matches(expected, token)
+            }) || subprotocol_credential(&headers).is_some_and(|token| {
+                crate::core::bridge_token::operator_token_matches(expected, &token)
+            })
+        };
     drop(config);
 
     // No Origin means a non-browser client (a peer, a CLI): never the frontend.
@@ -299,8 +301,33 @@ pub async fn ws_handler(
         tracing::warn!("WS: too many unadmitted connections from {peer_ip}");
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip, is_local, slot))
+    ws.protocols([WS_PROTOCOL])
+        .on_upgrade(move |socket| handle_socket(socket, state, peer_ip, is_local, slot))
         .into_response()
+}
+
+/// Subprotocol the server selects; the credential rides beside it.
+pub(crate) const WS_PROTOCOL: &str = "kronn";
+/// Prefix of the subprotocol that carries the operator token, base64url
+/// encoded: a browser cannot set headers on a WebSocket, and a URL query
+/// ends up in proxy logs.
+pub(crate) const WS_AUTH_PROTOCOL_PREFIX: &str = "kronn.auth.";
+
+/// The operator token offered as a `kronn.auth.<base64url>` subprotocol.
+pub(crate) fn subprotocol_credential(headers: &HeaderMap) -> Option<String> {
+    use base64::Engine as _;
+    headers
+        .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .find_map(|item| item.trim().strip_prefix(WS_AUTH_PROTOCOL_PREFIX))
+        .and_then(|encoded| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded)
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
 /// Where a WS upgrade comes from, judged by its `Origin` header.
@@ -315,18 +342,18 @@ pub(crate) enum WsOrigin {
 }
 
 /// Exact frontend origins: the CORS list for the listening port (the desktop
-/// webview included), the gateway ports, the configured domain, the Tauri
+/// webview included), the gateway ports under Docker only, the configured domain, the Tauri
 /// webview, the dev UI when `kronn start-dev` exported it, and the operator's
 /// own list (LAN or Tailscale aliases).
 pub(crate) fn allowed_ws_origins(
     server: &crate::models::ServerConfig,
     dev_ui: Option<&str>,
+    in_docker: bool,
 ) -> Vec<String> {
     let port = server.listening_port();
-    let mut origins = crate::frontend_origins(&None, port);
-    origins.push("http://127.0.0.1:3141".into());
+    let mut origins = crate::frontend_origins(&None, port, in_docker);
     if server.domain.is_some() {
-        origins.extend(crate::frontend_origins(&server.domain, port));
+        origins.extend(crate::frontend_origins(&server.domain, port, in_docker));
     }
     origins.extend(
         [
@@ -363,45 +390,39 @@ pub(crate) fn classify_ws_origin(origin: Option<&str>, allowed: &[String]) -> Ws
 }
 
 /// Canonical `scheme://host[:port]` (lowercase, default port dropped, a
-/// trailing slash allowed), or None for anything else (paths, `null`).
+/// trailing slash allowed), or None for anything else: paths, queries,
+/// credentials, `null`, or an authority the URL parser does not read whole.
 pub(crate) fn normalize_origin(origin: &str) -> Option<String> {
     let origin = origin.trim();
-    let origin = origin.strip_suffix('/').unwrap_or(origin);
-    let (scheme, authority) = origin.split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
-    let default_port = match scheme.as_str() {
-        "http" => "80",
-        "https" => "443",
-        "tauri" => "",
-        _ => return None,
-    };
-    if authority.is_empty() || authority.contains(['/', '?', '#', '@', ' ']) {
+    if origin.contains(['\\', ' ', '\t']) {
         return None;
     }
-    let authority = authority.to_ascii_lowercase();
-    let (host, port) = if authority.starts_with('[') {
-        let (v6, tail) = authority.split_once(']')?;
-        (format!("{v6}]"), tail.strip_prefix(':'))
-    } else {
-        match authority.split_once(':') {
-            Some((host, port)) => (host.to_owned(), Some(port)),
-            None => (authority.clone(), None),
-        }
-    };
-    if host.is_empty() {
+    if origin.eq_ignore_ascii_case("tauri://localhost") {
+        return Some("tauri://localhost".into());
+    }
+    let url = reqwest::Url::parse(origin).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+        || url.host().is_none()
+    {
         return None;
     }
-    match port {
-        Some(port) => {
-            let port: u16 = port.parse().ok()?;
-            if port.to_string() == default_port {
-                Some(format!("{scheme}://{host}"))
-            } else {
-                Some(format!("{scheme}://{host}:{port}"))
-            }
-        }
-        None => Some(format!("{scheme}://{host}")),
-    }
+    // The parser forgives trailing garbage after an IPv6 literal or a port in
+    // some forms: the serialization must give back what was written.
+    let canonical = url.origin().ascii_serialization();
+    let written = origin
+        .strip_suffix('/')
+        .unwrap_or(origin)
+        .to_ascii_lowercase();
+    let explicit_default = match url.scheme() {
+        "http" => format!("{canonical}:80"),
+        _ => format!("{canonical}:443"),
+    };
+    (written == canonical || written == explicit_default).then_some(canonical)
 }
 
 /// Unadmitted connections per client IP. The slot is released when the
@@ -585,8 +606,11 @@ async fn handle_socket(
                                         continue;
                                     }
                                 }
-                                if !peer_authorized(&state, &code).await {
-                                    break;
+                                // Only a member of that shared discussion gets it.
+                                match PeerAuth::InviteCode(code).may_receive(&state, &msg).await {
+                                    None => break,
+                                    Some(false) => continue,
+                                    Some(true) => {}
                                 }
                             }
                         }
@@ -907,6 +931,7 @@ fn handle_discussion_invite(
     shared_discussion_id: &str,
     title: &str,
     from_pseudo: &str,
+    inviter_contact_id: &str,
 ) -> anyhow::Result<bool> {
     // Check if we already have this shared discussion — if so, NOT new, don't
     // re-broadcast (loop guard). Otherwise create the mirror via the shared
@@ -920,11 +945,13 @@ fn handle_discussion_invite(
         return Ok(false);
     }
 
-    crate::db::discussions::ensure_mirror_by_shared_id(
+    crate::db::discussions::ensure_mirror_with_host(
         conn,
         shared_discussion_id,
         title,
         from_pseudo,
+        inviter_contact_id,
+        false,
     )?;
     tracing::info!(
         "WS: created shared discussion '{}' from invite by {}",
@@ -944,14 +971,68 @@ pub(crate) enum PeerAuth {
 }
 
 impl PeerAuth {
+    /// The id of the accepted contact behind this peer, or None once it is
+    /// no longer accepted.
+    pub(crate) fn accepted_contact_id(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> anyhow::Result<Option<String>> {
+        match self {
+            Self::InviteCode(code) => Ok(
+                match crate::db::contacts::authenticate_invite_code(conn, code)? {
+                    crate::db::contacts::InviteAuth::Accepted(contact) => Some(contact.id),
+                    _ => None,
+                },
+            ),
+            Self::ContactId(id) => {
+                Ok(crate::db::contacts::contact_id_is_accepted(conn, id)?.then(|| id.clone()))
+            }
+        }
+    }
+
     /// Still an accepted contact (P2P being on is checked by the callers).
     pub(crate) fn authorized(&self, conn: &rusqlite::Connection) -> anyhow::Result<bool> {
-        match self {
-            Self::InviteCode(code) => Ok(matches!(
-                crate::db::contacts::authenticate_invite_code(conn, code)?,
-                crate::db::contacts::InviteAuth::Accepted(_)
-            )),
-            Self::ContactId(id) => crate::db::contacts::contact_id_is_accepted(conn, id),
+        Ok(self.accepted_contact_id(conn)?.is_some())
+    }
+
+    /// None once the peer is no longer accepted; otherwise whether it is a
+    /// member of the shared discussion `shared_id`.
+    pub(crate) fn membership(
+        &self,
+        conn: &rusqlite::Connection,
+        shared_id: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        let Some(contact_id) = self.accepted_contact_id(conn)? else {
+            return Ok(None);
+        };
+        let member = crate::db::discussions::shared_member(conn, shared_id, &contact_id)?;
+        if !member {
+            tracing::warn!(
+                "federation: contact {contact_id} is not a member of shared discussion {shared_id}"
+            );
+        }
+        Ok(Some(member))
+    }
+
+    /// `membership` with P2P on; None when P2P is off or the DB fails.
+    pub(crate) async fn check_member(&self, state: &AppState, shared_id: &str) -> Option<bool> {
+        if !state.config.read().await.server.p2p_enabled {
+            return None;
+        }
+        let (peer, sid) = (self.clone(), shared_id.to_owned());
+        state
+            .db
+            .with_conn(move |conn| peer.membership(conn, &sid))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Whether `msg` may go to this peer: None to close the connection.
+    pub(crate) async fn may_receive(&self, state: &AppState, msg: &WsMessage) -> Option<bool> {
+        match relay_shared_id(msg) {
+            Some(shared_id) => self.check_member(state, shared_id).await,
+            None => Some(false),
         }
     }
 
@@ -966,6 +1047,33 @@ impl PeerAuth {
             .with_conn(move |conn| peer.authorized(conn))
             .await
             .unwrap_or(false)
+    }
+}
+
+/// The shared discussion a relayable frame belongs to.
+pub(crate) fn relay_shared_id(msg: &WsMessage) -> Option<&str> {
+    match msg {
+        WsMessage::ChatMessage {
+            shared_discussion_id,
+            ..
+        }
+        | WsMessage::MessageRevised {
+            shared_discussion_id,
+            ..
+        }
+        | WsMessage::DiscussionInvite {
+            shared_discussion_id,
+            ..
+        }
+        | WsMessage::DiscSyncRequest {
+            shared_discussion_id,
+            ..
+        }
+        | WsMessage::FileAttached {
+            shared_discussion_id,
+            ..
+        } => Some(shared_discussion_id),
+        _ => None,
     }
 }
 
@@ -1052,8 +1160,10 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             state
                 .db
                 .with_conn(move |conn| {
-                    if !peer.authorized(conn)? {
-                        return Ok(None);
+                    match peer.membership(conn, &sid)? {
+                        None => return Ok(None),
+                        Some(false) => return Ok(Some(false)),
+                        Some(true) => {}
                     }
                     handle_incoming_chat_message(
                         conn,
@@ -1115,8 +1225,10 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             state
                 .db
                 .with_conn(move |conn| {
-                    if !peer.authorized(conn)? {
-                        return Ok(None);
+                    match peer.membership(conn, &sid)? {
+                        None => return Ok(None),
+                        Some(false) => return Ok(Some(false)),
+                        Some(true) => {}
                     }
                     let Some(discussion_id) =
                         crate::db::discussions::find_discussion_by_shared_id(conn, &sid)?
@@ -1163,10 +1275,12 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             state
                 .db
                 .with_conn(move |conn| {
-                    if !peer.authorized(conn)? {
+                    // Any accepted contact may invite: the mirror records it
+                    // as the host, its only member.
+                    let Some(inviter) = peer.accepted_contact_id(conn)? else {
                         return Ok(None);
-                    }
-                    handle_discussion_invite(conn, &sid, &t, &p).map(Some)
+                    };
+                    handle_discussion_invite(conn, &sid, &t, &p, &inviter).map(Some)
                 })
                 .await
                 .unwrap_or(Some(false))
@@ -1178,8 +1292,10 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             // Answer with the missing messages (broadcast → relayed back to the
             // requester). The request itself is NEVER re-broadcast (return
             // false) — it is consumed here, so it can't bounce between peers.
-            if !peer.check(state).await {
-                return None;
+            match peer.check_member(state, shared_discussion_id).await {
+                None => return None,
+                Some(false) => return Some(false),
+                Some(true) => {}
             }
             crate::api::federation::respond_to_sync_request(
                 state,
@@ -1204,12 +1320,15 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
             // peer (which holds the file) receives our local emits below, finds
             // the file present, and stops — so the frames don't bounce.
             let exists = {
-                let fid = file_id.clone();
+                let (fid, sid) = (file_id.clone(), shared_discussion_id.clone());
                 state
                     .db
                     .with_conn(move |conn| {
-                        if !peer.authorized(conn)? {
-                            return Ok(None);
+                        match peer.membership(conn, &sid)? {
+                            None => return Ok(None),
+                            // Not a member: handled like a file already held.
+                            Some(false) => return Ok(Some(true)),
+                            Some(true) => {}
                         }
                         crate::db::discussions::context_file_exists(conn, &fid)
                             .map(Some)
@@ -1251,15 +1370,30 @@ async fn ingest_authorized(state: &AppState, msg: &WsMessage, peer: &PeerAuth) -
                 from_invite_code.clone(),
             );
             let sz = *size;
+            // Turning P2P off cancels the transfer.
             tokio::spawn(async move {
-                crate::api::federation::fetch_and_store_attachment(
-                    &st, &sid, &mid, &fid, &fname, &mime, sz, &host,
-                )
-                .await;
+                tokio::select! {
+                    _ = crate::api::federation::fetch_and_store_attachment(
+                        &st, &sid, &mid, &fid, &fname, &mime, sz, &host,
+                    ) => {}
+                    _ = p2p_turned_off(&st) => {
+                        tracing::info!("F8: P2P turned off, attachment {fid} transfer cancelled");
+                    }
+                }
             });
             Some(false)
         }
         _ => Some(false),
+    }
+}
+
+/// Resolves once P2P is off (checked every second).
+pub(crate) async fn p2p_turned_off(state: &AppState) {
+    loop {
+        if !state.config.read().await.server.p2p_enabled {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -1571,9 +1705,46 @@ mod relay_dedup_tests {
     fn discussion_invite_is_new_once_then_duplicate() {
         let c = conn();
         // First invite creates the local copy → new → re-broadcast.
-        assert!(handle_discussion_invite(&c, "shared-1", "Title", "Romu").unwrap());
+        assert!(handle_discussion_invite(&c, "shared-1", "Title", "Romu", "contact-romu").unwrap());
         // Same shared_id again → already known → NOT new → no re-broadcast (loop dies).
-        assert!(!handle_discussion_invite(&c, "shared-1", "Title", "Romu").unwrap());
+        assert!(
+            !handle_discussion_invite(&c, "shared-1", "Title", "Romu", "contact-romu").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_mirror_has_its_inviter_as_only_member() {
+        let c = conn();
+        assert!(handle_discussion_invite(&c, "shared-m", "T", "Host", "contact-host").unwrap());
+        assert!(crate::db::discussions::shared_member(&c, "shared-m", "contact-host").unwrap());
+        // Another contact re-announcing the same share does not join it.
+        assert!(!handle_discussion_invite(&c, "shared-m", "T", "Bob", "contact-bob").unwrap());
+        assert!(!crate::db::discussions::shared_member(&c, "shared-m", "contact-bob").unwrap());
+        // An explicit join adopts only a mirror that has no member yet.
+        crate::db::discussions::ensure_mirror_with_host(
+            &c,
+            "shared-m",
+            "T",
+            "Bob",
+            "contact-bob",
+            true,
+        )
+        .unwrap();
+        assert!(!crate::db::discussions::shared_member(&c, "shared-m", "contact-bob").unwrap());
+        let legacy =
+            crate::db::discussions::ensure_mirror_by_shared_id(&c, "shared-old", "T", "H").unwrap();
+        assert!(!crate::db::discussions::shared_member(&c, "shared-old", "contact-host").unwrap());
+        crate::db::discussions::ensure_mirror_with_host(
+            &c,
+            "shared-old",
+            "T",
+            "H",
+            "contact-host",
+            true,
+        )
+        .unwrap();
+        assert!(crate::db::discussions::shared_member(&c, "shared-old", "contact-host").unwrap());
+        let _ = legacy;
     }
 
     #[test]
@@ -1597,7 +1768,7 @@ mod relay_dedup_tests {
         )
         .unwrap());
         // Create the shared disc, then the same chat inserts once → new…
-        assert!(handle_discussion_invite(&c, "shared-2", "T", "Romu").unwrap());
+        assert!(handle_discussion_invite(&c, "shared-2", "T", "Romu", "contact-romu").unwrap());
         assert!(handle_incoming_chat_message(
             &c,
             "shared-2",
@@ -1729,13 +1900,13 @@ mod origin_and_admission_tests {
     }
 
     fn classify(origin: &str, server: &crate::models::ServerConfig) -> WsOrigin {
-        classify_ws_origin(Some(origin), &allowed_ws_origins(server, None))
+        classify_ws_origin(Some(origin), &allowed_ws_origins(server, None, false))
     }
 
     #[test]
     fn no_origin_is_absent() {
         assert_eq!(
-            classify_ws_origin(None, &allowed_ws_origins(&server(), None)),
+            classify_ws_origin(None, &allowed_ws_origins(&server(), None, false)),
             WsOrigin::Absent
         );
     }
@@ -1770,11 +1941,7 @@ mod origin_and_admission_tests {
     #[test]
     fn the_frontend_origins_for_the_listening_port_are_allowed() {
         let mut server = server();
-        for origin in [
-            "http://localhost:3140",
-            "http://127.0.0.1:3140",
-            "http://localhost:3141",
-        ] {
+        for origin in ["http://localhost:3140", "http://127.0.0.1:3140"] {
             assert_eq!(classify(origin, &server), WsOrigin::Allowed, "{origin}");
         }
         // The desktop's runtime port, and nothing else.
@@ -1787,6 +1954,24 @@ mod origin_and_admission_tests {
             classify("http://127.0.0.1:53592", &server),
             WsOrigin::Foreign
         );
+    }
+
+    #[test]
+    fn the_gateway_ports_are_trusted_only_under_docker() {
+        let mut desktop = server();
+        desktop.runtime_port = Some(53591);
+        for origin in [
+            "http://localhost:3141",
+            "http://127.0.0.1:3141",
+            "http://localhost:3140",
+        ] {
+            assert_eq!(classify(origin, &desktop), WsOrigin::Foreign, "{origin}");
+            assert_eq!(
+                classify_ws_origin(Some(origin), &allowed_ws_origins(&server(), None, true)),
+                WsOrigin::Allowed,
+                "{origin} under Docker"
+            );
+        }
     }
 
     #[test]
@@ -1805,7 +1990,7 @@ mod origin_and_admission_tests {
     #[test]
     fn the_dev_ui_is_allowed_only_when_exported() {
         let server = server();
-        let with_dev = allowed_ws_origins(&server, Some("http://localhost:5173/"));
+        let with_dev = allowed_ws_origins(&server, Some("http://localhost:5173/"), false);
         for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
             assert_eq!(
                 classify_ws_origin(Some(origin), &with_dev),
@@ -1855,6 +2040,22 @@ mod origin_and_admission_tests {
     }
 
     #[test]
+    fn the_operator_token_is_read_from_the_subprotocol() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("op-token");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+            format!("kronn, kronn.auth.{encoded}").parse().unwrap(),
+        );
+        assert_eq!(
+            subprotocol_credential(&headers).as_deref(),
+            Some("op-token")
+        );
+        assert_eq!(subprotocol_credential(&HeaderMap::new()), None);
+    }
+
+    #[test]
     fn origins_are_normalized() {
         assert_eq!(
             normalize_origin("HTTP://Host:80/").as_deref(),
@@ -1869,6 +2070,11 @@ mod origin_and_admission_tests {
             Some("http://[::1]:3140")
         );
         for bad in [
+            "http://[::1]garbage",
+            "http://h:3140garbage",
+            "http://h?x",
+            "http://h#x",
+            "http:\\\\h",
             "null",
             "http://h/path",
             "ftp://h",

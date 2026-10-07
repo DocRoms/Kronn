@@ -2976,6 +2976,48 @@ pub fn find_discussion_by_shared_id(conn: &Connection, shared_id: &str) -> Resul
     Ok(id)
 }
 
+/// Whether `contact_id` belongs to the shared discussion `shared_id`: listed
+/// in its `shared_with` (on the host: the contacts it was shared with; on a
+/// mirror: the host it came from).
+pub fn shared_member(conn: &Connection, shared_id: &str, contact_id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT shared_with_json FROM discussions WHERE shared_id = ?1")?;
+    let rows = stmt.query_map(params![shared_id], |row| row.get::<_, String>(0))?;
+    for json in rows {
+        let members: Vec<String> = serde_json::from_str(&json?).unwrap_or_default();
+        if members.iter().any(|member| member == contact_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Create the mirror of a shared discussion with its host as only member.
+/// An existing mirror keeps its members, except a mirror created before
+/// membership was recorded (empty list) when `adopt_unbound` is set: the
+/// operator joined it explicitly through that host.
+pub fn ensure_mirror_with_host(
+    conn: &Connection,
+    shared_id: &str,
+    title: &str,
+    from_pseudo: &str,
+    host_contact_id: &str,
+    adopt_unbound: bool,
+) -> Result<String> {
+    let existing = find_discussion_by_shared_id(conn, shared_id)?;
+    let disc_id = ensure_mirror_by_shared_id(conn, shared_id, title, from_pseudo)?;
+    let unbound = match &existing {
+        None => true,
+        Some(_) => {
+            adopt_unbound
+                && get_discussion(conn, &disc_id)?.is_some_and(|d| d.shared_with.is_empty())
+        }
+    };
+    if unbound {
+        update_discussion_sharing(conn, &disc_id, shared_id, &[host_contact_id.to_owned()])?;
+    }
+    Ok(disc_id)
+}
+
 /// Update shared_id and shared_with for a discussion.
 pub fn update_discussion_sharing(
     conn: &Connection,

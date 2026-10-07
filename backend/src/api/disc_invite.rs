@@ -326,6 +326,12 @@ pub async fn peer_join(
         match local {
             Ok(j) => (j.disc_id, j.session_pk, j.resume_token),
             Err(local_err) => {
+                if !state.config.read().await.server.p2p_enabled {
+                    return Json(ApiResponse::err(format!(
+                        "{local_err}. A room hosted on another Kronn needs P2P connections: \
+                         enable \"Accept P2P connections\" in Settings > Identity to join it."
+                    )));
+                }
                 match try_remote_join(&state, &token, &agent_type, &session_id).await {
                     Ok(Some(r)) => r,
                     // No contact hosts it → surface the original local error.
@@ -855,13 +861,17 @@ async fn try_remote_join(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(6))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     for contact in contacts.into_iter().filter(|c| c.status == "accepted") {
-        let url = format!(
-            "{}/api/disc/claim-by-token",
-            contact.kronn_url.trim_end_matches('/')
-        );
+        if !state.config.read().await.server.p2p_enabled {
+            return Ok(None);
+        }
+        let Some(base) = db::contacts::contact_base_url(&contact.kronn_url) else {
+            continue;
+        };
+        let url = format!("{base}/api/disc/claim-by-token");
         let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
         let resp = match client.post(&url).json(&body).send().await {
             Ok(r) => r,
@@ -898,11 +908,27 @@ async fn try_remote_join(
             .and_then(|t| t.as_str())
             .unwrap_or("Discussion")
             .to_string();
-        let (sid, ttl, from) = (shared_id.clone(), title, contact.pseudo.clone());
+        // P2P may have been turned off while the claim was in flight.
+        if !state.config.read().await.server.p2p_enabled {
+            return Ok(None);
+        }
+        let (sid, ttl, from, host) = (
+            shared_id.clone(),
+            title,
+            contact.pseudo.clone(),
+            contact.id.clone(),
+        );
+        // The operator joined through this host explicitly: it becomes the
+        // mirror's member, also for a mirror made before membership existed.
         let mirror_disc_id = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussions::ensure_mirror_by_shared_id(conn, &sid, &ttl, &from)
+                if !db::contacts::contact_id_is_accepted(conn, &host)? {
+                    anyhow::bail!("the host contact is no longer accepted");
+                }
+                crate::db::discussions::ensure_mirror_with_host(
+                    conn, &sid, &ttl, &from, &host, true,
+                )
             })
             .await?;
         let (mdid, a, s) = (
