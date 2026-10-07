@@ -619,16 +619,13 @@ export function ProjectCard({
     setMigrationSuccess(null);
     try {
       const res = await projectsApi.migrateDocs(proj.id, { create_symlink: migrationCreateSymlink });
-      if (res.status === 'Failed') {
-        setMigrationError(res.reason ?? t('migration.failedGeneric'));
-        toast(t('migration.failedToast', proj.name), 'error');
-      } else if (res.status === 'Migrated') {
+      if (res.status === 'migrated') {
         const filesMoved = res.files_moved ?? 0;
         setMigrationSuccess({ filesMoved });
         toast(t('migration.successToast', String(filesMoved)), 'success');
         // Hold the green confirmation row, then refetch.
         window.setTimeout(() => onRefetch(), 1600);
-      } else if (res.status === 'AlreadyMigrated') {
+      } else if (res.status === 'already_migrated') {
         toast(t('migration.alreadyToast'), 'info');
         onRefetch();
       } else {

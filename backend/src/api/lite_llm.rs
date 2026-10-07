@@ -151,7 +151,7 @@ fn resolve_base_url(stored: Option<&str>) -> String {
     }
     if let Ok(env) = crate::core::child_env::var("LITELLM_BASE_URL") {
         let env = env.trim();
-        if !env.is_empty() && env != "0.0.0.0" {
+        if !env.is_empty() && !crate::core::net_expose::is_exposed_host(env) {
             return normalize_url(env);
         }
     }

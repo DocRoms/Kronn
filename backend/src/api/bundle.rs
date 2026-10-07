@@ -370,7 +370,9 @@ async fn create_bundle_as(
     // Exec lines get the same save-time rules as the editor (allowlist,
     // inline-code interpolation), for the parent and every child.
     for workflow in std::iter::once(&wf_to_insert).chain(prepared_children.iter()) {
-        if let Err(error) = crate::api::workflows::validate_exec_definition(workflow) {
+        if let Err(error) = crate::api::workflows::validate_exec_definition(workflow)
+            .and_then(|()| crate::api::workflows::validate_foreach_files(workflow))
+        {
             return Json(ApiResponse::err(error));
         }
     }

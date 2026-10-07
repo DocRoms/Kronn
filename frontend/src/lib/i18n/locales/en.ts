@@ -5630,7 +5630,6 @@ End with [SIGNAL: OK].`,
   'migration.successToast': 'Migration succeeded ({0} files moved)',
   'migration.alreadyToast': 'Project already migrated',
   'migration.failedToast': 'Migration failed for {0}',
-  'migration.failedGeneric': 'Migration failed — check server logs',
 
   // ── User context (cross-project agent prompts) ──
   'userContext.title': 'My contexts',

@@ -587,6 +587,22 @@ fn configure_embedded_server(server: &mut kronn::models::ServerConfig, port: u16
     server.runtime_port = Some(port);
 }
 
+/// The LAN guard on the host the embedded server binds: the same predicate
+/// as the bind itself, so `::` is as exposed as `0.0.0.0`.
+fn embedded_lan_guard(
+    bind_host: &str,
+    auth_enabled: bool,
+    token_configured: bool,
+    ack_insecure: bool,
+) -> Option<String> {
+    kronn::core::net_expose::insecure_lan_boot_error(
+        kronn::core::net_expose::is_exposed_host(bind_host),
+        auth_enabled,
+        token_configured,
+        ack_insecure,
+    )
+}
+
 /// Start the Kronn backend server on the port reserved by `reserved`
 /// (runs in a tokio task).
 async fn start_backend(
@@ -642,8 +658,8 @@ async fn start_backend(
     let ack_insecure = kronn::core::child_env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
-        bind_host == "0.0.0.0",
+    if let Some(msg) = embedded_lan_guard(
+        &bind_host,
         app_config.server.auth_enabled,
         app_config.server.auth_token_or_lock(),
         ack_insecure,
@@ -1262,6 +1278,22 @@ fn main() {
 mod enrich_path_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_lan_guard_treats_every_bind_all_host_alike() {
+        for host in ["0.0.0.0", "::"] {
+            assert!(embedded_lan_guard(host, false, false, false).is_some(), "{host}");
+            assert!(embedded_lan_guard(host, true, false, false).is_some(), "{host}");
+            assert!(embedded_lan_guard(host, true, true, false).is_none(), "{host}");
+            assert!(embedded_lan_guard(host, false, false, true).is_none(), "{host}");
+        }
+        assert!(embedded_lan_guard("127.0.0.1", false, false, false).is_none());
+        // `::` survives configure_embedded_server, so the guard must see it.
+        let mut config = config::default_config();
+        config.server.host = "::".into();
+        configure_embedded_server(&mut config.server, 53591);
+        assert_eq!(config.server.host, "::");
+    }
 
     #[test]
     fn embedded_listener_preserves_the_saved_cli_port() {

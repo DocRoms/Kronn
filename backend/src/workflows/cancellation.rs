@@ -25,6 +25,14 @@ pub struct CancellationOutcome {
     pub child_dispatches_settled: u32,
 }
 
+/// Every run below `?1`, however deep (sub-workflow children of children,
+/// batch runs launched by a child).
+const DESCENDANTS_CTE: &str = "WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM workflow_runs WHERE parent_run_id = ?1
+         UNION
+         SELECT wr.id FROM workflow_runs wr JOIN descendants d ON wr.parent_run_id = d.id
+     )";
+
 pub async fn cancel_run_tree(
     state: &AppState,
     run_id: &str,
@@ -38,15 +46,21 @@ pub async fn cancel_run_tree(
     };
 
     let lookup_id = run_id.to_string();
-    let (child_disc_ids, child_dispatch_ids) = state
+    let (descendant_run_ids, child_disc_ids, child_dispatch_ids) = state
         .db
         .with_conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT d.id FROM discussions d
-                 JOIN workflow_runs wr ON d.workflow_run_id = wr.id
-                 WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1",
-            )?;
-            let rows = stmt.query_map([lookup_id], |row| row.get::<_, String>(0))?;
+            let mut runs =
+                conn.prepare(&format!("{DESCENDANTS_CTE} SELECT id FROM descendants"))?;
+            let descendant_run_ids = runs
+                .query_map([&lookup_id], |row| row.get::<_, String>(0))?
+                .filter_map(|row| row.ok())
+                .collect::<Vec<_>>();
+            let mut stmt = conn.prepare(&format!(
+                "{DESCENDANTS_CTE} SELECT d.id FROM discussions d
+                 WHERE d.workflow_run_id = ?1
+                    OR d.workflow_run_id IN (SELECT id FROM descendants)"
+            ))?;
+            let rows = stmt.query_map([&lookup_id], |row| row.get::<_, String>(0))?;
             let discussion_ids = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
             let dispatch_ids = discussion_ids
                 .iter()
@@ -57,11 +71,15 @@ pub async fn cancel_run_tree(
                         .map(|job| job.id)
                 })
                 .collect::<Vec<_>>();
-            Ok((discussion_ids, dispatch_ids))
+            Ok((descendant_run_ids, discussion_ids, dispatch_ids))
         })
         .await
         .context("find child discussions for workflow cancellation")?;
 
+    // Descendant runners stop at once; their rows are settled below.
+    for descendant in &descendant_run_ids {
+        cancel_registered_token(state, descendant)?;
+    }
     let mut child_discs_cancelled = 0u32;
     for discussion_id in &child_disc_ids {
         child_discs_cancelled += u32::from(cancel_registered_token(state, discussion_id)?);
@@ -101,11 +119,27 @@ pub async fn cancel_run_tree(
             } else {
                 0
             };
+            // The whole subtree, and the dispatches of discussions that
+            // appeared since the lookup, in this one transaction.
             transaction.execute(
-                "UPDATE workflow_runs
-                 SET status = 'Cancelled', finished_at = ?2
-                 WHERE parent_run_id = ?1
-                   AND status IN ('Running', 'Pending', 'WaitingApproval')",
+                &format!(
+                    "{DESCENDANTS_CTE} UPDATE agent_dispatch_jobs
+                     SET status = 'Cancelled', completed_at = ?2,
+                         updated_at = ?2, last_error = ?3
+                     WHERE status IN ('Pending', 'Running')
+                       AND discussion_id IN (
+                           SELECT d.id FROM discussions d
+                           WHERE d.workflow_run_id IN (SELECT id FROM descendants))"
+                ),
+                rusqlite::params![settle_run_id, now, settle_reason],
+            )?;
+            transaction.execute(
+                &format!(
+                    "{DESCENDANTS_CTE} UPDATE workflow_runs
+                     SET status = 'Cancelled', finished_at = ?2
+                     WHERE id IN (SELECT id FROM descendants)
+                       AND status IN ('Running', 'Pending', 'WaitingApproval')"
+                ),
                 rusqlite::params![settle_run_id, now],
             )?;
             transaction.commit()?;

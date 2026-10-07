@@ -25,20 +25,36 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, serde::Serialize)]
+/// Outcome of a docs migration, shared with the frontend through ts-rs so
+/// both sides compare the same strings. A failure is an API error instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MigrateDocsStatus {
+    Migrated,
+    AlreadyMigrated,
+    NotApplicable,
+}
+
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct MigrateDocsResponse {
-    pub status: &'static str,
+    pub status: MigrateDocsStatus,
     /// Files moved on success. 0 on no-op.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub files_moved: Option<usize>,
     /// Path refs rewritten (cross-refs in markdown + root redirectors).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub refs_rewritten: Option<usize>,
     /// Whether a `ai → docs` symlink was created.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub symlink_created: Option<bool>,
     /// Reason on failure / no-op.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub reason: Option<String>,
 }
 
@@ -78,7 +94,7 @@ pub async fn migrate_docs(
             refs_rewritten,
             symlink_created,
         } => MigrateDocsResponse {
-            status: "migrated",
+            status: MigrateDocsStatus::Migrated,
             files_moved: Some(files_moved),
             refs_rewritten: Some(refs_rewritten),
             symlink_created: Some(symlink_created),
@@ -89,14 +105,14 @@ pub async fn migrate_docs(
             // re-run the ref-rewrite pass and surface the count so the
             // operator can re-trigger the action to clean stale `ai/`
             // refs without scaring them off with a "not_applicable".
-            status: "already_migrated",
+            status: MigrateDocsStatus::AlreadyMigrated,
             files_moved: None,
             refs_rewritten: Some(refs_rewritten),
             symlink_created: None,
             reason: None,
         },
         MigrationOutcome::NotApplicable => MigrateDocsResponse {
-            status: "not_applicable",
+            status: MigrateDocsStatus::NotApplicable,
             files_moved: None,
             refs_rewritten: None,
             symlink_created: None,
@@ -107,4 +123,20 @@ pub async fn migrate_docs(
         }
     };
     Json(ApiResponse::ok(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_keep_their_snake_case_wire_names() {
+        for (status, wire) in [
+            (MigrateDocsStatus::Migrated, "migrated"),
+            (MigrateDocsStatus::AlreadyMigrated, "already_migrated"),
+            (MigrateDocsStatus::NotApplicable, "not_applicable"),
+        ] {
+            assert_eq!(serde_json::to_value(status).unwrap(), wire);
+        }
+    }
 }

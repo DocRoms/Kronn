@@ -1157,16 +1157,51 @@ pub(crate) fn backup_before_migration(
 /// wait for the connection's busy timeout.
 const CHECKPOINT_ATTEMPTS: u32 = 3;
 
+/// The WAL SQLite really uses, as SQLite names it (`sqlite3_filename_wal`
+/// on the main database's filename, no resolution of our own: the Windows VFS
+/// keeps a symlink alias), or `None` outside WAL mode.
+fn active_wal_path(conn: &Connection) -> Result<Option<std::path::PathBuf>> {
+    let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Ok(None);
+    }
+    // SAFETY: the handle stays valid for the borrow of `conn`; both strings
+    // returned by SQLite live as long as the connection and are copied here.
+    let wal = unsafe {
+        let db = conn.handle();
+        let main = rusqlite::ffi::sqlite3_db_filename(db, c"main".as_ptr());
+        if main.is_null() || *main == 0 {
+            anyhow::bail!("SQLite reports no file for the main database");
+        }
+        let wal = rusqlite::ffi::sqlite3_filename_wal(main);
+        if wal.is_null() {
+            anyhow::bail!("SQLite reports no WAL file for the main database");
+        }
+        std::ffi::CStr::from_ptr(wal).to_owned()
+    };
+    let wal = wal
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("the WAL file name is not UTF-8"))?;
+    Ok(Some(std::path::PathBuf::from(wal)))
+}
+
 /// Folds the WAL into the main file, then opens a read transaction on that
 /// state. A reader that started on an empty WAL reads the main file only, and
 /// while it is open no connection can copy WAL frames into that file, so a
 /// plain copy taken meanwhile is consistent. `Ok(false)`: no checkpoint
 /// completed, typically because another connection is still reading.
 /// The caller ends the transaction.
-fn pin_checkpointed_file(conn: &Connection, path: &Path) -> Result<bool> {
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    let wal = std::path::PathBuf::from(wal);
+fn pin_checkpointed_file(conn: &Connection) -> Result<bool> {
+    pin_checkpointed_file_with(conn, |_| Ok(()))
+}
+
+/// `between` runs after each completed checkpoint, before the read starts:
+/// tests use it to land a concurrent commit in that window.
+fn pin_checkpointed_file_with(
+    conn: &Connection,
+    mut between: impl FnMut(u32) -> Result<()>,
+) -> Result<bool> {
+    let wal = active_wal_path(conn)?;
     for attempt in 0..CHECKPOINT_ATTEMPTS {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1193,16 +1228,31 @@ fn pin_checkpointed_file(conn: &Connection, path: &Path) -> Result<bool> {
                 continue;
             }
         }
+        between(attempt)?;
         conn.execute_batch("BEGIN")?;
-        conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        // A writer may have appended frames between the checkpoint and the read.
-        let wal_empty = std::fs::metadata(&wal).map_or(true, |meta| meta.len() == 0);
-        if wal_empty {
-            return Ok(true);
+        let pinned = (|| -> Result<bool> {
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+            // A writer may have appended frames between the checkpoint and the read.
+            match &wal {
+                None => Ok(true),
+                Some(wal) => {
+                    let meta = std::fs::metadata(wal).map_err(|e| {
+                        anyhow::anyhow!("cannot inspect the WAL {}: {e}", wal.display())
+                    })?;
+                    Ok(meta.len() == 0)
+                }
+            }
+        })();
+        match pinned {
+            Ok(true) => return Ok(true),
+            Ok(false) => conn.execute_batch("ROLLBACK")?,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
         }
-        conn.execute_batch("ROLLBACK")?;
     }
     Ok(false)
 }
@@ -1237,12 +1287,15 @@ fn run_with_backup_checked(
                 if backup_disabled() {
                     backup_before_migration(path, available_space)?;
                 } else {
-                    if !pin_checkpointed_file(conn, path)? {
+                    if !pin_checkpointed_file(conn)? {
                         anyhow::bail!(
                             "could not fold the write-ahead log into {} before backing it up: \
-                             another connection is still reading the database (another Kronn \
-                             process?). No migration was applied. Close it and restart, or set \
-                             KRONN_MIGRATION_BACKUP=0 to upgrade without a backup.",
+                             another connection keeps a read transaction open on it. Look for \
+                             an external SQLite client (sqlite3 shell, DB Browser), a backup or \
+                             sync tool, or another process using this data directory, close it \
+                             and restart Kronn. No migration was applied. Set \
+                             KRONN_MIGRATION_BACKUP=0 only if you already hold an independent, \
+                             verified backup of this database.",
                             path.display()
                         );
                     }
@@ -1878,7 +1931,8 @@ mod tests {
         let error = run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX))
             .expect_err("no consistent backup, no upgrade");
         assert!(
-            error.to_string().contains("No migration was applied"),
+            error.to_string().contains("No migration was applied")
+                && error.to_string().contains("independent, verified backup"),
             "{error}"
         );
         assert!(!db_path.with_extension("db.backup").exists());
@@ -1913,6 +1967,69 @@ mod tests {
             .unwrap();
         assert_eq!(rows, ["first", "latest"]);
         assert!(applied_migrations(&conn) > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_database_backup_catches_a_commit_racing_the_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        let (real, conn) = wal_db_with_unfolded_write(&dir.path().join("real"));
+        drop(conn);
+        let link = dir.path().join("kronn.db");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let conn = Connection::open(&link).unwrap();
+        conn.execute_batch("PRAGMA wal_autocheckpoint=0;").unwrap();
+        let wal = super::active_wal_path(&conn).unwrap().unwrap();
+        assert!(wal.ends_with("real/wal.db-wal"), "{}", wal.display());
+
+        // A commit lands after the first checkpoint, before the read starts.
+        let writer = Connection::open(&link).unwrap();
+        let pinned = super::pin_checkpointed_file_with(&conn, |attempt| {
+            if attempt == 0 {
+                writer.execute("INSERT INTO t(val) VALUES ('racing')", [])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(pinned, "the second attempt folds the racing commit");
+        let copy = dir.path().join("copy.db");
+        std::fs::copy(&link, &copy).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        let rows: Vec<String> = Connection::open(&copy)
+            .unwrap()
+            .prepare("SELECT val FROM t ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows, ["first", "racing"]);
+    }
+
+    #[test]
+    fn a_commit_racing_every_checkpoint_refuses_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db_path, conn) = wal_db_with_unfolded_write(dir.path());
+        let writer = Connection::open(&db_path).unwrap();
+        let pinned = super::pin_checkpointed_file_with(&conn, |_| {
+            writer.execute("INSERT INTO t(val) VALUES ('again')", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!pinned);
+        assert!(conn.is_autocommit());
+    }
+
+    #[test]
+    fn an_uninspectable_wal_fails_closed() {
+        // Never read as "empty": the WAL SQLite names cannot be inspected.
+        let dir = tempfile::tempdir().unwrap();
+        let (_db_path, conn) = wal_db_with_unfolded_write(dir.path());
+        let wal = super::active_wal_path(&conn).unwrap().unwrap();
+        std::fs::rename(&wal, dir.path().join("elsewhere")).unwrap();
+        assert!(super::pin_checkpointed_file(&conn).is_err());
+        assert!(conn.is_autocommit());
     }
 
     #[test]

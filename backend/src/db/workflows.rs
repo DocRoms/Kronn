@@ -2074,10 +2074,13 @@ pub fn claim_run_status(
 
 /// Atomic `Interrupted → Running` claim that also persists the caller's
 /// updated durable state and clears the old interruption timestamp.
+/// `concurrency_key` is written with the claim: a run interrupted before its
+/// key was rendered (an older version stored none) resumes under its real key.
 pub fn claim_interrupted_run_status(
     conn: &Connection,
     run_id: &str,
     state: &std::collections::HashMap<String, String>,
+    concurrency_key: Option<&str>,
 ) -> Result<bool> {
     let state_json = if state.is_empty() {
         None
@@ -2086,9 +2089,9 @@ pub fn claim_interrupted_run_status(
     };
     let n = conn.execute(
         "UPDATE workflow_runs
-         SET status = 'Running', finished_at = NULL, state = ?2
+         SET status = 'Running', finished_at = NULL, state = ?2, concurrency_key = ?3
          WHERE id = ?1 AND status = 'Interrupted'",
-        params![run_id, state_json],
+        params![run_id, state_json, concurrency_key],
     )?;
     Ok(n == 1)
 }

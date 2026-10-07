@@ -139,6 +139,63 @@ pub fn insert_run_within_limit(
     Ok(Ok(()))
 }
 
+/// Why `parent_run_id` can no longer take a child (cancelled, stopped or
+/// finished), or `None` when it still runs. Read in the closure that inserts
+/// or claims the child: a cancellation settles the parent and its children
+/// in one transaction on the same connection, so it is either seen here or
+/// settles the child afterwards. No Pending child appears once it settled.
+pub fn parent_refuses_children(
+    conn: &Connection,
+    parent_run_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let Some(parent) = parent_run_id else {
+        return Ok(None);
+    };
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM workflow_runs WHERE id = ?1",
+            [parent],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match status.as_deref() {
+        Some("Running" | "Pending" | "WaitingApproval") => None,
+        Some(other) => Some(format!("parent run {parent} is {other}")),
+        None => Some(format!("parent run {parent} no longer exists")),
+    })
+}
+
+/// Refuses a child admission or resume that runs past `deadline`, the
+/// earliest timeout the runners above it enforce: their executors are gone
+/// even while the parent row still says Running.
+pub fn past_deadline(deadline: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
+    deadline
+        .filter(|deadline| chrono::Utc::now() >= *deadline)
+        .map(|deadline| format!("the run's timeout passed at {}", deadline.to_rfc3339()))
+}
+
+/// [`insert_run_within_limit`] for a sub-workflow child, refused outright
+/// (an error, not a limit refusal to wait on) once its parent stopped or
+/// its runners' deadline passed.
+pub fn insert_child_within_limit(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Result<(), String>> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(reason) = past_deadline(deadline) {
+        anyhow::bail!("child not started: {reason}");
+    }
+    if let Some(reason) = parent_refuses_children(&tx, run.parent_run_id.as_deref())? {
+        anyhow::bail!("child not started: {reason}");
+    }
+    let admitted = insert_run_within_limit(&tx, workflow, run)?;
+    tx.commit()?;
+    Ok(admitted)
+}
+
 /// Re-admission of a paused or interrupted run about to execute again: the
 /// limit is counted without the run itself. Call it in the same `with_conn`
 /// closure as the claim, like [`insert_run_within_limit`].

@@ -196,7 +196,7 @@ pub fn advertised_host(server: &crate::models::ServerConfig) -> String {
         }
     }
     let h = &server.host;
-    if h == "0.0.0.0" || h == "::" {
+    if crate::core::net_expose::is_exposed_host(h) {
         "localhost".into()
     } else {
         h.clone()
@@ -223,7 +223,7 @@ pub async fn advertised_host_async(server: &crate::models::ServerConfig) -> Stri
     //    127.0.0.1 / 0.0.0.0 / ::, so the invite code points somewhere a peer
     //    can actually reach. Keeps "localhost" only when no LAN IP is found.
     let h = &server.host;
-    if h == "0.0.0.0" || h == "::" || h == "127.0.0.1" || h == "localhost" {
+    if crate::core::net_expose::is_exposed_host(h) || h == "127.0.0.1" || h == "localhost" {
         return crate::core::tailscale::primary_lan_ipv4().unwrap_or_else(|| "localhost".into());
     }
     h.clone()

@@ -4681,6 +4681,30 @@ export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 
 export type Metric = { label: string, value: string, };
 
+export type MigrateDocsResponse = { status: MigrateDocsStatus,
+/**
+ * Files moved on success. 0 on no-op.
+ */
+files_moved?: number,
+/**
+ * Path refs rewritten (cross-refs in markdown + root redirectors).
+ */
+refs_rewritten?: number,
+/**
+ * Whether a `ai → docs` symlink was created.
+ */
+symlink_created?: boolean,
+/**
+ * Reason on failure / no-op.
+ */
+reason?: string, };
+
+/**
+ * Outcome of a docs migration, shared with the frontend through ts-rs so
+ * both sides compare the same strings. A failure is an API error instead.
+ */
+export type MigrateDocsStatus = "migrated" | "already_migrated" | "not_applicable";
+
 export type ModelAvailability = "available" | "unavailable";
 
 export type ModelCatalogAlert = { model_id: string, replacement?: string | null, references: Array<ModelCatalogReference>, };

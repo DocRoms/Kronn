@@ -265,6 +265,10 @@ fn uncertain_side_effect_intent(run: &WorkflowRun) -> Option<SideEffectIntent> {
 pub struct SharedBudget {
     llm_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     max_llm_calls: u32,
+    /// The earliest timeout any runner of this tree enforces on the current
+    /// branch, with that runner's timeout: guards captured when each run
+    /// started, never re-read from saved config.
+    deadline: Option<(chrono::DateTime<Utc>, u64)>,
 }
 
 impl SharedBudget {
@@ -273,7 +277,24 @@ impl SharedBudget {
         Self {
             llm_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_llm_calls,
+            deadline: None,
         }
+    }
+    /// The same budget, bounded also by a runner whose timeout guard of
+    /// `timeout_seconds` ends at `deadline`; the earlier deadline wins.
+    pub fn within_deadline(&self, deadline: chrono::DateTime<Utc>, timeout_seconds: u64) -> Self {
+        let mut bounded = self.clone();
+        if bounded
+            .deadline
+            .is_none_or(|(current, _)| deadline < current)
+        {
+            bounded.deadline = Some((deadline, timeout_seconds));
+        }
+        bounded
+    }
+    /// The earliest enforced deadline and the timeout it comes from.
+    pub fn deadline(&self) -> Option<(chrono::DateTime<Utc>, u64)> {
+        self.deadline
     }
     pub fn llm_calls(&self) -> u32 {
         self.llm_calls.load(std::sync::atomic::Ordering::Relaxed)
@@ -286,6 +307,32 @@ impl SharedBudget {
     /// descendant — a child's own `max_llm_calls` is ignored when nested).
     pub fn max_llm_calls(&self) -> u32 {
         self.max_llm_calls
+    }
+}
+
+#[cfg(test)]
+mod shared_budget_deadline_tests {
+    use super::SharedBudget;
+
+    #[test]
+    fn the_earliest_runner_deadline_wins_down_the_tree() {
+        let now = chrono::Utc::now();
+        let root = SharedBudget::root(5).within_deadline(now + chrono::Duration::seconds(60), 60);
+        let child = root.within_deadline(now + chrono::Duration::seconds(3600), 3600);
+        assert_eq!(
+            child.deadline(),
+            Some((now + chrono::Duration::seconds(60), 60))
+        );
+        let tighter = child.within_deadline(now + chrono::Duration::seconds(10), 10);
+        assert_eq!(
+            tighter.deadline(),
+            Some((now + chrono::Duration::seconds(10), 10))
+        );
+        assert_eq!(
+            root.deadline(),
+            Some((now + chrono::Duration::seconds(60), 60))
+        );
+        assert_eq!(SharedBudget::root(5).deadline(), None);
     }
 }
 
@@ -1541,7 +1588,15 @@ async fn execute_run_body(
     // Phase 1b-ii — shared LLM-calls budget. A child inherits the parent
     // tree's (same counter + cap); a top-level run gets a fresh one capped at
     // its own resolved limit. The whole tree is then governed by ONE quota.
-    let budget = shared_budget.unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls));
+    let budget = shared_budget
+        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls))
+        .within_deadline(
+            run.started_at
+                + chrono::Duration::seconds(
+                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4),
+                ),
+            resolved_guards.timeout_seconds,
+        );
     let mut step_revisits: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     // 0.7.0 Phase 6 — per-Goto-edge counter. Keyed by `(source, target)`
@@ -2307,6 +2362,7 @@ async fn execute_run_body(
                             ctx: &ctx,
                             parent_variables: &workflow.variables,
                             parent_project_id: workflow.project_id.as_deref(),
+                            cancel: Some(&cancel_token),
                         },
                     )
                     .await
@@ -2392,18 +2448,6 @@ async fn execute_run_body(
                     threshold: resolved_guards.timeout_seconds,
                     actual: actual_secs,
                 });
-                if matches!(step.step_type, StepType::BatchQuickPrompt) {
-                    if let Err(error) = super::cancellation::cancel_run_tree(
-                        &state,
-                        &run.id,
-                        super::cancellation::CancellationScope::DescendantsOnly,
-                        "workflow_timeout_guard",
-                    )
-                    .await
-                    {
-                        tracing::error!(run_id = %run.id, "Unable to cancel timed-out batch descendants: {error}");
-                    }
-                }
                 stopped_by_guard = true;
                 StepOutcome {
                     result: StepResult {
@@ -3293,6 +3337,23 @@ async fn execute_run_body(
     })
     .await?;
 
+    // Every guard exit (in-flight or between-step timeout, LLM quota, loop
+    // detection) ends here. Settled after the terminal write: an admission
+    // that runs later sees the stopped parent and refuses, one that ran
+    // earlier left a child this sweep cancels, with its whole subtree.
+    if run.status == RunStatus::StoppedByGuard {
+        if let Err(error) = super::cancellation::cancel_run_tree(
+            &state,
+            &run.id,
+            super::cancellation::CancellationScope::DescendantsOnly,
+            "workflow_guard_stop",
+        )
+        .await
+        {
+            tracing::error!(run_id = %run.id, "Unable to settle descendants after a guard stop: {error}");
+        }
+    }
+
     // Emit run done
     emit(RunEvent::RunDone {
         status: run.status.clone(),
@@ -3692,6 +3753,22 @@ pub(crate) async fn claim_interrupted_run_row(
     state: &AppState,
     run: &mut WorkflowRun,
 ) -> Result<()> {
+    let id = run.id.clone();
+    try_claim_interrupted_run_row(state, run, None)
+        .await?
+        .map_err(|reason| anyhow::anyhow!("Run {id} cannot resume: {reason}"))
+}
+
+/// Claims an `Interrupted` run, its concurrency key and resume trail included,
+/// in the same closure as the admission check. `Ok(Err(reason))`: the
+/// workflow's concurrency limit refused it; `run` is then left unchanged, so
+/// the caller may wait and try again. `deadline`: the earliest timeout the
+/// runners above a sub-workflow child enforce; past it the claim is refused.
+pub(crate) async fn try_claim_interrupted_run_row(
+    state: &AppState,
+    run: &mut WorkflowRun,
+    deadline: Option<chrono::DateTime<Utc>>,
+) -> Result<std::result::Result<(), String>> {
     use anyhow::anyhow;
     if run.status != RunStatus::Interrupted {
         return Err(anyhow!(
@@ -3700,38 +3777,55 @@ pub(crate) async fn claim_interrupted_run_row(
             run.status
         ));
     }
-    append_resume_transition(run);
-    let claim_run = run.clone();
+    let mut claim_run = run.clone();
+    append_resume_transition(&mut claim_run);
+    let candidate = claim_run.clone();
     let claimed = state
         .db
         .with_conn(move |conn| {
+            if candidate.run_type == "subworkflow" {
+                if let Some(reason) = super::concurrency::past_deadline(deadline) {
+                    anyhow::bail!("Run {} cannot resume: {reason}", candidate.id);
+                }
+                if let Some(reason) = super::concurrency::parent_refuses_children(
+                    conn,
+                    candidate.parent_run_id.as_deref(),
+                )? {
+                    anyhow::bail!("Run {} cannot resume: {reason}", candidate.id);
+                }
+            }
             if let Some(workflow) =
-                crate::db::workflows::get_workflow(conn, &claim_run.workflow_id)?
+                crate::db::workflows::get_workflow(conn, &candidate.workflow_id)?
             {
                 if let Err(reason) =
-                    super::concurrency::resume_within_limit(conn, &workflow, &claim_run)?
+                    super::concurrency::resume_within_limit(conn, &workflow, &candidate)?
                 {
                     return Ok(Err(reason));
                 }
             }
             crate::db::workflows::claim_interrupted_run_status(
                 conn,
-                &claim_run.id,
-                &claim_run.state,
+                &candidate.id,
+                &candidate.state,
+                candidate.concurrency_key.as_deref(),
             )
             .map(Ok)
         })
-        .await?
-        .map_err(|reason| anyhow!("Run {} cannot resume: {reason}", run.id))?;
+        .await?;
+    let claimed = match claimed {
+        Ok(claimed) => claimed,
+        Err(reason) => return Ok(Err(reason)),
+    };
     if !claimed {
         return Err(anyhow!(
             "Run {} was just claimed by another caller — resume ignored (no double-resume)",
             run.id
         ));
     }
+    *run = claim_run;
     run.status = RunStatus::Running;
     run.finished_at = None;
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// A2 — validate + atomically claim an `Interrupted` top-level run for manual
