@@ -1350,6 +1350,44 @@ mod compare_tests {
         );
     }
 
+    /// A prompt published as `review` and renamed since still answers to
+    /// `ref:prompt:review` at run time: an agent edit disables its users.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_published_then_renamed_prompt_disables_its_alias_users() {
+        let state = prompt_test_state();
+        let prompt = stored_prompt("qp-pub", "Review v2");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &prompt)?;
+                crate::db::resource_identities::upsert(
+                    conn,
+                    "",
+                    "quick_prompt",
+                    "review",
+                    "qp-pub",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-alias", "ref:prompt:review").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Review v2", "prompt_template": "Changed by an agent", "agent": "ClaudeCode",
+            "project_id": null
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qp-pub".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(!workflow_enabled(&state, "wf-alias").await);
+    }
+
     /// Codex's case: an unscoped global workflow naming a global prompt by
     /// `ref:` may run in any project, so an agent creating a project-local
     /// prompt with the same slug disables it.

@@ -305,6 +305,29 @@ pub fn enabled_workflows_naming(
         .collect())
 }
 
+/// Every slug `resource_identities` maps to `kind`/`id`, in any scope, as
+/// the runtime compares them (trimmed).
+fn identity_slugs(conn: &Connection, kind: &str, id: &str) -> anyhow::Result<Vec<String>> {
+    let table_kind = match kind {
+        "prompt" => "quick_prompt",
+        "qa" => "quick_api",
+        "qe" => "quick_exec",
+        "workflow" => "workflow",
+        other => other,
+    };
+    let mut stmt =
+        conn.prepare("SELECT slug FROM resource_identities WHERE kind = ?1 AND target_id = ?2")?;
+    let slugs = stmt
+        .query_map(rusqlite::params![table_kind, id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(slugs
+        .into_iter()
+        .map(|slug| slug.trim().to_string())
+        .collect())
+}
+
 /// Disables (and records) every enabled workflow naming `kind`/`id` or one
 /// of `slugs`. Call it inside the write's transaction.
 pub fn disable_workflows_naming(
@@ -316,7 +339,11 @@ pub fn disable_workflows_naming(
     by: &str,
     summary: &str,
 ) -> anyhow::Result<usize> {
-    let users = enabled_workflows_naming(conn, kind, id, slugs)?;
+    // The runtime also resolves a `ref:` through every slug the resource was
+    // published or imported under, whatever its name is now.
+    let mut slugs = slugs.to_vec();
+    slugs.extend(identity_slugs(conn, kind, id)?);
+    let users = enabled_workflows_naming(conn, kind, id, &slugs)?;
     let disabled = disable_workflows(conn, &users)?;
     for user in &users {
         crate::db::workflows::mark_auto_disabled(conn, user, reason, by, summary)?;

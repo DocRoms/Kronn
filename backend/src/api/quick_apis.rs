@@ -1573,6 +1573,66 @@ mod tests {
         );
     }
 
+    /// A Quick API published as `fetch` and renamed since still answers to
+    /// `ref:qa:fetch` at run time: an agent edit disables its users.
+    #[tokio::test]
+    async fn an_agent_edit_of_a_published_then_renamed_quick_api_disables_its_alias_users() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("db"));
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
+        let state = AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let api: QuickApi = serde_json::from_value(serde_json::json!({
+            "id": "qa-pub", "name": "Fetch v2", "icon": "x", "description": "",
+            "project_id": null, "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/items", "api_method": "GET", "variables": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_apis::insert_quick_api(conn, &api)?;
+                crate::db::resource_identities::upsert(conn, "", "quick_api", "fetch", "qa-pub")?;
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-alias', 'wf-alias', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"s\",\"quick_api_id\":\"ref:qa:fetch\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let request: CreateQuickApiRequest = serde_json::from_value(serde_json::json!({
+            "name": "Fetch v2", "description": "", "project_id": null,
+            "api_plugin_slug": "p", "api_config_id": "c",
+            "api_endpoint_path": "/admin", "api_method": "DELETE", "variables": []
+        }))
+        .unwrap();
+        let Json(saved) = update_as(
+            state.clone(),
+            "qa-pub".into(),
+            request,
+            Some("Codex".into()),
+        )
+        .await;
+        assert!(saved.success, "{:?}", saved.error);
+        let enabled = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-alias'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!enabled, "the published alias still names this API");
+    }
+
     /// KT-1037: an agent's change to what a Quick API sends disables every
     /// enabled workflow that calls it; a human's edit or a rename does not.
     #[tokio::test]

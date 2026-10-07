@@ -336,22 +336,23 @@ Release notes for 0.9.3 and earlier are available in the
   that shadows a shared `ref:` such a workflow uses, for every enabled
   workflow, in any project, that names it by id or holds a
   `ref:qa:`/`ref:prompt:` (any field, fan-out or rollback position) with its
-  old or new slug: no reference is resolved, so the rule is a conservative
-  superset that ambiguity can never block, and it runs in the same transaction
-  as the write. Quick Exec lines keep their own KT-1017 rule: an agent's line
-  waits for a human's approval. A disabled definition never runs: a parent
-  refuses a disabled sub-workflow, manual and TriggerWorkflow launches, the
-  scheduler and trackers skip it and only a human can resume an interrupted
-  run of a disabled workflow. Known residual: a run already in flight, a
-  human-resumed one included, can still load a Quick API or Prompt an agent
-  changed during that run (rollback and fan-out included); revision pinning
-  (the approved workflow and its dependencies frozen at approval) is a 0.15
-  priority. With localhost trust on (auth off, or `auth_strict_localhost =
-  false`) a local process without a bridge token still counts as the user, the
-  trust model already documented for the HTTP API; strict localhost is the
-  mitigation until positive human authorization (0.15, KT-1034). The import
-  preview shows the trigger, the Exec steps and the Exec allowlist, and the
-  agent banners say the workflow is created disabled (KT-1037).
+  old or new slug or any slug it was published or imported under: no reference
+  is resolved, so the rule is a conservative superset that ambiguity can never
+  block, and it runs in the same transaction as the write. Quick Exec lines
+  keep their own KT-1017 rule: an agent's line waits for a human's approval. A
+  disabled definition never runs: a parent refuses a disabled sub-workflow,
+  manual and TriggerWorkflow launches, the scheduler and trackers skip it and
+  only a human can resume an interrupted run of a disabled workflow. Known
+  residual: a run already in flight, a human-resumed one included, can still
+  load a Quick API or Prompt an agent changed during that run (rollback and
+  fan-out included); revision pinning (the approved workflow and its
+  dependencies frozen at approval) is a 0.15 priority. With localhost trust on
+  (auth off, or `auth_strict_localhost = false`) a local process without a
+  bridge token still counts as the user, the trust model already documented
+  for the HTTP API; strict localhost is the mitigation until positive human
+  authorization (0.15, KT-1034). The import preview shows the trigger, the
+  Exec steps and the Exec allowlist, and the agent banners say the workflow is
+  created disabled (KT-1037).
 - Kronn now says why it turned a workflow off on its own. Each automatic
   disable (an agent's edit or create, an agent's change to a Quick API or
   Prompt it uses, an agent bundle or proposal, an import, a config restore
