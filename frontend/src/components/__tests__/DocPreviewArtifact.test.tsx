@@ -21,7 +21,7 @@ describe('DocPreviewArtifact', () => {
       expect(create).not.toHaveBeenCalled();
       const button = screen.getByRole('button', { name: 'disc.docArtifactConfirm' });
       act(() => { button.click(); button.click(); });
-      expect(await screen.findByRole('link', { name: 'disc.docArtifactOpen:Mon équipe' })).toHaveAttribute('href', expect.stringContaining('#page/new-artifact'));
+      expect(await screen.findByRole('link', { name: 'disc.docArtifactOpen:Mon équipe' })).toHaveAttribute('href', `${window.location.origin}/standalone/pages/new-artifact`);
       expect(create).toHaveBeenCalledTimes(1);
       expect(create).toHaveBeenCalledWith({ title: 'Mon équipe', html, discussion_id: 'room', source_message_id: 'message', project_id: null, slug: null, created_by_agent: null, datasets: [] });
       expect(activated).toHaveBeenCalledOnce();

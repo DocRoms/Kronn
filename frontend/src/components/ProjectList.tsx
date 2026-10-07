@@ -66,7 +66,9 @@ export interface ProjectListProps {
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
+  /** Opens the discussion and runs its agent: lands on the Discussions page. */
   onAutoRunDiscussion: (discId: string) => void;
+  /** Opens the discussion: lands on the Discussions page. */
   onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;

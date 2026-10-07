@@ -1762,44 +1762,78 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
   });
 
-  it('switches back to workflows when an external workflow selection arrives', async () => {
+  it('follows the address when it changes under the page, and reports what it shows', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
     mockWorkflowsApi.listRuns.mockResolvedValue([]);
     mockWorkflowsApi.countRuns.mockResolvedValue(0);
     mockWorkflowsApi.getRun.mockResolvedValue(null);
-    const onInitialSelectionConsumed = vi.fn();
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], installedAgentTypes: ['ClaudeCode' as const], agentAccess: fullConfig, onSelectionChange };
     const page = await wrap(
-      <WorkflowsPage
-        projects={[]}
-        installedAgentTypes={['ClaudeCode']}
-        agentAccess={fullConfig}
-      />
+      <WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} />,
     );
+    // The page's first word restores what the address named.
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore');
+    expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'quickPrompts', resourceId: null });
 
-    await chooseAutomationType(/Quick Prompts/);
-    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
-
+    // Back, a link, a jump from another page: the address names a run.
     await act(async () => {
       page.rerender(
         <I18nProvider>
-          <WorkflowsPage
-            projects={[]}
-            installedAgentTypes={['ClaudeCode']}
-            agentAccess={fullConfig}
-            initialSelectedWorkflowId="wf-lab"
-            initialSelectedWorkflowRunId="run-from-page"
-            onInitialSelectionConsumed={onInitialSelectionConsumed}
-          />
-        </I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: 'run-from-page' }} />
+        </I18nProvider>,
       );
     });
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledWith('wf-lab', 'run-from-page');
-    await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
     expect(automationTypeChip()).toHaveAttribute('data-value', 'workflows');
     expect(screen.getByText('Éditer')).toBeInTheDocument();
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'workflows', resourceId: 'wf-lab', runId: 'run-from-page' }, 'change',
+    ));
+
+    // The reader's own choice is reported as such, with the run let go.
+    await chooseAutomationType(/Quick Prompts/);
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'quickPrompts', resourceId: null, runId: null }, 'change',
+    ));
+  });
+
+  it('applies the address again under a new token, even when its fields did not change', async () => {
+    // Back after a click: the address goes A → B → A. The page may have moved
+    // to B on its own (the click) while the B render never committed; the
+    // token tells it the address was set again.
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], onSelectionChange };
+    const tokenA = {};
+    const page = await wrap(<WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} addressToken={tokenA} />);
+
+    await chooseAutomationType(/Quick APIs/);
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickApis', resourceId: null, runId: null }, 'change'));
+    expect(automationTypeChip()).toHaveAttribute('data-value', 'quickApis');
+
+    await act(async () => {
+      page.rerender(
+        <I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'quickPrompts', resourceId: null, runId: null }} addressToken={{}} />
+        </I18nProvider>,
+      );
+    });
+
+    await waitFor(() => expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts'));
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'change'));
+  });
+
+  it('restores the last visit at the bare address and says so', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: null }));
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange} />);
+
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'quickApis', resourceId: null, runId: null }, 'restore');
+    expect(onSelectionChange).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the full focused run when the compact page already contains its id', async () => {
@@ -1817,7 +1851,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     mockWorkflowsApi.countRuns.mockResolvedValue(1);
     mockWorkflowsApi.getRun.mockResolvedValue({ ...summary, step_results: [{ ...summary.step_results[0], output: cause }] });
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
-      initialSelectedWorkflowId="wf-lab" initialSelectedWorkflowRunId="run-focused" />);
+      selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: 'run-focused' }} />);
     expect(await screen.findByText(cause)).toBeInTheDocument();
     expect(mockWorkflowsApi.getRun).toHaveBeenCalledTimes(1);
   });

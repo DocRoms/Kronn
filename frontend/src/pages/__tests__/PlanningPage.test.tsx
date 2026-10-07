@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -463,6 +463,66 @@ describe('PlanningPage', () => {
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(outsideFirstPage.id));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'planning.taskActions' })).toBeInTheDocument();
+  });
+
+  it('reports every selection to the owner of the address, and follows what it is given', async () => {
+    const onSelectedTaskChange = vi.fn();
+    const view = render(
+      <PlanningPage
+        selectedTaskId={null}
+        onSelectedTaskChange={onSelectedTaskChange}
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    const row = await findCanonicalTaskRow('Upgrade PHP');
+
+    fireEvent.click(row);
+
+    // Controlled: the page asks, and shows nothing until it is given the task.
+    expect(onSelectedTaskChange).toHaveBeenCalledWith('task-1');
+    expect(screen.getByText('planning.selectHint')).toBeInTheDocument();
+    expect(mocks.get).not.toHaveBeenCalled();
+
+    view.rerender(
+      <PlanningPage
+        selectedTaskId="task-1"
+        onSelectedTaskChange={onSelectedTaskChange}
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
+    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.close' }));
+    expect(onSelectedTaskChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it('shows the task the address names, never the previous one while it loads', async () => {
+    const first = detail(summary());
+    const second = detail(summary({ id: 'task-2', reference: 'KT-2', title: 'Second' }));
+    second.description = 'The second description.';
+    let releaseSecond!: () => void;
+    mocks.get.mockImplementation((id: string) => id === 'task-1'
+      ? Promise.resolve(first)
+      : new Promise(resolve => { releaseSecond = () => resolve(second); }));
+    const props = { onSelectedTaskChange: vi.fn(), projects: [], discussions: [], toast: vi.fn(), onNavigateDiscussion: vi.fn() };
+    const view = render(<PlanningPage selectedTaskId="task-1" {...props} />);
+    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+
+    // Back, a link: the address changes without a click in the page.
+    view.rerender(<PlanningPage selectedTaskId="task-2" {...props} />);
+
+    expect(screen.queryByDisplayValue('Move the runtime forward.')).toBeNull();
+    expect(screen.getByRole('complementary', { name: 'planning.taskActions' }).querySelector('.planning-state')).not.toBeNull();
+    await act(async () => { releaseSecond(); });
+    expect(await screen.findByDisplayValue('The second description.')).toBeInTheDocument();
+    expect(props.onSelectedTaskChange).not.toHaveBeenCalled();
   });
 
   it('clears a directly linked selection when its detail cannot be loaded', async () => {

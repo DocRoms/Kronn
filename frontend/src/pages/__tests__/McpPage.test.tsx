@@ -786,6 +786,52 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
   });
 
+  it('reports every selection to the owner of the address, and follows what it is given', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub'), makeServer('linear', 'Linear')],
+      configs: [makeConfig('github-config', 'github', 'GitHub'), makeConfig('linear-config', 'linear', 'Linear')],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const onSelectedConfigChange = vi.fn();
+    const page = (selectedConfigId: string | null) => (
+      <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop}
+        selectedConfigId={selectedConfigId} onSelectedConfigChange={onSelectedConfigChange} />
+    );
+    const view = wrap(page(null));
+
+    // Controlled: the page asks, and opens nothing until it is given the config.
+    openPlugin('GitHub');
+    expect(onSelectedConfigChange).toHaveBeenCalledWith('github-config');
+    expect(document.querySelector('.mcp-sidebar-plugin-row[data-active="true"]')).toBeNull();
+
+    view.rerender(<I18nProvider>{page('github-config')}</I18nProvider>);
+    expect(document.querySelector('.mcp-sidebar-plugin-row[data-active="true"]')).toHaveAttribute('data-config-id', 'github-config');
+
+    // Back, a link: the address changes without a click in the page.
+    view.rerender(<I18nProvider>{page('linear-config')}</I18nProvider>);
+    expect(document.querySelector('.mcp-sidebar-plugin-row[data-active="true"]')).toHaveAttribute('data-config-id', 'linear-config');
+    expect(onSelectedConfigChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets go of an owned selection that no longer matches the search', () => {
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs: [makeConfig('github-config', 'github', 'GitHub')],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const onSelectedConfigChange = vi.fn();
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop}
+      selectedConfigId="github-config" onSelectedConfigChange={onSelectedConfigChange} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), { target: { value: 'missing' } });
+
+    expect(onSelectedConfigChange).toHaveBeenCalledWith(null);
+  });
+
   it('keeps plugin search compact and reveals filtering and sorting below it', () => {
     const githubServer = makeServer('github', 'GitHub');
     const chartbeatServer = makeServer('api-chartbeat', 'Chartbeat');

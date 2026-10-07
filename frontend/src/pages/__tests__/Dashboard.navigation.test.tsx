@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
 import type { DiscussionListItem } from '../../types/generated';
 
 vi.mock('../../hooks/useWebSocket', () => ({
@@ -38,6 +39,7 @@ vi.mock('../../lib/api', async () => {
 
 import { discussions as discussionsApi, pages as pagesApi, workflows as workflowsApi, projects as projectsApi } from '../../lib/api';
 import { Dashboard } from '../Dashboard';
+import { navigateAppTab } from '../../lib/live-page-navigation';
 
 const makeDiscussion = (id: string): DiscussionListItem => ({
   // KT-595 — the list carries the pending-decision count now.
@@ -63,15 +65,21 @@ const makeDiscussion = (id: string): DiscussionListItem => ({
   awaiting_agent: false,
 });
 
-async function renderDashboard() {
+async function renderDashboard(initialPath = '/') {
   await act(async () => {
     render(
       <I18nProvider>
-        <Dashboard onReset={vi.fn()} />
+        {withDashboardRoutes(<Dashboard onReset={vi.fn()} />, initialPath)}
       </I18nProvider>,
     );
   });
 }
+
+const navTab = (page: string) => {
+  const tab = document.querySelector<HTMLButtonElement>(`[data-tour-id="nav-${page}"]`);
+  if (!tab) throw new Error(`No nav tab for ${page}`);
+  return tab;
+};
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -88,7 +96,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('Dashboard reload/HMR navigation restoration', () => {
+describe('Dashboard navigation', () => {
   it('always navigates Projects and Automation while activity disclosures remain separate buttons', async () => {
     vi.mocked(workflowsApi.list).mockResolvedValue([{
       id: 'wf-live', name: 'Live workflow', project_id: null, project_name: null,
@@ -178,11 +186,10 @@ describe('Dashboard reload/HMR navigation restoration', () => {
   });
 
   it('restores the Discussions page and its existing active discussion', async () => {
-    sessionStorage.setItem('kronn:navigation:page', 'discussions');
     sessionStorage.setItem('kronn:navigation:discussion', 'disc-42');
     vi.mocked(discussionsApi.list).mockResolvedValue([makeDiscussion('disc-42')]);
 
-    await renderDashboard();
+    await renderDashboard('/discussions');
 
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-42');
     expect(discussionsApi.runAgent).not.toHaveBeenCalled();
@@ -195,51 +202,140 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     // list is paginated and loads asynchronously, so filtering it refused to
     // open a discussion merely absent from the first page — or created a
     // second ago. The page fetches the target by id anyway.
-    window.location.hash = '#discussion-disc-deep?message=message-origin';
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
-    await renderDashboard();
+    await renderDashboard('/discussions/disc-deep?message=message-origin');
 
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-deep');
     expect(screen.getByTestId('discussion-page')).toHaveAttribute('data-message-id', 'message-origin');
-    window.location.hash = '';
+    expect(window.location.pathname).toBe('/discussions/disc-deep');
   });
 
-  it('follows an internal discussion hash without reloading the dashboard', async () => {
-    await renderDashboard();
+  it('prefers the discussion the address names over the checkpoint', async () => {
+    sessionStorage.setItem('kronn:navigation:discussion', 'disc-42');
+    vi.mocked(discussionsApi.list).mockResolvedValue([makeDiscussion('disc-42'), makeDiscussion('disc-7')]);
 
-    await act(async () => {
-      window.history.pushState(null, '', '#discussion-disc-in-place');
-      window.dispatchEvent(new Event('hashchange'));
-    });
+    await renderDashboard('/discussions/disc-7');
 
-    expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-in-place');
+    expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-7');
+  });
+
+  it('lets the reader leave a discussion address through the nav', async () => {
+    await renderDashboard('/discussions/disc-deep');
+    expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();
+
+    await act(async () => { navTab('planning').click(); });
+
+    expect(await screen.findByTestId('planning-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/planning');
   });
 
   it('opens Artifacts settings with a blocked site typed in, on load and from a link in place', async () => {
-    window.location.hash = '#settings/artifacts?origin=https%3A%2F%2Fvimeo.com';
-    await renderDashboard();
+    await renderDashboard('/config/artifacts?origin=https%3A%2F%2Fvimeo.com');
     expect(await screen.findByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://vimeo.com');
     // Consumed: a reload must not prefill it again.
-    expect(window.location.hash).toBe('');
+    await waitFor(() => expect(window.location.pathname).toBe('/config'));
+    expect(window.location.search).toBe('');
 
     await act(async () => {
-      window.history.pushState(null, '', '#settings/artifacts?origin=https%3A%2F%2Fplayer.example.com');
-      window.dispatchEvent(new Event('hashchange'));
+      navigateAppTab('/config/artifacts?origin=https%3A%2F%2Fplayer.example.com');
     });
     await waitFor(() => expect(screen.getByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://player.example.com'));
+    await waitFor(() => expect(window.location.pathname).toBe('/config'));
   });
 
   it('drops a stale discussion id and keeps the safe list view', async () => {
-    sessionStorage.setItem('kronn:navigation:page', 'discussions');
     sessionStorage.setItem('kronn:navigation:discussion', 'deleted-disc');
     vi.mocked(discussionsApi.list).mockResolvedValue([]);
 
-    await renderDashboard();
+    await renderDashboard('/discussions');
 
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('discussion-list');
     await waitFor(() => {
       expect(sessionStorage.getItem('kronn:navigation:discussion')).toBeNull();
     });
+  });
+});
+
+describe('Dashboard page addresses', () => {
+  const PAGES = [
+    ['discussions', '/discussions', 'discussion-page'],
+    ['planning', '/planning', 'planning-page'],
+    ['workflows', '/workflows', 'workflow-page'],
+    ['mcps', '/plugins', 'mcp-page'],
+    ['settings', '/config', 'settings-page'],
+  ] as const;
+
+  it('lands on Projects from the bare address', async () => {
+    await renderDashboard('/');
+
+    expect(window.location.pathname).toBe('/projects');
+    expect(navTab('projects')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('lands on Projects from an address that names no page', async () => {
+    await renderDashboard('/nowhere/at-all');
+
+    expect(window.location.pathname).toBe('/projects');
+    expect(navTab('projects')).toHaveAttribute('aria-current', 'page');
+  });
+
+  it.each(PAGES)('opens %s straight from its address', async (page, path, testId) => {
+    await renderDashboard(path);
+
+    expect(await screen.findByTestId(testId)).toBeInTheDocument();
+    expect(navTab(page)).toHaveAttribute('aria-current', 'page');
+    expect(navTab('projects')).not.toHaveAttribute('aria-current');
+    expect(window.location.pathname).toBe(path);
+  });
+
+  it.each(PAGES)('moves the address to %s when its tab is clicked', async (page, path, testId) => {
+    await renderDashboard('/projects');
+
+    await act(async () => { navTab(page).click(); });
+
+    expect(await screen.findByTestId(testId)).toBeInTheDocument();
+    expect(window.location.pathname).toBe(path);
+  });
+
+  it('keeps one page on screen at a time', async () => {
+    await renderDashboard('/planning');
+    expect(await screen.findByTestId('planning-page')).toBeInTheDocument();
+
+    await act(async () => { navTab('settings').click(); });
+
+    expect(await screen.findByTestId('settings-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('planning-page')).not.toBeInTheDocument();
+  });
+
+  it('follows the browser back and forward buttons', async () => {
+    await renderDashboard('/projects');
+    await act(async () => { navTab('planning').click(); });
+    await act(async () => { navTab('workflows').click(); });
+    expect(await screen.findByTestId('workflow-page')).toBeInTheDocument();
+
+    await act(async () => { window.history.back(); });
+    expect(await screen.findByTestId('planning-page')).toBeInTheDocument();
+    expect(navTab('planning')).toHaveAttribute('aria-current', 'page');
+
+    await act(async () => { window.history.forward(); });
+    expect(await screen.findByTestId('workflow-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/workflows');
+  });
+
+  it('refuses the Artifacts address until the capability is activated', async () => {
+    await renderDashboard('/pages');
+
+    await waitFor(() => expect(window.location.pathname).toBe('/projects'));
+    expect(screen.queryByTestId('pages-page')).not.toBeInTheDocument();
+  });
+
+  it('opens Artifacts from its address once the capability is activated', async () => {
+    vi.mocked(pagesApi.capability).mockResolvedValue({ activated: true, activated_at: '2026-08-13T10:00:00Z' });
+
+    await renderDashboard('/pages');
+
+    expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/pages');
   });
 });

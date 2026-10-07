@@ -11,6 +11,24 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- Every view has its own address, and the browser's Back, Forward and reload
+  follow it: the pages (`/projects`, `/discussions`, `/planning`,
+  `/workflows`, `/pages`, `/plugins`, `/config`), what is open in them
+  (`/projects/<id>`, `/discussions/<id>?message=<id>`, `/planning/<id>`,
+  `/workflows/<id>/runs/<id>`, `/workflows/qp/<id>` and the other Automation
+  tabs, `/pages/<id>`, `/plugins/<id>`) and the whole-window views
+  (`/standalone/pages/<id>`, with its view parameters such as `?tv=1`, the
+  Page and discussion mosaics). An address can be copied, sent and reopened.
+  The links written before — `#discussion-<id>`, `#project-<id>`,
+  `#page/<id>?…`, the mosaics' `#…/mosaic?…`, `#settings/artifacts?…` and
+  `#config` —
+  keep working for good, from Live Pages, messages, bookmarks and the `kronn`
+  CLI alike. The desktop app's embedded server answers a reload on any of these
+  addresses with the app.
+
+
 ## [0.14.3] - 2026-10-07
 
 ### Upgrade notes

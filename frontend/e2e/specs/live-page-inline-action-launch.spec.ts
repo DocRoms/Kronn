@@ -20,7 +20,7 @@
  *
  * The terminal "open discussion" button exercises
  * `openStandaloneDiscussion` (`frontend/src/lib/live-page-navigation.ts`):
- * a deterministic same-origin `#discussion-<id>` URL opened with
+ * a deterministic same-origin `/discussions/<id>` URL opened with
  * `noopener,noreferrer`. This spec proves both halves live in a real
  * browser — the new tab lands on the right discussion, AND it never
  * receives a `window.opener` back-reference — a guarantee Vitest/happy-dom
@@ -70,7 +70,7 @@ test.describe('Live Page inline action — launch and secure discussion deep lin
     const popup = await popupPromise;
     await popup.waitForLoadState();
 
-    expect(popup.url()).toMatch(/#discussion-.+/);
+    expect(popup.url()).toMatch(/\/discussions\/.+/);
     const hasOpener = await popup.evaluate(() => window.opener !== null);
     expect(hasOpener, 'the new tab must never receive a window.opener back-reference').toBe(false);
 

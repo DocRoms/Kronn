@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { withDashboardRoutes } from '../../test/routerWrapper';
 
 // Dashboard now opens its own WS (audit_finished toast) — never a real
 // socket in tests.
@@ -123,7 +124,7 @@ afterEach(() => {
 const wrap = async (ui: React.ReactElement) => {
   let result: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<I18nProvider>{ui}</I18nProvider>);
+    result = render(<I18nProvider>{withDashboardRoutes(ui)}</I18nProvider>);
   });
   await act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return result!;
@@ -169,7 +170,7 @@ describe('Dashboard — unseen badge & document.title', () => {
     }));
 
     act(() => {
-      render(<I18nProvider><Dashboard onReset={vi.fn()} /></I18nProvider>);
+      render(<I18nProvider>{withDashboardRoutes(<Dashboard onReset={vi.fn()} />)}</I18nProvider>);
     });
 
     const main = document.querySelector('.dash-main');

@@ -11,8 +11,8 @@
  * These tests pin:
  *   - CTA visible only when the message contains the marker AND we
  *     have a project id (orphan discussion → no jump target)
- *   - Click sets `window.location.hash` to `#project-<id>` AND
- *     calls onNavigate('projects')
+ *   - Click calls onNavigate('projects', { projectId }) so the Dashboard
+ *     lands on the project's own address
  *   - Stripped marker doesn't leak into the rendered text
  */
 import { describe, it, expect, vi } from 'vitest';
@@ -122,17 +122,15 @@ describe('MessageBubble — KRONN:VALIDATION_COMPLETE CTA', () => {
     expect(screen.queryByText('audit.viewTechDebtsAfterValidation')).toBeNull();
   });
 
-  it('clicking the CTA sets the project hash + sessionStorage deeplink + navigates', () => {
-    // 0.8.3 (#314) — the CTA must do THREE things atomically:
-    //   - set `window.location.hash` so Dashboard expands the project
+  it('clicking the CTA writes the sessionStorage deeplink + navigates to the project', () => {
+    // 0.8.3 (#314) — the CTA must do TWO things atomically:
     //   - write `sessionStorage[kronn:postValidation:<id>]` so the
     //     ProjectCard auto-opens docs/tech-debt on mount
-    //   - call `onNavigate('projects')` to switch pages
+    //   - hand the project to `onNavigate`, which lands on its address
     // Pre-#314 only steps (1) + (3) happened, so the user landed on
     // the project's default tab (AI Context) and had to expand the
     // tech-debt section manually — two clicks instead of one.
     const onNavigate = vi.fn();
-    window.location.hash = '';
     sessionStorage.clear();
     render(
       <I18nProvider>
@@ -146,8 +144,8 @@ describe('MessageBubble — KRONN:VALIDATION_COMPLETE CTA', () => {
     );
     fireEvent.click(screen.getByText('audit.viewTechDebtsAfterValidation'));
     expect(sessionStorage.getItem('kronn:postValidation:proj-xyz')).toBe('docs/tech-debt');
-    expect(onNavigate).toHaveBeenCalledWith('projects');
-    expect(window.location.hash).toBe('#project-proj-xyz');
+    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: 'proj-xyz' });
+    expect(window.location.hash).toBe('');
   });
 
   it('stripped marker does not leak into the rendered text', () => {

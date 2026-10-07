@@ -327,18 +327,37 @@ describe('DiscussionsPage', () => {
     const other = makeListDiscussion('d-native-required', 0);
     vi.mocked(discussionsApi.get).mockImplementation(async id => id === discussion.id ? discussion : other);
     const lifted = liftedProps();
-    const page = (openDiscussionId?: string) => (
+    const page = (openDiscussionId?: string, addressToken?: object) => (
       <DiscussionsPage
         projects={[]} agents={[unavailableNative]} allDiscussions={[discussion, other]}
         configLanguage="fr" agentAccess={null}
         refetchDiscussions={noop} refetchProjects={noop} onNavigate={noop}
         toast={toastFn} initialActiveDiscussionId={discussion.id} {...lifted}
         openDiscussionId={openDiscussionId}
+        addressToken={addressToken}
       />
     );
     const view = await wrap(page());
     return { view, page, discussion, other };
   }
+
+  it('opens the address again under a new token, even when its id did not change', async () => {
+    // Back after a click: the address goes A → B → A while the page moved to
+    // B on its own. As a prop the id never changed; the token says the
+    // address was set again.
+    const { view, page, discussion, other } = await renderWithoutNativeProvider();
+    const row = (id: string) => document.querySelector(`[data-tour-disc-id="${id}"]`);
+    await act(async () => { view.rerender(<I18nProvider>{page(discussion.id, {})}</I18nProvider>); });
+    await waitFor(() => expect(row(discussion.id)).toHaveAttribute('data-active', 'true'));
+
+    fireEvent.click(document.querySelector(`[data-tour-disc-id="${other.id}"] .disc-item-open`) as HTMLElement);
+    await waitFor(() => expect(row(other.id)).toHaveAttribute('data-active', 'true'));
+
+    await act(async () => { view.rerender(<I18nProvider>{page(discussion.id, {})}</I18nProvider>); });
+
+    await waitFor(() => expect(row(discussion.id)).toHaveAttribute('data-active', 'true'));
+    expect(row(other.id)).toHaveAttribute('data-active', 'false');
+  });
 
   it('shows why a discussion could not be opened and loads it on retry', async () => {
     const discussion = makeListDiscussion('d-load-failed', 0);

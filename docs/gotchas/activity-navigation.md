@@ -8,7 +8,7 @@ activity buttons outside the scrolling tabs disclose the matching non-modal
 dialog; opening one closes the other. Tour anchors stay on the navigation tabs.
 The disclosure sets `aria-controls` only while its dialog exists and remains
 available when polling reaches zero until the user closes or navigates.
-[src: file: frontend/src/pages/Dashboard.tsx:750-906]
+[src: file: frontend/src/pages/Dashboard.tsx:810-988]
 
 ## Overlay and focus ownership
 
@@ -29,7 +29,7 @@ focuses the destination tab. If a live refresh removes the focused row or Stop
 button, a scoped mutation observer restores dialog focus only when it would
 otherwise be lost to the document body; intentional outside focus is preserved.
 [src: file: frontend/src/hooks/useActivityPopover.ts:1]
-[src: file: frontend/src/pages/Dashboard.tsx:839-902]
+[src: file: frontend/src/pages/Dashboard.tsx:903-988]
 
 Cancellation uses a synchronous per-ID ref guard as well as the disabled UI.
 Failures show a localized alert, permit an explicit retry and refresh the

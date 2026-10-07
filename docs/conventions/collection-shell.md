@@ -5,9 +5,9 @@ shared collection shell, while retaining their domain data and detail actions.
 [src: file: frontend/src/components/ProjectList.tsx:110-121]
 [src: file: frontend/src/components/DiscussionSidebar.tsx:761-785]
 [src: file: frontend/src/pages/McpPage.tsx:299-303]
-[src: file: frontend/src/pages/PagesPage.tsx:600-617]
-[src: file: frontend/src/pages/PlanningPage.tsx:300-340]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:1821-1840]
+[src: file: frontend/src/pages/PagesPage.tsx:617-634]
+[src: file: frontend/src/pages/PlanningPage.tsx:308-348]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:1840-1859]
 
 ## Shared interaction contract
 
@@ -26,9 +26,9 @@ shared collection shell, while retaining their domain data and detail actions.
 | Projects | Multi-select project rows use checkbox semantics and names. [src: file: frontend/src/components/ProjectList.tsx:467-499] | Shared menu/sidebar dismissal. [src: file: frontend/src/components/CollectionShell.tsx:308-324] | Favorites wait for `projectsLoaded`; collapsed sections are stored locally. [src: file: frontend/src/pages/Dashboard.tsx:144] [src: file: frontend/src/pages/Dashboard.tsx:1322-1325] [src: file: frontend/src/components/ProjectList.tsx:118-129] | Local state; shell-pruned. [src: file: frontend/src/components/ProjectList.tsx:117-120] |
 | Discussions | The shell receives selected identifiers and global keyboard search. [src: file: frontend/src/components/DiscussionSidebar.tsx:761-785] | Header and batch menus close on Escape and restore their triggers. [src: file: frontend/src/components/DiscussionSidebar.tsx:230-265] | Search and grouping are domain-owned; favorites are not supplied to the shell. [src: file: frontend/src/components/DiscussionSidebar.tsx:768-773] | Local state; shell-pruned. [src: file: frontend/src/components/DiscussionSidebar.tsx:215-218] [src: file: frontend/src/components/DiscussionSidebar.tsx:774-777] |
 | Plugins | The add-plugin panel is a modal dialog. [src: file: frontend/src/pages/McpPage.tsx:1791-1815] | Its close button/backdrop invoke the page reset path; shared menu/sidebar dismissal also applies. [src: file: frontend/src/pages/McpPage.tsx:1792-1815] [src: file: frontend/src/components/CollectionShell.tsx:308-324] | Favorites wait for a non-null MCP overview; sort and collapsed groups are local. [src: file: frontend/src/pages/Dashboard.tsx:1383-1387] [src: file: frontend/src/pages/McpPage.tsx:290-312] | Local state; shell-pruned. [src: file: frontend/src/pages/McpPage.tsx:301-303] |
-| Pages | In selection mode, custom rows are named checkboxes using the select action, not the open action. [src: file: frontend/src/pages/PagesPage.tsx:697-704] | Shared mobile/sidebar dismissal; page-specific dialogs own their closure. [src: file: frontend/src/components/CollectionShell.tsx:338-352] | Search and validated collapsed sections are local. [src: file: frontend/src/pages/PagesPage.tsx:151-154] | Local state; shell-pruned. [src: file: frontend/src/pages/PagesPage.tsx:600-617] |
-| Planning | The shell receives task labels, selection and selection callbacks. [src: file: frontend/src/pages/PlanningPage.tsx:310-347] | The create panel is modal and routes keyboard events to its handler. [src: file: frontend/src/pages/PlanningPage.tsx:665-681] | Favorites wait for the first successful list response, but are never pruned from a filtered or paginated response; collapsed sections are local. [src: file: frontend/src/pages/PlanningPage.tsx:108-124] [src: file: frontend/src/pages/PlanningPage.tsx:151-168] | Local state; shell-pruned. [src: file: frontend/src/pages/PlanningPage.tsx:109-110] [src: file: frontend/src/pages/PlanningPage.tsx:332-334] |
-| Automations | The shell receives its active resource selection. [src: file: frontend/src/pages/WorkflowsPage.tsx:1821-1840] | The actions panel closes on Escape and is a modal dialog. [src: file: frontend/src/pages/WorkflowsPage.tsx:407-414] [src: file: frontend/src/pages/WorkflowsPage.tsx:2170-2180] | Navigation and valid collapsed-section state are restored locally. [src: file: frontend/src/pages/WorkflowsPage.tsx:148-175] | No shell bulk-selection props are supplied. [src: file: frontend/src/pages/WorkflowsPage.tsx:1821-1840] |
+| Pages | In selection mode, custom rows are named checkboxes using the select action, not the open action. [src: file: frontend/src/pages/PagesPage.tsx:714-721] | Shared mobile/sidebar dismissal; page-specific dialogs own their closure. [src: file: frontend/src/components/CollectionShell.tsx:338-352] | Search and validated collapsed sections are local. [src: file: frontend/src/pages/PagesPage.tsx:159-164] | Local state; shell-pruned. [src: file: frontend/src/pages/PagesPage.tsx:617-634] |
+| Planning | The shell receives task labels, selection and selection callbacks. [src: file: frontend/src/pages/PlanningPage.tsx:318-355] | The create panel is modal and routes keyboard events to its handler. [src: file: frontend/src/pages/PlanningPage.tsx:669-685] | Favorites wait for the first successful list response, but are never pruned from a filtered or paginated response; collapsed sections are local. [src: file: frontend/src/pages/PlanningPage.tsx:108-124] [src: file: frontend/src/pages/PlanningPage.tsx:151-168] | Local state; shell-pruned. [src: file: frontend/src/pages/PlanningPage.tsx:109-110] [src: file: frontend/src/pages/PlanningPage.tsx:332-334] |
+| Automations | The shell receives its active resource selection. [src: file: frontend/src/pages/WorkflowsPage.tsx:1840-1859] | The actions panel closes on Escape and is a modal dialog. [src: file: frontend/src/pages/WorkflowsPage.tsx:408-415] [src: file: frontend/src/pages/WorkflowsPage.tsx:2189-2199] | Navigation and valid collapsed-section state are restored locally. [src: file: frontend/src/pages/WorkflowsPage.tsx:148-175] | No shell bulk-selection props are supplied. [src: file: frontend/src/pages/WorkflowsPage.tsx:1840-1859] |
 
 ## Visual review matrix
 
@@ -78,15 +78,15 @@ the sort, and `renderList` for the groups. The search has the row to itself: the
 old Filter and Sort icons, the panel of three `<select>` (KT-912) and
 `AutomationToolbar` are gone, as `AutomationFilterBar` was before them. Nothing
 sits above the list: the main column is the viewer only.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2211]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2213]
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2221]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2230]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2232]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2240]
 [src: file: frontend/src/components/AutomationSidebarControls.tsx:47]
 
 One filter set narrows the list (`itemFilter`, the search being applied by the
 shell). `/` focuses the search from anywhere on the page, sidebar included. The
 pure rules stay in `lib/automationFilters.ts`.
-[src: file: frontend/src/pages/WorkflowsPage.tsx:2114]
+[src: file: frontend/src/pages/WorkflowsPage.tsx:2133]
 [src: file: frontend/src/lib/automationFilters.ts:97]
 
 "Group by" is a segmented control, **Type / Project / None**, Type by default,
@@ -158,10 +158,11 @@ state, Plugins require a non-null overview, and Planning keeps favorites through
 every partial task response.
 [src: file: frontend/src/hooks/usePersistentIdSet.ts:19-43]
 [src: file: frontend/src/hooks/useApi.ts:26-75]
-[src: file: frontend/src/pages/Dashboard.tsx:144]
-[src: file: frontend/src/pages/Dashboard.tsx:1322-1325]
-[src: file: frontend/src/pages/Dashboard.tsx:1383-1387]
-[src: file: frontend/src/pages/PlanningPage.tsx:116-124]
+[src: file: frontend/src/pages/Dashboard.tsx:736]
+[src: file: frontend/src/pages/Dashboard.tsx:747]
+[src: file: frontend/src/routes/ProjectsRoute.tsx:25]
+[src: file: frontend/src/routes/PluginsRoute.tsx:25]
+[src: file: frontend/src/pages/PlanningPage.tsx:134-142]
 
 ## Executable regression matrix
 

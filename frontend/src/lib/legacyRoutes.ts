@@ -1,0 +1,35 @@
+import { EMBED_SETTINGS_PATH, PAGE_PATHS, STANDALONE_PATHS } from './routes';
+
+/**
+ * Before pages had addresses, deep links lived in the hash. Those links are
+ * still out there: in Live Pages stored in the database, in messages, in
+ * bookmarks and in the CLI. Each one keeps working, by redirecting to the
+ * address that replaced it. This mapping is permanent, not transitional.
+ *
+ * An in-page anchor (`#settings-server`) is not one of them: it returns `null`.
+ */
+const PREFIXES: [legacyPrefix: string, canonicalPrefix: string][] = [
+  // `#discussion-<id>?message=<id>`: the query survives as the address's own.
+  ['#discussion-', `${PAGE_PATHS.discussions}/`],
+  ['#project-', `${PAGE_PATHS.projects}/`],
+  ['#page/', `${STANDALONE_PATHS.page}/`],
+  ['#pages/mosaic?', `${STANDALONE_PATHS.pagesMosaic}?`],
+  ['#discussions/mosaic?', `${STANDALONE_PATHS.discussionsMosaic}?`],
+];
+
+// Exact match or followed by its query, like `#config`: it is a whole section.
+const LEGACY_EMBED_SETTINGS = '#settings/artifacts';
+
+export function legacyHashToPath(hash: string): string | null {
+  if (hash === '#config') return PAGE_PATHS.settings;
+  // `#settings/artifacts?origin=<site>`: the site to type in survives as the query.
+  if (hash === LEGACY_EMBED_SETTINGS || hash.startsWith(`${LEGACY_EMBED_SETTINGS}?`)) {
+    return `${EMBED_SETTINGS_PATH}${hash.slice(LEGACY_EMBED_SETTINGS.length)}`;
+  }
+  for (const [legacyPrefix, canonicalPrefix] of PREFIXES) {
+    if (!hash.startsWith(legacyPrefix)) continue;
+    const rest = hash.slice(legacyPrefix.length);
+    return rest ? `${canonicalPrefix}${rest}` : null;
+  }
+  return null;
+}

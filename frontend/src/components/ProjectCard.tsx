@@ -89,7 +89,9 @@ export interface ProjectCardProps {
   toast: (msg: string, type: 'success' | 'error' | 'warning' | 'info') => void;
   onNavigate: (page: string) => void;
   onSetDiscPrefill: (prefill: { projectId: string; title: string; prompt: string; locked?: boolean }) => void;
+  /** Opens the discussion and runs its agent: lands on the Discussions page. */
   onAutoRunDiscussion: (discId: string) => void;
+  /** Opens the discussion: lands on the Discussions page. */
   onOpenDiscussion: (discId: string) => void;
   onRefetch: () => void;
   onRefetchDiscussions: () => void;
@@ -880,7 +882,6 @@ export function ProjectCard({
             // the failed-steps toast already told the user what is left.
             if (status !== 'interrupted') toast(t('audit.fullAuditDone'), 'success');
             onAutoRunDiscussion(discussionId);
-            onNavigate('discussions');
           }
         },
         onError: (error) => {
@@ -910,7 +911,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, onNavigate, resumableAudit]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDiscussions, onAutoRunDiscussion, resumableAudit]);
 
   const startPartialAudit = useCallback(async (drift: DriftCheckResponse) => {
     if (auditActiveRef.current) return;
@@ -969,10 +970,9 @@ export function ProjectCard({
           // never reaches here (refused as malformed, no legacy fallback).
           if (info?.status === 'complete' && info.discussionId) {
             toast(t('audit.partialValidationCreated', String(info.succeededSteps.length)), 'success');
-            // Open AND navigate — same UX as the Full validation flow; no
-            // auto-run (the backend already spawned the agent post-commit).
+            // Open — same UX as the Full validation flow; no auto-run (the
+            // backend already spawned the agent post-commit).
             onOpenDiscussion(info.discussionId);
-            onNavigate('discussions');
           } else if (info?.status === 'no_change') {
             // Honest: nothing was rewritten, sections stay stale — and NO
             // "just relaunch" nudge (manual review/acceptance is a future
@@ -1006,7 +1006,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
+  }, [selectedAuditAgent, auditTierChoice, auditConnectionId, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -1435,7 +1435,7 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); onNavigate('discussions'); }}>
+              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
               </span>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
@@ -2178,7 +2178,7 @@ export function ProjectCard({
                     {t('config.enabled')}
                   </span>
                 </div>
-                <div className="flex-1 cursor-pointer" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }}>
+                <div className="flex-1 cursor-pointer" onClick={() => onOpenDiscussion(disc.id)}>
                   <span className="dash-row-disc-title">
                     {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
                     {disc.title}
@@ -2187,7 +2187,7 @@ export function ProjectCard({
                     {unseenBasis(disc)} msg · {disc.agent}
                   </span>
                 </div>
-                <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
+                <button className="dash-icon-btn" onClick={() => onOpenDiscussion(disc.id)} aria-label="Open discussion">
                   <ChevronRight size={12} />
                 </button>
               </div>
@@ -2348,7 +2348,7 @@ export function ProjectCard({
                     </p>
                     <button
                       className="dash-icon-btn dash-btn-accent-border"
-                      onClick={() => { onOpenDiscussion(bootstrapDisc.id); onNavigate('discussions'); }}
+                      onClick={() => onOpenDiscussion(bootstrapDisc.id)}
                     >
                       <MessageSquare size={12} /> {t('audit.resumeBootstrap')}
                     </button>
@@ -2413,7 +2413,7 @@ export function ProjectCard({
                     liveStepBreakdown={auditStepBreakdown}
                     liveTotalTokens={auditTotalTokens}
                     onResumeBriefingDiscussion={briefingDisc && !briefingDone
-                      ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }
+                      ? () => onOpenDiscussion(briefingDisc.id)
                       : null}
                     onCancel={handleCancelAudit}
                     resumable={resumableAudit}
@@ -2422,7 +2422,6 @@ export function ProjectCard({
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {
                         onOpenDiscussion(validationDisc.id);
-                        onNavigate('discussions');
                         return;
                       }
                       onSetDiscPrefill({

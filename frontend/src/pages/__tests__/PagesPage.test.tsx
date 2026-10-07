@@ -167,7 +167,7 @@ describe('PagesPage', () => {
     }]);
     render(<PagesPage />);
     const link = await screen.findByRole('link', { name: 'Original discussion · pages.sourceMessage' });
-    expect(link).toHaveAttribute('href', expect.stringContaining('#discussion-source-disc?message=source-message'));
+    expect(link).toHaveAttribute('href', `${window.location.origin}/discussions/source-disc?message=source-message`);
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   });
@@ -422,7 +422,7 @@ describe('PagesPage', () => {
     const auto = screen.getByRole('link', { name: 'pages.mosaic.layout.auto' });
     expect(auto).toHaveAttribute(
       'href',
-      `${window.location.origin}${window.location.pathname}#pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
+      `${window.location.origin}/standalone/pages/mosaic?page=page-1&page=page-2&page=page-3&layout=auto`,
     );
     expect(auto).toHaveAttribute('target', '_blank');
     expect(auto).toHaveAttribute('rel', 'noopener noreferrer');
@@ -445,7 +445,7 @@ describe('PagesPage', () => {
     expect(frame.getAttribute('srcdoc')).toContain('<h1>Adobe</h1>');
     expect(linkRelay.connect).toHaveBeenCalledWith((frame as HTMLIFrameElement).contentWindow);
     const standaloneLink = screen.getByRole('link', { name: 'pages.openInNewTab:Adobe Signals' });
-    expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}${window.location.pathname}#page/page-1`);
+    expect(standaloneLink).toHaveAttribute('href', `${window.location.origin}/standalone/pages/page-1`);
     expect(standaloneLink).toHaveAttribute('target', '_blank');
     expect(standaloneLink).toHaveAttribute('rel', 'noopener noreferrer');
     expect(screen.getByText('data r3 · HTML r2')).toBeInTheDocument();
@@ -811,6 +811,56 @@ describe('PagesPage', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     fireEvent.click(screen.getByTitle('pages.archive'));
     await waitFor(() => expect(pagesApi.update).toHaveBeenCalledWith(page.id, { archived: true }));
+  });
+
+  it('reports the Page it opens on its own, then opens the one the address names', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+    const onSelectedPageChange = vi.fn();
+    const view = render(<PagesPage selectedPageId={null} onSelectedPageChange={onSelectedPageChange} />);
+
+    // Nothing named by the address: the library opens its first Page and says so.
+    await waitFor(() => expect(onSelectedPageChange).toHaveBeenLastCalledWith(page.id));
+    expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true');
+
+    // Back, a link: the address changes without a click in the page.
+    view.rerender(<PagesPage selectedPageId={second.id} onSelectedPageChange={onSelectedPageChange} />);
+
+    await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(second.id));
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    expect(onSelectedPageChange).toHaveBeenLastCalledWith(second.id);
+  });
+
+  it('comes back to the address when the reader moved away and it is set again', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+    const props = { onSelectedPageChange: vi.fn() };
+    const view = render(<PagesPage selectedPageId={page.id} {...props} />);
+    await waitFor(() => expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true'));
+
+    // The reader opens the second Page; the address is then set to the first
+    // again (Back) while its id, as a prop, never changed.
+    fireEvent.click(getCanonicalPageRow('Beta Board'));
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    view.rerender(<PagesPage selectedPageId={page.id} {...props} />);
+
+    await waitFor(() => expect(getCanonicalPageRow('Adobe Signals')).toHaveAttribute('aria-current', 'true'));
+  });
+
+  it('opens the Page the address names, not the last visit', async () => {
+    const second: LivePage = { ...page, id: 'page-2', title: 'Beta Board', slug: 'beta-board' };
+    localStorage.setItem('kronn:pageNavigation', JSON.stringify({ resourceId: page.id }));
+    vi.mocked(pagesApi.list).mockResolvedValue([page, second]);
+    vi.mocked(pagesApi.get).mockImplementation(async id => id === second.id ? { ...detail, ...second } : detail);
+
+    render(<PagesPage selectedPageId={second.id} onSelectedPageChange={vi.fn()} />);
+
+    await waitFor(() => expect(pagesApi.get).toHaveBeenCalledWith(second.id));
+    expect(vi.mocked(pagesApi.get).mock.calls[0][0]).toBe(second.id);
+    await waitFor(() => expect(getCanonicalPageRow('Beta Board')).toHaveAttribute('aria-current', 'true'));
+    expect(getCanonicalPageRow('Adobe Signals')).not.toHaveAttribute('aria-current', 'true');
   });
 
   it('uses the shared row menu and complete keyboard footer', async () => {

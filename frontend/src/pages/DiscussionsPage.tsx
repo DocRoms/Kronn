@@ -363,6 +363,11 @@ export interface DiscussionsPageProps {
   onAutoRunConsumed?: () => void;
   /** Open a specific discussion without triggering agent (e.g. Resume Validation) */
   openDiscussionId?: string | null;
+  /** The router's location, new on every navigation — even one that comes
+   *  back to the same address, whose key is unchanged. Listed with the
+   *  request above so it is renewed each time: the router renders in a
+   *  transition, and a request that goes A → B → A may never commit B. */
+  addressToken?: object;
   onOpenDiscConsumed?: () => void;
   /** When clicking "📋 N conversations" on a workflow run, the parent passes
    *  the batch run id here. We auto-uncollapse the matching project + batch
@@ -456,6 +461,7 @@ export function DiscussionsPage({
   autoRunDiscussionId,
   onAutoRunConsumed,
   openDiscussionId,
+  addressToken,
   onOpenDiscConsumed,
   focusBatchId,
   focusBatchMode = 'batch',
@@ -2338,7 +2344,7 @@ export function DiscussionsPage({
     ensureDiscussionVisible(openDiscussionId);
     onOpenDiscConsumed?.();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openDiscussionId, allDiscussions.length]);
+  }, [openDiscussionId, addressToken, allDiscussions.length]);
 
   // ── Cross-page navigation: WorkflowDetail "📋 N conversations" → here ──
   // The chip click sets `focusBatchId` on Dashboard, which lands as a prop here.

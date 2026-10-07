@@ -21,7 +21,15 @@ export interface McpPageProps {
   /** False until the overview request has completed; protects restored
    * favorites from its initial empty fallback. */
   favoritesReady?: boolean;
+  /** The config to open on mount, when the page keeps its own selection. */
   initialSelectedConfigId?: string | null;
+  /**
+   * The open config, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedConfigChange` and follows
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedConfigId?: string | null;
+  onSelectedConfigChange?: (configId: string | null) => void;
   /** Installed agent types — threaded through to the Custom API AI
    *  helper bubble so the user can pick which local agent runs the
    *  helper conversation. Optional: when empty, the helper trigger
@@ -63,12 +71,12 @@ export type McpPageState =
     showBuiltinFallback: boolean;
   };
 
-export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady = true, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps): McpPageState {
+export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady = true, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, installedAgentTypes, configLanguage }: McpPageProps): McpPageState {
   const { t } = useT();
   const isMobile = useIsMobile();
   const { toast, ToastContainer } = useToast();
 
-  const list = usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile });
+  const list = usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, t, toast, isMobile });
   const addRegistry = useAddPluginRegistryState({ mcpOverview, mcpRegistry });
   const customForm = useCustomApiFormState();
 

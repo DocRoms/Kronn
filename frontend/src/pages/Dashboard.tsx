@@ -1,12 +1,13 @@
 import './Dashboard.css';
-import { useState, useCallback, useRef, useEffect, useMemo, Suspense } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
 import type { RemoteRepo, RepoSource, DiscoverSourceError, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
-import { lazyPage, preloadPagesWhenIdle } from '../lib/lazyPage';
-import { BootHold, LoadingState } from '../components/LoadingState';
+import { preloadPagesWhenIdle } from '../lib/lazyPage';
+import { BootHold } from '../components/LoadingState';
 import { useBackendHealth } from '../hooks/useBackendHealth';
 import { useProjectDrift } from '../hooks/useProjectDrift';
 import { unseenBasis } from '../lib/discussionUiUtils';
@@ -21,30 +22,13 @@ import { KronnMark } from '../components/KronnMark';
 import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
-import { ErrorBoundary } from '../components/ErrorBoundary';
-import { embedSettingsRoute, standaloneDiscussionId, standaloneDiscussionMessageId } from '../lib/live-page-navigation';
-import type { EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
-import {
-  readActiveDiscussionId,
-  readDashboardPage,
-  writeActiveDiscussionId,
-  writeDashboardPage,
-  type DashboardPage,
-} from '../lib/dashboard-navigation';
-// Heavy page components lazy-loaded so the initial Dashboard chunk stays
-// under 500 KB. Each one is its own chunk and only fetched when the user
-// switches to that tab, or fetched once the browser is idle after start-up so
-// a first tab switch does not wait on the network.
-const McpPage = lazyPage(() => import('./McpPage').then(m => m.McpPage));
-const WorkflowsPage = lazyPage(() => import('./WorkflowsPage').then(m => m.WorkflowsPage));
-const PlanningPage = lazyPage(() => import('./PlanningPage').then(m => m.PlanningPage));
-const SettingsPage = lazyPage(() => import('./SettingsPage').then(m => m.SettingsPage));
-const DiscussionsPage = lazyPage(() => import('./DiscussionsPage').then(m => m.DiscussionsPage));
-const PagesPage = lazyPage(() => import('./PagesPage').then(m => m.PagesPage));
-const PRELOADED_PAGES = [DiscussionsPage, McpPage, WorkflowsPage, PlanningPage, PagesPage, SettingsPage];
+import { readActiveDiscussionId, writeActiveDiscussionId } from '../lib/dashboard-navigation';
+import { DEFAULT_PAGE, pathToPage, type DashboardPage } from '../lib/routes';
+import type { DashboardOutletContext, DiscussionPrefill } from '../lib/dashboardContext';
+import { useKronnNavigate } from '../hooks/useKronnNavigate';
+import { PRELOADED_ROUTES } from '../routes/lazyRoutes';
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
 import { ActiveAuditsPopover } from '../components/ActiveAuditsPopover';
-import { ProjectList } from '../components/ProjectList';
 import {
   Folder, FolderOpen, Puzzle,
   Search, Zap, Settings,
@@ -54,21 +38,12 @@ import {
 } from 'lucide-react';
 import { safeSetItem } from '../lib/safeStorage';
 
-type Page = DashboardPage;
-
 interface DashboardProps {
   onReset: () => void;
 }
 
 /** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
 const canAudit = (a: { installed: boolean; runtime_available: boolean; enabled: boolean; agent_type: string }) => isUsable(a) && a.agent_type !== 'Vibe';
-
-// Suspense fallback for the lazy-loaded page chunks: the shared loading
-// state, which lives in the main chunk.
-function PageFallback() {
-  const { t } = useT();
-  return <LoadingState message={t('common.loading')} />;
-}
 
 // Sort score for project readiness
 export function Dashboard({ onReset }: DashboardProps) {
@@ -78,49 +53,24 @@ export function Dashboard({ onReset }: DashboardProps) {
   // can widen the document and push a page sidebar outside the viewport.
   const isMobile = useIsMobile(1100);
   const { toast, ToastContainer } = useToast();
-  // A `#discussion-<id>` address wins over the session checkpoint: it is what
-  // the reader asked for by opening this URL, while the checkpoint only says
-  // where the previous visit left off.
-  const deepLinkedDiscussionId = standaloneDiscussionId(window.location.hash);
-  const [page, setPage] = useState<Page>(() =>
-    deepLinkedDiscussionId ? 'discussions' : readDashboardPage());
-  const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
-  const [planningSelectedTaskId, setPlanningSelectedTaskId] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // The address names the page: back, forward and reload all follow it.
+  const { pathname } = useLocation();
+  const nav = useKronnNavigate();
+  const page: DashboardPage = pathToPage(pathname) ?? DEFAULT_PAGE;
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
-  const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
+  const [discPrefill, setDiscPrefill] = useState<DiscussionPrefill | null>(null);
   // Unseen message tracking (persisted in localStorage, computed in Dashboard)
   const [lastSeenMsgCount, setLastSeenMsgCount] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('kronn:lastSeenMsgCount') ?? '{}'); } catch { return {}; }
   });
-  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
-    () => deepLinkedDiscussionId ?? readActiveDiscussionId(),
-  );
-  // Auto-run agent on a discussion (after full audit creates validation discussion)
-  const [autoRunDiscussionId, setAutoRunDiscussionId] = useState<string | null>(null);
-  // Open a specific discussion without triggering agent (e.g. Resume Validation button)
-  const [openDiscussionId, setOpenDiscussionId] = useState<string | null>(null);
-  // When the sidebar batch pastille is clicked, we hand the workflow id to
-  // WorkflowsPage via this prop. It's cleared right after consumption so the
-  // navigation only fires once per click.
-  const [openWorkflowId, setOpenWorkflowId] = useState<string | null>(null);
-  const [openWorkflowRunId, setOpenWorkflowRunId] = useState<string | null>(null);
+  const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(readActiveDiscussionId);
   const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
   const projectsTabRef = useRef<HTMLButtonElement>(null);
   const workflowsTabRef = useRef<HTMLButtonElement>(null);
   const auditsTriggerRef = useRef<HTMLButtonElement>(null);
   const runsTriggerRef = useRef<HTMLButtonElement>(null);
-  // Reverse direction: when a "📋 View N discussions" chip on a workflow run
-  // is clicked, we hand the batch run id to DiscussionsPage so the sidebar
-  // expands the matching batch group + scrolls to it.
-  const [focusBatchId, setFocusBatchId] = useState<string | null>(null);
-  const [focusBatchMode, setFocusBatchMode] = useState<'batch' | 'compare'>('batch');
   // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
   // workflow wizard pre-loaded with a preset (e.g. `ticket-to-pr` for
-  // AutoPilot) bound to the project of the audit that just completed.
-  // Cleared by WorkflowsPage's onPendingPresetConsumed after the wizard
-  // captures it locally.
-  const [pendingWorkflowPreset, setPendingWorkflowPreset] = useState<{ presetId: string; projectId: string } | null>(null);
 
   // ─── Drift detection state ──────────
 
@@ -164,49 +114,6 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   const { data: projectList, initialLoading: projectsLoading, hasLoaded: projectsLoaded, error: projectsError, refetch } = useApi(() => projectsApi.list(), []);
 
-  // ─── Deep-link: #project-<id> hash → auto-expand + scroll ──────────
-  // Used by the CLI: `kronn` opens `http://localhost:3140/#project-<id>`
-  // so the dashboard scrolls directly to the right project card.
-  //
-  // Timing: consumed AFTER `projectList` is loaded (not on mount) because
-  // the ProjectCard DOM nodes don't exist until the fetch completes. A ref
-  // guards against re-firing on subsequent refetches.
-  const hashConsumedRef = useRef(false);
-  useEffect(() => {
-    if (hashConsumedRef.current) return;
-    if (!projectList || projectList.length === 0) return;
-
-    const hash = window.location.hash;
-    if (!hash.startsWith('#project-')) return;
-    const projectId = hash.slice('#project-'.length);
-    if (!projectId) return;
-
-    // Verify the project actually exists in the loaded list.
-    if (!projectList.some(p => p.id === projectId)) return;
-
-    hashConsumedRef.current = true;
-
-    // Ensure we're on the Projects page (not Discussions / MCPs / etc.)
-    setPage('projects');
-    // Expand the card...
-    setExpandedId(projectId);
-
-    // ...then scroll after React re-renders with the card open. Two rAF
-    // frames: one for React to commit the DOM, one for the browser to
-    // layout the expanded card.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const el = document.getElementById(`project-${projectId}`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    });
-
-    // Clean the hash so a page refresh doesn't re-trigger.
-    if (window.history.replaceState) {
-      window.history.replaceState(null, '', window.location.pathname);
-    }
-  }, [projectList]);  
-
   const { data: registry } = useApi(() => mcpsApi.registry(), []);
   const { data: mcpOverviewData, refetch: refetchMcps } = useApi(() => mcpsApi.overview(), []);
   const { data: agentList, refetch: refetchAgents } = useApi(() => agentsApi.detect(), []);
@@ -215,74 +122,8 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { data: agentAccess, refetch: refetchAgentAccess } = useApi(() => configApi.getAgentAccess(), []);
   const { data: workflowList, refetch: refetchWorkflows } = useApi(() => workflowsApi.list(), []);
   const { data: pagesCapability, refetch: refetchPagesCapability } = useApi(() => pagesApi.capability(), []);
-  const [openPageId, setOpenPageId] = useState<string | null>(null);
   const { data: skillList, refetch: refetchSkills } = useApi(() => skillsApi.list(), []);
 
-  // KT-77 — a Vite full reload/HMR must not throw the user back to Projects.
-  // Keep this tab-local: it restores an interrupted dev session without
-  // turning the SPA state into a long-lived or shareable routing contract.
-  useEffect(() => {
-    writeDashboardPage(page);
-  }, [page]);
-
-  useEffect(() => {
-    const followDiscussionLink = () => {
-      const discussionId = standaloneDiscussionId(window.location.hash);
-      if (!discussionId) return;
-      setOpenDiscussionId(discussionId);
-      setActiveDiscussionId(discussionId);
-      setPage('discussions');
-    };
-    window.addEventListener('hashchange', followDiscussionLink);
-    return () => window.removeEventListener('hashchange', followDiscussionLink);
-  }, []);
-
-  // A blocked embed links to Configuration → Artifacts with its site typed in
-  // (`#settings/artifacts?origin=…`), from this tab or from a standalone Page.
-  const [embedOriginPrefill, setEmbedOriginPrefill] = useState<EmbedOriginPrefill | null>(null);
-  useEffect(() => {
-    const followEmbedSettingsLink = () => {
-      const route = embedSettingsRoute(window.location.hash);
-      if (!route) return;
-      setPage('settings');
-      setEmbedOriginPrefill({ origin: route.origin, nonce: Date.now() });
-      if (window.history.replaceState) {
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    };
-    followEmbedSettingsLink();
-    window.addEventListener('hashchange', followEmbedSettingsLink);
-    return () => window.removeEventListener('hashchange', followEmbedSettingsLink);
-  }, []);
-
-  // A link inside the app (a discussion pointing at a project file) sets the
-  // hash after the first-load consumer above has already run.
-  useEffect(() => {
-    const followProjectLink = () => {
-      const hash = window.location.hash;
-      if (!hash.startsWith('#project-')) return;
-      const projectId = hash.slice('#project-'.length);
-      if (!projectId) return;
-      setPage('projects');
-      setExpandedId(projectId);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          document.getElementById(`project-${projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
-      });
-      if (window.history.replaceState) {
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    };
-    window.addEventListener('hashchange', followProjectLink);
-    return () => window.removeEventListener('hashchange', followProjectLink);
-  }, []);
-
-  useEffect(() => {
-    if (pagesCapability && !pagesCapability.activated && page === 'pages') {
-      setPage('projects');
-    }
-  }, [page, pagesCapability]);
   useEffect(() => {
     const activated = () => refetchPagesCapability();
     window.addEventListener('kronn:pages-activated', activated);
@@ -305,10 +146,10 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // The session checkpoint is filtered against the loaded list: it points at
   // wherever the previous visit left off, which may since have been deleted.
-  // A `#discussion-<id>` address is NOT filtered — the list loads
-  // asynchronously and is paginated, so filtering it would refuse to open a
-  // discussion that is merely absent from the first page, or one created a
-  // second ago. The page fetches the target by id anyway.
+  // An address is NOT filtered — the list loads asynchronously and is
+  // paginated, so filtering it would refuse to open a discussion that is
+  // merely absent from the first page, or one created a second ago. The page
+  // fetches the target by id anyway.
   const restorableDiscussionId = useMemo(() => {
     if (!activeDiscussionId || !discussionList) return null;
     return discussionList.some(discussion => discussion.id === activeDiscussionId)
@@ -543,11 +384,6 @@ export function Dashboard({ onReset }: DashboardProps) {
     document.title = totalUnseen > 0 ? `(${totalUnseen}) Kronn` : 'Kronn';
   }, [totalUnseen]);
 
-  // Stable callback for prefill consumed
-  const handlePrefillConsumed = useCallback(() => setDiscPrefill(null), []);
-  const handleAutoRunConsumed = useCallback(() => setAutoRunDiscussionId(null), []);
-  const handleOpenDiscConsumed = useCallback(() => setOpenDiscussionId(null), []);
-
 
   // Bootstrap new project state
   const [showBootstrap, setShowBootstrap] = useState(false);
@@ -659,8 +495,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       setBootstrapTrackerMcp('');
       await refetch();
       // Navigate to discussions with auto-run on the bootstrap discussion
-      setAutoRunDiscussionId(res.discussion_id);
-      setPage('discussions');
+      nav.toDiscussion(res.discussion_id, { autoRun: true });
       toast(`Projet "${bootstrapName}" cree`, 'success');
     } catch (e) {
       toast(`Erreur: ${e}`, 'error');
@@ -773,13 +608,78 @@ export function Dashboard({ onReset }: DashboardProps) {
   const settled = (loaded: boolean, error: string | null) =>
     loaded || (error !== null && backendHealth === 'up');
   const firstDataSettled = settled(projectsLoaded, projectsError) && settled(discussionsLoaded, discussionsError);
-  useEffect(() => preloadPagesWhenIdle(PRELOADED_PAGES), []);
+  useEffect(() => preloadPagesWhenIdle(PRELOADED_ROUTES), []);
+
+  // The shell owns `sendingMap`; the Workflows page only lives on its route.
+  const markBatchSending = useCallback((discussionIds: string[]) => {
+    setSendingMap(prev => {
+      const next = { ...prev };
+      for (const id of discussionIds) next[id] = true;
+      return next;
+    });
+    setSendingStartMap(prev => {
+      const next = { ...prev };
+      const now = Date.now();
+      for (const id of discussionIds) next[id] = now;
+      return next;
+    });
+  }, []);
+  const openAddProject = useCallback(() => setShowBootstrap(true), []);
+
+  const outletContext: DashboardOutletContext = {
+    projects,
+    projectsLoading,
+    projectsLoaded,
+    agents,
+    allDiscussions,
+    discussionsByProject,
+    allSkills,
+    workflowList: workflowList ?? [],
+    activeAudits,
+    driftByProject,
+    configLanguage: configLanguage ?? null,
+    agentAccess: agentAccess ?? null,
+    mcpOverview,
+    mcpOverviewLoaded: mcpOverviewData !== null,
+    mcpRegistry,
+    pagesCapability: pagesCapability ?? null,
+    refetchProjects: refetch,
+    refetchDiscussions,
+    refetchSkills,
+    refetchAgents,
+    refetchAgentAccess,
+    refetchLanguage,
+    refetchMcps,
+    refetchDrift: handleRefetchDrift,
+    toast,
+    onReset,
+    openAddProject,
+    markBatchSending,
+    sendingMap,
+    setSendingMap,
+    queuedMap,
+    setQueuedMap,
+    sendingStartMap,
+    setSendingStartMap,
+    streamingMap,
+    setStreamingMap,
+    noteStreamTick,
+    abortControllers,
+    cleanupStream,
+    lastSeenMsgCount,
+    markDiscussionSeen,
+    markAllDiscussionsSeen,
+    discPrefill,
+    setDiscPrefill,
+    restorableDiscussionId,
+    setActiveDiscussionId,
+  };
 
   return (
     <div className="dash-app">
       <BootHold active={!firstDataSettled} phase={backendHealth === 'down' ? 'slow' : 'opening'} />
       <ToastContainer />
-      <TourProvider setPage={setPage as (p: string) => void}>
+      <TourProvider setPage={nav.toPage}>
       {/* Nav */}
       <nav className="dash-nav">
         <div className="dash-nav-brand" data-mobile={isMobile}>
@@ -812,7 +712,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           // conditional : only renders if at least one API plugin has a
           // config in this Kronn instance.
           ['settings', Settings, t('nav.config')],
-        ] as [string, typeof Folder, string][]).map(([id, Icon, label]) => {
+        ] as [DashboardPage, typeof Folder, string][]).map(([id, Icon, label]) => {
           const btn = (
             <button
               key={id}
@@ -828,11 +728,7 @@ export function Dashboard({ onReset }: DashboardProps) {
               aria-current={page === id ? 'page' : undefined}
               aria-label={isMobile ? label : undefined}
               ref={id === 'projects' ? projectsTabRef : id === 'workflows' ? workflowsTabRef : undefined}
-              onClick={() => {
-                setPage(id as Page);
-                if (id !== 'mcps') setMcpSelectedConfigId(null);
-                setPlanningSelectedTaskId(null);
-              }}
+              onClick={() => nav.toPage(id)}
               title={label}
             >
               <Icon size={isMobile ? 16 : 14} />
@@ -901,13 +797,12 @@ export function Dashboard({ onReset }: DashboardProps) {
                   focusFallbackRef={projectsTabRef}
                   onClose={() => setActiveAuditsPopoverOpen(false)}
                   onNavigateToProject={(projectId) => {
-                    setExpandedId(projectId);
-                    setPage('projects');
+                    nav.toProject(projectId);
                     setActiveAuditsPopoverOpen(false);
                     requestAnimationFrame(() => projectsTabRef.current?.focus());
                   }}
                   onViewAllProjects={() => {
-                    setPage('projects');
+                    nav.toPage('projects');
                     setActiveAuditsPopoverOpen(false);
                     requestAnimationFrame(() => projectsTabRef.current?.focus());
                   }}
@@ -944,14 +839,12 @@ export function Dashboard({ onReset }: DashboardProps) {
                   focusFallbackRef={workflowsTabRef}
                   onClose={() => setActiveRunsPopoverOpen(false)}
                   onNavigateToWorkflow={(wfId) => {
-                    setOpenWorkflowId(wfId);
-                    setOpenWorkflowRunId(null);
-                    setPage('workflows');
+                    nav.toWorkflow(wfId);
                     setActiveRunsPopoverOpen(false);
                     requestAnimationFrame(() => workflowsTabRef.current?.focus());
                   }}
                   onViewAllWorkflows={() => {
-                    setPage('workflows');
+                    nav.toPage('workflows');
                     setActiveRunsPopoverOpen(false);
                     requestAnimationFrame(() => workflowsTabRef.current?.focus());
                   }}
@@ -967,7 +860,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             type="button"
             className="dash-running-badge"
             title={t('nav.agentsRunningHint')}
-            onClick={() => setPage('discussions')}
+            onClick={() => nav.toPage('discussions')}
           >
             <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
             {!isMobile && <span>{t('nav.agentsRunning', String(runningDiscIds.length))}</span>}
@@ -1378,267 +1271,7 @@ export function Dashboard({ onReset }: DashboardProps) {
 
       {/* Content */}
       <main className="dash-main">
-
-        {/* ════════ PROJETS ════════ */}
-        {page === 'projects' && (<ErrorBoundary mode="zone" label="Projects">
-          <ProjectList
-            projects={projects}
-            loading={projectsLoading}
-            favoritesReady={projectsLoaded}
-            activeAudits={activeAudits}
-            discussions={allDiscussions}
-            discussionsByProject={discussionsByProject}
-            driftByProject={driftByProject}
-            agents={agents}
-            allSkills={allSkills}
-            mcpConfigs={mcpOverview.configs}
-            workflows={workflowList ?? []}
-            configLanguage={configLanguage ?? null}
-            modelTiers={agentAccess?.model_tiers ?? null}
-            toast={toast}
-            onAddProject={() => setShowBootstrap(true)}
-            onNavigate={(p) => {
-              if (p.startsWith('mcps:')) {
-                setMcpSelectedConfigId(p.split(':')[1]);
-                setPage('mcps');
-              } else if (p.startsWith('planning:')) {
-                setPlanningSelectedTaskId(p.slice('planning:'.length));
-                setPage('planning');
-              } else if (p === 'planning') {
-                setPlanningSelectedTaskId(null);
-                setPage('planning');
-              } else {
-                setPage(p as Page);
-              }
-            }}
-            onSetDiscPrefill={setDiscPrefill}
-            onAutoRunDiscussion={setAutoRunDiscussionId}
-            onOpenDiscussion={setOpenDiscussionId}
-            onRefetch={refetch}
-            onRefetchDiscussions={refetchDiscussions}
-            onRefetchSkills={refetchSkills}
-            onRefetchDrift={handleRefetchDrift}
-            expandedId={expandedId}
-            onSetExpandedId={setExpandedId}
-          />
-        </ErrorBoundary>)}
-
-        {/* ════════ PLANIFICATION ════════ */}
-        {page === 'planning' && (
-          <ErrorBoundary mode="zone" label="Planning">
-            <Suspense fallback={<PageFallback />}>
-              <PlanningPage
-                key={planningSelectedTaskId ?? 'planning'}
-                initialSelectedTaskId={planningSelectedTaskId}
-                projects={projects}
-                discussions={allDiscussions}
-                toast={toast}
-                onNavigateDiscussion={(discussionId) => {
-                  setOpenDiscussionId(discussionId);
-                  setPage('discussions');
-                }}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ Plugins ════════ */}
-        {page === 'mcps' && (
-          <ErrorBoundary mode="zone" label="Plugins">
-            <Suspense fallback={<PageFallback />}>
-              <McpPage projects={projects} mcpOverview={mcpOverview} mcpRegistry={mcpRegistry} refetchMcps={refetchMcps} favoritesReady={mcpOverviewData !== null} initialSelectedConfigId={mcpSelectedConfigId} installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)} configLanguage={configLanguage ?? undefined} />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ WORKFLOWS ════════ */}
-        {page === 'workflows' && (
-          <ErrorBoundary mode="zone" label="Workflows">
-            <Suspense fallback={<PageFallback />}>
-            <WorkflowsPage
-              projects={projects}
-              installedAgentTypes={agents.filter(isUsable).map(a => a.agent_type)}
-              agentAccess={agentAccess ?? undefined}
-              configLanguage={configLanguage ?? undefined}
-              toast={toast}
-              initialSelectedWorkflowId={openWorkflowId}
-              initialSelectedWorkflowRunId={openWorkflowRunId}
-              onInitialSelectionConsumed={() => {
-                setOpenWorkflowId(null);
-                setOpenWorkflowRunId(null);
-              }}
-              pendingPreset={pendingWorkflowPreset}
-              onPendingPresetConsumed={() => setPendingWorkflowPreset(null)}
-              onNavigateToBatch={(batchRunId) => {
-                setFocusBatchMode('batch');
-                setFocusBatchId(batchRunId);
-                setPage('discussions');
-              }}
-              onNavigateDiscussion={(discId) => { setAutoRunDiscussionId(discId); setPage('discussions'); }}
-              onNavigatePage={(pageId) => { setOpenPageId(pageId); setPage('pages'); }}
-              onNavigateMcp={() => setPage('mcps')}
-              onNavigateSettings={() => setPage('settings')}
-              onBatchLaunched={(discIds, batchRunId, mode = 'batch') => {
-                // Mark every batch-child disc as sending so the sidebar
-                // spinner lights up for all of them in parallel, not just
-                // the one we navigate to. The parent (Dashboard) owns
-                // sendingMap; WorkflowsPage only lives in the workflow tab.
-                setSendingMap(prev => {
-                  const next = { ...prev };
-                  for (const id of discIds) next[id] = true;
-                  return next;
-                });
-                setSendingStartMap(prev => {
-                  const next = { ...prev };
-                  const now = Date.now();
-                  for (const id of discIds) next[id] = now;
-                  return next;
-                });
-                // Navigate to the discussions tab and focus the batch
-                // group in the sidebar — expand the project group + the
-                // batch group + scroll to it. `focusBatchId` is consumed
-                // by DiscussionsPage's useEffect which handles the expand
-                // + scroll after the refetch settles.
-                if (discIds.length > 0) {
-                  setOpenDiscussionId(discIds[0]);
-                  setFocusBatchMode(mode);
-                  setFocusBatchId(batchRunId);
-                  setPage('discussions');
-                }
-                // Force a refetch so the new discs show up in the sidebar
-                // grouped under their batch run.
-                refetchDiscussions?.();
-              }}
-            />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ PAGES VIVANTES — progressive disclosure ════════ */}
-        {page === 'pages' && pagesCapability?.activated && (
-          <ErrorBoundary mode="zone" label={t('nav.pages')}>
-            <Suspense fallback={<PageFallback />}>
-              <PagesPage
-                projects={projects}
-                initialSelectedPageId={openPageId}
-                onInitialSelectionConsumed={() => setOpenPageId(null)}
-                onNavigateWorkflow={(workflowId, runId) => {
-                  setOpenWorkflowId(workflowId);
-                  setOpenWorkflowRunId(runId ?? null);
-                  setPage('workflows');
-                }}
-                onNavigateDiscussion={(discussionId) => { setOpenDiscussionId(discussionId); setPage('discussions'); }}
-              />
-            </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ DISCUSSIONS ════════ */}
-        {page === 'discussions' && (
-          <ErrorBoundary mode="zone" label="Discussions">
-          <Suspense fallback={<PageFallback />}>
-          <DiscussionsPage
-            projects={projects}
-            agents={agents}
-            allDiscussions={allDiscussions}
-            configLanguage={configLanguage ?? null}
-            agentAccess={agentAccess ?? null}
-            refetchDiscussions={refetchDiscussions}
-            refetchProjects={refetch}
-            onNavigate={(p, opts) => {
-              setPage(p as Page);
-              if (opts?.projectId) {
-                setExpandedId(opts.projectId);
-                setTimeout(() => {
-                  document.getElementById(`project-${opts.projectId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 100);
-              }
-              if (opts?.scrollTo) {
-                const target = opts.scrollTo;
-                setTimeout(() => {
-                  document.getElementById(target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }, 200);
-              }
-              // Sidebar batch pastille → workflows tab + pre-open the parent workflow's detail.
-              if (opts?.workflowId) {
-                setOpenWorkflowId(opts.workflowId);
-                setOpenWorkflowRunId(null);
-              }
-            }}
-            prefill={discPrefill}
-            onPrefillConsumed={handlePrefillConsumed}
-            onSetDiscPrefill={setDiscPrefill}
-            autoRunDiscussionId={autoRunDiscussionId}
-            onAutoRunConsumed={handleAutoRunConsumed}
-            onLaunchWorkflowFromPreset={(presetId, projectId) => {
-              setPendingWorkflowPreset({ presetId, projectId });
-              setPage('workflows');
-            }}
-            openDiscussionId={openDiscussionId}
-            onOpenDiscConsumed={handleOpenDiscConsumed}
-            focusBatchId={focusBatchId}
-            focusBatchMode={focusBatchMode}
-            onFocusBatchConsumed={() => {
-              setFocusBatchId(null);
-              setFocusBatchMode('batch');
-            }}
-            toast={toast}
-            sendingMap={sendingMap}
-            setSendingMap={setSendingMap}
-            queuedMap={queuedMap}
-            setQueuedMap={setQueuedMap}
-            sendingStartMap={sendingStartMap}
-            setSendingStartMap={setSendingStartMap}
-            streamingMap={streamingMap}
-            setStreamingMap={setStreamingMap}
-            noteStreamTick={noteStreamTick}
-            abortControllers={abortControllers}
-            cleanupStream={cleanupStream}
-            markDiscussionSeen={markDiscussionSeen}
-            markAllDiscussionsSeen={markAllDiscussionsSeen}
-            onActiveDiscussionChange={setActiveDiscussionId}
-            initialActiveDiscussionId={openDiscussionId ?? deepLinkedDiscussionId ?? restorableDiscussionId}
-            initialMessageId={deepLinkedDiscussionId
-              && (!openDiscussionId || openDiscussionId === deepLinkedDiscussionId)
-              ? standaloneDiscussionMessageId(window.location.hash)
-              : null}
-            lastSeenMsgCount={lastSeenMsgCount}
-            mcpConfigs={mcpOverview.configs}
-            mcpIncompatibilities={mcpOverview.incompatibilities}
-          />
-          </Suspense>
-          </ErrorBoundary>
-        )}
-
-        {/* ════════ CONFIG ════════ */}
-        {page === 'settings' && (
-          <ErrorBoundary mode="zone" label="Settings">
-          <Suspense fallback={<PageFallback />}>
-          <SettingsPage
-            agents={agents}
-            agentAccess={agentAccess ?? null}
-            configLanguage={configLanguage ?? null}
-            projects={projects}
-            refetchAgents={refetchAgents}
-            refetchAgentAccess={refetchAgentAccess}
-            refetchLanguage={refetchLanguage}
-            refetchProjects={refetch}
-            refetchDiscussions={refetchDiscussions}
-            onReset={onReset}
-            onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
-            toast={toast}
-            embedOriginPrefill={embedOriginPrefill}
-            // 0.8.6 — API audit section visibility : only show if at
-            // least one API plugin (registry or custom) has a config
-            // in this Kronn instance. Computed from mcpOverview so the
-            // section disappears for users who don't use APIs yet.
-            hasConfiguredApi={mcpOverview.configs.some(cfg =>
-              mcpOverview.servers.some(s => s.id === cfg.server_id && s.api_spec != null)
-            )}
-          />
-          </Suspense>
-          </ErrorBoundary>
-        )}
+        <Outlet context={outletContext} />
       </main>
       <TourOverlay />
       </TourProvider>

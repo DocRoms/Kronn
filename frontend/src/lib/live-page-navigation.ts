@@ -1,8 +1,4 @@
-import { writeActiveDiscussionId, writeDashboardPage } from './dashboard-navigation';
-
-export const STANDALONE_DISCUSSION_HASH_PREFIX = '#discussion-';
-export const STANDALONE_LIVE_PAGE_HASH_PREFIX = '#page/';
-export const STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX = '#pages/mosaic?';
+import { STANDALONE_PATHS, discussionPath, embedSettingsPath, isStandalonePath, standalonePagePath } from './routes';
 
 export type LivePageMosaicLayout =
   | 'auto'
@@ -33,15 +29,10 @@ export function livePageMosaicLayouts(pageCount: number): LivePageMosaicLayout[]
   return ['auto'];
 }
 
-export interface StandaloneLivePageRoute {
-  pageId: string;
-  /** View parameters from `#page/<id>?key=value`, handed to the Page as
-   * `KronnPageData.page.params` (e.g. `tv=1` for a wall screen). */
-  params: Record<string, string>;
-}
-
-// Display hints only: short, plain tokens so a link can never smuggle markup or
-// large payloads into the sandbox. Anything else is dropped, not rejected.
+// View parameters (`/standalone/pages/<id>?tv=1&scene=standup`) are display
+// hints handed to the Page as `KronnPageData.page.params`: short, plain tokens
+// so a link can never smuggle markup or large payloads into the sandbox.
+// Anything else is dropped, not rejected.
 const LIVE_PAGE_PARAM_KEY = /^[a-z][a-z0-9_]{0,31}$/;
 const LIVE_PAGE_PARAM_VALUE = /^[A-Za-z0-9_.-]{0,64}$/;
 const MAX_LIVE_PAGE_PARAMS = 8;
@@ -55,37 +46,16 @@ export function livePageViewParams(query: string): Record<string, string> {
   return params;
 }
 
-/** `#page/<encoded id>[?view params]`. The id is percent-encoded by
- * `standaloneLivePageUrl`, so a literal `?` can only start the parameters. */
-export function standaloneLivePageRoute(hash: string): StandaloneLivePageRoute | null {
-  if (!hash.startsWith(STANDALONE_LIVE_PAGE_HASH_PREFIX)) return null;
-  const rest = hash.slice(STANDALONE_LIVE_PAGE_HASH_PREFIX.length);
-  const queryAt = rest.indexOf('?');
-  const encodedId = queryAt < 0 ? rest : rest.slice(0, queryAt);
-  if (!encodedId) return null;
-  try {
-    const pageId = decodeURIComponent(encodedId).trim();
-    if (!pageId) return null;
-    return { pageId, params: queryAt < 0 ? {} : livePageViewParams(rest.slice(queryAt + 1)) };
-  } catch {
-    return null;
-  }
-}
-
-export function standaloneLivePageId(hash: string): string | null {
-  return standaloneLivePageRoute(hash)?.pageId ?? null;
-}
-
+/** The shareable address of a Live Page shown on its own. */
 export function standaloneLivePageUrl(
   pageId: string,
-  location: Pick<Location, 'origin' | 'pathname'> = window.location,
+  location: Pick<Location, 'origin'> = window.location,
 ): string {
-  return `${location.origin}${location.pathname}${STANDALONE_LIVE_PAGE_HASH_PREFIX}${encodeURIComponent(pageId)}`;
+  return `${location.origin}${standalonePagePath(pageId)}`;
 }
 
-export function standaloneLivePageMosaic(hash: string): LivePageMosaicRoute | null {
-  if (!hash.startsWith(STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX)) return null;
-  const params = new URLSearchParams(hash.slice(STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX.length));
+/** The pages and layout a mosaic address asks for, or null when it names fewer than two. */
+export function livePageMosaicRoute(params: URLSearchParams): LivePageMosaicRoute | null {
   const pageIds = [...new Set(params.getAll('page').map(id => id.trim()).filter(Boolean))];
   if (pageIds.length < 2) return null;
 
@@ -97,84 +67,74 @@ export function standaloneLivePageMosaic(hash: string): LivePageMosaicRoute | nu
   return { pageIds, layout };
 }
 
-export function standaloneLivePageMosaicUrl(
-  pageIds: string[],
-  layout: LivePageMosaicLayout = 'auto',
-  location: Pick<Location, 'origin' | 'pathname'> = window.location,
-): string {
+export function livePageMosaicSearch(pageIds: string[], layout: LivePageMosaicLayout = 'auto'): URLSearchParams {
   const uniquePageIds = [...new Set(pageIds.map(id => id.trim()).filter(Boolean))];
   const params = new URLSearchParams();
   uniquePageIds.forEach(pageId => params.append('page', pageId));
   const compatibleLayout = livePageMosaicLayouts(uniquePageIds.length).includes(layout) ? layout : 'auto';
   params.set('layout', compatibleLayout);
-  return `${location.origin}${location.pathname}${STANDALONE_LIVE_PAGE_MOSAIC_HASH_PREFIX}${params.toString()}`;
+  return params;
 }
 
-/** The discussion a `#discussion-<id>` URL names, or null. */
-export function standaloneDiscussionId(hash: string): string | null {
-  if (!hash.startsWith(STANDALONE_DISCUSSION_HASH_PREFIX)) return null;
-  const encodedId = hash.slice(STANDALONE_DISCUSSION_HASH_PREFIX.length).split('?')[0];
-  if (!encodedId) return null;
-  try {
-    const discussionId = decodeURIComponent(encodedId).trim();
-    return discussionId || null;
-  } catch {
-    return null;
-  }
+/** The shareable address of a mosaic of Live Pages. */
+export function standaloneLivePageMosaicUrl(
+  pageIds: string[],
+  layout: LivePageMosaicLayout = 'auto',
+  location: Pick<Location, 'origin'> = window.location,
+): string {
+  return `${location.origin}${STANDALONE_PATHS.pagesMosaic}?${livePageMosaicSearch(pageIds, layout)}`;
 }
 
+/** The shareable address of a discussion. */
 export function standaloneDiscussionUrl(
   discussionId: string,
-  location: Pick<Location, 'origin' | 'pathname'> = window.location,
+  location: Pick<Location, 'origin'> = window.location,
 ): string {
-  return `${location.origin}${location.pathname}${STANDALONE_DISCUSSION_HASH_PREFIX}${encodeURIComponent(discussionId)}`;
+  return `${location.origin}${discussionPath(discussionId)}`;
 }
 
-export function standaloneDiscussionMessageId(hash: string): string | null {
-  if (!standaloneDiscussionId(hash) || !hash.includes('?')) return null;
-  const id = new URLSearchParams(hash.slice(hash.indexOf('?') + 1)).get('message')?.trim();
-  return id && id.length <= 128 ? id : null;
-}
-
-export function standaloneDiscussionMessageUrl(discussionId: string, messageId: string,
-  location: Pick<Location, 'origin' | 'pathname'> = window.location): string {
-  return `${standaloneDiscussionUrl(discussionId, location)}?message=${encodeURIComponent(messageId)}`;
+/** The shareable address of one message inside its discussion. */
+export function standaloneDiscussionMessageUrl(
+  discussionId: string,
+  messageId: string,
+  location: Pick<Location, 'origin'> = window.location,
+): string {
+  return `${location.origin}${discussionPath(discussionId, messageId)}`;
 }
 
 /**
  * A standalone/mosaic Live Page tab has no Dashboard shell to navigate within,
  * so an action's "open discussion" jump opens the target in a fresh tab.
  *
- * The URL carries the discussion in its hash, like the Live Page routes above.
- * Session storage is still seeded — a reload of the ORIGINAL tab must keep its
- * place — but the new tab no longer depends on it, which is what lets this
- * open with `noopener,noreferrer`: nothing has to be cloned across windows, so
- * nothing needs a back-reference to the opener. The address is also the point:
- * it can be copied, pasted and sent, which a session-storage checkpoint never
- * could.
+ * The address carries the discussion, so nothing has to be cloned across
+ * windows: that is what lets this open with `noopener,noreferrer`, with no
+ * back-reference to the opener. The address is also the point: it can be
+ * copied, pasted and sent.
  */
 export function openStandaloneDiscussion(
   discussionId: string,
-  location: Pick<Location, 'origin' | 'pathname'> = window.location,
+  location: Pick<Location, 'origin'> = window.location,
   open: typeof window.open = window.open.bind(window),
 ): void {
-  writeDashboardPage('discussions');
-  writeActiveDiscussionId(discussionId);
   open(standaloneDiscussionUrl(discussionId, location), '_blank', 'noopener,noreferrer');
 }
 
-export const EMBED_SETTINGS_HASH = '#settings/artifacts';
+const MAX_EMBED_ORIGIN_CHARS = 2048;
 
-/** Configuration → Artifacts → External content, with `origin` prefilled (never added). */
-export function embedSettingsHash(origin?: string): string {
-  return origin ? `${EMBED_SETTINGS_HASH}?origin=${encodeURIComponent(origin)}` : EMBED_SETTINGS_HASH;
+/** The site an allowed-sites address asks to type in (`''` for none). */
+export function embedSettingsOrigin(search: string): string {
+  const origin = new URLSearchParams(search).get('origin')?.trim() ?? '';
+  return origin.length <= MAX_EMBED_ORIGIN_CHARS ? origin : '';
 }
 
-/** `#settings/artifacts[?origin=…]`: the origin to prefill (`''` for none), or null for another hash. */
-export function embedSettingsRoute(hash: string): { origin: string } | null {
-  if (hash !== EMBED_SETTINGS_HASH && !hash.startsWith(`${EMBED_SETTINGS_HASH}?`)) return null;
-  const origin = new URLSearchParams(hash.slice(EMBED_SETTINGS_HASH.length + 1)).get('origin')?.trim() ?? '';
-  return { origin: origin.length <= 2048 ? origin : '' };
+/**
+ * Follow an address of this app in the current tab, from code that has no
+ * handle on the router: push the entry and announce it the way the browser
+ * announces Back, so the router follows the address.
+ */
+export function navigateAppTab(path: string): void {
+  window.history.pushState(null, '', path);
+  window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
 /**
@@ -184,13 +144,14 @@ export function embedSettingsRoute(hash: string): { origin: string } | null {
  */
 export function openEmbedSettings(
   origin: string,
-  location: Pick<Location, 'origin' | 'pathname' | 'hash'> = window.location,
+  location: Pick<Location, 'origin' | 'pathname'> = window.location,
   open: (url: string, target: string, features: string) => unknown = window.open.bind(window),
+  navigate: (path: string) => unknown = navigateAppTab,
 ): void {
-  const standalone = standaloneLivePageRoute(location.hash) !== null || standaloneLivePageMosaic(location.hash) !== null;
-  if (standalone) {
-    open(`${location.origin}${location.pathname}${embedSettingsHash(origin)}`, '_blank', 'noopener,noreferrer');
+  const path = embedSettingsPath(origin);
+  if (isStandalonePath(location.pathname)) {
+    open(`${location.origin}${path}`, '_blank', 'noopener,noreferrer');
     return;
   }
-  window.location.hash = embedSettingsHash(origin);
+  navigate(path);
 }

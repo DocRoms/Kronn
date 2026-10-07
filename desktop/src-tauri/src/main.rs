@@ -858,11 +858,11 @@ async fn start_backend(
     // Build API router
     let api_router = build_router(state);
 
-    // Serve frontend static files + API
-    let frontend_service =
-        tower_http::services::ServeDir::new(&dist_dir).append_index_html_on_directories(true);
+    // Serve frontend static files + API. The frontend routes on the client,
+    // so an address that is no file of the build answers with the app.
+    let frontend_service = kronn::core::frontend_spa::frontend_spa_service(&dist_dir);
 
-    // Merge: /api/* → backend, /* → frontend static files
+    // Merge: /api/* → backend, /* → frontend (files, then client-side routes)
     let app = axum::Router::new()
         .merge(api_router)
         .fallback_service(frontend_service)

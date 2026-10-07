@@ -40,7 +40,15 @@ import './DiscussionsPage.css';
 import './PlanningPage.css';
 
 interface Props {
+  /** The task to open on mount, when the page keeps its own selection. */
   initialSelectedTaskId?: string | null;
+  /**
+   * The open task, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedTaskChange` and follows
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedTaskId?: string | null;
+  onSelectedTaskChange?: (taskId: string | null) => void;
   projects: Project[];
   discussions: Discussion[];
   toast: ToastFn;
@@ -81,6 +89,8 @@ function titleTokens(value: string): Set<string> {
 
 export function PlanningPage({
   initialSelectedTaskId,
+  selectedTaskId,
+  onSelectedTaskChange,
   projects,
   discussions,
   toast,
@@ -100,9 +110,17 @@ export function PlanningPage({
   const [quickPriority, setQuickPriority] = useState<PlanningTaskPriority>('normal');
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
-  const [detail, setDetail] = useState<PlanningTaskDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(Boolean(initialSelectedTaskId));
+  const [ownSelectedId, setOwnSelectedId] = useState<string | null>(initialSelectedTaskId ?? null);
+  const selectedId = selectedTaskId !== undefined ? selectedTaskId : ownSelectedId;
+  const setSelectedId = useCallback((taskId: string | null) => {
+    setOwnSelectedId(taskId);
+    onSelectedTaskChange?.(taskId);
+  }, [onSelectedTaskChange]);
+  const [loadedDetail, setDetail] = useState<PlanningTaskDetail | null>(null);
+  // The pane shows the selected task only once it is loaded: a selection made
+  // elsewhere (Back, a link) must not show the previous task's detail.
+  const detail = loadedDetail && loadedDetail.id === selectedId ? loadedDetail : null;
+  const detailLoading = selectedId !== null && detail === null;
   const [saving, setSaving] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [tasksLoaded, setTasksLoaded] = useState(false);
@@ -182,15 +200,10 @@ export function PlanningPage({
       .catch(cause => {
         if (cancelled) return;
         setSelectedId(null);
-        setDetail(null);
-        setDetailLoading(false);
         toast(userError(cause), 'error');
-      })
-      .finally(() => {
-        if (!cancelled) setDetailLoading(false);
       });
     return () => { cancelled = true; };
-  }, [selectedId, toast]);
+  }, [selectedId, setSelectedId, toast]);
 
   useEffect(() => {
     if (createModalOpen) {
@@ -227,8 +240,6 @@ export function PlanningPage({
   }, [quickTitle, tasks]);
 
   const selectTask = (taskId: string) => {
-    setDetail(null);
-    setDetailLoading(true);
     setSelectedId(taskId);
   };
 
@@ -293,10 +304,7 @@ export function PlanningPage({
       const archived = await Promise.all(selected.map(task => planning.update(task.id, { status: 'archived' })));
       const archivedIds = new Set(archived.map(task => task.id));
       setTasks(previous => previous.map(task => archived.find(item => item.id === task.id) ?? task));
-      if (selectedId && archivedIds.has(selectedId)) {
-        setSelectedId(null);
-        setDetail(null);
-      }
+      if (selectedId && archivedIds.has(selectedId)) setSelectedId(null);
       toast(t('collection.archiveSuccess', selected.length), 'success');
     } catch (cause) {
       toast(t('collection.deleteError', userError(cause)), 'error');
@@ -544,7 +552,7 @@ export function PlanningPage({
               searchLabel={t('disc.sidebar.searchShortcut')}
             />,
             renderDetail: () => {
-              if (!selectedId && !detailLoading) {
+              if (!selectedId) {
                 return <div className="collection-shell-detail-empty-hint">{t('planning.selectHint')}</div>;
               }
               return (
@@ -557,11 +565,7 @@ export function PlanningPage({
                         title={t('planning.copyTaskId', detail.reference)}
                       />
                     )}
-                    <button type="button" className="planning-detail-close" onClick={() => {
-                      setSelectedId(null);
-                      setDetail(null);
-                      setDetailLoading(false);
-                    }} aria-label={t('common.close')}><X size={16} /></button>
+                    <button type="button" className="planning-detail-close" onClick={() => setSelectedId(null)} aria-label={t('common.close')}><X size={16} /></button>
                   </header>
                   {detailLoading && <div className="planning-state"><Loader2 size={16} className="spin" /></div>}
                   {detail && (

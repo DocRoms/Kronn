@@ -1,5 +1,6 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
+import { sameAutomationSelection, type AutomationSelection, type AutomationTab } from '../lib/routes';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -105,7 +106,6 @@ import './DiscussionsPage.css';
 import './WorkflowsPage.css';
 import { safeSetItem } from '../lib/safeStorage';
 
-type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 type CompareTarget = {
   agent: AgentType;
   tier: ModelTier;
@@ -314,17 +314,21 @@ interface WorkflowsPageProps {
    * all of them, not just the one we navigate to. Without this prop the
    * batch still works but only the navigated disc looks like it's running. */
   onBatchLaunched?: (discIds: string[], batchRunId: string, mode?: 'batch' | 'compare') => void;
-  /** When the user clicks a batch pastille in the discussion sidebar, the
-   * Dashboard switches to this tab and sets this prop to the parent workflow
-   * id. We auto-open its detail panel + switch to the 'workflows' sub-tab
-   * so the user lands exactly on the run that spawned their batch. */
-  initialSelectedWorkflowId?: string | null;
-  /** Optional run to focus when cross-page navigation targets a specific
-   * publication from the Page refresh timeline. */
-  initialSelectedWorkflowRunId?: string | null;
-  /** Ack callback — Dashboard clears the id after we've consumed it so the
-   * same click doesn't re-open on every render. */
-  onInitialSelectionConsumed?: () => void;
+  /**
+   * The tab and the resource open in it, when the caller owns them (the
+   * address does): the page reports every change through `onSelectionChange`
+   * and follows whatever it is then given — a workflow with a run to reveal,
+   * a Quick Prompt, a skill. Leave undefined to let the page keep its own,
+   * restored from the last visit.
+   */
+  selection?: AutomationSelection;
+  /** `restore` is the page's own first word, from the last visit; `change` is the reader's. */
+  onSelectionChange?: (selection: AutomationSelection, reason: 'restore' | 'change') => void;
+  /** The router's location, new on every navigation — even one that comes
+   *  back to the same address, whose key is unchanged. Listed with the
+   *  selection above so it is renewed each time: the router renders in a
+   *  transition, and a request that goes A → B → A may never commit B. */
+  addressToken?: object;
   /** Reverse direction: when "📋 N conversations" is clicked on a workflow run,
    * jump to the discussions tab and focus that batch group. */
   onNavigateToBatch?: (batchRunId: string) => void;
@@ -373,7 +377,7 @@ function readPostImprovedQuickPromptId(): string | null {
   }
 }
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, initialSelectedWorkflowRunId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
@@ -385,7 +389,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(
     readPostImprovedQuickPromptId,
   );
-  const [initialAutomationNavigation] = useState(readAutomationNavigation);
+  // The address, when it names a tab and resource; otherwise the last visit.
+  const [initialAutomationNavigation] = useState<AutomationNavigationState>(() =>
+    selection ? { tab: selection.tab, resourceId: selection.resourceId } : readAutomationNavigation());
   const [tab, setTab] = useState<AutomationTab>(
     postImprovedQpId ? 'quickPrompts' : initialAutomationNavigation.tab,
   );
@@ -529,6 +535,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       && !skillEntryById.has(selectedSkillId)
       && (!isRepositorySkillId(selectedSkillId) || usedSkillsLoaded || usedSkillsError),
   );
+  // #11 — when a parent run's sub-run link is clicked, remember the target
+  // child run so the opened WorkflowDetail auto-expands + scrolls to it.
+  const [focusRunId, setFocusRunId] = useState<string | null>(selection?.runId ?? null);
+  // What the page shows right now, for the address to follow and to compare
+  // against. The first word after mount restores the last visit.
+  const currentSelectionRef = useRef<AutomationSelection | null>(null);
   useEffect(() => {
     const resourceId = tab === 'workflows'
       ? (invalidWorkflowSelection ? null : selectedId)
@@ -547,12 +559,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
+    const current: AutomationSelection = { tab, resourceId, runId: tab === 'workflows' && resourceId ? focusRunId : null };
+    const reason = currentSelectionRef.current ? 'change' : 'restore';
+    currentSelectionRef.current = current;
+    onSelectionChange?.(current, reason);
   }, [
+    focusRunId,
     invalidQuickApiSelection,
     invalidQuickExecSelection,
     invalidQuickPromptSelection,
     invalidSkillSelection,
     invalidWorkflowSelection,
+    onSelectionChange,
     selectedId,
     selectedQuickApiId,
     selectedQuickExecId,
@@ -570,9 +588,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // localStorage may be unavailable in private/restricted browser modes.
     }
   }, [collapsedAutomationSections]);
-  // #11 — when a parent run's sub-run link is clicked, remember the target
-  // child run so the opened WorkflowDetail auto-expands + scrolls to it.
-  const [focusRunId, setFocusRunId] = useState<string | null>(null);
   const [showCreateQP, setShowCreateQP] = useState(false);
   const [editingQP, setEditingQP] = useState<QuickPrompt | null>(null);
   const [launchingQP, setLaunchingQP] = useState<QuickPrompt | null>(null);
@@ -1037,12 +1052,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   useEffect(() => {
     if (restoredWorkflowSelection.current || !workflowList) return;
     restoredWorkflowSelection.current = true;
-    if (postImprovedQpId || initialSelectedWorkflowId) return;
+    if (postImprovedQpId) return;
     if (initialAutomationNavigation.tab !== 'workflows'
       || !initialAutomationNavigation.resourceId
       || !workflowList.some(item => item.id === initialAutomationNavigation.resourceId)) return;
     const resourceId = initialAutomationNavigation.resourceId;
-    const timeoutId = window.setTimeout(() => { void openDetail(resourceId); }, 0);
+    const runId = focusRunId ?? undefined;
+    const timeoutId = window.setTimeout(() => { void openDetail(resourceId, runId); }, 0);
     // The restore target is an immutable mount snapshot; subsequent selections
     // already call openDetail directly.
     return () => window.clearTimeout(timeoutId);
@@ -1142,23 +1158,31 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
-  // Cross-page navigation: when the sidebar's batch pastille is clicked, the
-  // Dashboard passes the parent workflow id here. We auto-switch to the
-  // "workflows" sub-tab, open its detail panel, then ack so the same click
-  // doesn't re-fire on every render.
+  // The address changed under the page — Back, a link, a jump from another
+  // page: follow it. What the page itself just reported is already in place.
+  const selectionTab = selection?.tab;
+  const selectionResourceId = selection?.resourceId;
+  const selectionRunId = selection?.runId ?? null;
   useEffect(() => {
-    if (!initialSelectedWorkflowId) return;
+    if (!selectionTab) return;
+    const target: AutomationSelection = { tab: selectionTab, resourceId: selectionResourceId ?? null, runId: selectionRunId };
+    if (currentSelectionRef.current && sameAutomationSelection(target, currentSelectionRef.current)) return;
     const timeoutId = window.setTimeout(() => {
-      setTab('workflows');
-      setAutomationKindFilter('workflows');
-      void openDetail(initialSelectedWorkflowId, initialSelectedWorkflowRunId ?? undefined);
-      onInitialSelectionConsumed?.();
+      setTab(target.tab);
+      setAutomationKindFilter(target.tab);
+      if (target.tab === 'workflows') {
+        if (target.resourceId) void openDetail(target.resourceId, target.runId ?? undefined);
+        else { setSelectedId(null); setDetailWorkflow(null); }
+      } else if (target.tab === 'quickPrompts') setSelectedQuickPromptId(target.resourceId);
+      else if (target.tab === 'quickApis') setSelectedQuickApiId(target.resourceId);
+      else if (target.tab === 'quickExecs') setSelectedQuickExecId(target.resourceId);
+      else setSelectedSkillId(target.resourceId);
     }, 0);
     return () => {
       window.clearTimeout(timeoutId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialSelectedWorkflowId, initialSelectedWorkflowRunId]);
+  }, [selectionTab, selectionResourceId, selectionRunId, addressToken]);
 
   // 0.8.2 — Live workflow-run updates. The SSE stream is tab-local: if the
   // user opens the workflow detail in a *different* tab while a run is in
@@ -2645,6 +2669,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           initialPresetId={pendingPresetLocal?.presetId}
           initialProjectId={pendingPresetLocal?.projectId}
           onNavigatePage={onNavigatePage}
+          onNavigateSettings={onNavigateSettings}
           onDone={() => { setShowCreate(false); setPendingPresetLocal(null); refetch(); }}
           onCancel={() => { setShowCreate(false); setPendingPresetLocal(null); }}
         />
@@ -2661,6 +2686,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           configLanguage={configLanguage}
           editWorkflow={editingWorkflow}
           onNavigatePage={onNavigatePage}
+          onNavigateSettings={onNavigateSettings}
           onDone={() => { setEditingWorkflow(null); refetch(); if (editingWorkflow) openDetail(editingWorkflow.id); }}
           onCancel={() => setEditingWorkflow(null)}
         />

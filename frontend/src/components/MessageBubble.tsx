@@ -271,7 +271,7 @@ export interface MessageBubbleProps {
   onRetry: () => void;
   onRetryAgentDispatch?: (dispatchId: string, agentType: AgentType) => void;
   onExpandSummary: (msgId: string) => void;
-  onNavigate: (page: string, opts?: { scrollTo?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
@@ -334,8 +334,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           try {
             sessionStorage.setItem(`kronn:codeView:${projectId}`, JSON.stringify({ path, line }));
           } catch { /* private mode / quota — the card still opens */ }
-          window.location.hash = `#project-${projectId}`;
-          onNavigate('projects');
+          onNavigate('projects', { projectId });
           return true;
         }
       : undefined,
@@ -1250,9 +1249,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             KRONN:VALIDATION_COMPLETE in a project-bound discussion,
             surface a one-click jump to the TD index. Pattern: same
             as the auth-error / timeout CTAs above (button below the
-            bubble, before the footer). The hash + onNavigate combo
-            re-uses Dashboard's existing `#project-<id>` deep-link so
-            we don't need new plumbing in the Dashboard state machine. */}
+            bubble, before the footer). `onNavigate` lands on the
+            project's own address, so no extra plumbing is needed. */}
         {projectId && /KRONN:VALIDATION_COMPLETE/i.test(msg.content) && (
           <div className="disc-auth-error-cta">
             <button
@@ -1260,9 +1258,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               style={{ fontSize: 11, padding: '5px 12px' }}
               onClick={() => {
                 // 0.8.3 (#314) — deep-link directly to the tech-debt folder.
-                // Pre-fix the CTA only navigated to the project (via hash
-                // #project-<id>) and the user landed on the AI Context
-                // tab but had to manually expand + click into docs/tech-debt/.
+                // Pre-fix the CTA only navigated to the project and the
+                // user landed on the AI Context tab but had to manually
+                // expand + click into docs/tech-debt/.
                 // The sessionStorage flag is read by ProjectCard on mount
                 // and triggers `setExpandedTab('docAi') + setDocDeepLink`
                 // automatically, so a single click takes the user from
@@ -1270,8 +1268,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 try {
                   sessionStorage.setItem(`kronn:postValidation:${projectId}`, 'docs/tech-debt');
                 } catch { /* private-mode / quota — fall through */ }
-                window.location.hash = `#project-${projectId}`;
-                onNavigate('projects');
+                onNavigate('projects', { projectId });
               }}
             >
               <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}

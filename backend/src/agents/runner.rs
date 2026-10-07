@@ -7311,7 +7311,7 @@ pub(crate) fn inline_project_doc_forced() -> bool {
 /// the prompt was the only way, and a server that will not say its version keeps
 /// it rather than silently paying for reasoning nobody reads.
 pub(crate) fn needs_no_think_token(server_version: Option<(u64, u64)>) -> bool {
-    !server_version.is_some_and(|version| version >= (0, 19))
+    server_version.is_none_or(|version| version < (0, 19))
 }
 
 /// qwen3 models are hybrid-reasoning; a step pays for every thinking token and

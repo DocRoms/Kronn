@@ -143,8 +143,16 @@ function useDismissibleDetails<T extends HTMLDetailsElement>() {
 
 interface PagesPageProps {
   projects?: Project[];
+  /** A Page to open once the library is loaded, when the page keeps its own selection. */
   initialSelectedPageId?: string | null;
   onInitialSelectionConsumed?: () => void;
+  /**
+   * The open Page, when the caller owns the selection (the address does):
+   * the page reports every change through `onSelectedPageChange` and opens
+   * whatever it is then given. Leave undefined to let the page keep its own.
+   */
+  selectedPageId?: string | null;
+  onSelectedPageChange?: (pageId: string | null) => void;
   onNavigateWorkflow?: (workflowId: string, runId?: string) => void;
   onNavigateDiscussion?: (discussionId: string) => void;
 }
@@ -153,6 +161,8 @@ export function PagesPage({
   projects = [],
   initialSelectedPageId,
   onInitialSelectionConsumed,
+  selectedPageId,
+  onSelectedPageChange,
   onNavigateWorkflow,
   onNavigateDiscussion,
 }: PagesPageProps) {
@@ -161,7 +171,7 @@ export function PagesPage({
   const [initialPageNavigation] = useState(readPageNavigation);
   const [pages, setPages] = useState<LivePage[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(
-    initialSelectedPageId ?? initialPageNavigation.resourceId,
+    selectedPageId ?? initialSelectedPageId ?? initialPageNavigation.resourceId,
   );
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -227,13 +237,8 @@ export function PagesPage({
     reload: reloadPageActions,
   } = useLivePageActions(() => setError(t('disc.action.unavailablePageAction')));
   const [bridgeChannel] = useState(channelId);
-  const requestedPageIdRef = useRef(initialSelectedPageId);
+  const requestedPageIdRef = useRef(selectedPageId ?? initialSelectedPageId);
   const selectionConsumedRef = useRef(onInitialSelectionConsumed);
-
-  useEffect(() => {
-    if (initialSelectedPageId) requestedPageIdRef.current = initialSelectedPageId;
-    selectionConsumedRef.current = onInitialSelectionConsumed;
-  }, [initialSelectedPageId, onInitialSelectionConsumed]);
 
   useEffect(() => {
     try {
@@ -241,7 +246,8 @@ export function PagesPage({
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
-  }, [selectedId]);
+    onSelectedPageChange?.(selectedId);
+  }, [selectedId, onSelectedPageChange]);
 
   useEffect(() => {
     try {
@@ -318,6 +324,19 @@ export function PagesPage({
   // Initial remote-library synchronization; the state updates happen after
   // the request resolves, not synchronously in the effect body.
   useEffect(() => { void refreshRef.current(); }, []);
+
+  // A Page asked for by the caller — the address, or a one-shot request —
+  // is opened by the next library refresh, which also runs right away when
+  // the request and the open Page disagree: the request changed under the
+  // page (Back, a link, a jump from another page), or the page moved on its
+  // own while the address was set again. The state updates happen after the
+  // request resolves.
+  useEffect(() => {
+    const requested = selectedPageId ?? initialSelectedPageId ?? null;
+    if (requested) requestedPageIdRef.current = requested;
+    selectionConsumedRef.current = onInitialSelectionConsumed;
+    if (requested && requested !== selectedId) void refreshRef.current();
+  }, [selectedPageId, initialSelectedPageId, onInitialSelectionConsumed, selectedId]);
   useEffect(() => {
     if (editingHtml) return undefined;
     const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);

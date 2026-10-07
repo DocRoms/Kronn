@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { ToastFn } from '../../hooks/useToast';
 import { mcps as mcpsApi, apiCallLogs, type EndpointDrift } from '../../lib/api';
 import { useAsyncGuard } from '../../hooks/useAsyncGuard';
@@ -29,6 +29,9 @@ interface UsePluginListStateArgs {
   refetchMcps: () => void;
   favoritesReady: boolean;
   initialSelectedConfigId?: string | null;
+  /** Owned selection: see `McpPageProps`. */
+  selectedConfigId?: string | null;
+  onSelectedConfigChange?: (configId: string | null) => void;
   t: (key: string, ...args: (string | number)[]) => string;
   toast: ToastFn;
   isMobile: boolean;
@@ -40,7 +43,7 @@ interface UsePluginListStateArgs {
  *  delete) and the derived `visibleConfigs` list. Split out of the
  *  monolithic `useMcpPageState` (KT-830) to stay under the page's
  *  per-file line budget — this is the "liste + fiche" half. */
-export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, t, toast, isMobile }: UsePluginListStateArgs) {
+export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetchMcps, favoritesReady, initialSelectedConfigId, selectedConfigId: ownedConfigId, onSelectedConfigChange, t, toast, isMobile }: UsePluginListStateArgs) {
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
 
@@ -71,7 +74,12 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
       localStorage.setItem(MCP_COLLAPSED_GROUPS_STORAGE_KEY, JSON.stringify([...collapsedMcpGroups]));
     } catch { /* localStorage may be unavailable in private/restricted browser modes. */ }
   }, [collapsedMcpGroups]);
-  const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const [ownSelectedConfigId, setOwnSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const selectedConfigId = ownedConfigId !== undefined ? ownedConfigId : ownSelectedConfigId;
+  const setSelectedConfigId = useCallback((configId: string | null) => {
+    setOwnSelectedConfigId(configId);
+    onSelectedConfigChange?.(configId);
+  }, [onSelectedConfigChange]);
   const [storedProjectId, setSelectedProjectId] = useState(() => {
     try {
       const saved = localStorage.getItem('kronn:mcpSelectedProject') ?? '__all__';
@@ -510,7 +518,7 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
     if (selectedConfigId && !selectedMatchesQuery) {
       setSelectedConfigId(null);
     }
-  }, [matchingConfigs, selectedConfigId]);
+  }, [matchingConfigs, selectedConfigId, setSelectedConfigId]);
 
   return {
     editingLabelId, setEditingLabelId, editingLabelText, setEditingLabelText, handleSaveLabel,

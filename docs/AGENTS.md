@@ -84,6 +84,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 |------|---------------|
 | Backend API changes | `docs/repo-map.md`, `docs/coding-rules.md` |
 | Frontend UI changes | `docs/repo-map.md`, `docs/coding-rules.md`, `docs/architecture/ui-structure.md` |
+| **Frontend routing / addresses** (a new page, a new `/:id`, a deep link) | `docs/architecture/ui-structure.md` § Routing, `frontend/src/lib/routes.ts`, `frontend/src/lib/legacyRoutes.ts` |
 | Add new API endpoint | `docs/repo-map.md`, `docs/architecture/overview.md` |
 | RTK / compression integration | `docs/architecture/rtk-integration.md` |
 | Workflow engine work | `docs/architecture/overview.md`, `docs/inconsistencies-tech-debt.md`, `docs/coding-rules.md` |
@@ -131,6 +132,7 @@ Never load everything "just in case".
 - Do **not** slice `&str` with a hard-coded byte index (`&s[..N]`) when truncating user/agent text — UTF-8 (French, emoji, accented filenames) panics at non-boundary bytes. Use `s.chars().take(N).collect::<String>()` instead. Pattern documented in `feedback_rust_str_slicing` memory.
 - Do **not** rely on `disabled={state}` alone to gate an async button handler — React's state update is async, so two synchronous clicks read the stale closure and fire two API calls. Use `useRef` + check at top of handler. Helper: `useAsyncGuard` in `frontend/src/hooks/useAsyncGuard.ts`.
 - Do **not** nest a `<button>` inside another `<button>` — invalid HTML and produces a React dev warning. Convert the outer to `<div role="button" tabIndex={0}>` with explicit `onKeyDown` for Enter/Space.
+- Do **not** spell a URL path outside `frontend/src/lib/routes.ts`, call `useNavigate` in a component (use `useKronnNavigate()`), add a new `#hash` route, or drop an entry from `frontend/src/lib/legacyRoutes.ts` — stored Live Pages, messages and bookmarks still carry the old hash links. A page owned by its route reports its selection through a callback and follows the address it is given; see `docs/architecture/ui-structure.md` § Routing, including the three « Back must win » rules.
 ---
 
 ## 4. Development constraints

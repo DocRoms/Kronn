@@ -262,9 +262,11 @@ export interface WorkflowWizardProps {
   /** Leave the wizard and open the selected Page. The Page id remains
    * copyable when navigation is not provided (embedded/test contexts). */
   onNavigatePage?: (pageId: string) => void;
+  /** Leave the wizard for Settings, where an agent's access is granted. */
+  onNavigateSettings?: () => void;
 }
 
-export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage }: WorkflowWizardProps) {
+export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, installedAgentTypes, agentChoices, agentAccess, configLanguage, initialPresetId, initialProjectId, initialStepId, focusedStepOnly = false, onNavigatePage, onNavigateSettings }: WorkflowWizardProps) {
   const { t } = useT();
   const availableAgents = (installedAgentTypes && installedAgentTypes.length > 0
     ? installedAgentTypes
@@ -2176,7 +2178,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       ? t('config.fullAccessRequired', AGENT_LABELS[step.agent] ?? step.agent)
                       : t('config.restrictedStep')}</span>
                     <span className="cursor-pointer" style={{ textDecoration: 'underline', marginLeft: 4 }}
-                      onClick={() => window.location.hash = '#config'}
+                      onClick={() => onNavigateSettings?.()}
                     >{t('config.restrictedAgentLink')}</span>
                   </div>
                 )}

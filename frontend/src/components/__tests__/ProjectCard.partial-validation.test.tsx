@@ -101,8 +101,9 @@ describe('ProjectCard — partial refresh validation UX', () => {
     await clickUpdate();
     expect(props.onRefetchDiscussions).toHaveBeenCalled();
     expect(props.toast).toHaveBeenCalledWith(expect.stringContaining('audit.partialValidationCreated'), 'success');
+    // Opening the discussion is the navigation: it lands on its address.
     expect(props.onOpenDiscussion).toHaveBeenCalledWith('d-scoped');
-    expect(props.onNavigate).toHaveBeenCalledWith('discussions');
+    expect(props.onNavigate).not.toHaveBeenCalled();
     expect(props.onAutoRunDiscussion).not.toHaveBeenCalled();
   });
 

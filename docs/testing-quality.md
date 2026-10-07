@@ -68,6 +68,19 @@ A local green does not prove a CI green for tests that read the machine
 (installed CLIs such as LiteLLM, RTK or `npx`, the agent preflight): reproduce
 a CI-only failure in `rust:1-bookworm` before concluding.
 
+Anything rendered inside the dashboard outlet needs a router in tests: wrap the
+shell with `withDashboardRoutes(shell, initialPath)` from
+`src/test/routerWrapper.tsx`. It mounts the real route table on a browser
+router, preloads the route chunks and resets the address after each test;
+assert navigation on `window.location.pathname`.
+`[src: file: frontend/src/test/routerWrapper.tsx:34-39]`
+
+`frontend/e2e/specs/routing-addresses.spec.ts` drives the addresses in a real
+browser against a sandbox backend: every page, the resources open in them,
+Back and Forward, a reload, and the legacy `#…` links. It creates what it opens
+through the API; the project part needs `KRONN_REPOS_DIR` (the sandbox
+launcher's repositories directory) and skips otherwise.
+
 CI also checks dependency audit, generated-type drift, desktop compilation and
 repository-specific Rust safety lints. `.github/workflows/ci-test.yml` is the
 authoritative job graph.

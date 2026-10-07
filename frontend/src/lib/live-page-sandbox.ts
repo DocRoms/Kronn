@@ -1,6 +1,8 @@
 import type { LivePageAction, LivePageDetail } from '../types/generated';
 import { MAX_LIVE_PAGE_EMBED_REPORTS, MAX_LIVE_PAGE_EMBED_URL_CHARS } from './live-page-embeds';
-import { standaloneDiscussionId, standaloneLivePageId } from './live-page-navigation';
+import { legacyHashToPath } from './legacyRoutes';
+import { navigateAppTab } from './live-page-navigation';
+import { isAppPath } from './routes';
 
 export const LIVE_PAGE_CSP = [
   "default-src 'none'",
@@ -716,16 +718,21 @@ function safeLivePageLink(value: unknown): string | null {
   }
 }
 
-function isInternalKronnLink(value: string): boolean {
+/**
+ * The in-app address a Live Page link points at, or null when the link leaves
+ * the app. A Page stores the link it was authored with, so its path is
+ * wherever the author stood (the app root before pages had addresses, any
+ * page since) and its target may still be a legacy hash: both are resolved
+ * to the canonical address.
+ */
+export function internalKronnLinkPath(value: string): string | null {
   const url = new URL(value);
-  return url.origin === window.location.origin
-    && url.pathname === window.location.pathname
-    && Boolean(standaloneDiscussionId(url.hash) || standaloneLivePageId(url.hash));
-}
-
-function navigateInternalKronnLink(url: string): void {
-  window.history.pushState(null, '', url);
-  window.dispatchEvent(new Event('hashchange'));
+  if (url.origin !== window.location.origin) return null;
+  if (!isAppPath(url.pathname) && url.pathname !== window.location.pathname) return null;
+  const legacy = legacyHashToPath(url.hash);
+  if (legacy) return legacy;
+  if (isAppPath(url.pathname) && url.pathname !== '/') return `${url.pathname}${url.search}${url.hash}`;
+  return null;
 }
 
 /**
@@ -747,8 +754,8 @@ export interface LivePageOpenLinkRelayOptions {
   onAction?: (intent: LivePageActionIntent) => void;
   onAnchor?: (anchor: LivePageActionIntent['anchor']) => void;
   onHeight?: (height: number) => void;
-  /** Follows a link to another Kronn screen; same-tab hash navigation by default. */
-  navigateInternal?: (url: string) => unknown;
+  /** Follows a link to another Kronn screen, given its canonical address; same-tab history navigation by default. */
+  navigateInternal?: (path: string) => unknown;
   onEmbeds?: (embeds: LivePageEmbedPlacement[]) => void;
 }
 
@@ -759,7 +766,7 @@ export function createLivePageOpenLinkRelay(
     onAction,
     onAnchor,
     onHeight,
-    navigateInternal = navigateInternalKronnLink,
+    navigateInternal = navigateAppTab,
     onEmbeds,
   }: LivePageOpenLinkRelayOptions = {},
 ): LivePageOpenLinkRelay {
@@ -814,8 +821,9 @@ export function createLivePageOpenLinkRelay(
     if (message.type !== 'kronn:page-open-link') return;
     const url = safeLivePageLink(message.url);
     if (!url) return;
-    if (isInternalKronnLink(url)) {
-      navigateInternal(url);
+    const internalPath = internalKronnLinkPath(url);
+    if (internalPath) {
+      navigateInternal(internalPath);
       return;
     }
     openExternal(url, '_blank', 'noopener,noreferrer');

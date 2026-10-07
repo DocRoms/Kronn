@@ -15,10 +15,10 @@ the usable-agent inputs supplied to the real UI consumers and assert the native
 Quick API and Quick Exec have no agent selector for their own execution. The
 Quick API form persists API plugin/config/endpoint fields and variables, while
 its create request has no agent field. [src: file: frontend/src/components/workflows/QuickApiForm.tsx:211-237] [src: file: frontend/src/types/generated.ts:1356] Its direct-run handler sends only
-`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1297-1317] [src: file: frontend/src/types/generated.ts:5221-5231]
+`{ variables }` to `quickApis.runQa`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1316-1336] [src: file: frontend/src/types/generated.ts:5221-5231]
 The Quick Exec form instead persists a command, arguments, timeout, output
 format, and variables; its create request likewise has no agent field. [src: file: frontend/src/components/workflows/QuickExecForm.tsx:46-66] [src: file: frontend/src/types/generated.ts:1358] Its direct-run handler sends only
-`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1276-1291] [src: file: frontend/src/types/generated.ts:5247]
+`{ variables }` to `quickExecs.run`. [src: file: frontend/src/pages/WorkflowsPage.tsx:1295-1310] [src: file: frontend/src/types/generated.ts:5247]
 Therefore this task makes no QA/QE OpenCode-selection assertion; that absence
 comes from their UI/request/executor contracts, rather than from the `AgentType`
 enum.
