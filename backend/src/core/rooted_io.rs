@@ -100,6 +100,15 @@ mod imp {
     }
 
     fn open_at(dir: &OwnedFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+        open_at_mode(dir, name, flags, 0o600)
+    }
+
+    fn open_at_mode(
+        dir: &OwnedFd,
+        name: &CStr,
+        flags: libc::c_int,
+        mode: libc::c_uint,
+    ) -> io::Result<OwnedFd> {
         // SAFETY: `dir` is an open directory and `name` NUL-terminated; the
         // mode is read only with O_CREAT.
         check(unsafe {
@@ -107,7 +116,7 @@ mod imp {
                 dir.as_raw_fd(),
                 name.as_ptr(),
                 flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o644 as libc::c_uint,
+                mode,
             )
         })
     }
@@ -177,9 +186,10 @@ mod imp {
         // The name must still be this very file: a hard link unlinked right
         // after the open would otherwise pass the link count.
         let entry = stat_at(&dir, &name)?;
-        if entry.st_dev as u64 != meta.dev()
-            || entry.st_ino as u64 != meta.ino()
-            || entry.st_nlink as u64 != 1
+        // Casts to the libc aliases: field widths differ by platform.
+        if entry.st_dev != meta.dev() as libc::dev_t
+            || entry.st_ino != meta.ino() as libc::ino_t
+            || entry.st_nlink != 1
         {
             return Err(super::refused("the file changed while it was opened"));
         }
@@ -193,7 +203,13 @@ mod imp {
     fn create_temp(dir: &OwnedFd) -> io::Result<(File, CString)> {
         for _ in 0..super::TEMP_ATTEMPTS {
             let tmp = cstring(super::temp_name().as_bytes())?;
-            match open_at(dir, &tmp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL) {
+            // Owner-only until its final mode is applied.
+            match open_at_mode(
+                dir,
+                &tmp,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            ) {
                 Ok(fd) => return Ok((File::from(fd), tmp)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
@@ -207,9 +223,24 @@ mod imp {
 
     pub fn write(root: &Path, rel: &Path, bytes: &[u8]) -> io::Result<()> {
         let (dir, name) = parent_dir(root, rel, true)?;
+        let existing = match stat_at(&dir, &name) {
+            Ok(st) => Some(st),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        // A replaced regular file keeps its permission bits; a new file (or
+        // one replacing a link) gets the usual 0644.
+        let mode: libc::mode_t = match existing {
+            Some(st) if (st.st_mode & libc::S_IFMT) == libc::S_IFREG => st.st_mode & 0o777,
+            _ => 0o644,
+        };
         // Cleanup is armed only once the temporary file is ours.
         let (mut file, tmp) = create_temp(&dir)?;
         let written = (|| {
+            // SAFETY: the descriptor is open and owned by `file`.
+            if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
             file.write_all(bytes)?;
             // SAFETY: as in open_at; renameat replaces the entry, never
             // writes through what it pointed at.
@@ -296,10 +327,15 @@ mod imp {
             .ok_or_else(|| super::refused("no parent directory"))?;
         std::fs::create_dir_all(parent)?;
         guarded(root, rel)?;
+        let existing = std::fs::symlink_metadata(&path).ok();
         // Cleanup is armed only once the temporary file is ours.
         let (mut file, tmp) = create_temp(parent)?;
         let written = (|| {
             file.write_all(bytes)?;
+            // A replaced regular file keeps its attributes (read-only).
+            if let Some(meta) = existing.as_ref().filter(|meta| meta.is_file()) {
+                file.set_permissions(meta.permissions())?;
+            }
             drop(file);
             // Replaces the directory entry (a planted link included).
             std::fs::rename(&tmp, &path)
@@ -482,6 +518,32 @@ mod tests {
         let long = "n".repeat(255);
         write(root.path(), Path::new(&long), b"x").unwrap();
         assert_eq!(read(root.path(), Path::new(&long)).unwrap(), b"x");
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, _) = dirs();
+        let mode = |name: &str| {
+            std::fs::metadata(root.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        for (name, bits) in [("secret", 0o600), ("tool.sh", 0o755)] {
+            std::fs::write(root.path().join(name), b"old").unwrap();
+            std::fs::set_permissions(
+                root.path().join(name),
+                std::fs::Permissions::from_mode(bits),
+            )
+            .unwrap();
+            write(root.path(), Path::new(name), b"new").unwrap();
+            append(root.path(), Path::new(name), b"+").unwrap();
+            assert_eq!(mode(name), bits, "{name}");
+        }
+        write(root.path(), Path::new("fresh"), b"x").unwrap();
+        assert_eq!(mode("fresh"), 0o644);
     }
 
     #[test]
