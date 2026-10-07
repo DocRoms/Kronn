@@ -360,7 +360,13 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
             let requests = requests.lock().unwrap();
             let asked: Vec<String> = requests
                 .iter()
-                .map(|r| r["messages"][1]["content"].to_string().chars().take(160).collect())
+                .map(|r| {
+                    r["messages"][1]["content"]
+                        .to_string()
+                        .chars()
+                        .take(160)
+                        .collect()
+                })
                 .collect();
             assert_eq!(
                 requests.len(),
