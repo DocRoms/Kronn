@@ -240,6 +240,9 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
     use axum::response::IntoResponse;
+    // wiremock pools servers: a dropped one comes back under the same URI, where
+    // the first pass's validation discussion would still reach it.
+    let mut servers = Vec::new();
     for reference in ["code.rs:1", "invented.rs:1"] {
         let correct = reference == "code.rs:1";
         use sha2::{Digest, Sha256};
@@ -382,6 +385,7 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         assert!(requests.lock().unwrap()[0]
             .to_string()
             .contains("targeted correction required"));
+        servers.push(server);
     }
 }
 

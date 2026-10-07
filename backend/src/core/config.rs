@@ -47,15 +47,17 @@ pub fn refuse_real_data_dir_in_tests() -> Result<(), String> {
 pub fn saved_full_access(agent: &crate::models::AgentType) -> bool {
     #[cfg(test)]
     {
-        // A test never reads the developer's own config: it states the setting.
-        if crate::core::child_env::var("KRONN_DATA_DIR").is_err() {
-            return test_saved_access::get(agent).unwrap_or(false);
-        }
+        // A test states the setting per thread; KRONN_DATA_DIR is process-wide
+        // and other tests change it concurrently.
+        test_saved_access::get(agent).unwrap_or(false)
     }
-    let Ok(path) = config_path() else {
-        return false;
-    };
-    saved_full_access_in(&std::fs::read_to_string(path).unwrap_or_default(), agent)
+    #[cfg(not(test))]
+    {
+        let Ok(path) = config_path() else {
+            return false;
+        };
+        saved_full_access_in(&std::fs::read_to_string(path).unwrap_or_default(), agent)
+    }
 }
 
 /// The saved full-access setting a test states, per thread (each tokio test
