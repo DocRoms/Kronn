@@ -461,25 +461,10 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(n as u32)
 }
 
-/// Disables every enabled workflow whose steps or rollback run this Quick
-/// Prompt (direct, batch or chained); returns how many.
+/// Disables every enabled workflow that runs this resource, by id or by a
+/// `ref:` resolving to it; returns how many.
 pub fn disable_workflows_using(conn: &Connection, id: &str) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE workflows SET enabled = 0
-          WHERE enabled = 1 AND id IN (
-            SELECT w.id
-              FROM workflows w,
-                   json_each(json_array(json(w.steps_json), json(COALESCE(w.on_failure, '[]')))) list,
-                   json_each(list.value) s
-             WHERE json_extract(s.value, '$.quick_prompt_id') = ?1
-                OR json_extract(s.value, '$.batch_quick_prompt_id') = ?1
-                OR EXISTS (
-                    SELECT 1 FROM json_each(s.value, '$.batch_chain_prompt_ids') chained
-                     WHERE chained.value = ?1
-                )
-          )",
-        rusqlite::params![id],
-    )?)
+    crate::core::resource_refs::disable_workflows_using(conn, "prompt", id)
 }
 
 #[cfg(test)]

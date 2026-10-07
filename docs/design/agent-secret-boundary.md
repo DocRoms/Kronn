@@ -848,5 +848,8 @@ Quick Prompt runs disables every enabled workflow using it (Quick Exec is
 not in this rule: an agent's Quick Exec line already waits for a human's
 approval under KT-1017); a disabled definition does not run (a
 parent refuses a disabled child, manual and TriggerWorkflow launches and the
-scheduler skip it, and only a human resumes a disabled workflow's run); JSON imports, accepted
+scheduler skip it, only a human resumes a disabled workflow's run, and a run
+in progress stops before its next step once its workflow is disabled under
+it; a dependency is matched by id or by a `ref:` resolving to it in any
+project the workflow serves); JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.

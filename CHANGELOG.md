@@ -313,6 +313,18 @@ Release notes for 0.9.3 and earlier are available in the
   `${ENV.*}` its body used (the same parser as substitution, so
   `${env.password}` counts), and a successful token response is never
   quoted. Stored text (call log, run detail in the UI and through MCP
+- An API call's credentials are scrubbed by value from everything it hands on:
+  the step output (successful JSON included), URL summaries, errors and the
+  call log, through one set built from every value the call takes from the env
+  or the credential store, wherever it lands (base URL included: no plugin
+  metadata marks a value public, so a summary may show a masked base URL) plus
+  the resolved auth and default headers. Each value is masked raw,
+  URL-encoded, hex, base64 and JSON-escaped, case-insensitively from 8
+  characters, before any truncation; shorter ones only as whole tokens. Notify
+  scrubs its whole response before cutting the excerpt, a token-exchange error
+  loses every `${ENV.*}` its body used (the same parser as substitution, so
+  `${env.password}` counts), and a successful token response is never quoted.
+  Stored text (call log, run detail in the UI and through MCP
   `workflow_run_get`, MCP run status) gets URL query/userinfo stripping and
   the secret heuristics, the most that can be done for output written before.
   Known limits: an endpoint that transforms what it echoes defeats any finite
@@ -321,26 +333,30 @@ Release notes for 0.9.3 and earlier are available in the
 - Turning a workflow on is a human decision. A workflow imported from a
   `.kronn-workflow.json` file, an accepted agent bundle (parent and children)
   and an accepted agent proposal land disabled, as ADR-005 and the Artifact
-  import already required, so a shared Cron or Tracker trigger no longer
-  fires on the next tick. An agent's token can no longer enable a workflow
-  through create, `workflow_update` or `workflow_set_enabled` (`force`
-  included): the backend refuses and tells it to ask the user; an agent's
-  change to what an enabled workflow executes (steps, rollback, trigger, Exec
-  allowlist, actions, workspace, guards, variables, concurrency limit and
-  key, project) disables it until the user enables it again, and so does
-  its change to what a Quick API sends or what a Quick Prompt runs (prompt,
-  variables, agent, connection, tier, skills, profiles, directives, agent
-  settings), for every enabled workflow using it. Quick Exec lines keep their
-  own KT-1017 rule: an agent's line waits for a human's approval. A disabled definition never runs: a parent refuses a disabled
-  sub-workflow, manual and TriggerWorkflow launches, the scheduler and
-  trackers skip it, and only a human can resume an interrupted run of a
-  disabled workflow. With localhost trust on (auth off, or
+  import already required, so a shared Cron or Tracker trigger no longer fires
+  on the next tick. An agent's token can no longer enable a workflow through
+  create, `workflow_update` or `workflow_set_enabled` (`force` included): the
+  backend refuses and tells it to ask the user. An agent's change to what an
+  enabled workflow executes (steps, rollback, trigger, Exec allowlist,
+  actions, workspace, guards, variables, concurrency limit and key, project)
+  disables it until the user enables it again, and so does its change to what
+  a Quick API sends or what a Quick Prompt runs (prompt, variables, agent,
+  connection, tier, skills, profiles, directives, agent settings), for every
+  enabled workflow using it by id or by a `ref:qa:`/`ref:prompt:` that
+  resolves to it in any project the workflow serves (steps and rollback,
+  direct, batch, chained and collection fields). Quick Exec lines keep their
+  own KT-1017 rule: an agent's line waits for a human's approval. A disabled
+  definition never runs: a parent refuses a disabled sub-workflow, manual and
+  TriggerWorkflow launches, the scheduler and trackers skip it, only a human
+  can resume an interrupted run of a disabled workflow, and a run already in
+  progress stops before its next step (StoppedByGuard, with the reason) once
+  its workflow is disabled under it. With localhost trust on (auth off, or
   `auth_strict_localhost = false`) a local process without a bridge token
   still counts as the user, the trust model already documented for the HTTP
   API; strict localhost is the mitigation until positive human authorization
-  (0.15, KT-1034). The import preview shows
-  the trigger, the Exec steps and the Exec allowlist, and the agent banners
-  say the workflow is created disabled (KT-1037).
+  (0.15, KT-1034). The import preview shows the trigger, the Exec steps and
+  the Exec allowlist, and the agent banners say the workflow is created
+  disabled (KT-1037).
 - Outbound requests to a URL a user, a plugin, a provider or an agent
   supplies go through one guarded transport (`core::safe_http`): ApiCall
   (every page, retry and redirect), OAuth and token exchange, Notify, gate

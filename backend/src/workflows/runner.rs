@@ -664,6 +664,24 @@ async fn fire_gate_webhook(
     Ok(response.status().as_u16())
 }
 
+/// Why a run stopped when its workflow was disabled under it.
+pub(crate) const ACTIVATION_REVOKED_REASON: &str = "Stopped: the workflow was disabled while this \
+     run was in progress (an agent changed it or a Quick API/Prompt it uses). Its remaining \
+     steps did not run; review the change, enable the workflow and run it again.";
+
+/// Whether the stored workflow is now disabled. A definition that is not
+/// stored (a test step) or a read error does not stop the run.
+async fn activation_revoked(state: &AppState, workflow_id: &str) -> bool {
+    let id = workflow_id.to_string();
+    matches!(
+        state
+            .db
+            .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+            .await,
+        Ok(Some(Workflow { enabled: false, .. }))
+    )
+}
+
 /// The production binary has only the enforcing variant. The loopback variant
 /// is compiled exclusively into Rust tests, so no environment variable, API
 /// payload or runtime configuration can weaken Notify's SSRF boundary.
@@ -1627,6 +1645,10 @@ async fn execute_run_body(
     // reached on a given edge.
     let mut goto_fires: std::collections::HashMap<(String, String), u32> =
         std::collections::HashMap::new();
+    // A run that started under an activation stops once that activation is
+    // revoked (an agent changed the workflow or a Quick API/Prompt it uses,
+    // KT-1037): later steps must not execute the changed definition.
+    let started_enabled = workflow.enabled;
 
     while step_idx < workflow.steps.len() {
         // Cancellation check — fires when the user clicked "⏹ Arrêter" and
@@ -1695,6 +1717,36 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
             });
+            break;
+        }
+
+        if started_enabled && activation_revoked(&state, &workflow.id).await {
+            tracing::warn!(target: "kronn::workflow_guard",
+                run_id = %run.id, workflow_id = %workflow.id,
+                "Workflow run stopped: its activation was revoked mid-run");
+            run.step_results.push(StepResult {
+                step_name: "__guard_activation_revoked__".to_string(),
+                status: RunStatus::StoppedByGuard,
+                output: ACTIVATION_REVOKED_REASON.to_string(),
+                tokens_used: Some(0),
+                duration_ms: 0,
+                started_at: None,
+                condition_result: None,
+                envelope_detected: None,
+                step_kind: None,
+                step_agent: None,
+                step_model: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
+                is_rollback: false,
+                child_run_id: None,
+                agent_provenance: None,
+                native_tool_calls: Box::default(),
+                cached_prompt_tokens: None,
+                cache_write_prompt_tokens: None,
+                last_activity: None,
+            });
+            stopped_by_guard = true;
             break;
         }
 
@@ -6454,6 +6506,98 @@ mod tests {
             .expect("persisted run exists");
         assert_eq!(persisted.status, RunStatus::Success);
         assert_eq!(persisted.step_results.len(), 3);
+    }
+
+    /// KT-1037: an agent edit while a run is in flight revokes its
+    /// activation; the next step does not run and the run says why.
+    #[tokio::test]
+    async fn an_agent_edit_mid_run_stops_the_remaining_steps() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let hits = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let editor_state = state.clone();
+        let hits_a = hits.clone();
+        let hits_b = hits.clone();
+        let app = axum::Router::new()
+            .route(
+                "/notify/a",
+                axum::routing::post(move || {
+                    let state = editor_state.clone();
+                    let hits = hits_a.clone();
+                    async move {
+                        hits.lock().await.push("a".into());
+                        // The agent edits the running workflow.
+                        let change: crate::models::UpdateWorkflowRequest =
+                            serde_json::from_value(serde_json::json!({"concurrency_limit": 3}))
+                                .unwrap();
+                        let edited = crate::api::workflows::agent_update_for_tests(
+                            state,
+                            "wf-mid-run".into(),
+                            change,
+                        )
+                        .await;
+                        assert!(edited, "the agent edit is saved");
+                        axum::Json(serde_json::json!({ "ok": true }))
+                    }
+                }),
+            )
+            .route(
+                "/notify/b",
+                axum::routing::post(move || {
+                    let hits = hits_b.clone();
+                    async move {
+                        hits.lock().await.push("b".into());
+                        axum::Json(serde_json::json!({ "ok": true }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-mid-run".into();
+        workflow.enabled = true;
+        workflow.steps = vec![
+            notify_step(
+                "notify_a",
+                format!("http://127.0.0.1:{port}/notify/a"),
+                "{}",
+            ),
+            notify_step(
+                "notify_b",
+                format!("http://127.0.0.1:{port}/notify/b"),
+                "{}",
+            ),
+        ];
+        let mut run = pending_run("run-mid-run", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run_with_notify_policy(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+            NotifySecurityPolicy::AllowLoopbackForTests,
+        )
+        .await
+        .expect("run settles");
+        server.abort();
+
+        assert_eq!(
+            hits.lock().await.clone(),
+            vec!["a".to_string()],
+            "step b never ran"
+        );
+        assert_eq!(run.status, RunStatus::StoppedByGuard);
+        let last = run.step_results.last().unwrap();
+        assert_eq!(last.step_name, "__guard_activation_revoked__");
+        assert_eq!(last.output, ACTIVATION_REVOKED_REASON);
     }
 
     #[tokio::test]

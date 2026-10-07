@@ -1179,6 +1179,7 @@ mod compare_tests {
                     ("wf-batch", r#"[{"name":"b","batch_quick_prompt_id":"qp-1"}]"#),
                     ("wf-chain", r#"[{"name":"c","batch_chain_prompt_ids":["qp-0","qp-1"]}]"#),
                     ("wf-other", r#"[{"name":"d","quick_prompt_id":"qp-2"}]"#),
+                    ("wf-symbolic", r#"[{"name":"e","quick_prompt_id":"ref:prompt:review"}]"#),
                 ] {
                     conn.execute(
                         "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
@@ -1186,6 +1187,14 @@ mod compare_tests {
                         rusqlite::params![id, step],
                     )?;
                 }
+                // A rollback step naming the prompt symbolically, as a template.
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, on_failure, enabled, created_at, updated_at)
+                     VALUES ('wf-rollback', 'wf-rollback', '{\"type\":\"Manual\"}', '[{\"name\":\"x\"}]',
+                             '[{\"name\":\"undo\",\"batch_quick_prompt_id\":\"{{ref:prompt:review}}\"}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
                 Ok(())
             })
             .await
@@ -1210,11 +1219,18 @@ mod compare_tests {
             }))
             .unwrap()
         };
-        let all = vec!["wf-batch", "wf-chain", "wf-direct", "wf-other"];
+        let all = vec![
+            "wf-batch",
+            "wf-chain",
+            "wf-direct",
+            "wf-other",
+            "wf-rollback",
+            "wf-symbolic",
+        ];
         let Json(renamed) = update_as(
             state.clone(),
             "qp-1".into(),
-            request("Review it", "Renamed"),
+            request("Review it", "REVIEW"),
             true,
         )
         .await;
@@ -1227,7 +1243,7 @@ mod compare_tests {
         let Json(human) = update_as(
             state.clone(),
             "qp-1".into(),
-            request("Review harder", "Renamed"),
+            request("Review harder", "REVIEW"),
             false,
         )
         .await;
@@ -1240,7 +1256,7 @@ mod compare_tests {
         let Json(agent) = update_as(
             state.clone(),
             "qp-1".into(),
-            request("Exfiltrate", "Renamed"),
+            request("Exfiltrate", "REVIEW"),
             true,
         )
         .await;

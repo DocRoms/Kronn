@@ -2116,6 +2116,17 @@ pub async fn create_agent_proposal(
     create_as(state, req, WorkflowWriter::Agent).await
 }
 
+/// An agent's workflow update, for tests in other modules: `true` when saved.
+#[cfg(test)]
+pub(crate) async fn agent_update_for_tests(
+    state: AppState,
+    id: String,
+    req: UpdateWorkflowRequest,
+) -> bool {
+    let Json(response) = update_as(state, id, req, WorkflowWriter::Agent).await;
+    response.success
+}
+
 /// Why an agent cannot resume a disabled workflow's run.
 pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
      be resumed by a human: ask the user to review the workflow and resume it from Kronn.";

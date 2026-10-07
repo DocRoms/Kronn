@@ -1364,6 +1364,14 @@ mod tests {
             .db
             .with_conn(move |conn| {
                 crate::db::quick_apis::insert_quick_api(conn, &qa)?;
+                // The same API named symbolically as a collection source.
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
+                     VALUES ('wf-qa-ref', 'uses qa by ref', '{\"type\":\"Manual\"}',
+                             '[{\"name\":\"collect\",\"collect_api_data\":{\"sources\":[{\"alias\":\"f\",\"quick_api_id\":\"ref:qa:fetch\"}]}}]', 1,
+                             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
                 conn.execute(
                     "INSERT INTO workflows (id, name, trigger_json, steps_json, enabled, created_at, updated_at)
                      VALUES ('wf-qa', 'uses qa', '{\"type\":\"Manual\"}', '[{\"name\":\"call\",\"quick_api_id\":\"qa-1\"}]', 1,
@@ -1395,13 +1403,8 @@ mod tests {
             }))
             .unwrap()
         };
-        let Json(renamed) = update_as(
-            state.clone(),
-            "qa-1".into(),
-            request("GET", "Renamed"),
-            true,
-        )
-        .await;
+        let Json(renamed) =
+            update_as(state.clone(), "qa-1".into(), request("GET", "FETCH"), true).await;
         assert!(renamed.success, "{:?}", renamed.error);
         assert!(
             enabled(state.clone()).await,
@@ -1410,7 +1413,7 @@ mod tests {
         let Json(human) = update_as(
             state.clone(),
             "qa-1".into(),
-            request("POST", "Renamed"),
+            request("POST", "FETCH"),
             false,
         )
         .await;
@@ -1422,7 +1425,7 @@ mod tests {
         let Json(agent) = update_as(
             state.clone(),
             "qa-1".into(),
-            request("DELETE", "Renamed"),
+            request("DELETE", "FETCH"),
             true,
         )
         .await;
@@ -1431,6 +1434,18 @@ mod tests {
             !enabled(state.clone()).await,
             "an agent's new method disables the caller"
         );
+        let by_ref = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT enabled FROM workflows WHERE id = 'wf-qa-ref'",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!by_ref, "a `ref:qa:` to the edited API is disabled too");
     }
 
     #[test]

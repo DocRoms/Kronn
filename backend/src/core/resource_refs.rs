@@ -265,6 +265,67 @@ pub fn resolve_run_structured_references(
     Ok(())
 }
 
+/// Whether `workflow` runs the Quick Prompt (`kind` "prompt") or Quick API
+/// ("qa") `id` anywhere: steps and rollback, direct, batch, chained or
+/// collection fields, by literal id or by a `ref:` that resolves to it in
+/// any project the workflow can run in.
+pub fn workflow_uses(
+    conn: &Connection,
+    workflow: &Workflow,
+    kind: &str,
+    id: &str,
+) -> anyhow::Result<bool> {
+    let mut projects = crate::workflows::project_scope::scheduled_projects(conn, workflow)?;
+    projects.push(workflow.project_id.clone());
+    projects.push(None);
+    projects.dedup();
+    for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
+        let mut step = step.clone();
+        for (field_kind, value) in structured_fields(&mut step) {
+            if field_kind != kind {
+                continue;
+            }
+            let Some((ref_kind, slug)) = parse_reference(value) else {
+                if value.trim() == id {
+                    return Ok(true);
+                }
+                continue;
+            };
+            if ref_kind != kind {
+                continue;
+            }
+            for project in &projects {
+                if resolve_symbolic_reference(
+                    conn,
+                    &format!("{ref_kind}:{slug}"),
+                    project.as_deref(),
+                )?
+                .as_deref()
+                    == Some(id)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Disables every enabled workflow that runs `kind`/`id` (see
+/// [`workflow_uses`]); returns how many.
+pub fn disable_workflows_using(conn: &Connection, kind: &str, id: &str) -> anyhow::Result<usize> {
+    let mut disabled = 0;
+    for workflow in crate::db::workflows::list_workflows(conn)? {
+        if workflow.enabled && workflow_uses(conn, &workflow, kind, id)? {
+            disabled += conn.execute(
+                "UPDATE workflows SET enabled = 0 WHERE id = ?1 AND enabled = 1",
+                rusqlite::params![workflow.id],
+            )?;
+        }
+    }
+    Ok(disabled)
+}
+
 /// The slug a resource of `kind` is published under: its identity in the
 /// workflow's project, else the one its name gives, as publication does.
 fn publication_slug(

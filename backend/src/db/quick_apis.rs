@@ -287,24 +287,10 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// Disables every enabled workflow whose steps or rollback call this Quick
-/// API, directly or as a collection source; returns how many.
+/// Disables every enabled workflow that runs this resource, by id or by a
+/// `ref:` resolving to it; returns how many.
 pub fn disable_workflows_using(conn: &Connection, id: &str) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE workflows SET enabled = 0
-          WHERE enabled = 1 AND id IN (
-            SELECT w.id
-              FROM workflows w,
-                   json_each(json_array(json(w.steps_json), json(COALESCE(w.on_failure, '[]')))) list,
-                   json_each(list.value) s
-             WHERE json_extract(s.value, '$.quick_api_id') = ?1
-                OR EXISTS (
-                    SELECT 1 FROM json_each(s.value, '$.collect_api_data.sources') source
-                     WHERE json_extract(source.value, '$.quick_api_id') = ?1
-                )
-          )",
-        params![id],
-    )?)
+    crate::core::resource_refs::disable_workflows_using(conn, "qa", id)
 }
 
 /// Number of workflow steps blocking deletion of this API.
