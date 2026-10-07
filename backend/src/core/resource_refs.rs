@@ -265,80 +265,58 @@ pub fn resolve_run_structured_references(
     Ok(())
 }
 
-/// Whether `workflow` runs the Quick Prompt (`kind` "prompt") or Quick API
-/// ("qa") `id` anywhere: steps and rollback, direct, batch, chained or
-/// collection fields, by literal id or by a `ref:` that resolves to it in
-/// any project the workflow can run in.
-pub fn workflow_uses(
-    conn: &Connection,
-    workflow: &Workflow,
-    kind: &str,
-    id: &str,
-) -> anyhow::Result<bool> {
-    let mut projects = crate::workflows::project_scope::scheduled_projects(conn, workflow)?;
-    projects.push(workflow.project_id.clone());
-    projects.push(None);
-    projects.dedup();
-    for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
-        let mut step = step.clone();
-        for (field_kind, value) in structured_fields(&mut step) {
-            if field_kind != kind {
-                continue;
-            }
-            let Some((ref_kind, slug)) = parse_reference(value) else {
-                if value.trim() == id {
-                    return Ok(true);
-                }
-                continue;
-            };
-            if ref_kind != kind {
-                continue;
-            }
-            for project in &projects {
-                if resolve_symbolic_reference(
-                    conn,
-                    &format!("{ref_kind}:{slug}"),
-                    project.as_deref(),
-                )?
-                .as_deref()
-                    == Some(id)
-                {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
+/// Whether `workflow` names the Quick Prompt (`kind` "prompt") or Quick API
+/// ("qa") `id` anywhere (steps and rollback; direct, batch, chained or
+/// collection fields), by its literal id or by a `ref:` of that kind whose
+/// slug is one of `slugs`. No project resolution on purpose: a slug match is
+/// a conservative superset of every project a reference could resolve in.
+pub fn workflow_names(workflow: &Workflow, kind: &str, id: &str, slugs: &[String]) -> bool {
+    workflow
+        .steps
+        .iter()
+        .chain(workflow.on_failure.iter())
+        .any(|step| {
+            let mut step = step.clone();
+            structured_fields(&mut step)
+                .into_iter()
+                .filter(|(field_kind, _)| *field_kind == kind)
+                .any(|(_, value)| match parse_reference(value) {
+                    Some((ref_kind, slug)) => {
+                        ref_kind == kind && slugs.iter().any(|s| s.eq_ignore_ascii_case(slug))
+                    }
+                    None => value.trim() == id,
+                })
+        })
 }
 
-/// The enabled workflows that run `kind`/`id` (see [`workflow_uses`]). An
-/// ambiguous reference is an error, so the caller can refuse its change.
-pub fn enabled_workflows_using(
+/// The enabled workflows that name `kind`/`id` or one of `slugs` (see
+/// [`workflow_names`]).
+pub fn enabled_workflows_naming(
     conn: &Connection,
     kind: &str,
     id: &str,
+    slugs: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    let mut ids = Vec::new();
-    for workflow in crate::db::workflows::list_workflows(conn)? {
-        if workflow.enabled && workflow_uses(conn, &workflow, kind, id)? {
-            ids.push(workflow.id);
-        }
-    }
-    Ok(ids)
+    let slugs: Vec<String> = slugs.iter().filter(|s| !s.is_empty()).cloned().collect();
+    Ok(crate::db::workflows::list_workflows(conn)?
+        .into_iter()
+        .filter(|workflow| workflow.enabled && workflow_names(workflow, kind, id, &slugs))
+        .map(|workflow| workflow.id)
+        .collect())
 }
 
-/// A resource just created: every enabled workflow whose `ref:` now
-/// resolves to it (it shadows a shared one) is disabled and recorded. Call it
-/// inside the insert's transaction, after the insert ("before" is empty).
-pub fn disable_users_of_new(
+/// Disables (and records) every enabled workflow naming `kind`/`id` or one
+/// of `slugs`. Call it inside the write's transaction.
+pub fn disable_workflows_naming(
     conn: &Connection,
     kind: &str,
     id: &str,
+    slugs: &[String],
     reason: crate::models::AutoDisableReason,
     by: &str,
     summary: &str,
 ) -> anyhow::Result<usize> {
-    let users = enabled_workflows_using(conn, kind, id)?;
+    let users = enabled_workflows_naming(conn, kind, id, slugs)?;
     let disabled = disable_workflows(conn, &users)?;
     for user in &users {
         crate::db::workflows::mark_auto_disabled(conn, user, reason, by, summary)?;

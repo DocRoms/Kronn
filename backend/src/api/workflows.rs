@@ -3857,10 +3857,11 @@ async fn import_workflow_written(
             // workflow already uses: that workflow goes off too.
             for qp in &qps {
                 crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
-                crate::core::resource_refs::disable_users_of_new(
+                crate::core::resource_refs::disable_workflows_naming(
                     conn,
                     "prompt",
                     &qp.id,
+                    &[crate::core::repository_resources::ascii_slug(&qp.name)],
                     AutoDisableReason::Imported,
                     "import",
                     &format!(
@@ -3872,10 +3873,11 @@ async fn import_workflow_written(
             for mut qa in qas {
                 rebind_quick_api_config(conn, &mut qa, rebind_project.as_deref());
                 crate::db::quick_apis::insert_quick_api(conn, &qa)?;
-                crate::core::resource_refs::disable_users_of_new(
+                crate::core::resource_refs::disable_workflows_naming(
                     conn,
                     "qa",
                     &qa.id,
+                    &[crate::core::repository_resources::ascii_slug(&qa.name)],
                     AutoDisableReason::Imported,
                     "import",
                     &format!(

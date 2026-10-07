@@ -480,10 +480,11 @@ async fn create_bundle_as(
             // `ref:` an enabled workflow uses: that workflow goes off too.
             if by_agent {
                 for qp in &prepared_qps {
-                    crate::core::resource_refs::disable_users_of_new(
+                    crate::core::resource_refs::disable_workflows_naming(
                         &tx,
                         "prompt",
                         &qp.id,
+                        &[crate::core::repository_resources::ascii_slug(&qp.name)],
                         crate::models::AutoDisableReason::DependencyEditedByAgent,
                         crate::api::workflows::AN_AGENT,
                         &format!(
@@ -493,10 +494,11 @@ async fn create_bundle_as(
                     )?;
                 }
                 for qa in &prepared_qas {
-                    crate::core::resource_refs::disable_users_of_new(
+                    crate::core::resource_refs::disable_workflows_naming(
                         &tx,
                         "qa",
                         &qa.id,
+                        &[crate::core::repository_resources::ascii_slug(&qa.name)],
                         crate::models::AutoDisableReason::DependencyEditedByAgent,
                         crate::api::workflows::AN_AGENT,
                         &format!(

@@ -860,8 +860,8 @@ not in this rule: an agent's Quick Exec line already waits for a human's
 approval under KT-1017); a disabled definition does not run (a
 parent refuses a disabled child, manual and TriggerWorkflow launches and the
 scheduler skip it, and only a human resumes a disabled workflow's run; a
-dependency is matched by id or by a `ref:` resolving to it in any project the
-workflow serves, found before and after the edit (a rename may leave an old
-slug or shadow another resource), and disabled in the same transaction,
-which an ambiguous reference rolls back); JSON imports, accepted
+dependency is matched without resolving anything: every enabled workflow, in
+any project, that names its id or holds a `ref:` of its kind with its old or
+new slug is disabled, in the write's transaction, so no project resolution or
+ambiguity can let one through); JSON imports, accepted
 agent bundles and proposals land disabled. Only a human request enables.

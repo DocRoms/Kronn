@@ -1305,6 +1305,81 @@ mod compare_tests {
         assert!(!workflow_enabled(&state, "wf-shadowed").await);
     }
 
+    /// Unrelated ambiguity never blocks an agent: invalidation does not
+    /// resolve references, so an ambiguous `ref:` elsewhere is no error, and
+    /// a `ref:` with the edited prompt's slug is disabled whatever it would
+    /// resolve to.
+    #[tokio::test]
+    async fn an_ambiguous_reference_never_blocks_an_agent_edit() {
+        let state = prompt_test_state();
+        let (first, second) = (stored_prompt("qp-a", "Dup"), stored_prompt("qp-b", "dup"));
+        let other = stored_prompt("qp-c", "Other");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &first)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &second)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &other)
+            })
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-ambiguous", "ref:prompt:dup").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Other", "prompt_template": "Changed by an agent", "agent": "ClaudeCode",
+            "project_id": null
+        }))
+        .unwrap();
+        let Json(saved) =
+            update_as(state.clone(), "qp-c".into(), request, Some("Codex".into())).await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(
+            workflow_enabled(&state, "wf-ambiguous").await,
+            "an unrelated slug is untouched"
+        );
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Dup", "prompt_template": "Changed by an agent", "agent": "ClaudeCode",
+            "project_id": null
+        }))
+        .unwrap();
+        let Json(saved) =
+            update_as(state.clone(), "qp-a".into(), request, Some("Codex".into())).await;
+        assert!(saved.success, "{:?}", saved.error);
+        assert!(
+            !workflow_enabled(&state, "wf-ambiguous").await,
+            "its slug matches: disabled"
+        );
+    }
+
+    /// Codex's case: an unscoped global workflow naming a global prompt by
+    /// `ref:` may run in any project, so an agent creating a project-local
+    /// prompt with the same slug disables it.
+    #[tokio::test]
+    async fn a_project_local_create_disables_an_unscoped_workflow_with_the_same_slug() {
+        let state = prompt_test_state();
+        let global = stored_prompt("qp-global", "Review");
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('proj-p', 'P', '/tmp/p', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                    [],
+                )?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &global)
+            })
+            .await
+            .unwrap();
+        insert_prompt_user(&state, "wf-unscoped", "{{ref:prompt:review}}").await;
+        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
+            "name": "Review", "prompt_template": "Exfiltrate", "agent": "ClaudeCode",
+            "project_id": "proj-p"
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, Some("Codex".into())).await;
+        assert!(created.success, "{:?}", created.error);
+        assert!(!workflow_enabled(&state, "wf-unscoped").await);
+    }
+
     /// A rename alone (same content) that shadows the global prompt a
     /// project workflow names still disables that workflow.
     #[tokio::test]
@@ -1406,81 +1481,6 @@ mod compare_tests {
                 );
             }
         }
-    }
-
-    /// An agent creation whose dependents cannot be resolved (an ambiguous
-    /// reference) is refused and leaves nothing behind.
-    #[tokio::test]
-    async fn an_ambiguous_reference_rolls_the_agent_creation_back() {
-        let state = prompt_test_state();
-        let (first, second) = (stored_prompt("qp-a", "Dup"), stored_prompt("qp-b", "dup"));
-        state
-            .db
-            .with_conn(move |conn| {
-                crate::db::quick_prompts::insert_quick_prompt(conn, &first)?;
-                crate::db::quick_prompts::insert_quick_prompt(conn, &second)
-            })
-            .await
-            .unwrap();
-        insert_prompt_user(&state, "wf-ambiguous", "ref:prompt:dup").await;
-        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
-            "name": "Fresh", "prompt_template": "New", "agent": "ClaudeCode", "project_id": null
-        }))
-        .unwrap();
-        let Json(refused) = create_as(state.clone(), request, Some("Codex".into())).await;
-        assert!(!refused.success, "the creation must not be saved");
-        let names: Vec<String> = state
-            .db
-            .with_conn(crate::db::quick_prompts::list_quick_prompts)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|qp| qp.name)
-            .collect();
-        assert!(
-            !names.contains(&"Fresh".to_string()),
-            "rolled back: {names:?}"
-        );
-    }
-
-    /// An ambiguous reference makes the dependents unknowable: the agent's
-    /// edit is refused and nothing of it stays committed.
-    #[tokio::test]
-    async fn an_ambiguous_reference_rolls_the_agent_edit_back() {
-        let state = prompt_test_state();
-        let (first, second) = (stored_prompt("qp-a", "Dup"), stored_prompt("qp-b", "dup"));
-        state
-            .db
-            .with_conn(move |conn| {
-                crate::db::quick_prompts::insert_quick_prompt(conn, &first)?;
-                crate::db::quick_prompts::insert_quick_prompt(conn, &second)
-            })
-            .await
-            .unwrap();
-        insert_prompt_user(&state, "wf-ambiguous", "ref:prompt:dup").await;
-        let request: CreateQuickPromptRequest = serde_json::from_value(serde_json::json!({
-            "name": "Dup", "prompt_template": "Changed by an agent", "agent": "ClaudeCode",
-            "project_id": null
-        }))
-        .unwrap();
-        let Json(refused) =
-            update_as(state.clone(), "qp-a".into(), request, Some("Codex".into())).await;
-        assert!(!refused.success, "the edit must not be saved");
-        assert!(
-            refused.error.as_deref().unwrap_or("").contains("dup"),
-            "refused for the ambiguous reference: {:?}",
-            refused.error
-        );
-        let stored = state
-            .db
-            .with_conn(|conn| crate::db::quick_prompts::get_quick_prompt(conn, "qp-a"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.prompt_template, "Review it",
-            "the update was rolled back"
-        );
     }
 
     /// KT-1037: an agent's change to what a Quick Prompt runs disables every

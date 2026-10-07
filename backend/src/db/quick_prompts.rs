@@ -461,9 +461,9 @@ pub fn count_workflow_step_usage(conn: &Connection, id: &str) -> Result<u32> {
     Ok(n as u32)
 }
 
-/// Inserts `item`; when an `agent` (or "import") created it, also disables (and records)
-/// every enabled workflow whose `ref:` now resolves to it, in the same
-/// transaction. A failed lookup rolls the insert back.
+/// Inserts `item`; when an `agent` (or "import") created it, also disables
+/// and records, in the same transaction, every enabled workflow that names
+/// its id or a `ref:` with its slug (it may shadow a shared reference).
 pub fn insert_quick_prompt_invalidating(
     conn: &Connection,
     item: &QuickPrompt,
@@ -472,10 +472,11 @@ pub fn insert_quick_prompt_invalidating(
     let tx = conn.unchecked_transaction()?;
     insert_quick_prompt(&tx, item)?;
     let disabled = match agent {
-        Some(agent) => crate::core::resource_refs::disable_users_of_new(
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
             &tx,
             "prompt",
             &item.id,
+            &[crate::core::repository_resources::ascii_slug(&item.name)],
             if agent == "import" {
                 crate::models::AutoDisableReason::Imported
             } else {
@@ -493,45 +494,38 @@ pub fn insert_quick_prompt_invalidating(
     Ok(disabled)
 }
 
-/// Saves `item`; when an `agent` made the edit, also disables every enabled workflow that
-/// runs it before OR after the update (a rename may leave an old slug's
-/// `ref:` or capture a new one), in the same transaction. A failed lookup
-/// (an ambiguous reference) rolls the whole update back.
+/// Saves `item`; when an `agent` made the edit, also disables and records,
+/// in the same transaction, every enabled workflow that names its id or a
+/// `ref:` with its old or new slug (a rename may leave one or capture one).
 pub fn update_quick_prompt_invalidating(
     conn: &Connection,
     item: &QuickPrompt,
     agent: Option<&str>,
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let invalidate = agent.is_some();
-    let mut dependents = if invalidate {
-        crate::core::resource_refs::enabled_workflows_using(&tx, "prompt", &item.id)?
-    } else {
-        Vec::new()
-    };
+    let old_name = tx
+        .query_row(
+            "SELECT name FROM quick_prompts WHERE id = ?1",
+            params![item.id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
     update_quick_prompt(&tx, item)?;
-    if invalidate {
-        // After the update too: a new name can make a `ref:` resolve to it
-        // (a project-local resource shadowing a global one).
-        for id in crate::core::resource_refs::enabled_workflows_using(&tx, "prompt", &item.id)? {
-            if !dependents.contains(&id) {
-                dependents.push(id);
-            }
-        }
-    }
-    let disabled = crate::core::resource_refs::disable_workflows(&tx, &dependents)?;
-    if let Some(agent) = agent {
-        let summary = format!("Quick Prompt « {} » edited by {agent}", item.name);
-        for id in &dependents {
-            crate::db::workflows::mark_auto_disabled(
-                &tx,
-                id,
-                crate::models::AutoDisableReason::DependencyEditedByAgent,
-                agent,
-                &summary,
-            )?;
-        }
-    }
+    let disabled = match agent {
+        Some(agent) => crate::core::resource_refs::disable_workflows_naming(
+            &tx,
+            "prompt",
+            &item.id,
+            &[
+                crate::core::repository_resources::ascii_slug(&old_name),
+                crate::core::repository_resources::ascii_slug(&item.name),
+            ],
+            crate::models::AutoDisableReason::DependencyEditedByAgent,
+            agent,
+            &format!("Quick Prompt « {} » edited by {agent}", item.name),
+        )?,
+        None => 0,
+    };
     tx.commit()?;
     Ok(disabled)
 }
