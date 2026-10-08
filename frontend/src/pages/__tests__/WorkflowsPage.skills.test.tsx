@@ -297,15 +297,15 @@ describe('WorkflowsPage — skills (KT-914)', () => {
   });
 
   it('reopens the sheet of the skill that was open before a reload', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'rust' }));
-    await wrap(page());
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ selection: { tab: 'skills', resourceId: 'rust', runId: null } }));
     expect(screen.getByRole('heading', { level: 2, name: 'Rust' })).toBeInTheDocument();
     expect(screen.getByTestId('skill-content')).toHaveTextContent('Rust idioms');
   });
 
   it('falls back to the list when the remembered skill no longer exists', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'deleted' }));
-    await wrap(page());
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ selection: { tab: 'skills', resourceId: 'deleted', runId: null } }));
     expect(screen.queryByTestId('skill-sheet')).toBeNull();
     expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'skills', resourceId: null });
   });
@@ -349,16 +349,16 @@ describe('WorkflowsPage — skills (KT-914)', () => {
 
   it('sends the reader to Config, the one place a skill is edited', async () => {
     const onNavigateSettings = vi.fn();
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'review' }));
-    await wrap(page({ onNavigateSettings }));
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ onNavigateSettings, selection: { tab: 'skills', resourceId: 'review', runId: null } }));
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir dans Config' }));
     expect(onNavigateSettings).toHaveBeenCalledTimes(1);
   });
 
   it('deletes a skill the user wrote from its sheet, and leaves a built-in one alone', async () => {
     mockSkillsApi.delete.mockResolvedValue(true);
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'rust' }));
-    await wrap(page());
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ selection: { tab: 'skills', resourceId: 'rust', runId: null } }));
     expect(screen.queryByTestId('skill-delete-rust')).toBeNull();
 
     await openAvailable(2);
@@ -515,10 +515,10 @@ describe('WorkflowsPage — skills used from a repository (KT-921)', () => {
   });
 
   it('keeps the remembered repository skill while the list of used skills is on its way, then reopens it', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: REPOSITORY_SKILL_ID }));
     let answer: (skills: ProjectUsedSkill[]) => void = () => {};
     mockProjectsApi.usedSkills.mockReturnValue(new Promise<ProjectUsedSkill[]>(resolve => { answer = resolve; }));
-    await wrap(page());
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ selection: { tab: 'skills', resourceId: REPOSITORY_SKILL_ID, runId: null } }));
     // Not known yet is not gone: the memory is left alone.
     expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'skills', resourceId: REPOSITORY_SKILL_ID });
     expect(screen.queryByTestId('skill-sheet')).toBeNull();
@@ -530,8 +530,8 @@ describe('WorkflowsPage — skills used from a repository (KT-921)', () => {
   });
 
   it('forgets a remembered repository skill once the list is in and no longer holds it', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'repository:p-alpha:gone' }));
-    await wrap(page());
+    // As the route hands it: the visit remembered, resolved into the address.
+    await wrap(page({ selection: { tab: 'skills', resourceId: 'repository:p-alpha:gone', runId: null } }));
     expect(screen.queryByTestId('skill-sheet')).toBeNull();
     expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'skills', resourceId: null });
   });
