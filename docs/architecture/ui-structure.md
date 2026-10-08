@@ -20,12 +20,12 @@ so back, forward and reload follow it. React Router 8 runs in Data mode.
 
 | Page | Path |
 |------|------|
-| Projets | `/projects`, `/projects/:projectId` for the project open in the master/detail workspace (picking one is a history step; the first one the page opens on its own replaces the bare address), `/projects/:projectId/:view` for one of its views (`overview`, `discussions`, `tasks`, `audit`, `docs`, `code`, `docker`, `git`, `resources`) — `code?file=<path>&line=<n>` opens a file at a line, `docs?folder=<path>` a docs folder. A bare project address opens on the view the reader used last (localStorage) |
+| Projets | `/projects`, `/projects/:projectId` for the project open in the master/detail workspace (picking one is a history step; the first one the page opens on its own replaces the bare address), `/projects/:projectId/:view` for one of its views (`overview`, `discussions`, `tasks`, `audit`, `docs`, `code`, `docker`, `git`, `resources`) — `code?file=<path>&line=<n>` opens a file at a line and the file the reader then opens in the tree, or reaches through the next/previous match, rewrites `?file=` (a history step, without the line), `docs?folder=<path>` a docs folder. A bare project address opens on the view the reader used last (localStorage) |
 | Discussions | `/discussions`, `/discussions/:discussionId` for the open discussion, `?message=<id>` to reveal one of its messages, `/discussions/compare/:runId` for a comparison (a Compare batch or a free selection), restored from its run. A bare `/discussions` reopens where the previous visit left off (sessionStorage checkpoint) |
 | Planification | `/planning`, `/planning/:taskId` for the task open in the detail pane |
-| Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage checkpoint) |
+| Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage record, read by the route, which replaces the bare address with it); an explicit address, Back and Forward are what they say, and a preset arriving at the bare address opens the wizard on the workflows list instead. A remembered resource the loaded list no longer knows is let go in place of its address |
 | Pages (Artifacts) | `/pages`, `/pages/:pageId` for the open Page — redirects to `/projects` until the capability is activated. A bare `/pages` reopens where the previous visit left off (localStorage checkpoint), else the first Page |
-| Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel |
+| Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel — kept while the overview is still loading; a config the loaded overview does not know is let go in place of the address |
 | Config | `/config`, `/config#<section-id>` scrolled to one of its sections on arrival (waiting for one fed by a request); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
 
 `/` and any unknown address redirect to `/projects`, keeping the hash and the
@@ -51,10 +51,13 @@ address that replaced it, from one place: `legacyHashToPath` in
 `lib/legacyRoutes.ts`, applied by the app root whatever path it was opened
 on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
 `#pages/mosaic?…`, `#discussions/mosaic?…`, `#settings/artifacts?…` and
-`#config` are all mapped. Any other hash is left alone: it routes nowhere,
-and only Configuration reads it, as the section to scroll to.
+`#config` are all mapped. An id that cannot be decoded (`#page/%E0%A4%A`)
+names nothing: the link lands on its page, bare, rather than on an address
+the router cannot read; the same id in a direct address is handed to the
+page as it is, like any unknown id. Any other hash is left alone: it routes
+nowhere, and only Configuration reads it, as the section to scroll to.
 `[src: file: frontend/src/routes/SettingsRoute.tsx:36-52]`
-`[src: file: frontend/src/lib/legacyRoutes.ts:13-35]`
+`[src: file: frontend/src/lib/legacyRoutes.ts:11-50]`
 `[src: file: frontend/src/App.tsx:159-162]`
 
 - **Route table** — `App` is the root route (setup gate, legacy redirect)
@@ -92,8 +95,13 @@ and only Configuration reads it, as the section to scroll to.
   change callback (`selectedTaskId`/`onSelectedTaskChange`, `selection`/
   `onSelectionChange`, a project's `location`/`onLocationChange`,
   `compareRunId`/`onCompareChange`, …) and still works alone, keeping its own
-  selection. Nothing crosses pages through `sessionStorage`: a deep link is
-  an address, plus an arrival intent for what it does once.
+  selection. A change callback says why (`SelectionReason`): `change` is the
+  reader's, a step Back can undo; `restore` is the page's own word — its first,
+  or a resource the loaded list does not know let go — and replaces the
+  address instead. The bare address of a page that remembers its last visit
+  is resolved by the route, never by the page. Nothing crosses pages through
+  `sessionStorage`: a deep link is an address, plus an arrival intent for
+  what it does once. The tab of the page already open is not a navigation.
 - **Back must win, three rules** (found in a real browser, each one tested):
   the router applies its state synchronously (`useTransitions={false}` on
   `RouterProvider`), because a navigation render wrapped in a transition can
@@ -110,8 +118,10 @@ and only Configuration reads it, as the section to scroll to.
   `[src: file: frontend/src/pages/DiscussionsPage.tsx:364-368]`
 - **Open in a new tab** — anything that opens a view with an address opens it
   in a new tab on Ctrl/Cmd/Shift-click or a middle click, and in this tab on a
-  plain click. The dashboard tabs and the run-card links are real `<a href>`
-  links, so the context menu and the URL preview work too. Every other row,
+  plain click. The dashboard tabs, the run-card links and an Artifact's
+  links to its related discussion, workflows and publication runs are real
+  `<a href>` links (`components/AppLink.tsx` for anything rendered outside a
+  router), so the context menu and the URL preview work too. Every other row,
   card or button keeps its element, and so its exact look: it spreads
   `newTabClickProps(path)`, which opens the modified clicks itself and leaves a
   click on a control nested in it (favourite, menu, checkbox) to that control.
