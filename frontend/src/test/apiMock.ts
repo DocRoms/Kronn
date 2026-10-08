@@ -711,6 +711,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       purge: resolve(0),
+      // The Plugins page asks which endpoints keep failing.
+      drift: resolve([]),
     },
 
     orchestration: {

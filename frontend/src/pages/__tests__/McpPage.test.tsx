@@ -390,11 +390,11 @@ describe('McpPage', () => {
       configs: [makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' })],
       customized_contexts: [], incompatibilities: [], incomplete_configs: [],
     };
-    const { rerender } = wrap(<McpPage projects={[]} mcpOverview={emptyOverview} mcpRegistry={[]} refetchMcps={noop} favoritesReady={false} />);
+    const { rerender } = wrap(<McpPage projects={[]} mcpOverview={emptyOverview} mcpRegistry={[]} refetchMcps={noop} overviewLoaded={false} />);
 
     expect(JSON.parse(localStorage.getItem('kronn:collection-favorites:plugins') ?? '[]')).toEqual(['c1']);
 
-    rerender(<I18nProvider><McpPage projects={[]} mcpOverview={loadedOverview} mcpRegistry={[]} refetchMcps={noop} favoritesReady /></I18nProvider>);
+    rerender(<I18nProvider><McpPage projects={[]} mcpOverview={loadedOverview} mcpRegistry={[]} refetchMcps={noop} overviewLoaded /></I18nProvider>);
     const favoritesSection = document.querySelector('.disc-sidebar-favorites') as HTMLElement;
     expect(within(favoritesSection).getByRole('button', { name: 'GitHub Main — Voir les détails' })).toBeInTheDocument();
   });
@@ -803,7 +803,7 @@ describe('McpPage', () => {
 
     // Controlled: the page asks, and opens nothing until it is given the config.
     openPlugin('GitHub');
-    expect(onSelectedConfigChange).toHaveBeenCalledWith('github-config');
+    expect(onSelectedConfigChange).toHaveBeenCalledWith('github-config', 'change');
     expect(document.querySelector('.mcp-sidebar-plugin-row[data-active="true"]')).toBeNull();
 
     view.rerender(<I18nProvider>{page('github-config')}</I18nProvider>);
@@ -829,7 +829,24 @@ describe('McpPage', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Rechercher un plugin ou un projet...' }), { target: { value: 'missing' } });
 
-    expect(onSelectedConfigChange).toHaveBeenCalledWith(null);
+    expect(onSelectedConfigChange).toHaveBeenCalledWith(null, 'change');
+  });
+
+  it('keeps an owned selection the overview has not answered for yet, and lets go of one it does not know', () => {
+    const empty: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const loaded: McpOverview = {
+      ...empty, servers: [makeServer('github', 'GitHub')], configs: [makeConfig('github-config', 'github', 'GitHub')],
+    };
+    const onSelectedConfigChange = vi.fn();
+    const page = (overview: McpOverview, overviewLoaded: boolean) => (
+      <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} overviewLoaded={overviewLoaded}
+        selectedConfigId="gone-config" onSelectedConfigChange={onSelectedConfigChange} />
+    );
+    const view = wrap(page(empty, false));
+    expect(onSelectedConfigChange).not.toHaveBeenCalled();
+
+    view.rerender(<I18nProvider>{page(loaded, true)}</I18nProvider>);
+    expect(onSelectedConfigChange).toHaveBeenCalledExactlyOnceWith(null, 'restore');
   });
 
   it('keeps plugin search compact and reveals filtering and sorting below it', () => {

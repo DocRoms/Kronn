@@ -113,6 +113,14 @@ export function embedSettingsPath(origin?: string | null): string {
   return origin ? `${EMBED_SETTINGS_PATH}?origin=${encodeURIComponent(origin)}` : EMBED_SETTINGS_PATH;
 }
 
+/**
+ * Why a page reports a selection. `change` is the reader's: a step Back can
+ * undo. `restore` is the page's own word — a last visit restored at the bare
+ * address, or an address that names nothing let go — and replaces the
+ * address instead.
+ */
+export type SelectionReason = 'change' | 'restore';
+
 /** The tabs of the Automation page. */
 export type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 

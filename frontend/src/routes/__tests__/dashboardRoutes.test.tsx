@@ -515,7 +515,7 @@ describe('Plugins route', () => {
 
     expect(props.selectedConfigId).toBe('cfg/9');
     expect(props.initialSelectedConfigId).toBeUndefined();
-    expect(props.favoritesReady).toBe(false);
+    expect(props.overviewLoaded).toBe(false);
     expect(props.configLanguage).toBeUndefined();
     expect(props.installedAgentTypes).toEqual(['ClaudeCode']);
   });
@@ -524,12 +524,12 @@ describe('Plugins route', () => {
     await open('/plugins');
     const depth = window.history.length;
 
-    act(() => received.mcps().onSelectedConfigChange?.('cfg-9'));
+    act(() => received.mcps().onSelectedConfigChange?.('cfg-9', 'change'));
     expect(window.location.pathname).toBe('/plugins/cfg-9');
     expect(window.history.length).toBe(depth + 1);
     expect(received.mcps().selectedConfigId).toBe('cfg-9');
 
-    act(() => received.mcps().onSelectedConfigChange?.(null));
+    act(() => received.mcps().onSelectedConfigChange?.(null, 'change'));
     expect(window.location.pathname).toBe('/plugins');
 
     await act(async () => { window.history.back(); });
@@ -540,8 +540,18 @@ describe('Plugins route', () => {
     await open('/plugins/cfg-9');
     const depth = window.history.length;
 
-    act(() => received.mcps().onSelectedConfigChange?.('cfg-9'));
+    act(() => received.mcps().onSelectedConfigChange?.('cfg-9', 'change'));
 
+    expect(window.history.length).toBe(depth);
+  });
+
+  it('replaces the address when the page lets go of a config the list does not know', async () => {
+    await open('/plugins/gone');
+    const depth = window.history.length;
+
+    act(() => received.mcps().onSelectedConfigChange?.(null, 'restore'));
+
+    expect(window.location.pathname).toBe('/plugins');
     expect(window.history.length).toBe(depth);
   });
 });
