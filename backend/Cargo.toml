@@ -110,6 +110,7 @@ utoipa = { version = "5", features = ["chrono", "uuid", "axum_extras"] }
 # build script tries to fetch the SWAGGER_UI_DOWNLOAD_URL via curl,
 # which fails inside slim Docker builders that don't ship curl.
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+html5ever = "0.40.1"
 
 [dev-dependencies]
 # `test-util` only: it lets a test reach a 30-minute agent deadline on a paused

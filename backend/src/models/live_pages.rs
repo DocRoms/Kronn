@@ -263,3 +263,14 @@ pub struct LivePagesCapability {
     pub activated: bool,
     pub activated_at: Option<DateTime<Utc>>,
 }
+
+/// `POST /api/config/embed-origins`: origins to allow and to revoke, applied
+/// together. Each one is normalized; an invalid one rejects the whole change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EmbedOriginsChange {
+    #[serde(default)]
+    pub add: Vec<String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}

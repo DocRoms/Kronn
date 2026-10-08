@@ -2780,6 +2780,7 @@ mod tests {
             slug: "dashboard".into(),
             html: "<h1>Dashboard</h1><p>password=hunter2-golden</p>".into(),
             created_by_agent: Some("agent".into()),
+            embed_origins: Vec::new(),
             datasets: vec![crate::models::ArtifactBundleDataset {
                 name: "visits".into(),
                 kind: crate::models::LivePageDatasetKind::TimeSeries,

@@ -194,6 +194,20 @@ explicit light value, for example with `:root:not([data-theme="light"])`.
 Custom theme names can use the Page's own fallback rules.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
 
+## View parameters
+
+The standalone tab accepts display hints after the Page id:
+`#page/<id>?tv=1&scene=standup`. The id stays percent-encoded by
+`standaloneLivePageUrl`, so a literal `?` can only start the parameters.
+They reach the Page as `KronnPageData.page.params` (and in every
+`kronn:page-data` event), for example to open a wall-screen layout. Only plain
+tokens pass: keys `^[a-z][a-z0-9_]{0,31}$`, values `^[A-Za-z0-9_.-]{0,64}$`,
+at most 8, first occurrence wins; anything else is dropped. The embedded viewer
+and mosaic tiles have no URL of their own and send no `params` key. Parameters
+are hints for the Page's own rendering, never an authorization input.
+`[src: file: frontend/src/lib/live-page-navigation.ts]`
+`[src: file: frontend/src/lib/live-page-sandbox.ts]`
+
 The embedded viewer, standalone Page and mosaic skip automatic data
 publication when the Page id, slug, title, data revision and dataset count
 are unchanged. This preserves local state during quiet polling cycles.
@@ -413,6 +427,140 @@ separate Page transaction inside an import would break this guarantee.
 Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
 and runtime limits.
+
+### Third-party embeds
+
+A player nested inside a Page (for example `https://suno.com/embed/<id>`)
+inherits the Page's opaque-origin sandbox: it renders but never plays, and the
+CSP has no `frame-src` anyway. Relaxing either is not an option, since
+`allow-scripts` plus `allow-same-origin` on a `srcdoc` frame lets the Page
+remove its own sandbox. Embeds therefore follow the action-card pattern: the
+host draws the real content over the Page, and only for sites the destination
+Kronn allows.
+
+Authoring contract. The Page sizes a placeholder with CSS and gives the full
+URL of what it wants to show:
+
+```html
+<div data-kronn-embed="https://suno.com/embed/08fca036-317a-4cd5-9860-166c62c0180f"
+     style="height:152px;border-radius:12px"></div>
+```
+
+Any http(s) URL is accepted by the contract; whether it is drawn depends only
+on its origin (scheme, host and port, compared exactly, so
+`https://player.example.com` does not cover `https://cdn.player.example.com`
+nor `:8443`). URLs with credentials or another scheme are ignored. Adding a new
+service is a configuration change plus HTML, never an engine change.
+[src: file: frontend/src/lib/live-page-embeds.ts:36]
+A third-party site can still refuse to be framed (`X-Frame-Options` or a CSP
+`frame-ancestors`); allowing it in Kronn does not override that, and the
+player then shows the site's own error.
+
+Allowed sites. One global list per Kronn, `embed_allowed_origins` in
+`config.toml`, served by `GET /api/config/embed-origins` and changed by
+`POST /api/config/embed-origins` with `{add, remove}`; each origin is
+normalized (lowercase host, default port dropped, IDN as punycode) and a
+malformed one rejects the whole change.
+[src: file: backend/src/models/setup.rs:73]
+[src: file: backend/src/core/embed_origins.rs:55]
+[src: file: backend/src/api/live_pages.rs:578]
+The UI is Configuration → Artifacts → External content (Allowed sites): type an
+origin, see the exact value that will be saved, add it, or remove a
+permission. Every Page view, the import dialog and that section share one
+in-tab store; another tab (a wall screen) re-reads it when it becomes visible,
+so a revoked site disappears at the next check. Changes are sent one after the
+other, and a read that started before a change landed (or while one is in
+flight) is discarded, so a slow read can never bring back a revoked site or
+drop a confirmed one. An import that allowed sites invalidates the store the
+same way and reads the list again at once.
+[src: file: frontend/src/components/settings/ExternalContentSection.tsx:24]
+[src: file: frontend/src/hooks/useEmbedAllowedOrigins.ts:95]
+
+Bridge. The injected script finds every `[data-kronn-embed]` (including ones
+page scripts render or change later, via a MutationObserver), and posts one
+`{type:'kronn:page-embeds', version:1, channel_id, embeds:[{key, url, rect,
+clip?, visible, radius}]}` message over the private link port. It re-sends on
+scroll (capture, so a scrolling container inside the Page counts), resize, DOM
+mutations and element resize, throttled to one animation frame and only when
+the list changed. `key` is `e<hash of url>:<rank>` (rank among identical
+placeholders in document order), so a redrawn placeholder keeps its player.
+`rect` is in the Page iframe's viewport coordinates. `clip` is what the
+placeholder's clipping ancestors (any `overflow` other than `visible`, up to a
+`position: fixed` one) leave visible of it, absent when none clips it;
+`visible` is false when that visible part is empty or outside the viewport.
+The report is capped at 64 placeholders, a bound on work only: the players'
+own cap (8) is applied by the host after its check, so refused placeholders
+never crowd out allowed ones. A fresh port always receives the full list,
+even empty. The message needs no user activation: it only positions
+host-owned content.
+[src: file: frontend/src/lib/live-page-sandbox.ts:548]
+[src: file: frontend/src/lib/live-page-sandbox.ts:567]
+
+Host. The relay checks the list structurally (bounded, finite rectangles, key
+grammar, URL length; a malformed clip becomes an empty one, never none)
+[src: file: frontend/src/lib/live-page-sandbox.ts:134], then
+`planLivePageEmbeds` decides: nothing before the allowed sites are known; an
+allowed origin gets a player (at most 8); a valid URL from another site gets a
+warning drawn by Kronn (at most 8), naming the origin, with a "Configure
+allowed domains" button that opens the settings with that origin typed in,
+never added. Inside the app the current tab navigates
+(`#settings/artifacts?origin=…`); a standalone Page or mosaic keeps running and
+opens the settings in a new tab.
+[src: file: frontend/src/lib/live-page-embeds.ts:71]
+[src: file: frontend/src/lib/live-page-navigation.ts:185]
+[src: file: frontend/src/pages/Dashboard.tsx:243]
+`LivePageEmbedOverlay` renders a layer sized to the iframe's content box with
+`overflow: hidden`, so content is clipped to the Page and can never cover host
+UI; each item is also cut with `clip-path: inset(…)` to the reported `clip`,
+which clips hit-testing too, so a Page control next to a clipped placeholder
+still gets its clicks (`e2e/specs/live-page-embed-clipping.spec.ts`).
+[src: file: frontend/src/lib/live-page-embeds.ts:114]
+The layer sits at z-index 3, under the action card (4), and lets clicks
+through except on its items. Players are keyed and kept in first-seen DOM
+order, because moving an iframe reloads it: scrolling, re-clipping or
+reordering only changes its style, and playback continues. Each player is
+`<iframe loading="lazy" allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+referrerpolicy="strict-origin-when-cross-origin"
+sandbox="allow-scripts allow-same-origin allow-popups allow-presentation">`;
+`allow-same-origin` keeps the site's own origin, cross-origin to Kronn.
+[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:42]
+[src: file: frontend/src/components/LivePageEmbedOverlay.tsx:105]
+
+Export and import. An exported Artifact carries `embed_origins` (omitted when
+empty, so other Artifacts keep their exact bytes): the origins of the
+`data-kronn-embed` attributes of its markup, read by html5ever's WHATWG
+tokenizer exactly as a browser reads them (quoted or not, every character
+reference decoded, comments and raw-text elements skipped, linear cost), plus
+quoted ones spelled inside its scripts (decoded the same way), plus the origins
+it was itself imported with. That last part is stored with the Page
+(`live_pages.declared_embed_origins`), so content built by script keeps its
+declaration through a chain of imports. It is information for the importer,
+never an authorization, and the creator's allowed sites are not exported.
+[src: file: backend/src/core/embed_origins.rs:154]
+[src: file: backend/src/api/artifact_portability.rs:123]
+The import preview lists one row per distinct origin (from the HTML and the
+declaration): already allowed ("in the Artifact and already in your
+configuration"), or Add / Refuse. Answers are not part of the reviewed digest
+because they change no imported resource. Only declared origins can be sent
+in `allow_embed_origins`, and they join the global list only after the import
+commits; a cancelled or failed import changes no permission, and a refused (or
+unanswered) site does not block the import: its content shows the warning.
+Choices that would exceed the 256-site limit refuse the import before anything
+is written; the configuration is not locked while the import is planned, only
+for the final update. If that update fails once the import committed (the list
+changed meanwhile, the configuration cannot be saved), the result lists those
+sites in `not_allowed_embed_origins` with `embed_origins_error`, and the dialog
+says so before opening the Artifact.
+[src: file: frontend/src/components/ArtifactImportDialog.tsx:164]
+[src: file: backend/src/api/artifact_portability/import.rs:90]
+[src: file: backend/src/api/artifact_portability/import.rs:975]
+
+Security reasoning, in short: the destination Kronn alone decides which sites
+may be framed, and checks every URL at render time, including ones added by
+script or by a later revision; the content runs outside the Page sandbox in
+its own origin; its box is clipped to the Page frame and to the Page's own
+containers. The Page's CSP is unchanged: allowing a site lets Kronn frame it,
+never lets the Page's own JavaScript reach that site or the network.
 
 ## Progressive disclosure
 

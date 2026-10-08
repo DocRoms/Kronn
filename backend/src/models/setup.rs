@@ -64,6 +64,13 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
     pub disabled_auto_skills: Vec<String>,
+    /// Origins (`scheme://host[:port]`, compared exactly) whose content Live
+    /// Pages may embed through `data-kronn-embed`. One list for every Page of
+    /// this Kronn; an imported Artifact only declares what it needs.
+    /// Served by `/api/config/embed-origins`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(skip)]
+    pub embed_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

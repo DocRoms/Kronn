@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  embedSettingsHash,
+  embedSettingsRoute,
   livePageMosaicLayouts,
+  openEmbedSettings,
   openStandaloneDiscussion,
   standaloneDiscussionId,
   standaloneDiscussionUrl,
@@ -9,7 +12,9 @@ import {
   standaloneLivePageId,
   standaloneLivePageMosaic,
   standaloneLivePageMosaicUrl,
+  standaloneLivePageRoute,
   standaloneLivePageUrl,
+  livePageViewParams,
 } from '../live-page-navigation';
 
 describe('standalone Live Page navigation', () => {
@@ -40,6 +45,24 @@ describe('standalone Live Page navigation', () => {
     expect(standaloneLivePageId('#project-page-1')).toBeNull();
     expect(standaloneLivePageId('#page/')).toBeNull();
     expect(standaloneLivePageId('#page/%E0%A4%A')).toBeNull();
+  });
+
+  it('splits view parameters from the Page id, which stays percent-encoded', () => {
+    expect(standaloneLivePageRoute('#page/4f38f114?tv=1')).toEqual({ pageId: '4f38f114', params: { tv: '1' } });
+    expect(standaloneLivePageRoute('#page/4f38f114')).toEqual({ pageId: '4f38f114', params: {} });
+    expect(standaloneLivePageId('#page/4f38f114?tv=1&scene=standup')).toBe('4f38f114');
+    // A literal « ? » inside an id is always encoded by standaloneLivePageUrl.
+    const url = standaloneLivePageUrl('a?b', { origin: 'http://localhost:5173', pathname: '/' } as Location);
+    expect(standaloneLivePageRoute(new URL(url).hash + '?tv=1')).toEqual({ pageId: 'a?b', params: { tv: '1' } });
+    expect(standaloneLivePageRoute('#page/?tv=1')).toBeNull();
+  });
+
+  it('keeps only short plain view parameters', () => {
+    expect(livePageViewParams('tv=1&names=all&scene=stand-up.v2')).toEqual({ tv: '1', names: 'all', scene: 'stand-up.v2' });
+    // markup, unicode, bad keys and oversized values are dropped, the first duplicate wins
+    expect(livePageViewParams('x=<script>&é=1&Tv=1&1a=1&long=' + 'a'.repeat(65) + '&tv=1&tv=2&empty=')).toEqual({ tv: '1', empty: '' });
+    const many = Array.from({ length: 12 }, (_, i) => `k${i}=v`).join('&');
+    expect(Object.keys(livePageViewParams(many))).toHaveLength(8);
   });
 
   it('builds and parses a multi-Page mosaic URL without losing Page ids', () => {
@@ -99,5 +122,32 @@ describe('standalone Live Page navigation', () => {
     expect(standaloneDiscussionId('#discussion-')).toBeNull();
     expect(standaloneDiscussionId('#discussion-%E0%A4%A')).toBeNull();
     expect(standaloneDiscussionId('')).toBeNull();
+  });
+});
+
+describe('allowed-sites settings link', () => {
+  it('round-trips the origin to prefill, and ignores other hashes', () => {
+    expect(embedSettingsHash('https://player.example.com:8443')).toBe('#settings/artifacts?origin=https%3A%2F%2Fplayer.example.com%3A8443');
+    expect(embedSettingsRoute(embedSettingsHash('https://player.example.com:8443'))).toEqual({ origin: 'https://player.example.com:8443' });
+    expect(embedSettingsRoute('#settings/artifacts')).toEqual({ origin: '' });
+    expect(embedSettingsRoute('#settings/artifactsx')).toBeNull();
+    expect(embedSettingsRoute('#page/abc')).toBeNull();
+  });
+
+  it('keeps a standalone Page running and opens the settings in a new tab', () => {
+    const open = vi.fn();
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '#page/wall?tv=1' }, open);
+    expect(open).toHaveBeenCalledWith('http://localhost:3140/#settings/artifacts?origin=https%3A%2F%2Fvimeo.com', '_blank', 'noopener,noreferrer');
+    open.mockClear();
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '#pages/mosaic?page=a&page=b' }, open);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it('navigates the current tab from inside the app', () => {
+    const open = vi.fn();
+    openEmbedSettings('https://vimeo.com', { origin: 'http://localhost:3140', pathname: '/', hash: '' }, open);
+    expect(open).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#settings/artifacts?origin=https%3A%2F%2Fvimeo.com');
+    window.location.hash = '';
   });
 });

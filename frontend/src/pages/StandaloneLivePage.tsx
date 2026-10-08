@@ -6,6 +6,7 @@ import {
   hostTheme,
   hostThemeTokens,
   createLivePageOpenLinkRelay,
+  type LivePageEmbedPlacement,
   runtimeData,
 } from '../lib/live-page-sandbox';
 import { openStandaloneDiscussion } from '../lib/live-page-navigation';
@@ -17,6 +18,7 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
+import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import './StandaloneLivePage.css';
@@ -24,12 +26,17 @@ import './StandaloneLivePage.css';
 // Same cadence as the embedded Pages view.
 const REFRESH_MS = 30_000;
 
+const NO_EMBEDS: LivePageEmbedPlacement[] = [];
+
 function channelId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `standalone-page-${Date.now()}-${Math.random()}`;
 }
 
-export function StandaloneLivePage({ pageId }: { pageId: string }) {
+export function StandaloneLivePage({ pageId, params }: { pageId: string; params?: Record<string, string> }) {
   const { t } = useT();
+  // Keyed by content: a parent re-render with an equal object must not re-post data.
+  const paramsKey = JSON.stringify(params ?? {});
+  const viewParams = useMemo(() => JSON.parse(paramsKey) as Record<string, string>, [paramsKey]);
   const [detail, setDetail] = useState<LivePageDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionUnavailable, setActionUnavailable] = useState(false);
@@ -102,27 +109,38 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
       type: 'kronn:page-data',
       version: 1,
       channel_id: bridgeChannel,
-      data: runtimeData(detail),
+      data: runtimeData(detail, viewParams),
     }, '*');
-  }, [bridgeChannel, detail]);
+  }, [bridgeChannel, detail, viewParams]);
   // A content-sized Page reports its height; it only applies to the document that sent it,
   // so a new revision that does not opt in never inherits the previous one's size.
   const [frameSize, setFrameSize] = useState<{ doc: string; height: number } | null>(null);
   const frameDocRef = useRef(sandboxDocument);
   useEffect(() => { frameDocRef.current = sandboxDocument; }, [sandboxDocument]);
   const frameHeight = frameSize && frameSize.doc === sandboxDocument ? frameSize.height : null;
+  // Where the Page placed its third-party players; like the height, it only
+  // applies to the document that reported it.
+  const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
+  const pageEmbeds = embedsReport && embedsReport.doc === sandboxDocument ? embedsReport.embeds : NO_EMBEDS;
   useEffect(() => {
-    const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
-      setActionUnavailable(false);
-      handlePageActionIntent(intent);
-    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
+    const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      onAction: intent => {
+        setActionUnavailable(false);
+        handlePageActionIntent(intent);
+      },
+      onAnchor: movePageActionAnchor,
+      onHeight: height => setFrameSize({ doc: frameDocRef.current, height }),
+      onEmbeds: embeds => setEmbedsReport({ doc: frameDocRef.current, embeds }),
+    });
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
       relay.dispose();
     };
   }, [bridgeChannel, handlePageActionIntent, movePageActionAnchor]);
-  usePublishPageDataWhenChanged(detail, publishToFrame);
+  // View parameters are part of what the Page was given: a new `?scene=` must
+  // reach it without a reload, an identical one must not re-post.
+  usePublishPageDataWhenChanged(detail, publishToFrame, paramsKey);
   // Each button shows how its row's last run went, and keeps up while it runs.
   const publishAllToFrame = useActionStatesInFrame(iframeRef, bridgeChannel, pageLaunches, publishToFrame);
   // The Page keeps a collapse of exactly this height open under the row.
@@ -155,6 +173,7 @@ export function StandaloneLivePage({ pageId }: { pageId: string }) {
           onLoad={publishAllToFrame}
           data-testid="standalone-live-page-frame"
         />
+        <LivePageEmbedOverlay frameRef={iframeRef} embeds={pageEmbeds} />
         <LivePageActionOverlay
           active={pageActiveAction}
           action={pageSelectedAction}

@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo } from '../types/generated';
+import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, EmbedOriginsChange } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   DiscussionWeightConfig,
@@ -829,6 +829,10 @@ export const config = {
     api<void>('POST', '/config/continual-learning-enabled', enabled),
   getScanPaths: () => api<string[]>('GET', '/config/scan-paths'),
   setScanPaths: (paths: string[]) => api<void>('POST', '/config/scan-paths', { paths }),
+  /** Sites every Live Page of this Kronn may embed content from (`data-kronn-embed`). */
+  getEmbedOrigins: () => api<string[]>('GET', '/config/embed-origins'),
+  /** Allow and revoke sites in one change; returns the new list. */
+  changeEmbedOrigins: (change: EmbedOriginsChange) => api<string[]>('POST', '/config/embed-origins', change),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
   setScanIgnore: (patterns: string[]) => api<void>('POST', '/config/scan-ignore', patterns),
   getScanDepth: () => api<number>('GET', '/config/scan-depth'),

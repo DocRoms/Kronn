@@ -1,13 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
-import { Loader2, Upload, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, Globe, Loader2, Upload, X } from 'lucide-react';
 import { pages, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { describeRedacted, redactedFieldsIn } from '../lib/redactedFields';
-import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, LivePage, Project } from '../types/generated';
+import { invalidateEmbedAllowedOrigins } from '../hooks/useEmbedAllowedOrigins';
+import type { ArtifactImportChoice, ArtifactImportPreview, ArtifactImportRequest, ArtifactImportResult, LivePage, Project } from '../types/generated';
 import './ArtifactImportDialog.css';
 
 const MAX_BYTES = 16 * 1024 * 1024;
+
+/** The user's answer for one site the Artifact embeds; unanswered means refused. */
+type EmbedDecision = 'add' | 'refuse';
 
 export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: {
   onClose: () => void;
@@ -21,6 +25,16 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
   const [projects, setProjects] = useState<Project[]>([]);
   const [choices, setChoices] = useState<ArtifactImportChoice[]>([]);
   const [approvedExecIds, setApprovedExecIds] = useState<string[]>([]);
+  const [embedDecisions, setEmbedDecisions] = useState<Record<string, EmbedDecision>>({});
+  // Imported, but some chosen sites could not be allowed: said before closing.
+  const [partial, setPartial] = useState<ArtifactImportResult | null>(null);
+  const partialRef = useRef<ArtifactImportResult | null>(null);
+  useEffect(() => { partialRef.current = partial; }, [partial]);
+  // Once imported, closing the dialog in any way opens the new Artifact.
+  const dismiss = useCallback(() => {
+    if (partialRef.current) onImported(partialRef.current.artifact);
+    else onClose();
+  }, [onClose, onImported]);
   const [preview, setPreview] = useState<ArtifactImportPreview | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -39,7 +53,7 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.querySelector<HTMLElement>('input')?.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !inFlight.current) { event.preventDefault(); onClose(); }
+      if (event.key === 'Escape' && !inFlight.current) { event.preventDefault(); dismiss(); }
       if (event.key !== 'Tab') return;
       const items = Array.from(dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)') ?? []);
       const first = items[0]; const last = items.at(-1);
@@ -48,12 +62,12 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
     };
     window.addEventListener('keydown', keydown);
     return () => { window.removeEventListener('keydown', keydown); previous?.focus(); };
-  }, [onClose]);
+  }, [dismiss]);
 
   const readFile = async (file?: File) => {
     if (!file || inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(null); setPreview(null); setContent(''); setChoices([]);
-    setApprovedExecIds([]);
+    setApprovedExecIds([]); setEmbedDecisions({});
     try {
       if (file.size > MAX_BYTES) throw new Error(t('pages.import.tooLarge'));
       const text = await file.text();
@@ -64,7 +78,15 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
     finally { inFlight.current = false; setBusy(false); }
   };
 
-  const request = (): ArtifactImportRequest => ({ content, project_id: projectId || null, choices, approved_quick_exec_ids: approvedExecIds, preview_digest: preview?.digest ?? null });
+  // Sites are not part of the reviewed digest: they change no imported
+  // resource, and are only added to the allowed list once the import commits.
+  const allowEmbedOrigins = (preview?.embed_origins ?? [])
+    .filter(item => !item.already_allowed && embedDecisions[item.origin] === 'add')
+    .map(item => item.origin);
+  const request = (): ArtifactImportRequest => ({
+    content, project_id: projectId || null, choices, approved_quick_exec_ids: approvedExecIds,
+    preview_digest: preview?.digest ?? null, allow_embed_origins: allowEmbedOrigins,
+  });
   const inspect = async () => {
     if (!content || inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(null);
@@ -77,18 +99,20 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
     inFlight.current = true; setBusy(true); setError(null);
     try {
       const result = await pages.importArtifact(request());
+      if (result.allowed_embed_origins.length > 0) void invalidateEmbedAllowedOrigins();
       window.dispatchEvent(new Event('kronn:pages-activated'));
-      onImported(result.artifact);
+      if (result.not_allowed_embed_origins.length > 0) setPartial(result);
+      else onImported(result.artifact);
     } catch (cause) { setError(userError(cause)); setDirty(true); }
     finally { inFlight.current = false; setBusy(false); }
   };
 
   return <div className="artifact-import-backdrop" onMouseDown={event => {
-    if (event.target === event.currentTarget && !inFlight.current) onClose();
+    if (event.target === event.currentTarget && !inFlight.current) dismiss();
   }}>
     <section ref={dialog} className="artifact-import-dialog" role="dialog" aria-modal="true" aria-labelledby="artifact-import-title">
       <header><h2 id="artifact-import-title">{t('pages.import.title')}</h2>
-        <button type="button" onClick={onClose} disabled={busy} aria-label={t('common.close')}><X size={18} /></button></header>
+        <button type="button" onClick={dismiss} disabled={busy} aria-label={t('common.close')}><X size={18} /></button></header>
       <p>{t('pages.import.hint')}</p>
       <label>{t('pages.import.file')}<input type="file" accept="application/json,.json" disabled={busy}
         onChange={event => { void readFile(event.target.files?.[0]); event.target.value = ''; }} /></label>
@@ -137,6 +161,25 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
         </div>
         {preview.entries.some(entry => entry.quick_exec && !entry.quick_exec.approved)
           && <p className="artifact-import-note">{t('pages.import.execApprovalRequired')}</p>}
+        {preview.embed_origins.length > 0 && <div className="artifact-import-embeds" data-testid="import-embed-origins">
+          <strong><Globe size={14} aria-hidden="true" />{t('pages.import.embeds.title')}</strong>
+          <p>{t('pages.import.embeds.hint')}</p>
+          <ul>{preview.embed_origins.map(({ origin, already_allowed: allowed }) => {
+            const decision = embedDecisions[origin];
+            const decide = (next: EmbedDecision) => setEmbedDecisions(previous => ({ ...previous, [origin]: next }));
+            return <li key={origin} className="artifact-import-embed" data-origin={origin}>
+              <code>{origin}</code>
+              {allowed
+                ? <small className="artifact-import-embed-allowed"><Check size={12} aria-hidden="true" />{t('pages.import.embeds.alreadyAllowed')}</small>
+                : <span className="artifact-import-embed-actions" role="group" aria-label={origin}>
+                  <button type="button" aria-pressed={decision === 'add'} disabled={busy}
+                    onClick={() => decide('add')}>{t('pages.import.embeds.add')}</button>
+                  <button type="button" aria-pressed={decision === 'refuse'} disabled={busy}
+                    onClick={() => decide('refuse')}>{t('pages.import.embeds.refuse')}</button>
+                </span>}
+            </li>;
+          })}</ul>
+        </div>}
         {preview.issues.length > 0 && <ul role="alert">{preview.issues.map(issue => <li key={issue}>{issue}</li>)}</ul>}
         {(() => {
           const masked = redactedFieldsIn(content);
@@ -149,12 +192,20 @@ export function ArtifactImportDialog({ onClose, onImported, initialProjectId }: 
         <p className="artifact-import-note">{t('pages.import.boundaries')}</p>
       </>}
       {error && <p className="artifact-import-error" role="alert">{error}</p>}
-      <footer><button type="button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
+      {partial && <div className="artifact-import-warning" role="alert" data-testid="import-embed-not-allowed">
+        <strong>{t('pages.import.embeds.notAllowed')}</strong>
+        <ul>{partial.not_allowed_embed_origins.map(origin => <li key={origin}><code>{origin}</code></li>)}</ul>
+        {partial.embed_origins_error && <p>{partial.embed_origins_error}</p>}
+        <p>{t('pages.import.embeds.notAllowedHint')}</p>
+      </div>}
+      {partial ? <footer>
+        <button type="button" onClick={() => onImported(partial.artifact)}>{t('pages.import.embeds.continue')}</button>
+      </footer> : <footer><button type="button" onClick={onClose} disabled={busy}>{t('common.cancel')}</button>
         <button type="button" onClick={() => void inspect()} disabled={busy || !content}>
           {busy && <Loader2 size={14} className="spin" />}{t('pages.import.preview')}</button>
         {preview && <button type="button" onClick={() => void commit()} disabled={busy || dirty || !preview.can_import}>
           <Upload size={14} />{t(preview.warnings.length ? 'pages.import.confirmWithSetup' : 'pages.import.confirm')}</button>}
-      </footer>
+      </footer>}
     </section>
   </div>;
 }

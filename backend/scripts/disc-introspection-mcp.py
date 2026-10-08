@@ -9580,6 +9580,13 @@ _PAGE_ACTION_CONTRACT = (
     "opened with the agent's answer. Any other click opens a fresh offer, which "
     "launches a new attempt, with the row's last run one click away. "
     "A Quick Prompt counts as succeeded once its agent has answered."
+    "\n\nThird-party content: never nest an iframe (the sandbox blocks it). Place a "
+    "sized placeholder `<div data-kronn-embed=\"https://player.example.com/embed/ID\">` "
+    "with the full http(s) embed URL, and Kronn draws it over the placeholder when "
+    "that site (scheme, host, port) is in the destination Kronn's allowed sites "
+    "(Configuration > Artifacts > External content); otherwise Kronn shows a warning "
+    "with a link to allow it. At most 8 are drawn. A site may itself refuse to be "
+    "framed. The Page's CSP is unchanged: page scripts still cannot fetch that site."
 )
 
 TOOL_MANUALS = {

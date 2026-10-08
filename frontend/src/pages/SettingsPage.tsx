@@ -15,7 +15,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
-  Minimize2, Maximize2, Maximize, Settings2, BookOpen,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, AppWindow,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -70,6 +70,7 @@ import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
+import { ExternalContentSection, EXTERNAL_CONTENT_SECTION_ID, type EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
 import { KronnMark } from '../components/KronnMark';
@@ -152,6 +153,8 @@ interface SettingsPageProps {
   // plugin has a config in this instance. Avoids surfacing a debug
   // panel for users who don't use APIs yet.
   hasConfiguredApi?: boolean;
+  /** A site to type into Artifacts → External content (from a blocked embed). */
+  embedOriginPrefill?: EmbedOriginPrefill | null;
 }
 
 export function SettingsPage({
@@ -167,6 +170,7 @@ export function SettingsPage({
   onNavigateDiscussion,
   toast,
   hasConfiguredApi = false,
+  embedOriginPrefill = null,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
   const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
@@ -410,6 +414,7 @@ export function SettingsPage({
     { id: 'settings-capabilities', label: t('config.capabilities'), icon: <Zap size={15} /> },
     { id: 'settings-appearance', label: t('config.preferences'), icon: <Settings2 size={15} /> },
     { id: 'settings-voice', label: t('settings.voice'), icon: <Mic size={15} />, group: t('config.workspaceSettings') },
+    { id: EXTERNAL_CONTENT_SECTION_ID, label: t('config.artifacts'), icon: <AppWindow size={15} /> },
     { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
     { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
     { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} />, group: t('config.systemSettings') },
@@ -1504,6 +1509,9 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+
+      {/* Artifacts: sites Live Pages may embed content from */}
+      <ExternalContentSection prefill={embedOriginPrefill} toast={toast} />
 
       {/* Scan (depth + paths + ignore) */}
       <div id="settings-scan" className="set-card">

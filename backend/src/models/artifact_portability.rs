@@ -41,6 +41,14 @@ pub struct ArtifactBundlePage {
     pub html: String,
     pub created_by_agent: Option<String>,
     pub datasets: Vec<ArtifactBundleDataset>,
+    /// Origins of the third-party content the HTML embeds (`data-kronn-embed`).
+    /// It tells the importer what the Artifact needs; it never authorizes
+    /// anything, and the destination Kronn still checks every URL it renders.
+    /// Omitted when empty, so Artifacts without embeds keep their exact bytes
+    /// (and the approval fingerprints of repository resources built on them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<String>>")]
+    pub embed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -105,6 +113,10 @@ pub struct ArtifactImportRequest {
     pub approved_quick_exec_ids: Vec<String>,
     /// The preview digest is required at commit; stale decisions are rejected.
     pub preview_digest: Option<String>,
+    /// Origins the Artifact declares that the user chose to allow on this
+    /// Kronn. Added to the global list only once the import commits.
+    #[serde(default)]
+    pub allow_embed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -159,6 +171,16 @@ pub struct ArtifactImportPreview {
     pub warnings: Vec<ArtifactImportWarning>,
     pub digest: String,
     pub can_import: bool,
+    /// One row per distinct origin the Artifact embeds content from.
+    pub embed_origins: Vec<ArtifactImportEmbedOrigin>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ArtifactImportEmbedOrigin {
+    pub origin: String,
+    /// Already in this Kronn's allowed sites: nothing to decide.
+    pub already_allowed: bool,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -166,6 +188,13 @@ pub struct ArtifactImportPreview {
 pub struct ArtifactImportResult {
     pub artifact: super::LivePage,
     pub entries: Vec<ArtifactImportEntry>,
+    /// Origins this import added to the allowed sites.
+    pub allowed_embed_origins: Vec<String>,
+    /// Origins the user chose to add that are NOT allowed although the
+    /// Artifact was imported (the configuration could not be saved), with
+    /// `embed_origins_error` saying why. Empty when every choice was applied.
+    pub not_allowed_embed_origins: Vec<String>,
+    pub embed_origins_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

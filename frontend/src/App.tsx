@@ -14,7 +14,7 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { BackendStatus } from './components/BackendStatus';
 import { LoadingState } from './components/LoadingState';
 import { armBootScreen } from './lib/bootScreen';
-import { standaloneLivePageId, standaloneLivePageMosaic } from './lib/live-page-navigation';
+import { standaloneLivePageMosaic, standaloneLivePageRoute } from './lib/live-page-navigation';
 import { discussionMosaicRoute } from './lib/discussion-mosaic-navigation';
 import './App.css';
 
@@ -201,12 +201,12 @@ export function App() {
     );
   }
 
-  const standalonePageId = standaloneLivePageId(window.location.hash);
-  if (standalonePageId) {
+  const standalonePage = standaloneLivePageRoute(window.location.hash);
+  if (standalonePage) {
     return (
       <ErrorBoundary>
         <Suspense fallback={<LoadingState fullscreen />}>
-          <StandaloneLivePage pageId={standalonePageId} />
+          <StandaloneLivePage pageId={standalonePage.pageId} params={standalonePage.params} />
         </Suspense>
       </ErrorBoundary>
     );

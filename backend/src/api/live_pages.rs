@@ -563,6 +563,42 @@ fn valid_slug(slug: &str) -> bool {
             .all(|value| value.is_ascii_lowercase() || value.is_ascii_digit() || value == '-')
 }
 
+/// GET /api/config/embed-origins: the origins every Live Page of this Kronn
+/// may embed content from (`data-kronn-embed`), normalized.
+pub async fn embed_origins(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
+    let config = state.config.read().await;
+    let current = &config.embed_allowed_origins;
+    Json(ApiResponse::ok(
+        crate::core::embed_origins::apply_changes(current, &[], &[]).unwrap_or_default(),
+    ))
+}
+
+/// POST /api/config/embed-origins: allow and revoke origins, then persist.
+/// Returns the new list.
+pub async fn change_embed_origins(
+    State(state): State<AppState>,
+    Json(change): Json<crate::models::EmbedOriginsChange>,
+) -> Json<ApiResponse<Vec<String>>> {
+    let mut config = state.config.write().await;
+    let next = match crate::core::embed_origins::apply_changes(
+        &config.embed_allowed_origins,
+        &change.add,
+        &change.remove,
+    ) {
+        Ok(next) => next,
+        Err(error) => return Json(ApiResponse::err_coded(ApiErrorCode::Validation, error)),
+    };
+    let previous = std::mem::replace(&mut config.embed_allowed_origins, next.clone());
+    if let Err(error) = crate::core::config::save(&config).await {
+        config.embed_allowed_origins = previous;
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to save allowed sites: {error}"),
+        ));
+    }
+    Json(ApiResponse::ok(next))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

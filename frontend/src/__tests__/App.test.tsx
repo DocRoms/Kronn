@@ -182,7 +182,7 @@ describe('App', () => {
 
     const postMessage = vi.fn();
     const openExternal = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     port.postMessage({

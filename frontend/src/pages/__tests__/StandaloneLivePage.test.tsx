@@ -37,8 +37,8 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
-  createLivePageOpenLinkRelay: vi.fn((_channel, _open, onAction) => {
-    linkRelay.onAction = onAction;
+  createLivePageOpenLinkRelay: vi.fn((_channel, options) => {
+    linkRelay.onAction = options?.onAction ?? null;
     return linkRelay;
   }),
 }));
@@ -101,6 +101,39 @@ describe('StandaloneLivePage', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('hands the URL view parameters to the Page with its data', async () => {
+    render(<StandaloneLivePage pageId="page-1" params={{ tv: '1' }} />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    fireEvent.load(frame);
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'kronn:page-data',
+        data: expect.objectContaining({ page: expect.objectContaining({ id: 'page-1', params: { tv: '1' } }) }),
+      }),
+      '*',
+    ));
+  });
+
+  it('republishes new view parameters without a reload, and identical ones not at all', async () => {
+    const view = render(<StandaloneLivePage pageId="page-1" params={{ scene: 'standup' }} />);
+    const frame = await screen.findByTestId('standalone-live-page-frame') as HTMLIFrameElement;
+    const documentBefore = frame.getAttribute('srcdoc');
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    const dataPosts = () => post.mock.calls.filter(([message]) => (message as { type?: string }).type === 'kronn:page-data');
+
+    // Same parameters, new object: nothing to send.
+    view.rerender(<StandaloneLivePage pageId="page-1" params={{ scene: 'standup' }} />);
+    await act(async () => {});
+    expect(dataPosts()).toHaveLength(0);
+
+    view.rerender(<StandaloneLivePage pageId="page-1" params={{ scene: 'retro' }} />);
+    await waitFor(() => expect(dataPosts()).toHaveLength(1));
+    expect(dataPosts()[0][0]).toMatchObject({ data: { page: { params: { scene: 'retro' } } } });
+    expect(screen.getByTestId('standalone-live-page-frame')).toBe(frame);
+    expect(frame.getAttribute('srcdoc')).toBe(documentBefore);
   });
 
   it('delivers a data: image published in a dataset without widening the frame CSP', async () => {

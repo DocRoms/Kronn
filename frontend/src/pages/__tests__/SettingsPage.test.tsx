@@ -328,6 +328,23 @@ describe('SettingsPage', () => {
     expect(preferences?.hasAttribute('aria-current')).toBe(false);
   });
 
+  it('places Artifacts after Voice and before Project scanning, in the index and on the page', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const labels = [...nav.querySelectorAll<HTMLButtonElement>('.set-nav-btn')].map(button => button.textContent?.trim());
+    const artifacts = labels.indexOf('Artifacts');
+    expect(artifacts).toBeGreaterThan(0);
+    expect(labels[artifacts - 1]).toContain('Voice');
+    expect(labels[artifacts + 1]).toContain('Scan des projets');
+
+    const sectionIds = [...(document.querySelector('.set-content')?.children ?? [])].map(child => child.id).filter(Boolean);
+    const at = sectionIds.indexOf('settings-artifacts');
+    expect(sectionIds.slice(at - 1, at + 2)).toEqual(['settings-voice', 'settings-artifacts', 'settings-scan']);
+    expect(screen.getByTestId('settings-external-content')).toHaveTextContent('Contenus externes');
+    expect(screen.getByTestId('settings-external-content')).toHaveTextContent('Sites autorisés');
+  });
+
   it('keeps agent capabilities directly after agents and the two beta sections', async () => {
     await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
 

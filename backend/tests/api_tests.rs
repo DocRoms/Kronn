@@ -2571,6 +2571,342 @@ async fn artifact_roundtrip_preserves_null_points_and_reuses_previous_import_ide
 }
 
 #[tokio::test]
+#[serial]
+async fn embed_origins_config_normalizes_dedupes_revokes_and_rejects_invalid_sites() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, empty) = get_json(app.clone(), "/api/config/embed-origins").await;
+    assert_eq!(empty["data"], serde_json::json!([]), "{empty}");
+
+    let (_, added) = post_json(
+        app.clone(),
+        "/api/config/embed-origins",
+        serde_json::json!({"add":["https://Player.Example.com/","https://player.example.com","https://suno.com:443"]}),
+    )
+    .await;
+    assert_eq!(
+        added["data"],
+        serde_json::json!(["https://player.example.com", "https://suno.com"]),
+        "{added}"
+    );
+    assert_eq!(
+        state.config.read().await.embed_allowed_origins,
+        vec!["https://player.example.com", "https://suno.com"]
+    );
+
+    // A typo is reported and changes nothing.
+    let (_, invalid) = post_json(
+        app.clone(),
+        "/api/config/embed-origins",
+        serde_json::json!({"add":["https://other.example/embed/x"]}),
+    )
+    .await;
+    assert_eq!(invalid["success"], false, "{invalid}");
+    assert_eq!(state.config.read().await.embed_allowed_origins.len(), 2);
+
+    let (_, revoked) = post_json(
+        app.clone(),
+        "/api/config/embed-origins",
+        serde_json::json!({"remove":["https://SUNO.com"]}),
+    )
+    .await;
+    assert_eq!(
+        revoked["data"],
+        serde_json::json!(["https://player.example.com"])
+    );
+    let (_, read_back) = get_json(app, "/api/config/embed-origins").await;
+    assert_eq!(
+        read_back["data"],
+        serde_json::json!(["https://player.example.com"])
+    );
+}
+
+/// An Artifact declares the sites it embeds; the importer decides per site,
+/// and only a committed import changes the allowed list.
+#[tokio::test]
+#[serial]
+async fn artifact_embed_origins_are_declared_on_export_and_allowed_only_on_committed_import() {
+    let (source, _) = workflow_portability_fixture().await;
+    let source_app = build_router_with_auth(source.clone(), false);
+    let embeds = r#"<div data-kronn-embed="https://suno.com/embed/08fca036-317a-4cd5-9860-166c62c0180f"></div><div data-kronn-embed='https://player.example.com/v/1?a=1&amp;b=2'></div><div data-kronn-embed="https://suno.com/embed/other"></div>"#;
+    source
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE live_page_revisions SET html = html || ?1
+                 WHERE id = (SELECT current_revision_id FROM live_pages WHERE id = 'page-portable')",
+                [embeds],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // The creator's own allowed sites never travel with the Artifact.
+    source.config.write().await.embed_allowed_origins = vec!["https://creator-only.example".into()];
+    let (_, exported) = get_json(source_app, "/api/pages/page-portable/export").await;
+    let mut bundle = exported["data"].clone();
+    assert_eq!(
+        bundle["artifact"]["embed_origins"],
+        serde_json::json!(["https://player.example.com", "https://suno.com"]),
+        "{bundle}"
+    );
+    assert!(!bundle.to_string().contains("creator-only"));
+    // A site added by script at runtime can only be declared.
+    bundle["artifact"]["embed_origins"] = serde_json::json!([
+        "https://player.example.com",
+        "https://suno.com",
+        "https://runtime.example/",
+        "not an origin"
+    ]);
+    let content = serde_json::to_string(&bundle).unwrap();
+
+    let state = test_state();
+    state.config.write().await.embed_allowed_origins = vec!["https://suno.com".into()];
+    let app = build_router_with_auth(state.clone(), false);
+    let request = |allow: Value, digest: Value| {
+        serde_json::json!({
+            "content": content, "project_id": null, "approved_quick_exec_ids": ["qe-portable"],
+            "allow_embed_origins": allow, "preview_digest": digest
+        })
+    };
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        request(serde_json::json!([]), Value::Null),
+    )
+    .await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    assert_eq!(
+        preview["data"]["embed_origins"],
+        serde_json::json!([
+            {"origin":"https://player.example.com","already_allowed":false},
+            {"origin":"https://runtime.example","already_allowed":false},
+            {"origin":"https://suno.com","already_allowed":true}
+        ]),
+        "one row per distinct origin: {preview}"
+    );
+    let digest = preview["data"]["digest"].clone();
+
+    // An origin the Artifact does not declare cannot be slipped in, and the
+    // failed import changes no permission.
+    let (_, smuggled) = post_json(
+        app.clone(),
+        "/api/pages/import",
+        request(serde_json::json!(["https://evil.example"]), digest.clone()),
+    )
+    .await;
+    assert_eq!(smuggled["success"], false, "{smuggled}");
+    assert_eq!(
+        state.config.read().await.embed_allowed_origins,
+        vec!["https://suno.com"]
+    );
+
+    // Allow one site, refuse the other: the Artifact still imports.
+    let (_, imported) = post_json(
+        app.clone(),
+        "/api/pages/import",
+        request(serde_json::json!(["https://Player.example.com"]), digest),
+    )
+    .await;
+    assert_eq!(imported["success"], true, "{imported}");
+    assert_eq!(
+        imported["data"]["allowed_embed_origins"],
+        serde_json::json!(["https://player.example.com"])
+    );
+    assert_eq!(
+        state.config.read().await.embed_allowed_origins,
+        vec!["https://suno.com", "https://player.example.com"]
+    );
+    let (_, list) = get_json(app, "/api/config/embed-origins").await;
+    assert_eq!(
+        list["data"],
+        serde_json::json!(["https://suno.com", "https://player.example.com"])
+    );
+}
+
+/// Export a portable page whose HTML embeds two sites and that declares a
+/// third one built by script; returns the bundle content.
+async fn embed_bundle_content() -> String {
+    let (source, _) = workflow_portability_fixture().await;
+    source
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "UPDATE live_page_revisions SET html = html || ?1
+                 WHERE id = (SELECT current_revision_id FROM live_pages WHERE id = 'page-portable')",
+                ["<div data-kronn-embed=https://suno.com/embed/x></div>"],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, exported) = get_json(
+        build_router_with_auth(source, false),
+        "/api/pages/page-portable/export",
+    )
+    .await;
+    let mut bundle = exported["data"].clone();
+    bundle["artifact"]["embed_origins"] =
+        serde_json::json!(["https://suno.com", "https://runtime.example"]);
+    serde_json::to_string(&bundle).unwrap()
+}
+
+async fn import_with_sites(app: Router, content: &str, allow: Value) -> Value {
+    let request = |digest: Value| {
+        serde_json::json!({
+            "content": content, "project_id": null, "approved_quick_exec_ids": ["qe-portable"],
+            "allow_embed_origins": allow, "preview_digest": digest
+        })
+    };
+    let (_, preview) = post_json(
+        app.clone(),
+        "/api/pages/import/preview",
+        request(Value::Null),
+    )
+    .await;
+    assert_eq!(preview["data"]["can_import"], true, "{preview}");
+    let (_, imported) = post_json(
+        app,
+        "/api/pages/import",
+        request(preview["data"]["digest"].clone()),
+    )
+    .await;
+    imported
+}
+
+/// Declared sites (content built by script) survive import → export → import.
+#[tokio::test]
+#[serial]
+async fn artifact_declared_embed_origins_survive_a_chain_of_imports() {
+    let content = embed_bundle_content().await;
+    let state = test_state();
+    state.config.write().await.embed_allowed_origins = Vec::new();
+    let app = build_router_with_auth(state.clone(), false);
+    let imported = import_with_sites(app.clone(), &content, serde_json::json!([])).await;
+    assert_eq!(imported["success"], true, "{imported}");
+    let id = imported["data"]["artifact"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (_, reexported) = get_json(app.clone(), &format!("/api/pages/{id}/export")).await;
+    assert_eq!(
+        reexported["data"]["artifact"]["embed_origins"],
+        serde_json::json!(["https://runtime.example", "https://suno.com"]),
+        "{reexported}"
+    );
+    let content = serde_json::to_string(&reexported["data"]).unwrap();
+    let (_, preview) = post_json(
+        app,
+        "/api/pages/import/preview",
+        serde_json::json!({"content": content, "project_id": null}),
+    )
+    .await;
+    let origins: Vec<_> = preview["data"]["embed_origins"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{preview}"))
+        .iter()
+        .map(|row| row["origin"].clone())
+        .collect();
+    assert_eq!(
+        origins,
+        vec!["https://runtime.example", "https://suno.com"],
+        "{preview}"
+    );
+}
+
+/// A choice that would exceed the allowed-sites limit is refused before
+/// anything is written: no silent success.
+#[tokio::test]
+#[serial]
+async fn artifact_import_refuses_sites_beyond_the_limit_before_importing() {
+    let content = embed_bundle_content().await;
+    let state = test_state();
+    let full: Vec<String> = (0..256)
+        .map(|i| format!("https://site{i}.example"))
+        .collect();
+    state.config.write().await.embed_allowed_origins = full.clone();
+    let app = build_router_with_auth(state.clone(), false);
+    let pages_before = state
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM live_pages", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
+        })
+        .await
+        .unwrap();
+
+    let imported = import_with_sites(
+        app,
+        &content,
+        serde_json::json!(["https://runtime.example"]),
+    )
+    .await;
+    assert_eq!(imported["success"], false, "{imported}");
+    assert!(
+        imported["error"].as_str().unwrap().contains("At most 256"),
+        "{imported}"
+    );
+    let pages_after = state
+        .db
+        .with_conn(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) FROM live_pages", [], |r| {
+                r.get::<_, i64>(0)
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(pages_after, pages_before, "nothing may be imported");
+    assert_eq!(state.config.read().await.embed_allowed_origins, full);
+}
+
+/// When the configuration cannot be saved after the import committed, the
+/// response says which sites were not allowed and why.
+#[tokio::test]
+#[serial]
+async fn artifact_import_reports_sites_it_could_not_allow() {
+    let content = embed_bundle_content().await;
+    let state = test_state();
+    state.config.write().await.embed_allowed_origins = Vec::new();
+    let app = build_router_with_auth(state.clone(), false);
+    // A directory where config.toml should be: the atomic replace fails.
+    let config_path = kronn::core::config::config_path().unwrap();
+    let saved = std::fs::read(&config_path).ok();
+    let _ = std::fs::remove_file(&config_path);
+    std::fs::create_dir_all(config_path.join("blocker")).unwrap();
+
+    let imported = import_with_sites(
+        app,
+        &content,
+        serde_json::json!(["https://runtime.example"]),
+    )
+    .await;
+
+    std::fs::remove_dir_all(&config_path).unwrap();
+    if let Some(saved) = saved {
+        std::fs::write(&config_path, saved).unwrap();
+    }
+    assert_eq!(
+        imported["success"], true,
+        "the Artifact itself was imported: {imported}"
+    );
+    assert_eq!(
+        imported["data"]["allowed_embed_origins"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        imported["data"]["not_allowed_embed_origins"],
+        serde_json::json!(["https://runtime.example"])
+    );
+    assert!(imported["data"]["embed_origins_error"]
+        .as_str()
+        .unwrap()
+        .contains("could not be saved"));
+    assert!(state.config.read().await.embed_allowed_origins.is_empty());
+}
+
+#[tokio::test]
 async fn artifact_import_identities_are_scoped_per_project_and_deduplicated_on_reimport() {
     let (source, _) = workflow_portability_fixture().await;
     let (_, exported) = get_json(

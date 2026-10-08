@@ -16,6 +16,7 @@ import {
   hostTheme,
   hostThemeTokens,
   createLivePageOpenLinkRelay,
+  type LivePageEmbedPlacement,
   requestRenderedPageHtml,
   runtimeData,
 } from '../lib/live-page-sandbox';
@@ -27,6 +28,7 @@ import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
+import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
@@ -62,6 +64,8 @@ const PAGE_COLLAPSED_STORAGE_KEY = 'kronn:pageCollapsedSections';
 interface PageNavigationPreference {
   resourceId: string | null;
 }
+
+const NO_EMBEDS: LivePageEmbedPlacement[] = [];
 
 function readPageNavigation(): PageNavigationPreference {
   try {
@@ -643,11 +647,20 @@ export function PagesPage({
   const frameDocRef = useRef(document);
   useEffect(() => { frameDocRef.current = document; }, [document]);
   const frameHeight = frameSize && frameSize.doc === document ? frameSize.height : null;
+  // Where the Page placed its third-party players; like the height, it only
+  // applies to the document that reported it.
+  const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
+  const pageEmbeds = embedsReport && embedsReport.doc === document ? embedsReport.embeds : NO_EMBEDS;
   useEffect(() => {
-    const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
-      setError(null);
-      handlePageActionIntent(intent);
-    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
+    const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      onAction: intent => {
+        setError(null);
+        handlePageActionIntent(intent);
+      },
+      onAnchor: movePageActionAnchor,
+      onHeight: height => setFrameSize({ doc: frameDocRef.current, height }),
+      onEmbeds: embeds => setEmbedsReport({ doc: frameDocRef.current, embeds }),
+    });
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -1268,6 +1281,7 @@ export function PagesPage({
                   onLoad={publishAllToFrame}
                   data-testid="live-page-frame"
                 />
+                <LivePageEmbedOverlay frameRef={iframeRef} embeds={pageEmbeds} />
                 <LivePageActionOverlay
                   active={pageActiveAction}
                   action={pageSelectedAction}
