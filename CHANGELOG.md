@@ -1016,6 +1016,13 @@ Release notes for 0.9.3 and earlier are available in the
   `docker compose run`, `runuser`, `xargs` or `parallel` stays refused when
   approved.
 
+- Security: dependency advisories. Frontend overrides now pin `sharp` 0.35.5
+  (GHSA-wq5f-xc86-pv6w, librsvg), `source-map-js` 1.2.2 (GHSA-68fv-2mgg-jv7q,
+  denial of service), `dompurify` 3.4.16 (GHSA-p98j-92pf-mc4p,
+  GHSA-6688-9rhm-gjv2) and `global-agent` 4.1.3, which drops the `sprintf-js`
+  chain behind GHSA-hp3w-g68c-fv3c (no patched `sprintf-js` exists). Only
+  `onnxruntime-node`'s install script uses `global-agent`.
+
 ### Changed
 
 - Settings: in every agent card (agents, Ollama, external APIs) each tier's model picker now spans the card's full width, one tier per line, and its list opens taller. Model names share long provider prefixes such as "OpenCode Zen/…" and were unreadable in the narrow control.
