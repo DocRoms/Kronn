@@ -13,6 +13,7 @@ import type { PlanningPage } from '../../pages/PlanningPage';
 import type { SettingsPage } from '../../pages/SettingsPage';
 import type { McpPage } from '../../pages/McpPage';
 import { withDashboardRoutes } from '../../test/routerWrapper';
+import { navigateAppTab } from '../../lib/live-page-navigation';
 
 // Each page is replaced by a marker that records the props its route gave it,
 // so a test can read what the page received and fire what it would call.
@@ -359,6 +360,33 @@ describe('Projects route', () => {
     expect(window.history.length).toBe(depth);
   });
 
+  it('hands the project the view its address names, and follows the view the reader picks', async () => {
+    await open('/projects/proj-1/code?file=src%2Fmain.ts&line=7');
+    expect(received.projects().expandedId).toBe('proj-1');
+    expect(received.projects().projectLocation).toEqual({ view: 'code', file: 'src/main.ts', line: 7, folder: null });
+    const depth = window.history.length;
+
+    await act(async () => received.projects().onProjectLocationChange?.({ view: 'git' }));
+
+    expect(window.location.pathname).toBe('/projects/proj-1/git');
+    expect(window.location.search).toBe('');
+    expect(window.history.length).toBe(depth + 1);
+    expect(received.projects().projectLocation).toEqual({ view: 'git', file: null, line: null, folder: null });
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(received.projects().projectLocation?.view).toBe('code'));
+  });
+
+  it('leaves the view to the project when the address names none, or one it does not know', async () => {
+    await open('/projects/proj-1');
+    expect(received.projects().projectLocation).toBeNull();
+
+    await act(async () => { navigateAppTab('/projects/proj-1/nope'); });
+    await waitFor(() => expect(window.location.pathname).toBe('/projects/proj-1/nope'));
+    expect(received.projects().expandedId).toBe('proj-1');
+    expect(received.projects().projectLocation).toBeNull();
+  });
+
   it('returns to the bare list when the open project is closed', async () => {
     await open('/projects/proj-1');
 
@@ -460,6 +488,17 @@ describe('Planning route', () => {
     expect(window.location.pathname).toBe('/discussions/disc-5');
     expect(received.discussions().openDiscussionId).toBe('disc-5');
   });
+
+  it('opens a discussion on one of its workspaces, once', async () => {
+    await open('/planning/task-4');
+
+    await act(async () => received.planning().onNavigateDiscussion?.('disc-5', { gitWorkspaceId: 'ws-2' }));
+
+    expect(window.location.pathname).toBe('/discussions/disc-5');
+    expect(received.discussions().gitWorkspaceTarget).toEqual({ discussionId: 'disc-5', workspaceId: 'ws-2' });
+    await act(async () => received.discussions().onGitWorkspaceConsumed?.());
+    expect(received.discussions().gitWorkspaceTarget).toBeNull();
+  });
 });
 
 describe('Plugins route', () => {
@@ -518,6 +557,8 @@ describe('Workflows route', () => {
     ['/workflows/qe/qe-1', { tab: 'quickExecs', resourceId: 'qe-1', runId: null }],
     ['/workflows/skills', { tab: 'skills', resourceId: null, runId: null }],
     ['/workflows/skills/skill-1', { tab: 'skills', resourceId: 'skill-1', runId: null }],
+    ['/workflows/new', { tab: 'workflows', resourceId: null, runId: null, editor: 'create' }],
+    ['/workflows/wf-1/edit', { tab: 'workflows', resourceId: 'wf-1', runId: null, editor: 'edit' }],
   ])('reads %s as the selection', async (path, selection) => {
     await open(path);
 
@@ -534,6 +575,10 @@ describe('Workflows route', () => {
     expect(window.location.pathname).toBe('/workflows/wf-1/runs/run-2');
     act(() => received.workflows().onSelectionChange?.({ tab: 'skills', resourceId: null }, 'change'));
     expect(window.location.pathname).toBe('/workflows/skills');
+    act(() => received.workflows().onSelectionChange?.({ tab: 'workflows', resourceId: null, editor: 'create' }, 'change'));
+    expect(window.location.pathname).toBe('/workflows/new');
+    act(() => received.workflows().onSelectionChange?.({ tab: 'workflows', resourceId: 'wf-1', editor: 'edit' }, 'change'));
+    expect(window.location.pathname).toBe('/workflows/wf-1/edit');
 
     expect(page.mounts.workflows).toBe(1);
   });
@@ -747,6 +792,46 @@ describe('Discussions route', () => {
     expect(after.onActiveDiscussionChange).toBe(before.onActiveDiscussionChange);
   });
 
+  it('gives a comparison its own address, and keeps it while the page names the discussion behind it', async () => {
+    await open('/discussions/compare/run%201');
+    expect(received.discussions().compareRunId).toBe('run 1');
+    expect(received.discussions().openDiscussionId).toBeNull();
+
+    // The page restores the discussion it keeps behind the comparison: not the address.
+    await act(async () => received.discussions().onActiveDiscussionChange?.('disc-1'));
+    expect(window.location.pathname).toBe('/discussions/compare/run%201');
+
+    // Closing the comparison returns to the discussions.
+    await act(async () => received.discussions().onCompareChange?.(null));
+    expect(window.location.pathname).toBe('/discussions');
+    expect(received.discussions().compareRunId).toBeNull();
+  });
+
+  it('moves to a comparison the reader opens, a step Back undoes', async () => {
+    await open('/discussions/disc-1');
+    const depth = window.history.length;
+
+    await act(async () => received.discussions().onCompareChange?.('run-2'));
+    expect(window.location.pathname).toBe('/discussions/compare/run-2');
+    expect(window.history.length).toBe(depth + 1);
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/discussions/disc-1'));
+  });
+
+  it('opens an improved Quick Prompt at its address, flashed on arrival', async () => {
+    await open('/discussions/disc-1');
+
+    await act(async () => received.discussions().onNavigate('workflows', { quickPromptId: 'qp-7' }));
+
+    expect(window.location.pathname).toBe('/workflows/qp/qp-7');
+    expect(received.workflows().highlightQuickPromptId).toBe('qp-7');
+    // Acknowledged: a reload or a Back never flashes it again.
+    await act(async () => received.workflows().onHighlightConsumed?.());
+    expect(received.workflows().highlightQuickPromptId).toBeNull();
+    expect(window.location.pathname).toBe('/workflows/qp/qp-7');
+  });
+
   it('jumps to a project at its own address', async () => {
     await open('/discussions');
 
@@ -765,23 +850,35 @@ describe('Discussions route', () => {
     expect(window.location.pathname).toBe('/discussions');
   });
 
-  it('scrolls to the named anchor of the page it jumps to', async () => {
-    vi.useFakeTimers();
+  it('jumps to a Configuration section at its own address, scrolled into view on arrival', async () => {
+    await open('/discussions');
+    const anchor = document.createElement('div');
+    anchor.id = 'settings-server';
+    anchor.scrollIntoView = vi.fn();
+    document.body.appendChild(anchor);
     try {
-      await open('/discussions');
-      const anchor = document.createElement('div');
-      anchor.id = 'settings-server';
-      anchor.scrollIntoView = vi.fn();
-      document.body.appendChild(anchor);
-
       await act(async () => received.discussions().onNavigate('settings', { scrollTo: 'settings-server' }));
       expect(window.location.pathname).toBe('/config');
+      expect(window.location.hash).toBe('#settings-server');
 
-      act(() => { vi.advanceTimersByTime(200); });
-      expect(anchor.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
-      anchor.remove();
+      await waitFor(() => expect(anchor.scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' }));
     } finally {
-      vi.useRealTimers();
+      anchor.remove();
+    }
+  });
+
+  it('waits for a section that renders late, then scrolls to it', async () => {
+    await open('/config#settings-late');
+    const anchor = document.createElement('div');
+    anchor.id = 'settings-late';
+    anchor.scrollIntoView = vi.fn();
+    // Appears a few frames after the page, like a section fed by a request.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    document.body.appendChild(anchor);
+    try {
+      await waitFor(() => expect(anchor.scrollIntoView).toHaveBeenCalledTimes(1));
+    } finally {
+      anchor.remove();
     }
   });
 

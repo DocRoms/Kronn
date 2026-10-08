@@ -27,6 +27,13 @@ Release notes for 0.9.3 and earlier are available in the
   keep working for good, from Live Pages, messages, bookmarks and the `kronn`
   CLI alike. The desktop app's embedded server answers a reload on any of these
   addresses with the app.
+- Views inside a page have their own address too: a project's view
+  (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
+  workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of
+  discussions (`/discussions/compare/<run>`) and a Configuration section
+  (`/config#<section>`). A file an agent cites, a just-validated audit or a
+  just-improved Quick Prompt now opens at such an address, so Back, a reload
+  and a shared link land on the same view.
 
 
 ## [0.14.3] - 2026-10-07

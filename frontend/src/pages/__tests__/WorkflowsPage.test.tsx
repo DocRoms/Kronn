@@ -191,7 +191,6 @@ const fullConfig: AgentsConfig = {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  sessionStorage.removeItem('kronn:postQpImproved');
   localStorage.removeItem('kronn:automationNavigation');
   localStorage.removeItem('kronn:automationCollapsedSections');
   localStorage.removeItem('kronn:automationGroupBy');
@@ -982,13 +981,13 @@ describe('WorkflowsPage', () => {
     ));
   });
 
-  it('opens the Quick Prompts tab from the one-shot deploy target without an effect redirect', async () => {
-    sessionStorage.setItem('kronn:postQpImproved', 'qp-deployed');
+  it('opens the Quick Prompts tab on the improved Quick Prompt it arrives for, and acknowledges it', async () => {
+    const onHighlightConsumed = vi.fn();
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} highlightQuickPromptId="qp-deployed" onHighlightConsumed={onHighlightConsumed} />);
 
     expect(automationTypeChip()).toHaveAttribute('data-value', 'quickPrompts');
-    expect(sessionStorage.getItem('kronn:postQpImproved')).toBeNull();
+    expect(onHighlightConsumed).toHaveBeenCalledTimes(1);
   });
 
   it('renders with various agentAccess configs and shows create button', async () => {
@@ -1799,6 +1798,57 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
       { tab: 'quickPrompts', resourceId: null, runId: null }, 'change',
     ));
+  });
+
+  it('gives the workflow wizard an address: opening it, reopening it from the address, closing it', async () => {
+    const onSelectionChange = vi.fn();
+    const props = { projects: [], installedAgentTypes: ['ClaudeCode' as const], agentAccess: fullConfig, onSelectionChange };
+    const page = await wrap(<WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: null, runId: null }} />);
+
+    chooseAutomationAction('Nouveau workflow');
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith(
+      { tab: 'workflows', resourceId: null, runId: null, editor: 'create' }, 'change',
+    ));
+    expect(screen.getByPlaceholderText('ex: Auto-fix 5xx errors')).toBeInTheDocument();
+
+    // Back: the address no longer names the wizard, so it closes.
+    await act(async () => {
+      page.rerender(
+        <I18nProvider>
+          <WorkflowsPage {...props} selection={{ tab: 'workflows', resourceId: null, runId: null }} addressToken={{}} />
+        </I18nProvider>,
+      );
+    });
+    await waitFor(() => expect(screen.queryByPlaceholderText('ex: Auto-fix 5xx errors')).toBeNull());
+  });
+
+  it('opens the wizard straight from its address, and reports it unchanged', async () => {
+    const onSelectionChange = vi.fn();
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} onSelectionChange={onSelectionChange}
+        selection={{ tab: 'workflows', resourceId: null, runId: null, editor: 'create' }} />,
+    );
+    expect(screen.getByPlaceholderText('ex: Auto-fix 5xx errors')).toBeInTheDocument();
+    // A reload on `/workflows/new` must not be rewritten to the bare list.
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'workflows', resourceId: null, runId: null, editor: 'create' }, 'restore');
+  });
+
+  it('opens the edit wizard on the workflow its address names, once it is loaded', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    const onSelectionChange = vi.fn();
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} onSelectionChange={onSelectionChange}
+        selection={{ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' }} />,
+    );
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
+    await waitFor(() => expect(screen.getByDisplayValue(labWorkflow().name)).toBeInTheDocument());
+    // Never reported as anything but the edit it was asked for.
+    for (const [reported] of onSelectionChange.mock.calls) {
+      expect(reported).toEqual({ tab: 'workflows', resourceId: 'wf-lab', runId: null, editor: 'edit' });
+    }
   });
 
   it('applies the address again under a new token, even when its fields did not change', async () => {

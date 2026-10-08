@@ -16,7 +16,6 @@ import {
   X,
 } from 'lucide-react';
 import { planning } from '../lib/api';
-import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { userError } from '../lib/userError';
@@ -52,7 +51,8 @@ interface Props {
   projects: Project[];
   discussions: Discussion[];
   toast: ToastFn;
-  onNavigateDiscussion: (discussionId: string) => void;
+  /** Opens a discussion; with a workspace, its Git panel on that workspace. */
+  onNavigateDiscussion: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
 }
 
 const PRIORITIES: PlanningTaskPriority[] = ['critical', 'high', 'normal', 'low'];
@@ -757,7 +757,8 @@ interface DetailProps {
   onRemoveBlocker: (blockerTaskId: string) => Promise<void>;
   onLinkDiscussion: (discussionId: string) => Promise<void>;
   onOpenTask: (taskId: string) => void;
-  onNavigateDiscussion: (discussionId: string) => void;
+  /** Opens a discussion; with a workspace, its Git panel on that workspace. */
+  onNavigateDiscussion: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
 }
 
 function PlanningDetailForm({
@@ -864,8 +865,7 @@ function PlanningDetailForm({
               type="button"
               key={workspace.id}
               onClick={() => {
-                queueDiscussionWorkspaceTarget(workspace.disc_id, workspace.id);
-                onNavigateDiscussion(workspace.disc_id);
+                onNavigateDiscussion(workspace.disc_id, { gitWorkspaceId: workspace.id });
               }}
               title={t('planning.workspaceViewFiles')}
             >

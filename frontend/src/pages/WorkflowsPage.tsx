@@ -338,6 +338,10 @@ interface WorkflowsPageProps {
    * and the project pre-selected. Ack via `onPendingPresetConsumed`. */
   pendingPreset?: { presetId: string; projectId: string } | null;
   onPendingPresetConsumed?: () => void;
+  /** A Quick Prompt to scroll to and flash on arrival (just improved). Ack
+   *  via `onHighlightConsumed`. */
+  highlightQuickPromptId?: string | null;
+  onHighlightConsumed?: () => void;
   onNavigatePage?: (pageId: string) => void;
   /** Switches Dashboard to the Plugins page — used by the "no API plugin
    *  wired" prerequisite warning on the Quick API tab. */
@@ -368,27 +372,15 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
-function readPostImprovedQuickPromptId(): string | null {
-  try {
-    return sessionStorage.getItem('kronn:postQpImproved');
-  } catch {
-    // sessionStorage may be unavailable in private/restricted browser modes.
-    return null;
-  }
-}
-
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
   // navigation on tablets too, before the detail content becomes cramped.
   const isMobile = useIsMobile(1024);
-  // Consume the one-shot navigation target during initial state creation.
-  // Deriving the initial tab here avoids a second render solely to mirror
-  // sessionStorage from a mount effect.
-  const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(
-    readPostImprovedQuickPromptId,
-  );
+  // The one-shot arrival target, taken during initial state creation so the
+  // first render is already on its tab.
+  const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(highlightQuickPromptId);
   // The address, when it names a tab and resource; otherwise the last visit.
   const [initialAutomationNavigation] = useState<AutomationNavigationState>(() =>
     selection ? { tab: selection.tab, resourceId: selection.resourceId } : readAutomationNavigation());
@@ -535,6 +527,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       && !skillEntryById.has(selectedSkillId)
       && (!isRepositorySkillId(selectedSkillId) || usedSkillsLoaded || usedSkillsError),
   );
+  // The address can open the wizard (`/workflows/new`, `/workflows/<id>/edit`).
+  const [showCreate, setShowCreate] = useState(selection?.editor === 'create');
+  const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
+  // An edit address names the workflow before its detail is loaded: the
+  // wizard opens on it once it is (and the page keeps reporting the edit).
+  const [pendingEditId, setPendingEditId] = useState<string | null>(
+    selection?.editor === 'edit' ? selection.resourceId : null,
+  );
   // #11 — when a parent run's sub-run link is clicked, remember the target
   // child run so the opened WorkflowDetail auto-expands + scrolls to it.
   const [focusRunId, setFocusRunId] = useState<string | null>(selection?.runId ?? null);
@@ -559,11 +559,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
-    const current: AutomationSelection = { tab, resourceId, runId: tab === 'workflows' && resourceId ? focusRunId : null };
+    const editingId = tab === 'workflows' ? editingWorkflow?.id ?? pendingEditId : null;
+    const editor = tab !== 'workflows' ? null : showCreate ? 'create' : editingId ? 'edit' : null;
+    const current: AutomationSelection = editor
+      ? { tab, resourceId: editor === 'edit' ? editingId : null, runId: null, editor }
+      : { tab, resourceId, runId: tab === 'workflows' && resourceId ? focusRunId : null };
     const reason = currentSelectionRef.current ? 'change' : 'restore';
     currentSelectionRef.current = current;
     onSelectionChange?.(current, reason);
   }, [
+    editingWorkflow,
     focusRunId,
     invalidQuickApiSelection,
     invalidQuickExecSelection,
@@ -576,6 +581,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     selectedQuickExecId,
     selectedQuickPromptId,
     selectedSkillId,
+    pendingEditId,
+    showCreate,
     tab,
   ]);
   useEffect(() => {
@@ -696,7 +703,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       : (quickApiList ?? []).filter(qa => qa.api_plugin_slug === quickApiPluginFilter);
     return sortQuickApis(filtered, quickApiSort, quickApiSortReversed);
   }, [quickApiList, quickApiPluginFilter, quickApiSort, quickApiSortReversed]);
-  const [showCreate, setShowCreate] = useState(false);
   // 0.8.2 — Local snapshot of the pending preset, captured at the moment
   // `pendingPreset` arrives. We can't pass `pendingPreset` directly to
   // WorkflowWizard because Dashboard clears it on consume (causing the
@@ -710,13 +716,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingPreset]);
 
-  // A mount effect is appropriate for consuming the external navigation
-  // receipt; unlike the previous implementation, it does not derive React
-  // state or cause an additional render.
+  // Acknowledge the arrival intent once taken, so a reload or a Back never
+  // flashes the card again.
   useEffect(() => {
-    if (!postImprovedQpId) return;
-    try { sessionStorage.removeItem('kronn:postQpImproved'); } catch { /* private mode */ }
-  }, [postImprovedQpId]);
+    if (highlightQuickPromptId) onHighlightConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightQuickPromptId]);
 
   // Scroll + flash highlight the deep-linked QP card once the list is
   // available. Uses a 1.4s CSS animation (defined in WorkflowsPage.css)
@@ -742,7 +747,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     });
     return () => cancelAnimationFrame(raf1);
   }, [postImprovedQpId, quickPromptList]);
-  const [editingWorkflow, setEditingWorkflow] = useState<Workflow | null>(null);
   // 0.7.0 UX pass — import drawer state. Set when the user clicks the
   // "Importer" button on either tab. Carries the parsed JSON content +
   // a small preview snapshot so the drawer can render "tu vas importer
@@ -1163,15 +1167,25 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const selectionTab = selection?.tab;
   const selectionResourceId = selection?.resourceId;
   const selectionRunId = selection?.runId ?? null;
+  const selectionEditor = selection?.editor ?? null;
   useEffect(() => {
     if (!selectionTab) return;
-    const target: AutomationSelection = { tab: selectionTab, resourceId: selectionResourceId ?? null, runId: selectionRunId };
+    const target: AutomationSelection = {
+      tab: selectionTab, resourceId: selectionResourceId ?? null, runId: selectionRunId, editor: selectionEditor,
+    };
     if (currentSelectionRef.current && sameAutomationSelection(target, currentSelectionRef.current)) return;
     const timeoutId = window.setTimeout(() => {
       setTab(target.tab);
       setAutomationKindFilter(target.tab);
+      // The wizard is open exactly when the address says so.
+      setShowCreate(target.tab === 'workflows' && target.editor === 'create');
+      if (target.editor !== 'edit') { setEditingWorkflow(null); setPendingEditId(null); }
       if (target.tab === 'workflows') {
-        if (target.resourceId) void openDetail(target.resourceId, target.runId ?? undefined);
+        if (target.editor === 'create') { setSelectedId(null); setDetailWorkflow(null); }
+        else if (target.resourceId) {
+          if (target.editor === 'edit') setPendingEditId(target.resourceId);
+          void openDetail(target.resourceId, target.runId ?? undefined);
+        }
         else { setSelectedId(null); setDetailWorkflow(null); }
       } else if (target.tab === 'quickPrompts') setSelectedQuickPromptId(target.resourceId);
       else if (target.tab === 'quickApis') setSelectedQuickApiId(target.resourceId);
@@ -1182,7 +1196,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       window.clearTimeout(timeoutId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectionTab, selectionResourceId, selectionRunId, addressToken]);
+  }, [selectionTab, selectionResourceId, selectionRunId, selectionEditor, addressToken]);
+
+  // The edit address's workflow is loaded: the wizard opens on it.
+  if (pendingEditId && detailWorkflow?.id === pendingEditId) {
+    setPendingEditId(null);
+    setEditingWorkflow(detailWorkflow);
+  }
 
   // 0.8.2 — Live workflow-run updates. The SSE stream is tab-local: if the
   // user opens the workflow detail in a *different* tab while a run is in

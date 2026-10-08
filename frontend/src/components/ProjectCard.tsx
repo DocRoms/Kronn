@@ -42,12 +42,11 @@ import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCached
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
+import { PROJECT_VIEWS, type ProjectLocation, type ProjectView } from '../lib/routes';
 
-type ProjectDetailView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
+type ProjectDetailView = ProjectView;
 
-const PROJECT_DETAIL_VIEWS: ProjectDetailView[] = [
-  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
-];
+const PROJECT_DETAIL_VIEWS = PROJECT_VIEWS;
 const PROJECT_DETAIL_VIEW_STORAGE_KEY = 'kronn:projectDetailView';
 
 function readProjectDetailView(): ProjectDetailView {
@@ -97,6 +96,11 @@ export interface ProjectCardProps {
   onRefetchDiscussions: () => void;
   onRefetchSkills: () => void;
   onRefetchDrift: (projectId: string) => void;
+  /** What the address names inside this project: a view, and the code file or
+   * docs folder it shows. Absent, the card keeps its own view. */
+  location?: ProjectLocation | null;
+  /** Reports a view the reader picks, so the address follows it. */
+  onLocationChange?: (location: ProjectLocation) => void;
 }
 
 export function ProjectCard({
@@ -121,21 +125,43 @@ export function ProjectCard({
   onRefetch,
   onRefetchDiscussions,
   onRefetchDrift,
+  location = null,
+  onLocationChange,
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
-  const [detailView, setDetailView] = useState<ProjectDetailView>(readProjectDetailView);
-  const [codeInitialPath, setCodeInitialPath] = useState<string | null>(null);
-  const [codeInitialLine, setCodeInitialLine] = useState<number | null>(null);
+  // The address owns the view when it names one (`/projects/<id>/<view>`);
+  // a bare project address opens on the view the reader used last.
+  const [ownDetailView, setOwnDetailView] = useState<ProjectDetailView>(readProjectDetailView);
+  const detailView = location?.view ?? ownDetailView;
+  // The code file and line to open: named by the address when it names a
+  // view, else the one this card was asked to open.
+  const [ownCodeFile, setOwnCodeFile] = useState<{ path: string; line: number | null } | null>(null);
+  const codeFile = location?.view
+    ? (location.view === 'code' && location.file ? { path: location.file, line: location.line ?? null } : null)
+    : ownCodeFile;
+  const codeInitialPath = codeFile?.path ?? null;
+  const codeInitialLine = codeFile?.line ?? null;
   const [expandedTab, setExpandedTab] = useState<string | undefined>(undefined);
   const selectDetailView = useCallback((view: ProjectDetailView) => {
-    setDetailView(view);
+    setOwnDetailView(view);
     try {
       localStorage.setItem(PROJECT_DETAIL_VIEW_STORAGE_KEY, view);
     } catch {
       // localStorage may be unavailable in private/restricted browser modes.
     }
-  }, []);
+    onLocationChange?.({ view });
+  }, [onLocationChange]);
+  const openCodeFile = useCallback((path: string, line: number | null = null) => {
+    setOwnCodeFile({ path, line });
+    setOwnDetailView('code');
+    try {
+      localStorage.setItem(PROJECT_DETAIL_VIEW_STORAGE_KEY, 'code');
+    } catch {
+      // localStorage may be unavailable in private/restricted browser modes.
+    }
+    onLocationChange?.({ view: 'code', file: path, line });
+  }, [onLocationChange]);
   const reportDockerRunning = useCallback(
     (running: boolean) => onDockerRunningChange?.(proj.id, running),
     [onDockerRunningChange, proj.id],
@@ -288,7 +314,9 @@ export function ProjectCard({
   // useEffect-less pattern (the prop only matters at mount time of the
   // viewer because of the dep on `projectId, initialExpandFolder` in
   // the load effect — see AiDocViewer L37).
-  const [docDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
+  const [ownDocDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
+  // A docs folder named by the address (`/projects/<id>/docs?folder=…`) wins.
+  const docDeepLink = (location?.view === 'docs' ? location.folder : null) ?? ownDocDeepLink;
 
   // 0.8.7 — anti-hallu section status. Lazily fetched at mount + after every
   // explicit inject so the badge reflects current state. `null` = not yet
@@ -326,78 +354,6 @@ export function ProjectCard({
       setAntiHalluBusy(false);
     }
   }, [proj.id, antiHalluBusy]);
-
-  // 0.8.3 (#314) — post-validation deep-link consumer. MessageBubble
-  // writes `kronn:postValidation:<projectId>` to sessionStorage when
-  // the user clicks the "View Tech Debts" CTA in the validation
-  // discussion. We read + clear it on every render where the card is
-  // open AND the AI Context tab is exposable; the value is the
-  // folder path to deep-link into (e.g. `docs/tech-debt`). One-shot:
-  // we always remove the key so a manual reload doesn't re-trigger.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: string | null = null;
-    try {
-      target = sessionStorage.getItem(`kronn:postValidation:${proj.id}`);
-      if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
-    } catch { /* private mode / quota — no deep-link */ }
-    if (target) {
-      queueMicrotask(() => {
-        if (cancelled) return;
-        selectDetailView('docs');
-        setExpandedTab('docAi');
-        setDocDeepLink(target);
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
-
-  // KT-954 — a project path an agent cited in a discussion opens here, on its
-  // file and line. Same one-shot sessionStorage contract as the links above.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: { path?: unknown; line?: unknown } | null = null;
-    try {
-      const raw = sessionStorage.getItem(`kronn:codeView:${proj.id}`);
-      if (raw) {
-        sessionStorage.removeItem(`kronn:codeView:${proj.id}`);
-        target = JSON.parse(raw) as { path?: unknown; line?: unknown };
-      }
-    } catch { /* private mode / quota / malformed — no deep-link */ }
-    if (target && typeof target.path === 'string' && target.path) {
-      const path = target.path;
-      const line = typeof target.line === 'number' && target.line > 0 ? target.line : null;
-      queueMicrotask(() => {
-        if (cancelled) return;
-        setCodeInitialPath(path);
-        setCodeInitialLine(line);
-        selectDetailView('code');
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
-
-  // Generic one-shot project-tab deep-link. The validation discussion uses
-  // this after "Mark audit as validated" so the user lands on the Audit tab
-  // and sees the new validated state instead of staying on Discussions.
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    let target: string | null = null;
-    try {
-      target = sessionStorage.getItem(`kronn:projectView:${proj.id}`);
-      if (target) sessionStorage.removeItem(`kronn:projectView:${proj.id}`);
-    } catch { /* private mode / quota — no deep-link */ }
-    if (target === 'automationArtifacts') target = 'resources';
-    if (target && PROJECT_DETAIL_VIEWS.includes(target as ProjectDetailView)) {
-      queueMicrotask(() => {
-        if (!cancelled) selectDetailView(target as ProjectDetailView);
-      });
-    }
-    return () => { cancelled = true; };
-  }, [isOpen, proj.id, selectDetailView]);
 
   // ── Audit state ──
   const [auditActive, setAuditActive] = useState(false);
@@ -2065,11 +2021,7 @@ export function ProjectCard({
                 projectId={proj.id}
                 toast={toast}
                 onRunningChange={reportDockerRunning}
-                onOpenConfig={(path) => {
-                  setCodeInitialPath(path);
-                  setCodeInitialLine(null);
-                  selectDetailView('code');
-                }}
+                onOpenConfig={(path) => openCodeFile(path)}
               />
             </section>
           )}

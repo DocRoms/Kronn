@@ -7,6 +7,9 @@ import { embedSettingsOrigin } from '../lib/live-page-navigation';
 import { EMBED_SETTINGS_PATH } from '../lib/routes';
 import { SettingsPage } from '../pages/SettingsPage';
 
+// Long enough for a section fed by a request to appear.
+const SECTION_WAIT_MS = 2000;
+
 export function SettingsRoute() {
   const ctx = useDashboardContext();
   const nav = useKronnNavigate();
@@ -30,6 +33,23 @@ export function SettingsRoute() {
   useEffect(() => {
     if (onEmbedSettings) nav.toPage('settings', { replace: true });
   }, [onEmbedSettings, nav]);
+  // `/config#<section>`: each arrival scrolls the section into view, once it
+  // is rendered (some appear only after their data has loaded).
+  const { hash, key: arrival } = location;
+  useEffect(() => {
+    let sectionId = '';
+    try { sectionId = decodeURIComponent(hash.slice(1)); } catch { return undefined; }
+    if (!sectionId) return undefined;
+    let frame = 0;
+    const deadline = performance.now() + SECTION_WAIT_MS;
+    const reveal = () => {
+      const section = document.getElementById(sectionId);
+      if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      else if (performance.now() < deadline) frame = requestAnimationFrame(reveal);
+    };
+    frame = requestAnimationFrame(reveal);
+    return () => cancelAnimationFrame(frame);
+  }, [hash, arrival]);
   return (
     <SettingsPage
       agents={ctx.agents}

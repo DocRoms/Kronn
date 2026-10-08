@@ -122,14 +122,11 @@ describe('MessageBubble — KRONN:VALIDATION_COMPLETE CTA', () => {
     expect(screen.queryByText('audit.viewTechDebtsAfterValidation')).toBeNull();
   });
 
-  it('clicking the CTA writes the sessionStorage deeplink + navigates to the project', () => {
-    // 0.8.3 (#314) — the CTA must do TWO things atomically:
-    //   - write `sessionStorage[kronn:postValidation:<id>]` so the
-    //     ProjectCard auto-opens docs/tech-debt on mount
-    //   - hand the project to `onNavigate`, which lands on its address
-    // Pre-#314 only steps (1) + (3) happened, so the user landed on
-    // the project's default tab (AI Context) and had to expand the
-    // tech-debt section manually — two clicks instead of one.
+  it('clicking the CTA lands on the project docs, on the tech-debt folder', () => {
+    // 0.8.3 (#314) — one click from "validation finished" to the TDs: the
+    // project's docs view, its tech-debt folder named by the address.
+    // Pre-#314 the user landed on the project's default tab (AI Context) and
+    // had to expand the tech-debt section manually — two clicks instead of one.
     const onNavigate = vi.fn();
     sessionStorage.clear();
     render(
@@ -143,8 +140,11 @@ describe('MessageBubble — KRONN:VALIDATION_COMPLETE CTA', () => {
       </I18nProvider>
     );
     fireEvent.click(screen.getByText('audit.viewTechDebtsAfterValidation'));
-    expect(sessionStorage.getItem('kronn:postValidation:proj-xyz')).toBe('docs/tech-debt');
-    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: 'proj-xyz' });
+    expect(onNavigate).toHaveBeenCalledWith('projects', {
+      projectId: 'proj-xyz',
+      projectAt: { view: 'docs', folder: 'docs/tech-debt' },
+    });
+    expect(sessionStorage.getItem('kronn:postValidation:proj-xyz')).toBeNull();
     expect(window.location.hash).toBe('');
   });
 

@@ -30,9 +30,49 @@ export const PAGE_PATHS: Record<DashboardPage, string> = {
 
 const PAGE_BY_PATH = Object.entries(PAGE_PATHS) as [DashboardPage, string][];
 
-/** The address of one project, open in its master/detail workspace. */
-export function projectPath(projectId: string): string {
-  return `${PAGE_PATHS.projects}/${encodeURIComponent(projectId)}`;
+/** The views of a project's workspace. */
+export type ProjectView = 'overview' | 'discussions' | 'tasks' | 'audit' | 'docs' | 'code' | 'docker' | 'git' | 'resources';
+
+export const PROJECT_VIEWS: readonly ProjectView[] = [
+  'overview', 'discussions', 'tasks', 'audit', 'docs', 'code', 'docker', 'git', 'resources',
+];
+
+/**
+ * What an address names inside a project: a view and, for the code view, a
+ * file and line, for the docs view, a folder. With no view the workspace opens
+ * on the view the reader used last.
+ */
+export interface ProjectLocation {
+  view?: ProjectView | null;
+  file?: string | null;
+  line?: number | null;
+  folder?: string | null;
+}
+
+/** The address of one project, open in its master/detail workspace, optionally on one of its views. */
+export function projectPath(projectId: string, { view, file, line, folder }: ProjectLocation = {}): string {
+  const path = `${PAGE_PATHS.projects}/${encodeURIComponent(projectId)}`;
+  if (!view) return path;
+  const query = new URLSearchParams();
+  if (view === 'code' && file) {
+    query.set('file', file);
+    if (line && line > 0) query.set('line', String(line));
+  }
+  if (view === 'docs' && folder) query.set('folder', folder);
+  const search = query.toString();
+  return `${path}/${view}${search ? `?${search}` : ''}`;
+}
+
+/** What a project address names, or null when it names no (known) view. */
+export function projectLocation(view: string | undefined, search: URLSearchParams): ProjectLocation | null {
+  if (!view || !PROJECT_VIEWS.includes(view as ProjectView)) return null;
+  const line = Number(search.get('line'));
+  return {
+    view: view as ProjectView,
+    file: view === 'code' ? search.get('file') || null : null,
+    line: view === 'code' && Number.isInteger(line) && line > 0 ? line : null,
+    folder: view === 'docs' ? search.get('folder') || null : null,
+  };
 }
 
 /** The address of one planning task, open in its detail pane. */
@@ -50,6 +90,11 @@ export function pluginPath(configId: string): string {
   return `${PAGE_PATHS.mcps}/${encodeURIComponent(configId)}`;
 }
 
+/** Configuration scrolled to one of its sections (`settings-…`), named by the hash. */
+export function settingsSectionPath(sectionId: string): string {
+  return `${PAGE_PATHS.settings}#${encodeURIComponent(sectionId)}`;
+}
+
 /** The Configuration section of the sites Live Pages may embed content from. */
 export const EMBED_SETTINGS_SEGMENT = '/artifacts';
 export const EMBED_SETTINGS_PATH = `${PAGE_PATHS.settings}${EMBED_SETTINGS_SEGMENT}`;
@@ -62,17 +107,34 @@ export function embedSettingsPath(origin?: string | null): string {
 /** The tabs of the Automation page. */
 export type AutomationTab = 'workflows' | 'quickPrompts' | 'quickApis' | 'quickExecs' | 'skills';
 
-/** What the Automation page shows: a tab, the resource open in it, and for a workflow the run to reveal. */
+/** The workflow wizard: creating a new workflow, or editing the one open. */
+export type AutomationEditor = 'create' | 'edit';
+
+/**
+ * What the Automation page shows: a tab, the resource open in it, for a
+ * workflow the run to reveal, and whether the workflow wizard has the pane.
+ */
 export interface AutomationSelection {
   tab: AutomationTab;
   resourceId: string | null;
   runId?: string | null;
+  editor?: AutomationEditor | null;
 }
+
+const NEW_WORKFLOW_SEGMENT = 'new';
+const EDIT_WORKFLOW_SEGMENT = 'edit';
+/** The route segments of the workflow wizard, for the route table. */
+export const WORKFLOW_EDITOR_ROUTES = {
+  create: `/${NEW_WORKFLOW_SEGMENT}`,
+  edit: `/:workflowId/${EDIT_WORKFLOW_SEGMENT}`,
+} as const;
 
 /** What a navigation to Automation asks the page to do once, on arrival. */
 export interface AutomationIntent {
   /** Open the creation wizard with this preset, bound to this project. */
   preset?: { presetId: string; projectId: string };
+  /** Scroll to the Quick Prompt the address names and flash it (just improved). */
+  highlightQuickPrompt?: boolean;
 }
 
 // The path segment of each tab but the first, which is the page itself.
@@ -84,10 +146,12 @@ const AUTOMATION_SEGMENTS: Record<Exclude<AutomationTab, 'workflows'>, string> =
 };
 
 /** The address of an Automation selection. */
-export function automationPath({ tab, resourceId, runId }: AutomationSelection): string {
+export function automationPath({ tab, resourceId, runId, editor }: AutomationSelection): string {
   if (tab === 'workflows') {
+    if (editor === 'create') return `${PAGE_PATHS.workflows}/${NEW_WORKFLOW_SEGMENT}`;
     if (!resourceId) return PAGE_PATHS.workflows;
     const path = `${PAGE_PATHS.workflows}/${encodeURIComponent(resourceId)}`;
+    if (editor === 'edit') return `${path}/${EDIT_WORKFLOW_SEGMENT}`;
     return runId ? `${path}/runs/${encodeURIComponent(runId)}` : path;
   }
   const path = `${PAGE_PATHS.workflows}/${AUTOMATION_SEGMENTS[tab]}`;
@@ -107,8 +171,17 @@ export function automationTabFromPath(pathname: string): AutomationTab {
   return tab ?? 'workflows';
 }
 
+/** Whether a pathname under `/workflows` is the wizard, and which. */
+export function automationEditorFromPath(pathname: string): AutomationEditor | null {
+  const segments = pathname.slice(PAGE_PATHS.workflows.length + 1).replace(/\/+$/, '').split('/');
+  if (segments.length === 1 && segments[0] === NEW_WORKFLOW_SEGMENT) return 'create';
+  if (segments.length === 2 && segments[0] && segments[1] === EDIT_WORKFLOW_SEGMENT) return 'edit';
+  return null;
+}
+
 export function sameAutomationSelection(a: AutomationSelection, b: AutomationSelection): boolean {
-  return a.tab === b.tab && a.resourceId === b.resourceId && (a.runId ?? null) === (b.runId ?? null);
+  return a.tab === b.tab && a.resourceId === b.resourceId && (a.runId ?? null) === (b.runId ?? null)
+    && (a.editor ?? null) === (b.editor ?? null);
 }
 
 /** The query parameter naming the message to reveal inside a discussion. */
@@ -120,6 +193,14 @@ export function discussionPath(discussionId: string, messageId?: string | null):
   return messageId ? `${path}?${DISCUSSION_MESSAGE_PARAM}=${encodeURIComponent(messageId)}` : path;
 }
 
+/** The route segment of a comparison, for the route table. */
+export const DISCUSSION_COMPARE_ROUTE = '/compare/:compareRunId';
+
+/** The address of a comparison of discussions (a Compare batch or a free selection), by its run. */
+export function discussionComparePath(runId: string): string {
+  return `${PAGE_PATHS.discussions}/compare/${encodeURIComponent(runId)}`;
+}
+
 /**
  * What a navigation to Discussions asks the page to do once, on arrival.
  * It travels as history state, so a reload or a Back never replays it.
@@ -129,6 +210,8 @@ export interface DiscussionsIntent {
   autoRun?: boolean;
   /** Expand this batch group in the sidebar, as a batch or a comparison. */
   focusBatch?: { id: string; mode: 'batch' | 'compare' };
+  /** Open the Git panel of the discussion the address names, on this workspace. */
+  gitWorkspaceId?: string;
 }
 
 /**

@@ -568,13 +568,8 @@ describe('PlanningPage', () => {
     fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     fireEvent.click(await screen.findByText('feature/kt-140'));
 
-    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2');
-    expect(JSON.parse(
-      sessionStorage.getItem('kronn:discussion-workspace-target') ?? '{}',
-    )).toEqual({
-      discussionId: 'disc-2',
-      workspaceId: 'workspace-2',
-    });
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-2', { gitWorkspaceId: 'workspace-2' });
+    expect(sessionStorage.getItem('kronn:discussion-workspace-target')).toBeNull();
   });
 
   it('creates a subtask from the detail panel with inherited priority and project links', async () => {

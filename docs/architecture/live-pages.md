@@ -528,7 +528,7 @@ redirects there); a standalone Page or mosaic keeps running and opens the
 settings in a new tab.
 [src: file: frontend/src/lib/live-page-embeds.ts:71]
 [src: file: frontend/src/lib/live-page-navigation.ts:140-158]
-[src: file: frontend/src/routes/SettingsRoute.tsx:13-33]
+[src: file: frontend/src/routes/SettingsRoute.tsx:16-35]
 [src: file: frontend/src/pages/Dashboard.tsx:243]
 `LivePageEmbedOverlay` renders a layer sized to the iframe's content box with
 `overflow: hidden`, so content is clipped to the Page and can never cover host

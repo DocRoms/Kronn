@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react';
 import type { RouteObject } from 'react-router';
-import { EMBED_SETTINGS_SEGMENT, PAGE_PATHS, type DashboardPage } from '../lib/routes';
+import { DISCUSSION_COMPARE_ROUTE, EMBED_SETTINGS_SEGMENT, PAGE_PATHS, WORKFLOW_EDITOR_ROUTES, type DashboardPage } from '../lib/routes';
 import { HomeRedirect } from './HomeRedirect';
 import { RouteShell } from './RouteShell';
 import {
@@ -20,11 +20,15 @@ function pageRoute(page: DashboardPage, label: string, element: ReactElement, pa
 export const dashboardRoutes: RouteObject[] = [
   { index: true, element: <HomeRedirect /> },
   pageRoute('projects', 'Projects', <ProjectsRoute />, '/:projectId?'),
+  pageRoute('projects', 'Projects', <ProjectsRoute />, '/:projectId/:projectView'),
   pageRoute('discussions', 'Discussions', <DiscussionsRoute />, '/:discussionId?'),
+  pageRoute('discussions', 'Discussions', <DiscussionsRoute />, DISCUSSION_COMPARE_ROUTE),
   pageRoute('planning', 'Planning', <PlanningRoute />, '/:taskId?'),
   // One route per shape of the Automation address; all render the same page.
   pageRoute('workflows', 'Workflows', <WorkflowsRoute />, '/:workflowId?'),
   pageRoute('workflows', 'Workflows', <WorkflowsRoute />, '/:workflowId/runs/:runId'),
+  pageRoute('workflows', 'Workflows', <WorkflowsRoute />, WORKFLOW_EDITOR_ROUTES.create),
+  pageRoute('workflows', 'Workflows', <WorkflowsRoute />, WORKFLOW_EDITOR_ROUTES.edit),
   pageRoute('workflows', 'Workflows', <WorkflowsRoute />, '/qp/:qpId?'),
   pageRoute('workflows', 'Workflows', <WorkflowsRoute />, '/qa/:qaId?'),
   pageRoute('workflows', 'Workflows', <WorkflowsRoute />, '/qe/:qeId?'),

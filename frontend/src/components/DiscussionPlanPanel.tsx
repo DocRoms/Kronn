@@ -25,7 +25,6 @@ import {
   planning,
   type CampaignView,
 } from '../lib/api';
-import { queueDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import { readPlanOrchestrationState, writePlanOrchestrationState, type PlanOrchestrationState } from '../lib/orch-panel-state';
@@ -61,7 +60,8 @@ interface Props {
   initialTaskId?: string;
   onClose: () => void;
   onChanged?: (plan: DiscussionPlan) => void;
-  onNavigateDiscussion?: (discussionId: string) => void;
+  /** Opens a discussion; with a workspace, its Git panel on that workspace. */
+  onNavigateDiscussion?: (discussionId: string, options?: { gitWorkspaceId?: string }) => void;
   onNavigateProject?: (projectId: string) => void;
   toast: ToastFn;
 }
@@ -1138,8 +1138,7 @@ export function DiscussionPlanPanel({
                     type="button"
                     key={workspace.id}
                     onClick={() => {
-                      queueDiscussionWorkspaceTarget(workspace.disc_id, workspace.id);
-                      onNavigateDiscussion?.(workspace.disc_id);
+                      onNavigateDiscussion?.(workspace.disc_id, { gitWorkspaceId: workspace.id });
                     }}
                     title={t('planning.workspaceViewFiles')}
                   >

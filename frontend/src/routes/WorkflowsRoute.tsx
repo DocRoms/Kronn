@@ -4,7 +4,7 @@ import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { isUsable } from '../lib/constants';
 import { useDashboardContext } from '../lib/dashboardContext';
 import {
-  automationTabFromPath, sameAutomationSelection, type AutomationIntent, type AutomationSelection,
+  automationEditorFromPath, automationTabFromPath, sameAutomationSelection, type AutomationIntent, type AutomationSelection,
 } from '../lib/routes';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
 import { useLocationIntent } from './useLocationIntent';
@@ -24,7 +24,12 @@ export function WorkflowsRoute() {
   const tab = automationTabFromPath(pathname);
   const resourceId = params.workflowId ?? params.qpId ?? params.qaId ?? params.qeId ?? params.skillId ?? null;
   const runId = params.runId ?? null;
-  const selection = useMemo<AutomationSelection>(() => ({ tab, resourceId, runId }), [tab, resourceId, runId]);
+  // `/workflows/new` and `/workflows/<id>/edit`: the workflow wizard has the pane.
+  const editor = automationEditorFromPath(pathname);
+  const selection = useMemo<AutomationSelection>(
+    () => (editor ? { tab, resourceId, runId, editor } : { tab, resourceId, runId }),
+    [tab, resourceId, runId, editor],
+  );
   // A choice is a step Back can undo; what the page restores on its own at
   // the bare address replaces it instead. The address is read through a ref:
   // the page lists this callback in an effect's dependencies.
@@ -47,6 +52,8 @@ export function WorkflowsRoute() {
       addressToken={location}
       pendingPreset={intent?.preset ?? null}
       onPendingPresetConsumed={consumeIntent}
+      highlightQuickPromptId={intent?.highlightQuickPrompt && tab === 'quickPrompts' ? resourceId : null}
+      onHighlightConsumed={consumeIntent}
       onNavigateToBatch={(batchRunId) => nav.toDiscussions({ focusBatch: { id: batchRunId, mode: 'batch' } })}
       onNavigateDiscussion={(discussionId) => nav.toDiscussion(discussionId, { autoRun: true })}
       onNavigatePage={nav.toLivePage}

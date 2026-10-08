@@ -24,7 +24,7 @@ export function PlanningRoute() {
       projects={ctx.projects}
       discussions={ctx.allDiscussions}
       toast={ctx.toast}
-      onNavigateDiscussion={nav.toDiscussion}
+      onNavigateDiscussion={(discussionId, options) => nav.toDiscussion(discussionId, { gitWorkspaceId: options?.gitWorkspaceId })}
     />
   );
 }

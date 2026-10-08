@@ -12,6 +12,7 @@ import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
 import { projects as projectsApi } from '../lib/api';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
+import type { ProjectLocation } from '../lib/routes';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, ModelTiersConfig, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
@@ -80,6 +81,10 @@ export interface ProjectListProps {
   favoritesReady?: boolean;
   expandedId: string | null;
   onSetExpandedId: (id: string | null) => void;
+  /** What the address names inside the open project (its view, a file, a folder). */
+  projectLocation?: ProjectLocation | null;
+  /** Reports a view picked in the open project, so the address follows. */
+  onProjectLocationChange?: (location: ProjectLocation) => void;
 }
 
 export function ProjectList({
@@ -107,6 +112,8 @@ export function ProjectList({
   favoritesReady = true,
   expandedId,
   onSetExpandedId,
+  projectLocation,
+  onProjectLocationChange,
 }: ProjectListProps) {
   const { t } = useT();
   const isMobile = useIsMobile();
@@ -456,6 +463,8 @@ export function ProjectList({
                   onRefetchDiscussions={onRefetchDiscussions}
                   onRefetchSkills={onRefetchSkills}
                   onRefetchDrift={onRefetchDrift}
+                  location={projectLocation}
+                  onLocationChange={onProjectLocationChange}
                 />
               ) : (
                 <div className="project-detail-empty">

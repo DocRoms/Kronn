@@ -1,3 +1,4 @@
+import type { ComponentProps } from 'react';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
@@ -128,8 +129,9 @@ describe('ProjectCard — repository overview', () => {
   });
 
   it('separates audit and docs, keeps the active tab, and consumes an audit deep-link', async () => {
-    const renderCard = (project: Project) => render(
+    const renderCard = (project: Project, extra: Partial<ComponentProps<typeof ProjectCard>> = {}) => render(
       <ProjectCard
+        {...extra}
         project={project}
         dockerRunning
         detailMode
@@ -220,11 +222,10 @@ describe('ProjectCard — repository overview', () => {
       .toHaveAttribute('data-active', 'true');
     third.unmount();
 
-    sessionStorage.setItem('kronn:projectView:p-deep', 'audit');
-    renderCard({ ...PROJECT, id: 'p-deep', name: 'Deep-linked project' });
+    // A view named by the address wins over the remembered one.
+    renderCard({ ...PROJECT, id: 'p-deep', name: 'Deep-linked project' }, { location: { view: 'audit' } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'projects.master.tab.audit' }))
       .toHaveAttribute('data-active', 'true'));
-    expect(sessionStorage.getItem('kronn:projectView:p-deep')).toBeNull();
   });
 
   it('keeps linked MCPs, linked repositories, and project deletion in Overview', async () => {

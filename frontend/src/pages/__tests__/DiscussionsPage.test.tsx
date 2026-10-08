@@ -136,6 +136,7 @@ vi.mock('../../lib/api', () => ({
   },
   workflows: {
     listBatchRunSummaries: vi.fn().mockResolvedValue([]),
+    getBatchCompareDetails: vi.fn(),
   },
   quickPrompts: {
     list: vi.fn().mockResolvedValue([]),
@@ -197,12 +198,19 @@ vi.mock('../../lib/api', () => ({
 }));
 
 // Mock useWebSocket hook (WS not available in jsdom)
+vi.mock('../../components/GitPanel', () => ({
+  GitPanel: ({ initialWorkspaceId }: { initialWorkspaceId?: string }) => (
+    <div data-testid="git-panel" data-workspace={initialWorkspaceId ?? ''} />
+  ),
+}));
+
 vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })),
 }));
 
 import {
   discussions as discussionsApi,
+  workflows as workflowsApi,
   externalApi as externalApiConnections,
   media,
   planning as planningApi,
@@ -4674,10 +4682,9 @@ describe('DiscussionsPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Marquer l'audit comme valide/i }));
     await waitFor(() => expect(projectsApi.validateAudit).toHaveBeenCalledWith(proj.id));
-    expect(sessionStorage.getItem(`kronn:projectView:${proj.id}`)).toBe('audit');
     expect(refetchProjects).toHaveBeenCalled();
     expect(refetchDiscussions).toHaveBeenCalled();
-    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id });
+    expect(onNavigate).toHaveBeenCalledWith('projects', { projectId: proj.id, projectAt: { view: 'audit' } });
   });
 
   it('validation CTA still shows in the auto-archived validation discussion', async () => {
@@ -4809,5 +4816,114 @@ describe('DiscussionsPage', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 50)); });
     const body = document.body.textContent ?? '';
     expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+});
+
+describe('DiscussionsPage — comparison address', () => {
+  const renderPage = (props: { compareRunId?: string | null; onCompareChange?: (runId: string | null) => void }) => render(
+    <I18nProvider>
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[makeListDiscussion('disc-a', 1), makeListDiscussion('disc-b', 1)]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={vi.fn()}
+        refetchProjects={vi.fn()}
+        onNavigate={vi.fn()}
+        toast={vi.fn()}
+        {...liftedProps()}
+        {...props}
+      />
+    </I18nProvider>,
+  );
+
+  it('opens the comparison its address names, from its run, and closes it on request', async () => {
+    vi.mocked(workflowsApi.getBatchCompareDetails).mockResolvedValue({
+      run_id: 'run-c',
+      evaluations: [{ discussion_id: 'disc-a' }, { discussion_id: 'disc-b' }],
+    } as never);
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onCompareChange = vi.fn();
+
+    renderPage({ compareRunId: 'run-c', onCompareChange });
+
+    await waitFor(() => expect(workflowsApi.getBatchCompareDetails).toHaveBeenCalledWith('run-c'));
+    const workspace = await waitFor(() => {
+      const found = document.querySelector('.disc-compare-workspace');
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    await waitFor(() => expect(discussionsApi.get).toHaveBeenCalledWith('disc-b'));
+    // Opened from the address: nothing to report back.
+    expect(onCompareChange).not.toHaveBeenCalled();
+
+    const close = workspace.querySelector<HTMLButtonElement>('.btn-icon[aria-label]');
+    await act(async () => { close?.click(); });
+    expect(onCompareChange).toHaveBeenLastCalledWith(null);
+    expect(document.querySelector('.disc-compare-workspace')).toBeNull();
+  });
+
+  it('closes the comparison when the address no longer names one (Back)', async () => {
+    vi.mocked(workflowsApi.getBatchCompareDetails).mockResolvedValue({
+      run_id: 'run-c',
+      evaluations: [{ discussion_id: 'disc-a' }, { discussion_id: 'disc-b' }],
+    } as never);
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onCompareChange = vi.fn();
+    const page = renderPage({ compareRunId: 'run-c', onCompareChange });
+    await waitFor(() => expect(document.querySelector('.disc-compare-workspace')).not.toBeNull());
+
+    page.rerender(
+      <I18nProvider>
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[makeListDiscussion('disc-a', 1), makeListDiscussion('disc-b', 1)]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={vi.fn()}
+          refetchProjects={vi.fn()}
+          onNavigate={vi.fn()}
+          toast={vi.fn()}
+          {...liftedProps()}
+          compareRunId={null}
+          onCompareChange={onCompareChange}
+          addressToken={{}}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => expect(document.querySelector('.disc-compare-workspace')).toBeNull());
+    expect(onCompareChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('DiscussionsPage — Git workspace arrival', () => {
+  it('opens the Git panel of the addressed discussion on the workspace it arrives for, and acknowledges it', async () => {
+    vi.mocked(discussionsApi.get).mockImplementation(async (id: string) => makeListDiscussion(id, 1));
+    const onGitWorkspaceConsumed = vi.fn();
+    render(
+      <I18nProvider>
+        <DiscussionsPage
+          projects={[]}
+          agents={[]}
+          allDiscussions={[makeListDiscussion('disc-a', 1)]}
+          configLanguage="fr"
+          agentAccess={null}
+          refetchDiscussions={vi.fn()}
+          refetchProjects={vi.fn()}
+          onNavigate={vi.fn()}
+          toast={vi.fn()}
+          {...liftedProps()}
+          initialActiveDiscussionId="disc-a"
+          gitWorkspaceTarget={{ discussionId: 'disc-a', workspaceId: 'ws-1' }}
+          onGitWorkspaceConsumed={onGitWorkspaceConsumed}
+        />
+      </I18nProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId('git-panel')).toHaveAttribute('data-workspace', 'ws-1'));
+    expect(onGitWorkspaceConsumed).toHaveBeenCalledTimes(1);
   });
 });

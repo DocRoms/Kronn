@@ -1,16 +1,21 @@
-import { useCallback, useLayoutEffect, useRef } from 'react';
-import { useParams } from 'react-router';
+import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
+import { useParams, useSearchParams } from 'react-router';
 import { ProjectList } from '../components/ProjectList';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { useDashboardContext } from '../lib/dashboardContext';
-import type { DashboardPage } from '../lib/routes';
+import { projectLocation, type DashboardPage, type ProjectLocation } from '../lib/routes';
 
 export function ProjectsRoute() {
   const ctx = useDashboardContext();
   const nav = useKronnNavigate();
   // The address owns the open project: `/projects/<id>` is the selection.
-  const { projectId } = useParams<{ projectId?: string }>();
+  const { projectId, projectView } = useParams<{ projectId?: string; projectView?: string }>();
   const expandedId = projectId ?? null;
+  // `/projects/<id>/<view>[?file=…&line=…|?folder=…]`: the view open in the
+  // workspace, and what it shows. A bare `/projects/<id>` opens on the view
+  // the reader used last.
+  const [search] = useSearchParams();
+  const location = useMemo(() => projectLocation(projectView, search), [projectView, search]);
   // Picking a project is a step Back can undo. Landing on the bare list, the
   // page opens its first project on its own: that one replaces the address
   // instead, so Back does not bounce the reader between the two.
@@ -20,6 +25,10 @@ export function ProjectsRoute() {
     if (id === addressed.current) return;
     if (id) nav.toProject(id, { replace: addressed.current === null });
     else nav.toPage('projects');
+  }, [nav]);
+  // Picking a view is a step Back can undo.
+  const followLocation = useCallback((next: ProjectLocation) => {
+    if (addressed.current) nav.toProject(addressed.current, next);
   }, [nav]);
   return (
     <ProjectList
@@ -56,6 +65,8 @@ export function ProjectsRoute() {
       onRefetchDrift={ctx.refetchDrift}
       expandedId={expandedId}
       onSetExpandedId={selectProject}
+      projectLocation={location}
+      onProjectLocationChange={followLocation}
     />
   );
 }

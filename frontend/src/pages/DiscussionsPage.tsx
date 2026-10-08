@@ -1,5 +1,6 @@
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import { workflowExecLines } from '../lib/agentExecLines';
+import type { ProjectLocation } from '../lib/routes';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -53,7 +54,6 @@ import { clearReplyDraft, loadReplyDraft, saveReplyDraft } from '../lib/chat-rep
 import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { findRenderedTextRanges } from '../lib/discussionMessageSearch';
 import { triggerDownload } from '../lib/downloadBlob';
-import { consumeDiscussionWorkspaceTarget } from '../lib/discussion-navigation';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { useSustainedFlag } from '../hooks/useSustainedFlag';
@@ -347,7 +347,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string; workflowId?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; workflowId?: string; quickPromptId?: string }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   initialMessageId?: string | null;
@@ -368,6 +368,14 @@ export interface DiscussionsPageProps {
    *  request above so it is renewed each time: the router renders in a
    *  transition, and a request that goes A → B → A may never commit B. */
   addressToken?: object;
+  /** The comparison the address names (`/discussions/compare/<runId>`); the
+   *  page reports one it opens or closes through `onCompareChange`. */
+  compareRunId?: string | null;
+  onCompareChange?: (runId: string | null) => void;
+  /** Open the Git panel of the addressed discussion on this workspace (an
+   *  arrival from Planning). Ack via `onGitWorkspaceConsumed`. */
+  gitWorkspaceTarget?: { discussionId: string; workspaceId: string } | null;
+  onGitWorkspaceConsumed?: () => void;
   onOpenDiscConsumed?: () => void;
   /** When clicking "📋 N conversations" on a workflow run, the parent passes
    *  the batch run id here. We auto-uncollapse the matching project + batch
@@ -462,6 +470,10 @@ export function DiscussionsPage({
   onAutoRunConsumed,
   openDiscussionId,
   addressToken,
+  compareRunId = null,
+  onCompareChange,
+  gitWorkspaceTarget = null,
+  onGitWorkspaceConsumed,
   onOpenDiscConsumed,
   focusBatchId,
   focusBatchMode = 'batch',
@@ -695,18 +707,34 @@ export function DiscussionsPage({
     return () => window.removeEventListener('keydown', closePanel);
   }, [showGitPanel, showTerminalPanel, showPlanPanel, showSettingsPanel, showAssetsPanel, showNotesPanel]);
 
+  // A workspace to open the Git panel on, once its discussion is the active one:
+  // handed over by the plan panel, or by an arrival from Planning.
+  const [pendingGitWorkspace, setPendingGitWorkspace] = useState<{ discussionId: string; workspaceId: string } | null>(gitWorkspaceTarget);
+  const [takenGitWorkspaceTarget, setTakenGitWorkspaceTarget] = useState(gitWorkspaceTarget);
+  if (gitWorkspaceTarget !== takenGitWorkspaceTarget) {
+    setTakenGitWorkspaceTarget(gitWorkspaceTarget);
+    if (gitWorkspaceTarget) setPendingGitWorkspace(gitWorkspaceTarget);
+  }
+  useEffect(() => {
+    if (gitWorkspaceTarget) onGitWorkspaceConsumed?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitWorkspaceTarget]);
+  // Another discussion: its Git panel starts on no particular workspace…
   useEffect(() => {
     setInitialGitWorkspaceId(undefined);
-    if (!activeDiscussionId) return;
-    const workspaceId = consumeDiscussionWorkspaceTarget(activeDiscussionId);
-    if (!workspaceId) return;
+  }, [activeDiscussionId]);
+  // …unless one was handed over for it.
+  useEffect(() => {
+    if (!activeDiscussionId || pendingGitWorkspace?.discussionId !== activeDiscussionId) return;
+    const { workspaceId } = pendingGitWorkspace;
+    setPendingGitWorkspace(null);
     setInitialGitWorkspaceId(workspaceId);
     setShowPlanPanel(false);
     setShowSettingsPanel(false);
     setShowAssetsPanel(false);
     setShowTerminalPanel(false);
     setShowGitPanel(true);
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, pendingGitWorkspace]);
 
   const clearMessageSearchHighlights = useCallback(() => {
     const registry = cssHighlightRegistry();
@@ -1057,11 +1085,20 @@ export function DiscussionsPage({
       setBatchCompareLoading(false);
     }
   }, []);
-  const openBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
+  const showBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
     setBatchCompare({ runId, label, discIds });
     setBatchCompareDiscs([]);
     void refreshBatchCompare(discIds, true);
   }, [refreshBatchCompare]);
+  // A comparison the reader opens or closes has an address: report it.
+  const openBatchCompare = useCallback((runId: string, label: string, discIds: string[]) => {
+    showBatchCompare(runId, label, discIds);
+    onCompareChange?.(runId);
+  }, [showBatchCompare, onCompareChange]);
+  const closeBatchCompare = useCallback(() => {
+    setBatchCompare(null);
+    onCompareChange?.(null);
+  }, [onCompareChange]);
   const openSelectedComparison = useCallback(async (discIds: string[]) => {
     const comparison = await workflowsApi.createAdHocComparison({ discussion_ids: discIds });
     openBatchCompare(comparison.run_id, t('disc.compare.freeSelection'), discIds);
@@ -2393,6 +2430,38 @@ export function DiscussionsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusBatchId, focusBatchMode, allDiscussions.length, batchSummaries, openBatchCompare, t]);
 
+  // The address names a comparison (Back, a reload, a shared link): open it
+  // from its run, which knows the discussions it compares; an address without
+  // one closes the comparison. What the page itself just opened or closed is
+  // already in place.
+  const shownCompareRunId = batchCompare?.runId ?? null;
+  const shownCompareRef = useRef(shownCompareRunId);
+  useEffect(() => { shownCompareRef.current = shownCompareRunId; }, [shownCompareRunId]);
+  useEffect(() => {
+    if (!onCompareChange || compareRunId === shownCompareRef.current) return;
+    if (!compareRunId) {
+      setBatchCompare(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const details = await workflowsApi.getBatchCompareDetails(compareRunId);
+        if (cancelled) return;
+        const summary = batchSummaries.find(item => item.run_id === compareRunId);
+        showBatchCompare(
+          compareRunId,
+          summary?.batch_name || summary?.quick_prompt_name || t('disc.compare.title'),
+          details.evaluations.map(evaluation => evaluation.discussion_id),
+        );
+      } catch (error) {
+        if (!cancelled) toast(userError(error), 'error');
+      }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareRunId, addressToken]);
+
   // Child answers arrive independently. Refresh the open cockpit whenever a
   // child's durable message count changes, without replacing it by N chats.
   const batchCompareVersion = batchCompare
@@ -3350,11 +3419,12 @@ export function DiscussionsPage({
 
   // Stable sidebar callbacks (avoid breaking SwipeableDiscItem memo)
   const handleDiscSelect = useCallback((discId: string, msgCount: number) => {
-    setBatchCompare(null);
+    // Read through a ref: this callback must keep its identity (memoized sidebar rows).
+    if (shownCompareRef.current) closeBatchCompare();
     setActiveDiscussionId(discId);
     markDiscussionSeen(discId, msgCount);
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile, markDiscussionSeen]);
+  }, [closeBatchCompare, isMobile, markDiscussionSeen]);
   const handleDiscArchive = useCallback(async (discId: string) => {
     await discussionsApi.update(discId, { archived: true });
     setActiveDiscussionId(prev => prev === discId ? null : prev);
@@ -4333,11 +4403,11 @@ export function DiscussionsPage({
             ])}
             onRefresh={() => { void refreshBatchCompare(batchCompare.discIds, true); }}
             onOpenDiscussion={(discussionId) => {
-              setBatchCompare(null);
+              closeBatchCompare();
               setActiveDiscussionId(discussionId);
               ensureDiscussionVisible(discussionId);
             }}
-            onClose={() => setBatchCompare(null)}
+            onClose={closeBatchCompare}
             t={t}
           />
         ) : activeDiscussion && !showNewDiscussion ? (
@@ -4746,21 +4816,15 @@ export function DiscussionsPage({
                       onClick={async () => {
                         try {
                           await projectsApi.validateAudit(proj.id);
-                          // One-shot deep-link consumed by ProjectCard once the
-                          // Projects page has opened the matching card. Keep it
-                          // separate from the post-validation docs deep-link:
-                          // this CTA confirms the audit, so its natural landing
-                          // place is the Audit tab where the validated state is
+                          // This CTA confirms the audit, so it lands on the
+                          // project's Audit view, where the validated state is
                           // immediately visible.
-                          try {
-                            sessionStorage.setItem(`kronn:projectView:${proj.id}`, 'audit');
-                          } catch { /* restricted storage — navigation still works */ }
                           await Promise.all([
                             Promise.resolve(refetchProjects()),
                             Promise.resolve(refetchDiscussions()),
                           ]);
                           toast(t('audit.done'), 'success');
-                          onNavigate('projects', { projectId: proj.id });
+                          onNavigate('projects', { projectId: proj.id, projectAt: { view: 'audit' } });
                         } catch (error) {
                           toast(userError(error), 'error');
                         }
@@ -5037,14 +5101,10 @@ export function DiscussionsPage({
                             setDeployedVersion(activeDiscussion.id, newVersion);
                             toast(t('qp.deploySuccess', String(newVersion)), 'success');
                           }
-                          // 0.8.5 follow-up — deep-link to the QP card on
-                          // the Quick Prompts tab. WorkflowsPage reads
-                          // this key on mount: switches tab + scrolls
-                          // to the matching card + flashes a highlight.
-                          try {
-                            sessionStorage.setItem('kronn:postQpImproved', qpTargetId);
-                          } catch { /* private-mode / quota — fall through */ }
-                          onNavigate('workflows');
+                          // 0.8.5 follow-up — the improved QP at its own
+                          // address on the Quick Prompts tab, scrolled to and
+                          // flashed on arrival.
+                          onNavigate('workflows', { quickPromptId: qpTargetId });
                         } catch (e) {
                           // 0.8.4 follow-up — pre-fix this was a silent
                           // `console.warn`, so a 400 from the backend
@@ -5628,7 +5688,10 @@ export function DiscussionsPage({
                 initialTaskId={planTaskTarget?.discussionId === activeDiscussion.id ? planTaskTarget.taskId : undefined}
                 onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
-                onNavigateDiscussion={(targetDiscussionId) => {
+                onNavigateDiscussion={(targetDiscussionId, options) => {
+                  if (options?.gitWorkspaceId) {
+                    setPendingGitWorkspace({ discussionId: targetDiscussionId, workspaceId: options.gitWorkspaceId });
+                  }
                   setActiveDiscussionId(targetDiscussionId);
                   ensureDiscussionVisible(targetDiscussionId);
                   reloadDiscussion(targetDiscussionId);

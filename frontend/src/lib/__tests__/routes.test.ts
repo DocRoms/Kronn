@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_PAGE, PAGE_PATHS, STANDALONE_PATHS, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
-  livePagePath, planningTaskPath, pluginPath, projectPath, sameAutomationSelection, standalonePagePath, workflowPath, type AutomationSelection, type DashboardPage,
+  DEFAULT_PAGE, PAGE_PATHS, STANDALONE_PATHS, automationEditorFromPath, automationPath, automationTabFromPath, discussionPath, isAppPath, pathToPage,
+  livePagePath, planningTaskPath, pluginPath, projectLocation, projectPath, sameAutomationSelection, settingsSectionPath, standalonePagePath, workflowPath, type AutomationSelection, type DashboardPage,
 } from '../routes';
 
 describe('routes', () => {
@@ -52,6 +52,29 @@ describe('project addresses', () => {
     expect(projectPath('proj-1')).toBe('/projects/proj-1');
     expect(projectPath('a/b c')).toBe('/projects/a%2Fb%20c');
     expect(pathToPage(projectPath('proj-1'))).toBe('projects');
+  });
+
+  it('names a view of the project, and what the code or docs view shows', () => {
+    expect(projectPath('proj-1', { view: 'git' })).toBe('/projects/proj-1/git');
+    expect(projectPath('proj-1', { view: 'code', file: 'src/a b.ts', line: 12 })).toBe('/projects/proj-1/code?file=src%2Fa+b.ts&line=12');
+    expect(projectPath('proj-1', { view: 'docs', folder: 'docs/tech-debt' })).toBe('/projects/proj-1/docs?folder=docs%2Ftech-debt');
+    // A file only means something to the code view, a folder to the docs view.
+    expect(projectPath('proj-1', { view: 'git', file: 'x', folder: 'y' })).toBe('/projects/proj-1/git');
+    expect(pathToPage(projectPath('proj-1', { view: 'code' }))).toBe('projects');
+  });
+
+  it('reads back what a project address names, and ignores what it cannot', () => {
+    const at = (path: string) => {
+      const url = new URL(path, 'http://localhost');
+      return projectLocation(url.pathname.split('/')[3], url.searchParams);
+    };
+    expect(at(projectPath('p', { view: 'code', file: 'src/a b.ts', line: 12 })))
+      .toEqual({ view: 'code', file: 'src/a b.ts', line: 12, folder: null });
+    expect(at(projectPath('p', { view: 'docs', folder: 'docs/tech-debt' })))
+      .toEqual({ view: 'docs', file: null, line: null, folder: 'docs/tech-debt' });
+    expect(at('/projects/p/code?file=a.ts&line=-3')).toEqual({ view: 'code', file: 'a.ts', line: null, folder: null });
+    expect(at('/projects/p/nope')).toBeNull();
+    expect(at('/projects/p')).toBeNull();
   });
 });
 
@@ -152,5 +175,36 @@ describe('standalone addresses', () => {
     for (const path of ['', '/api/health', '/assets/index.js', '/standalonefoo', '/index.html', '/Projects']) {
       expect(isAppPath(path), path).toBe(false);
     }
+  });
+});
+
+describe('workflow wizard addresses', () => {
+  it('names the wizard, creating or editing', () => {
+    expect(automationPath({ tab: 'workflows', resourceId: null, editor: 'create' })).toBe('/workflows/new');
+    expect(automationPath({ tab: 'workflows', resourceId: 'wf 1', editor: 'edit' })).toBe('/workflows/wf%201/edit');
+    // Editing needs a workflow; without one it is the list.
+    expect(automationPath({ tab: 'workflows', resourceId: null, editor: 'edit' })).toBe('/workflows');
+    expect(automationTabFromPath('/workflows/new')).toBe('workflows');
+  });
+
+  it('reads the wizard back from the address, and nothing else as one', () => {
+    expect(automationEditorFromPath('/workflows/new')).toBe('create');
+    expect(automationEditorFromPath('/workflows/wf-1/edit')).toBe('edit');
+    expect(automationEditorFromPath('/workflows/wf-1')).toBeNull();
+    expect(automationEditorFromPath('/workflows/wf-1/runs/edit')).toBeNull();
+    expect(automationEditorFromPath('/workflows/qp/new')).toBeNull();
+  });
+
+  it('tells two selections apart by the wizard too', () => {
+    const list = { tab: 'workflows' as const, resourceId: null, runId: null };
+    expect(sameAutomationSelection(list, { ...list, editor: 'create' })).toBe(false);
+    expect(sameAutomationSelection(list, { ...list, editor: null })).toBe(true);
+  });
+});
+
+describe('Configuration sections', () => {
+  it('names a section by the hash of the Configuration address', () => {
+    expect(settingsSectionPath('settings-server')).toBe('/config#settings-server');
+    expect(pathToPage(settingsSectionPath('settings-server').split('#')[0])).toBe('settings');
   });
 });

@@ -1,4 +1,5 @@
 import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
+import type { ProjectLocation } from '../lib/routes';
 import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
   createContext,
@@ -271,7 +272,7 @@ export interface MessageBubbleProps {
   onRetry: () => void;
   onRetryAgentDispatch?: (dispatchId: string, agentType: AgentType) => void;
   onExpandSummary: (msgId: string) => void;
-  onNavigate: (page: string, opts?: { projectId?: string; scrollTo?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
@@ -330,11 +331,8 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     onOpenProjectFile: projectId
       ? async (path, line) => {
           try { await projectsApi.readSourceFile(projectId, path); } catch { return false; }
-          // Read once by the project card when it opens (see ProjectCard).
-          try {
-            sessionStorage.setItem(`kronn:codeView:${projectId}`, JSON.stringify({ path, line }));
-          } catch { /* private mode / quota — the card still opens */ }
-          onNavigate('projects', { projectId });
+          // The project's code view, on the file and line: an address of its own.
+          onNavigate('projects', { projectId, projectAt: { view: 'code', file: path, line } });
           return true;
         }
       : undefined,
@@ -1261,14 +1259,10 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 // Pre-fix the CTA only navigated to the project and the
                 // user landed on the AI Context tab but had to manually
                 // expand + click into docs/tech-debt/.
-                // The sessionStorage flag is read by ProjectCard on mount
-                // and triggers `setExpandedTab('docAi') + setDocDeepLink`
-                // automatically, so a single click takes the user from
-                // "validation finished" to "looking at the TDs".
-                try {
-                  sessionStorage.setItem(`kronn:postValidation:${projectId}`, 'docs/tech-debt');
-                } catch { /* private-mode / quota — fall through */ }
-                onNavigate('projects', { projectId });
+                // The project's docs view, on the tech-debt folder: a single
+                // click takes the user from "validation finished" to
+                // "looking at the TDs".
+                onNavigate('projects', { projectId, projectAt: { view: 'docs', folder: 'docs/tech-debt' } });
               }}
             >
               <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}

@@ -20,13 +20,13 @@ so back, forward and reload follow it. React Router 8 runs in Data mode.
 
 | Page | Path |
 |------|------|
-| Projets | `/projects`, `/projects/:projectId` for the project open in the master/detail workspace (picking one is a history step; the first one the page opens on its own replaces the bare address) |
-| Discussions | `/discussions`, `/discussions/:discussionId` for the open discussion, `?message=<id>` to reveal one of its messages. A bare `/discussions` reopens where the previous visit left off (sessionStorage checkpoint) |
+| Projets | `/projects`, `/projects/:projectId` for the project open in the master/detail workspace (picking one is a history step; the first one the page opens on its own replaces the bare address), `/projects/:projectId/:view` for one of its views (`overview`, `discussions`, `tasks`, `audit`, `docs`, `code`, `docker`, `git`, `resources`) — `code?file=<path>&line=<n>` opens a file at a line, `docs?folder=<path>` a docs folder. A bare project address opens on the view the reader used last (localStorage) |
+| Discussions | `/discussions`, `/discussions/:discussionId` for the open discussion, `?message=<id>` to reveal one of its messages, `/discussions/compare/:runId` for a comparison (a Compare batch or a free selection), restored from its run. A bare `/discussions` reopens where the previous visit left off (sessionStorage checkpoint) |
 | Planification | `/planning`, `/planning/:taskId` for the task open in the detail pane |
-| Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage checkpoint) |
+| Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage checkpoint) |
 | Pages (Artifacts) | `/pages`, `/pages/:pageId` for the open Page — redirects to `/projects` until the capability is activated. A bare `/pages` reopens where the previous visit left off (localStorage checkpoint), else the first Page |
 | Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel |
-| Config | `/config`; `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
+| Config | `/config`, `/config#<section-id>` scrolled to one of its sections on arrival (waiting for one fed by a request); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
 
 `/` and any unknown address redirect to `/projects`, keeping the hash and the
 query. `[src: file: frontend/src/lib/routes.ts:21-29]`
@@ -51,8 +51,9 @@ address that replaced it, from one place: `legacyHashToPath` in
 `lib/legacyRoutes.ts`, applied by the app root whatever path it was opened
 on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
 `#pages/mosaic?…`, `#discussions/mosaic?…`, `#settings/artifacts?…` and
-`#config` are all mapped. Any other hash is left alone: no page reads it
-on arrival, so it routes nowhere.
+`#config` are all mapped. Any other hash is left alone: it routes nowhere,
+and only Configuration reads it, as the section to scroll to.
+`[src: file: frontend/src/routes/SettingsRoute.tsx:36-52]`
 `[src: file: frontend/src/lib/legacyRoutes.ts:13-35]`
 `[src: file: frontend/src/App.tsx:159-162]`
 
@@ -79,14 +80,18 @@ on arrival, so it routes nowhere.
   to its canonical path and follows it in the current tab, and opens anything
   else in a new one. `[src: file: frontend/src/lib/live-page-sandbox.ts:720-736]`
 - **Arrival intents** — what a navigation asks the page to do once it lands
-  (run the agent, focus a batch group) travels as history state and is
+  (run the agent, focus a batch group, open a discussion's Git panel on a
+  workspace, flash a just-improved Quick Prompt) travels as history state and is
   consumed by replacing the entry without it, so a reload or a Back never
   replays it. `[src: file: frontend/src/routes/useLocationIntent.ts:9-20]`
 - **Every selection has an address** — the shell's outlet context carries
   fleet data and services only; nothing is handed from page to page any
   more. A page that can be owned by its caller takes the open resource and a
   change callback (`selectedTaskId`/`onSelectedTaskChange`, `selection`/
-  `onSelectionChange`, …) and still works alone, keeping its own selection.
+  `onSelectionChange`, a project's `location`/`onLocationChange`,
+  `compareRunId`/`onCompareChange`, …) and still works alone, keeping its own
+  selection. Nothing crosses pages through `sessionStorage`: a deep link is
+  an address, plus an arrival intent for what it does once.
 - **Back must win, three rules** (found in a real browser, each one tested):
   the router applies its state synchronously (`useTransitions={false}` on
   `RouterProvider`), because a navigation render wrapped in a transition can
