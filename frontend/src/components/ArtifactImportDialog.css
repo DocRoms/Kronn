@@ -22,4 +22,14 @@
 .artifact-import-error { color: var(--kr-danger, #e76f6f); }
 .artifact-import-note { font-size: 12px; opacity: .75; }
 .artifact-import-dialog footer { justify-content: flex-end; flex-wrap: wrap; margin-top: 20px; }
+.artifact-import-embeds { margin-top: 16px; padding: 12px; border: 1px solid var(--kr-border); border-radius: 8px; }
+.artifact-import-embeds > strong { display: inline-flex; align-items: center; gap: 6px; }
+.artifact-import-embeds > p { margin: 6px 0 0; font-size: 12px; opacity: .75; }
+.artifact-import-embeds ul { margin: 8px 0 0; padding: 0; list-style: none; }
+.artifact-import-embed { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 0; border-top: 1px solid var(--kr-border); }
+.artifact-import-embed code { overflow-wrap: anywhere; }
+.artifact-import-embed-allowed { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; opacity: .8; }
+.artifact-import-embed-actions { display: inline-flex; gap: 6px; }
+.artifact-import-dialog .artifact-import-embed-actions button { padding: 4px 10px; }
+.artifact-import-dialog .artifact-import-embed-actions button[aria-pressed="true"] { border-color: var(--kr-accent); background: rgba(var(--kr-accent-rgb), .15); }
 @media (max-width: 600px) { .artifact-import-dialog { padding: 16px; } .artifact-import-entry { flex-direction: column; } .artifact-import-entry select { max-width: 100%; align-self: stretch; } }

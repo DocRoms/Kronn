@@ -57,6 +57,47 @@ struct PlannedResource {
 struct ImportPlan {
     resources: Vec<PlannedResource>,
     preview: ArtifactImportPreview,
+    /// Distinct origins the bundle's Pages embed from, sorted.
+    embed_origins: Vec<String>,
+}
+
+/// The origins every Page of the bundle embeds from: what its HTML writes,
+/// plus what it declares (content a script adds at runtime). Declarations that
+/// are not valid origins are informative only and simply dropped.
+fn bundle_embed_origins(resources: &[Resource]) -> Vec<String> {
+    let mut origins = BTreeSet::new();
+    for page in resources
+        .iter()
+        .filter(|r| r.kind == ResourceKind::Artifact)
+    {
+        let html = page.value["html"].as_str().unwrap_or_default();
+        origins.extend(crate::core::embed_origins::declared_origins(html));
+        let declared = page.value["embed_origins"].as_array().into_iter().flatten();
+        for origin in declared.filter_map(Value::as_str) {
+            if let Ok(origin) = crate::core::embed_origins::normalize_origin(origin) {
+                origins.insert(origin);
+            }
+        }
+    }
+    origins
+        .into_iter()
+        .take(crate::core::embed_origins::MAX_EMBED_ORIGINS)
+        .collect()
+}
+
+/// The allowed-sites list once the user's choices for this import are added.
+/// Only origins the bundle declares can be added this way.
+fn origins_to_allow(plan: &ImportPlan, request: &ArtifactImportRequest) -> Result<Vec<String>> {
+    let mut chosen = BTreeSet::new();
+    for origin in &request.allow_embed_origins {
+        let origin =
+            crate::core::embed_origins::normalize_origin(origin).map_err(|e| anyhow!(e))?;
+        if !plan.embed_origins.contains(&origin) {
+            bail!("{origin} is not embedded by this Artifact");
+        }
+        chosen.insert(origin);
+    }
+    Ok(chosen.into_iter().collect())
 }
 
 type Remap = BTreeMap<ResourceKind, HashMap<String, String>>;
@@ -423,6 +464,7 @@ fn execution_requirements(
 
 fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<ImportPlan> {
     let resources = parse_resources(request)?;
+    let embed_origins = bundle_embed_origins(&resources);
     if let Some(project) = &request.project_id {
         if crate::db::projects::get_project(conn, project)?.is_none() {
             bail!("Import project not found");
@@ -661,10 +703,13 @@ fn prepare_plan(conn: &Connection, request: &ArtifactImportRequest) -> Result<Im
         issues,
         warnings,
         digest,
+        // Filled by the caller, which knows this Kronn's allowed sites.
+        embed_origins: Vec::new(),
     };
     Ok(ImportPlan {
         resources: planned,
         preview,
+        embed_origins,
     })
 }
 
@@ -672,11 +717,23 @@ pub async fn preview(
     State(state): State<AppState>,
     Json(request): Json<ArtifactImportRequest>,
 ) -> Json<ApiResponse<ArtifactImportPreview>> {
+    let allowed = state.config.read().await.embed_allowed_origins.clone();
     match state
         .db
         .with_read_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            prepare_plan(&tx, &request).map(|plan| plan.preview)
+            prepare_plan(&tx, &request).map(|plan| {
+                let mut preview = plan.preview;
+                preview.embed_origins = plan
+                    .embed_origins
+                    .into_iter()
+                    .map(|origin| ArtifactImportEmbedOrigin {
+                        already_allowed: allowed.contains(&origin),
+                        origin,
+                    })
+                    .collect();
+                preview
+            })
         })
         .await
     {
@@ -762,6 +819,18 @@ fn create_imported_page(
         })
         .collect();
     crate::db::live_pages::create_live_page_in_transaction(tx, &page, &revision, &datasets, None)?;
+    // What the Artifact declares it embeds (content its scripts build) travels
+    // on: the next export merges it with what the HTML spells out. Never a
+    // permission: those stay in this Kronn's config.
+    tx.execute(
+        "UPDATE live_pages SET declared_embed_origins = ?1 WHERE id = ?2",
+        rusqlite::params![
+            serde_json::to_string(&crate::core::embed_origins::normalize_declared(
+                &exported.embed_origins
+            ))?,
+            page.id
+        ],
+    )?;
     for dataset in exported.datasets {
         tx.execute(
             "UPDATE live_page_datasets SET updated_at = ?1 WHERE page_id = ?2 AND name = ?3",
@@ -860,6 +929,9 @@ fn commit_plan(
     Ok(ArtifactImportResult {
         artifact: root.context("Imported root Artifact missing")?,
         entries: plan.preview.entries,
+        allowed_embed_origins: Vec::new(),
+        not_allowed_embed_origins: Vec::new(),
+        embed_origins_error: None,
     })
 }
 
@@ -867,7 +939,15 @@ pub async fn import(
     State(state): State<AppState>,
     Json(request): Json<ArtifactImportRequest>,
 ) -> Json<ApiResponse<ArtifactImportResult>> {
-    match state
+    // Sites to allow are checked against a snapshot of the configuration
+    // before anything is written. The configuration is NOT locked while the
+    // import is planned and written: only the final update takes the lock.
+    let allowed_now = if request.allow_embed_origins.is_empty() {
+        Vec::new()
+    } else {
+        state.config.read().await.embed_allowed_origins.clone()
+    };
+    let imported = state
         .db
         .with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
@@ -878,13 +958,49 @@ pub async fn import(
             if !plan.preview.can_import {
                 bail!("Resolve Artifact import conflicts and approve each new Quick Exec first");
             }
-            let result = commit_plan(&tx, plan, &request)?;
+            let allow = origins_to_allow(&plan, &request)?;
+            crate::core::embed_origins::apply_changes(&allowed_now, &allow, &[]).map_err(
+                |error| {
+                    anyhow!("The chosen sites cannot be allowed, nothing was imported: {error}")
+                },
+            )?;
+            let mut result = commit_plan(&tx, plan, &request)?;
             tx.commit()?;
+            result.allowed_embed_origins = allow;
             Ok(result)
         })
-        .await
-    {
-        Ok(imported) => Json(ApiResponse::ok(imported)),
+        .await;
+    match imported {
+        Ok(mut imported) => {
+            // The sites the user chose join the allowed list only now that the
+            // import is committed; a cancelled import never reaches this point.
+            // Anything that keeps them out from here on (the list changed in
+            // the meantime, the configuration cannot be saved) is reported.
+            if !imported.allowed_embed_origins.is_empty() {
+                let mut config = state.config.write().await;
+                let outcome = match crate::core::embed_origins::apply_changes(
+                    &config.embed_allowed_origins,
+                    &imported.allowed_embed_origins,
+                    &[],
+                ) {
+                    Ok(next) => {
+                        let previous = std::mem::replace(&mut config.embed_allowed_origins, next);
+                        crate::core::config::save(&config).await.map_err(|error| {
+                            config.embed_allowed_origins = previous;
+                            format!("The configuration could not be saved: {error}")
+                        })
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = outcome {
+                    tracing::warn!("Imported Artifact, but could not allow its sites: {error}");
+                    imported.not_allowed_embed_origins =
+                        std::mem::take(&mut imported.allowed_embed_origins);
+                    imported.embed_origins_error = Some(error);
+                }
+            }
+            Json(ApiResponse::ok(imported))
+        }
         Err(error) => Json(ApiResponse::err(error.to_string())),
     }
 }

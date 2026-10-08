@@ -1,4 +1,5 @@
 import type { LivePageAction, LivePageDetail } from '../types/generated';
+import { MAX_LIVE_PAGE_EMBED_REPORTS, MAX_LIVE_PAGE_EMBED_URL_CHARS } from './live-page-embeds';
 import { standaloneDiscussionId, standaloneLivePageId } from './live-page-navigation';
 
 export const LIVE_PAGE_CSP = [
@@ -16,7 +17,7 @@ export const LIVE_PAGE_CSP = [
 
 export interface LivePageRuntimeData {
   version: 1;
-  page: { id: string; slug: string; title: string; data_revision: number };
+  page: { id: string; slug: string; title: string; data_revision: number; params?: Record<string, string> };
   datasets: Record<string, {
     kind: string;
     current: unknown;
@@ -85,6 +86,77 @@ export interface LivePageActionAnchor {
    * fills it. False (or absent) means it is the row, and the card sits under
    * it — the placement used for the frame between the click and the slot. */
   slot?: boolean;
+}
+
+export interface LivePageEmbedBox { left: number; top: number; width: number; height: number }
+
+/** Third-party content the Page placed, as the bridge reports it. The host
+ * still checks the URL's origin against the allowed sites before drawing it. */
+export interface LivePageEmbedPlacement {
+  /** Stable for the same element across reports, so the host keeps its iframe. */
+  key: string;
+  /** The placeholder's `data-kronn-embed`, as written by the Page. */
+  url: string;
+  /** In the Page iframe's viewport coordinates. */
+  rect: LivePageEmbedBox;
+  /** The part of `rect` its scrolling or clipping ancestors leave visible, in
+   * the same coordinates; absent when no ancestor clips it. */
+  clip?: LivePageEmbedBox;
+  visible: boolean;
+  /** The placeholder's computed border-radius, when it is a plain length list. */
+  radius?: string;
+}
+
+interface LivePageEmbedsRequest {
+  type: 'kronn:page-embeds';
+  version: 1;
+  channel_id: string;
+  embeds: unknown;
+}
+
+const LIVE_PAGE_EMBED_KEY = /^e[0-9a-z]{1,13}:\d{1,3}$/;
+const LIVE_PAGE_EMBED_RADIUS = /^\d+(?:\.\d+)?px(?: \d+(?:\.\d+)?px){0,3}$/;
+const MAX_EMBED_COORD = 200_000;
+const MAX_EMBED_SIZE = 20_000;
+
+function parseEmbedBox(raw: unknown): LivePageEmbedBox | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const { left, top, width, height } = raw as Record<string, unknown>;
+  if (![left, top, width, height].every(value => typeof value === 'number' && Number.isFinite(value))) return null;
+  const box = { left: left as number, top: top as number, width: width as number, height: height as number };
+  if (Math.abs(box.left) > MAX_EMBED_COORD || Math.abs(box.top) > MAX_EMBED_COORD) return null;
+  if (box.width < 0 || box.height < 0 || box.width > MAX_EMBED_SIZE || box.height > MAX_EMBED_SIZE) return null;
+  return box;
+}
+
+/** Structural check of a `kronn:page-embeds` list: bounded, typed, finite.
+ * Whether a URL may be drawn is decided later, by `planLivePageEmbeds`. */
+export function parseLivePageEmbeds(raw: unknown, max = MAX_LIVE_PAGE_EMBED_REPORTS): LivePageEmbedPlacement[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: LivePageEmbedPlacement[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (out.length >= max) break;
+    if (!entry || typeof entry !== 'object') continue;
+    const { key, url, rect, clip, visible, radius } = entry as Record<string, unknown>;
+    if (typeof key !== 'string' || !LIVE_PAGE_EMBED_KEY.test(key) || seen.has(key)) continue;
+    if (typeof url !== 'string' || !url || url.length > MAX_LIVE_PAGE_EMBED_URL_CHARS) continue;
+    const box = parseEmbedBox(rect);
+    if (!box) continue;
+    // A clip that is present but malformed hides the content rather than
+    // letting it spill over the Page's own controls.
+    const clipBox = clip === undefined || clip === null ? null : parseEmbedBox(clip) ?? { ...box, width: 0, height: 0 };
+    seen.add(key);
+    out.push({
+      key,
+      url,
+      rect: box,
+      ...(clipBox ? { clip: clipBox } : {}),
+      visible: visible === true,
+      ...(typeof radius === 'string' && LIVE_PAGE_EMBED_RADIUS.test(radius) ? { radius } : {}),
+    });
+  }
+  return out;
 }
 
 const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
@@ -183,7 +255,7 @@ export function postLivePageActionStates(
 }
 const LIVE_PAGE_ACTION_REF = /^[A-Za-z0-9._~-]{1,256}$/;
 
-export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
+export function runtimeData(detail: LivePageDetail, params?: Record<string, string>): LivePageRuntimeData {
   return {
     version: 1,
     page: {
@@ -191,6 +263,8 @@ export function runtimeData(detail: LivePageDetail): LivePageRuntimeData {
       slug: detail.slug,
       title: detail.title,
       data_revision: detail.data_revision,
+      // Only the standalone tab has a URL of its own to carry view parameters.
+      ...(params ? { params: { ...params } } : {}),
     },
     datasets: Object.fromEntries(detail.datasets.map(dataset => [dataset.name, {
       kind: dataset.kind,
@@ -471,6 +545,89 @@ export function buildSandboxDocument(
       }
       addEventListener('load',queueHeight);
     };
+    // Third-party content: a nested iframe would inherit this sandbox and never
+    // play, so the host draws the real content over the placeholder. The Page
+    // names a URL; the host decides whether its site is allowed. Each
+    // placeholder keeps the same key while it lives (its URL and rank among its
+    // twins), so the host moves its iframe instead of reloading it. The bound
+    // here only caps the work: refused placeholders must not hide allowed ones,
+    // so the players' own quota is applied by the host, after its check.
+    let embedsSent=null;
+    let embedsQueued=false;
+    const embedSizes=typeof ResizeObserver==='function'?new ResizeObserver(()=>queueEmbeds()):null;
+    const embedWatched=new WeakSet();
+    const embedHash=value=>{
+      let hash=5381;
+      for(let i=0;i<value.length;i+=1)hash=((hash*33)^value.charCodeAt(i))>>>0;
+      return hash.toString(36);
+    };
+    // What the scrolling or clipping ancestors leave visible of a box. The
+    // frame's own viewport is clipped by the host; a fixed ancestor escapes
+    // everything above it.
+    const embedClip=(el,r)=>{
+      let left=r.left,top=r.top,right=r.right,bottom=r.bottom,clipped=false;
+      for(let node=el.parentElement;node&&node!==document.body&&node!==document.documentElement;node=node.parentElement){
+        let style=null;
+        try{style=getComputedStyle(node);}catch(_error){}
+        if(!style)continue;
+        const overflowX=style.overflowX||style.overflow,overflowY=style.overflowY||style.overflow;
+        const clipX=Boolean(overflowX)&&overflowX!=='visible';
+        const clipY=Boolean(overflowY)&&overflowY!=='visible';
+        if(clipX||clipY){
+          const b=getBounds.call(node);
+          const innerLeft=b.left+node.clientLeft,innerTop=b.top+node.clientTop;
+          if(clipX){left=Math.max(left,innerLeft);right=Math.min(right,innerLeft+node.clientWidth);}
+          if(clipY){top=Math.max(top,innerTop);bottom=Math.min(bottom,innerTop+node.clientHeight);}
+          clipped=true;
+        }
+        if(style.position==='fixed')break;
+      }
+      return clipped?{left,top,width:Math.max(0,right-left),height:Math.max(0,bottom-top)}:null;
+    };
+    const sendEmbeds=()=>{
+      embedsQueued=false;
+      if(!linkPort)return;
+      const embeds=[];
+      const ranks=new Map();
+      const all=document.querySelectorAll('[data-kronn-embed]');
+      for(let i=0;i<all.length&&embeds.length<${MAX_LIVE_PAGE_EMBED_REPORTS};i+=1){
+        const el=all[i];
+        const url=(getAttribute.call(el,'data-kronn-embed')||'').trim();
+        const scheme=url.slice(0,8).toLowerCase();
+        if(url.length>${MAX_LIVE_PAGE_EMBED_URL_CHARS}||(scheme!=='https://'&&scheme.slice(0,7)!=='http://'))continue;
+        if(embedSizes&&!embedWatched.has(el)){embedWatched.add(el);embedSizes.observe(el);}
+        const twin='e'+embedHash(url);
+        const rank=ranks.get(twin)||0;
+        ranks.set(twin,rank+1);
+        const r=getBounds.call(el);
+        const clip=embedClip(el,r);
+        const area=clip||{left:r.left,top:r.top,width:r.width,height:r.height};
+        let shown=area.width>0&&area.height>0&&area.top+area.height>0&&area.left+area.width>0&&area.top<innerHeight&&area.left<innerWidth;
+        if(shown&&typeof el.checkVisibility==='function')shown=el.checkVisibility({visibilityProperty:true});
+        let radius='';
+        try{radius=String(getComputedStyle(el).borderRadius||'').slice(0,64);}catch(_error){}
+        const entry={key:twin+':'+rank,url,rect:{left:r.left,top:r.top,width:r.width,height:r.height},visible:shown,radius};
+        if(clip)entry.clip=clip;
+        embeds.push(entry);
+      }
+      const signature=JSON.stringify(embeds);
+      if(signature===embedsSent)return;
+      embedsSent=signature;
+      portPost.call(linkPort,{type:'kronn:page-embeds',version:1,channel_id:channel,embeds});
+    };
+    const queueEmbeds=()=>{
+      if(embedsQueued)return;
+      embedsQueued=true;
+      if(typeof requestAnimationFrame==='function')requestAnimationFrame(sendEmbeds);else setTimeout(sendEmbeds,16);
+    };
+    addEventListener('scroll',queueEmbeds,{capture:true,passive:true});
+    addEventListener('resize',queueEmbeds,{passive:true});
+    addEventListener('load',queueEmbeds);
+    new MutationObserver(queueEmbeds).observe(document,{childList:true,subtree:true,attributes:true,attributeFilter:['data-kronn-embed','style','class','hidden']});
+    if(embedSizes){
+      embedSizes.observe(document.documentElement);
+      if(document.body)embedSizes.observe(document.body);
+    }
     addEventListener('message',event=>{
       const message=event.data;
       if(!message||message.version!==1||message.channel_id!==channel)return;
@@ -480,6 +637,9 @@ export function buildSandboxDocument(
         linkPort=event.ports[0];
         portStart.call(linkPort);
         watchHeight();
+        // A new port is a new host listener: it gets the full list, even empty.
+        embedsSent=null;
+        queueEmbeds();
         return;
       }
       if(message.type==='kronn:page-data'){
@@ -581,19 +741,33 @@ export interface LivePageOpenLinkRelay {
   dispose(): void;
 }
 
+export interface LivePageOpenLinkRelayOptions {
+  /** Opens an external link; `window.open` by default. */
+  openExternal?: (url: string, target: string, features: string) => unknown;
+  onAction?: (intent: LivePageActionIntent) => void;
+  onAnchor?: (anchor: LivePageActionIntent['anchor']) => void;
+  onHeight?: (height: number) => void;
+  /** Follows a link to another Kronn screen; same-tab hash navigation by default. */
+  navigateInternal?: (url: string) => unknown;
+  onEmbeds?: (embeds: LivePageEmbedPlacement[]) => void;
+}
+
 export function createLivePageOpenLinkRelay(
   channelId: string,
-  openExternal: (url: string, target: string, features: string) => unknown = window.open.bind(window),
-  onAction?: (intent: LivePageActionIntent) => void,
-  onAnchor?: (anchor: LivePageActionIntent['anchor']) => void,
-  onHeight?: (height: number) => void,
-  navigateInternal: (url: string) => unknown = navigateInternalKronnLink,
+  {
+    openExternal = window.open.bind(window),
+    onAction,
+    onAnchor,
+    onHeight,
+    navigateInternal = navigateInternalKronnLink,
+    onEmbeds,
+  }: LivePageOpenLinkRelayOptions = {},
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
     Boolean(anchor) && [anchor?.left, anchor?.top, anchor?.width, anchor?.height].every(Number.isFinite)
   );
-  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest | LivePageActionAnchorRequest) => {
+  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest | LivePageActionAnchorRequest | LivePageEmbedsRequest) => {
     if (
       !message
       || message.version !== 1
@@ -604,6 +778,13 @@ export function createLivePageOpenLinkRelay(
     if (message.type === 'kronn:page-action-anchor') {
       if (!validAnchor(message.anchor)) return;
       onAnchor?.({ ...message.anchor, slot: message.anchor.slot === true });
+      return;
+    }
+    // Where the Page placed its players: it only positions host-owned content
+    // the host re-validates, so it needs no user activation either.
+    if (message.type === 'kronn:page-embeds') {
+      const embeds = parseLivePageEmbeds(message.embeds);
+      if (embeds) onEmbeds?.(embeds);
       return;
     }
     // A content-sized Page reporting its height: layout, not a user action.

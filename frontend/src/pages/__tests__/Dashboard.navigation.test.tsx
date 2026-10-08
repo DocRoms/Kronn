@@ -24,7 +24,11 @@ vi.mock('../DiscussionsPage', () => ({
 vi.mock('../McpPage', () => ({ McpPage: () => <div data-testid="mcp-page" /> }));
 vi.mock('../WorkflowsPage', () => ({ WorkflowsPage: () => <div data-testid="workflow-page" /> }));
 vi.mock('../PlanningPage', () => ({ PlanningPage: () => <div data-testid="planning-page" /> }));
-vi.mock('../SettingsPage', () => ({ SettingsPage: () => <div data-testid="settings-page" /> }));
+vi.mock('../SettingsPage', () => ({
+  SettingsPage: ({ embedOriginPrefill }: { embedOriginPrefill?: { origin: string } | null }) => (
+    <div data-testid="settings-page" data-prefill={embedOriginPrefill?.origin ?? ''} />
+  ),
+}));
 vi.mock('../PagesPage', () => ({ PagesPage: () => <div data-testid="pages-page" /> }));
 
 vi.mock('../../lib/api', async () => {
@@ -210,6 +214,20 @@ describe('Dashboard reload/HMR navigation restoration', () => {
     });
 
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-in-place');
+  });
+
+  it('opens Artifacts settings with a blocked site typed in, on load and from a link in place', async () => {
+    window.location.hash = '#settings/artifacts?origin=https%3A%2F%2Fvimeo.com';
+    await renderDashboard();
+    expect(await screen.findByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://vimeo.com');
+    // Consumed: a reload must not prefill it again.
+    expect(window.location.hash).toBe('');
+
+    await act(async () => {
+      window.history.pushState(null, '', '#settings/artifacts?origin=https%3A%2F%2Fplayer.example.com');
+      window.dispatchEvent(new Event('hashchange'));
+    });
+    await waitFor(() => expect(screen.getByTestId('settings-page')).toHaveAttribute('data-prefill', 'https://player.example.com'));
   });
 
   it('drops a stale discussion id and keeps the safe list view', async () => {

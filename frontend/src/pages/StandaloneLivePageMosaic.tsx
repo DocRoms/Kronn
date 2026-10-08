@@ -6,6 +6,7 @@ import {
   hostTheme,
   hostThemeTokens,
   createLivePageOpenLinkRelay,
+  type LivePageEmbedPlacement,
   runtimeData,
 } from '../lib/live-page-sandbox';
 import type { LivePageMosaicLayout } from '../lib/live-page-navigation';
@@ -18,9 +19,12 @@ import {
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
+import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
 import './StandaloneLivePageMosaic.css';
+
+const NO_EMBEDS: LivePageEmbedPlacement[] = [];
 
 function channelId(pageId: string): string {
   return globalThis.crypto?.randomUUID?.() ?? `mosaic-page-${pageId}-${Date.now()}-${Math.random()}`;
@@ -84,11 +88,20 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   const frameDocRef = useRef(sandboxDocument);
   useEffect(() => { frameDocRef.current = sandboxDocument; }, [sandboxDocument]);
   const frameHeight = frameSize && frameSize.doc === sandboxDocument ? frameSize.height : null;
+  // Where the Page placed its third-party players; like the height, it only
+  // applies to the document that reported it.
+  const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
+  const pageEmbeds = embedsReport && embedsReport.doc === sandboxDocument ? embedsReport.embeds : NO_EMBEDS;
   useEffect(() => {
-    const relay = createLivePageOpenLinkRelay(bridgeChannel, undefined, intent => {
-      setActionUnavailable(false);
-      handlePageActionIntent(intent);
-    }, movePageActionAnchor, height => setFrameSize({ doc: frameDocRef.current, height }));
+    const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      onAction: intent => {
+        setActionUnavailable(false);
+        handlePageActionIntent(intent);
+      },
+      onAnchor: movePageActionAnchor,
+      onHeight: height => setFrameSize({ doc: frameDocRef.current, height }),
+      onEmbeds: embeds => setEmbedsReport({ doc: frameDocRef.current, embeds }),
+    });
     linkRelayRef.current = relay;
     return () => {
       if (linkRelayRef.current === relay) linkRelayRef.current = null;
@@ -127,6 +140,7 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
         onLoad={publishAllToFrame}
         data-testid="standalone-live-page-mosaic-frame"
       />
+      <LivePageEmbedOverlay frameRef={iframeRef} embeds={pageEmbeds} />
       <LivePageActionOverlay
         active={pageActiveAction}
         action={pageSelectedAction}

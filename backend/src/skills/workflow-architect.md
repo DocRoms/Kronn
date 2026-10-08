@@ -346,7 +346,7 @@ Use as the durable sink for a Kronn Live Page. A Page is a shared destination, n
 }
 ```
 
-The Page must already declare every named dataset. `replace` updates a snapshot, `append` adds time-series observations, and `upsert` updates a collection and therefore requires `key_field`. A publish applies every write atomically. The Page HTML is presentation-only: it receives `window.KronnPageData` plus a `kronn:page-data` event in a sandbox with no external network. Use `page_get()` before `page_update_html()` because HTML updates replace the complete document and create an immutable revision.
+The Page must already declare every named dataset. `replace` updates a snapshot, `append` adds time-series observations, and `upsert` updates a collection and therefore requires `key_field`. A publish applies every write atomically. The Page HTML is presentation-only: it receives `window.KronnPageData` plus a `kronn:page-data` event in a sandbox with no external network. Opened standalone as `#page/<id>?key=value`, it also gets short view hints in `KronnPageData.page.params` (e.g. `tv=1`). Use `page_get()` before `page_update_html()` because HTML updates replace the complete document and create an immutable revision.
 
 When the user wants a Page CTA to launch an existing QP, QA, QE or Workflow,
 pair the visible element's stable `data-kronn-action` with an inert
@@ -363,6 +363,16 @@ only the row selector keyed by variable name. A `user_input` value with such a
 stays editable before launch. Never place a resolved value or
 secret in Page HTML. The sandbox proposes an intention only; Kronn renders the
 native preflight card and the human launches it explicitly.
+
+To show third-party content (a Suno track, a video, any embeddable player),
+never nest an iframe: the Page sandbox blocks it. Size a placeholder with CSS
+and give it the full embed URL:
+`<div data-kronn-embed="https://suno.com/embed/<track uuid>"></div>`. Kronn
+draws it over the placeholder when that site (scheme, host and port, exactly)
+is in the destination Kronn's allowed sites (Configuration → Artifacts →
+External content); otherwise it shows a warning with a link to allow the site.
+At most 8 are drawn per Page. Tell the user which site to allow; some sites
+refuse to be framed at all.
 One block serves every row: give each row's button its own
 `data-kronn-bindings` and each click is launched for that row alone. Kronn
 marks each button with `data-kronn-action-state` (`launching`, `running`,

@@ -22,7 +22,8 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { ErrorBoundary } from '../components/ErrorBoundary';
-import { standaloneDiscussionId, standaloneDiscussionMessageId } from '../lib/live-page-navigation';
+import { embedSettingsRoute, standaloneDiscussionId, standaloneDiscussionMessageId } from '../lib/live-page-navigation';
+import type { EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
 import {
   readActiveDiscussionId,
   readDashboardPage,
@@ -233,6 +234,24 @@ export function Dashboard({ onReset }: DashboardProps) {
     };
     window.addEventListener('hashchange', followDiscussionLink);
     return () => window.removeEventListener('hashchange', followDiscussionLink);
+  }, []);
+
+  // A blocked embed links to Configuration → Artifacts with its site typed in
+  // (`#settings/artifacts?origin=…`), from this tab or from a standalone Page.
+  const [embedOriginPrefill, setEmbedOriginPrefill] = useState<EmbedOriginPrefill | null>(null);
+  useEffect(() => {
+    const followEmbedSettingsLink = () => {
+      const route = embedSettingsRoute(window.location.hash);
+      if (!route) return;
+      setPage('settings');
+      setEmbedOriginPrefill({ origin: route.origin, nonce: Date.now() });
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    };
+    followEmbedSettingsLink();
+    window.addEventListener('hashchange', followEmbedSettingsLink);
+    return () => window.removeEventListener('hashchange', followEmbedSettingsLink);
   }, []);
 
   // A link inside the app (a discussion pointing at a project file) sets the
@@ -1607,6 +1626,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             onReset={onReset}
             onNavigateDiscussion={(id) => { setOpenDiscussionId(id); setPage('discussions'); }}
             toast={toast}
+            embedOriginPrefill={embedOriginPrefill}
             // 0.8.6 — API audit section visibility : only show if at
             // least one API plugin (registry or custom) has a config
             // in this Kronn instance. Computed from mcpOverview so the

@@ -48,6 +48,14 @@ describe('Live Page sandbox', () => {
     expect(data.datasets.ticket_images.current).toEqual({ '10001': thumbnail });
   });
 
+  it('adds view parameters to the runtime data only when the surface has some', () => {
+    expect(runtimeData(detail).page).not.toHaveProperty('params');
+    const params = { tv: '1' };
+    const data = runtimeData(detail, params);
+    expect(data.page.params).toEqual({ tv: '1' });
+    expect(data.page.params).not.toBe(params);
+  });
+
   it('exposes a rendered-DOM export bridge and rasterizes canvas charts', () => {
     const output = buildSandboxDocument('<main>Report</main>', 'channel-1');
     expect(output).toContain("message.type!=='kronn:page-export-request'");
@@ -89,7 +97,7 @@ describe('Live Page sandbox', () => {
     const postMessage = vi.fn();
     const target = { postMessage } as unknown as Window;
     const openExternal = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal });
     relay.connect(target);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     port.postMessage({
@@ -111,14 +119,7 @@ describe('Live Page sandbox', () => {
     const postMessage = vi.fn();
     const openExternal = vi.fn();
     const navigateInternal = vi.fn();
-    const relay = createLivePageOpenLinkRelay(
-      'channel-1',
-      openExternal,
-      undefined,
-      undefined,
-      undefined,
-      navigateInternal,
-    );
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal, navigateInternal });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     const appUrl = `${window.location.origin}${window.location.pathname}`;
@@ -141,7 +142,7 @@ describe('Live Page sandbox', () => {
     const postMessage = vi.fn();
     const target = { postMessage } as unknown as Window;
     const openExternal = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', openExternal);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal });
     relay.connect(target);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     const valid = {
@@ -172,7 +173,7 @@ describe('Live Page sandbox', () => {
   it('forwards a typed action intention through the private port without executing it', async () => {
     const postMessage = vi.fn();
     const onAction = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     port.postMessage({
@@ -215,7 +216,7 @@ describe('Live Page sandbox', () => {
     const postMessage = vi.fn();
     const onAction = vi.fn();
     const onAnchor = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction, onAnchor);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction, onAnchor });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     // A scroll carries no activation. The card must still follow its row.
@@ -397,7 +398,7 @@ describe('Live Page sandbox', () => {
   it('relays a valid Page height without user activation, and drops the rest', async () => {
     const postMessage = vi.fn();
     const onHeight = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), vi.fn(), onHeight);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction: vi.fn(), onAnchor: vi.fn(), onHeight });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: false, hasBeenActive: true } });
@@ -414,7 +415,7 @@ describe('Live Page sandbox', () => {
   it('reports an anchor that is the collapse the Page opened, not its row', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), onAnchor);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction: vi.fn(), onAnchor });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     port.postMessage({
@@ -432,7 +433,7 @@ describe('Live Page sandbox', () => {
   it('ignores an anchor whose rectangle is not finite', async () => {
     const postMessage = vi.fn();
     const onAnchor = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), vi.fn(), onAnchor);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction: vi.fn(), onAnchor });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     port.postMessage({
@@ -449,7 +450,7 @@ describe('Live Page sandbox', () => {
   it('rejects action references that cannot form a stable URL-safe server id', async () => {
     const postMessage = vi.fn();
     const onAction = vi.fn();
-    const relay = createLivePageOpenLinkRelay('channel-1', vi.fn(), onAction);
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction });
     relay.connect({ postMessage } as unknown as Window);
     const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
     const request = {
@@ -476,10 +477,7 @@ describe('Live Page sandbox', () => {
     });
     const postMessage = vi.fn();
     const openExternal = vi.fn();
-    const relay = createLivePageOpenLinkRelay(
-      'channel-1',
-      openExternal,
-    );
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal });
     try {
       relay.connect({ postMessage } as unknown as Window);
       const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];

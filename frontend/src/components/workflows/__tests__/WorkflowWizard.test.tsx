@@ -121,8 +121,8 @@ const renderWizard = (over: Partial<ComponentProps<typeof WorkflowWizard>> = {})
 it('imports the first Artifact from the publisher step and preserves its writes', async () => {
   const imported = { id: 'imported-artifact', title: 'Imported team', slug: 'imported-team' };
   // Exercise the real import dialog and the wizard callback together.
-  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true });
-  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [] });
+  pagesApi.previewImport = vi.fn().mockResolvedValue({ title: 'Imported team', entries: [], issues: [], warnings: [], digest: 'review', can_import: true, embed_origins: [] });
+  pagesApi.importArtifact = vi.fn().mockResolvedValue({ artifact: imported, entries: [], allowed_embed_origins: [], not_allowed_embed_origins: [], embed_origins_error: null });
   vi.mocked(projectsApi.list).mockResolvedValue([mkProject()]);
   renderWizard({ focusedStepOnly: true, initialStepId: 'publish-step', editWorkflow: mkWorkflow({ steps: [mkStep({
     id: 'publish-step', name: 'publish', step_type: { type: 'PublishPageData' },

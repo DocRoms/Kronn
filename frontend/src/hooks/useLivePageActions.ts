@@ -271,14 +271,17 @@ export function useLivePageActionSlot(
  * Skip automatic publication when runtimeData is unchanged to preserve Page
  * state. publishPageData stays unconditional for onLoad to seed fresh frames.
  * The revision changes on every publication, including dataset replacements.
+ * `extraKey` covers what the host adds to runtimeData besides the Page itself
+ * (the standalone tab's view parameters).
  */
 export function usePublishPageDataWhenChanged(
   detail: LivePageDetail | null,
   publishPageData: () => void,
+  extraKey = '',
 ): void {
   const publishedRef = useRef<string | null>(null);
   const signature = detail
-    ? [detail.id, detail.slug, detail.title, detail.data_revision, detail.datasets.length].join('\u0000')
+    ? [detail.id, detail.slug, detail.title, detail.data_revision, detail.datasets.length, extraKey].join('\u0000')
     : null;
   useEffect(() => {
     if (signature === null || publishedRef.current === signature) return;

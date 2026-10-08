@@ -47,6 +47,20 @@ fn action_dependencies(html: &str) -> Result<Vec<(ResourceKind, String)>> {
     Ok(dependencies)
 }
 
+/// The origins an exported Page needs: those its HTML spells out, plus those
+/// it was imported with (content its scripts build at runtime).
+fn export_embed_origins(conn: &Connection, page_id: &str, html: &str) -> Result<Vec<String>> {
+    let stored: String = conn.query_row(
+        "SELECT declared_embed_origins FROM live_pages WHERE id = ?1",
+        [page_id],
+        |row| row.get(0),
+    )?;
+    let stored: Vec<String> = serde_json::from_str(&stored).unwrap_or_default();
+    let mut origins = crate::core::embed_origins::declared_origins(html);
+    origins.extend(crate::core::embed_origins::normalize_declared(&stored));
+    Ok(crate::core::embed_origins::normalize_declared(&origins))
+}
+
 pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
     // Refuse oversized observations before hydrating the complete dataset graph.
     let estimated: Option<i64> = conn.query_row(
@@ -106,10 +120,12 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
             points,
         });
     }
+    let embed_origins = export_embed_origins(conn, &detail.page.id, &detail.revision.html)?;
     Ok(ArtifactBundlePage {
         id: detail.page.id,
         title: detail.page.title,
         slug: detail.page.slug,
+        embed_origins,
         html: detail.revision.html,
         created_by_agent: detail.revision.created_by_agent,
         datasets,

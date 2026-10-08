@@ -61,8 +61,8 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../lib/live-page-sandbox', async importOriginal => ({
   ...await importOriginal<Record<string, unknown>>(),
-  createLivePageOpenLinkRelay: vi.fn((_channel, _open, onAction) => {
-    actionRelay.onAction = onAction;
+  createLivePageOpenLinkRelay: vi.fn((_channel, options) => {
+    actionRelay.onAction = options?.onAction;
     return linkRelay;
   }),
   requestRenderedPageHtml: vi.fn(),

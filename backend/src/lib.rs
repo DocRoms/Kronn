@@ -852,6 +852,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::setup::restore_recovery),
         )
         .route(
+            "/api/config/embed-origins",
+            get(api::live_pages::embed_origins).post(api::live_pages::change_embed_origins),
+        )
+        .route(
             "/api/config/scan-paths",
             get(api::setup::get_scan_paths).post(api::setup::set_scan_paths),
         )

@@ -803,6 +803,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "208_workflow_runs_type_index",
         include_str!("sql/208_workflow_runs_type_index.sql"),
     ),
+    (
+        "209_live_page_declared_embed_origins",
+        include_str!("sql/209_live_page_declared_embed_origins.sql"),
+    ),
 ];
 
 /// Apply one migration inside the caller-owned transaction.

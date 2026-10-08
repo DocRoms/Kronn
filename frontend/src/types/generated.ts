@@ -532,7 +532,15 @@ export type ArtifactBundleDataset = { name: string, kind: LivePageDatasetKind,
  */
 has_current: boolean, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, points: Array<ArtifactBundlePoint>, };
 
-export type ArtifactBundlePage = { id: string, title: string, slug: string, html: string, created_by_agent: string | null, datasets: Array<ArtifactBundleDataset>, };
+export type ArtifactBundlePage = { id: string, title: string, slug: string, html: string, created_by_agent: string | null, datasets: Array<ArtifactBundleDataset>,
+/**
+ * Origins of the third-party content the HTML embeds (`data-kronn-embed`).
+ * It tells the importer what the Artifact needs; it never authorizes
+ * anything, and the destination Kronn still checks every URL it renders.
+ * Omitted when empty, so Artifacts without embeds keep their exact bytes
+ * (and the approval fingerprints of repository resources built on them).
+ */
+embed_origins?: Array<string>, };
 
 export type ArtifactBundlePoint = { observed_at: string, payload: any, dedupe_key: string | null, };
 
@@ -544,6 +552,12 @@ export type ArtifactImportChoice = { kind: ArtifactResourceKind, source_id: stri
 
 export type ArtifactImportDisposition = "create" | "reuse" | "conflict";
 
+export type ArtifactImportEmbedOrigin = { origin: string,
+/**
+ * Already in this Kronn's allowed sites: nothing to decide.
+ */
+already_allowed: boolean, };
+
 export type ArtifactImportEntry = { kind: ArtifactResourceKind, source_id: string, name: string, disposition: ArtifactImportDisposition, existing_id: string | null,
 /**
  * UI translation key suffix: missing, identical, changed, retargeted, chosen.
@@ -552,7 +566,11 @@ reason: string, quick_exec?: ArtifactImportExecReview, quick_api?: ArtifactImpor
 
 export type ArtifactImportExecReview = { command: string, args: Array<string>, approved: boolean, };
 
-export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean, };
+export type ArtifactImportPreview = { title: string, entries: Array<ArtifactImportEntry>, issues: Array<string>, warnings: Array<ArtifactImportWarning>, digest: string, can_import: boolean,
+/**
+ * One row per distinct origin the Artifact embeds content from.
+ */
+embed_origins: Array<ArtifactImportEmbedOrigin>, };
 
 export type ArtifactImportRequest = { content: string, project_id?: string | null, choices?: Array<ArtifactImportChoice>,
 /**
@@ -562,9 +580,24 @@ approved_quick_exec_ids?: Array<string>,
 /**
  * The preview digest is required at commit; stale decisions are rejected.
  */
-preview_digest?: string | null, };
+preview_digest?: string | null,
+/**
+ * Origins the Artifact declares that the user chose to allow on this
+ * Kronn. Added to the global list only once the import commits.
+ */
+allow_embed_origins?: Array<string>, };
 
-export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>, };
+export type ArtifactImportResult = { artifact: LivePage, entries: Array<ArtifactImportEntry>,
+/**
+ * Origins this import added to the allowed sites.
+ */
+allowed_embed_origins: Array<string>,
+/**
+ * Origins the user chose to add that are NOT allowed although the
+ * Artifact was imported (the configuration could not be saved), with
+ * `embed_origins_error` saying why. Empty when every choice was applied.
+ */
+not_allowed_embed_origins: Array<string>, embed_origins_error: string | null, };
 
 export type ArtifactImportWarning = { kind: string, id: string, };
 
@@ -2931,6 +2964,12 @@ paid_agent_growth: Array<AgentContextGrowth>, };
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
+
+/**
+ * `POST /api/config/embed-origins`: origins to allow and to revoke, applied
+ * together. Each one is normalized; an invalid one rejects the whole change.
+ */
+export type EmbedOriginsChange = { add: Array<string>, remove: Array<string>, };
 
 /**
  * One endpoint that keeps failing the same way, for the plugin's spec health.
