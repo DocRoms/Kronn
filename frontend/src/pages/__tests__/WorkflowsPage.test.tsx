@@ -9,6 +9,7 @@ import {
   quickPrompts as quickPromptsApi,
 } from '../../lib/api';
 import { WorkflowsPage } from '../WorkflowsPage';
+import { readAutomationLastVisit } from '../../lib/automationNavigation';
 import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
@@ -913,7 +914,10 @@ describe('WorkflowsPage', () => {
     expect(execsGroup).toHaveAttribute('aria-expanded', 'false');
     first.unmount();
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    // The route reopens the bare address on the visit the page recorded.
+    const lastVisit = readAutomationLastVisit();
+    expect(lastVisit).toEqual({ tab: 'quickExecs', resourceId: 'qe-persisted' });
+    await wrap(<WorkflowsPage projects={[]} selection={{ ...lastVisit, runId: null }} />);
     const restoredSidebar = screen.getByRole('complementary', { name: 'Automatisation' });
     expect(within(restoredSidebar).getByRole('button', { name: 'Workflows 1' }))
       .toHaveAttribute('aria-expanded', 'false');
@@ -922,13 +926,8 @@ describe('WorkflowsPage', () => {
     expect(await screen.findByRole('heading', { name: 'Shared CLI' })).toBeInTheDocument();
   });
 
-  it('drops a persisted automation selection when its resource no longer exists', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'quickExecs',
-      resourceId: 'qe-deleted',
-    }));
-
-    await wrap(<WorkflowsPage projects={[]} />);
+  it('drops an addressed automation whose resource no longer exists, and records the tab alone', async () => {
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'quickExecs', resourceId: 'qe-deleted', runId: null }} />);
 
     await waitFor(() => {
       expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}'))
@@ -937,7 +936,7 @@ describe('WorkflowsPage', () => {
     expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
   });
 
-  it('reloads the persisted workflow detail instead of only highlighting its row', async () => {
+  it('loads the addressed workflow detail instead of only highlighting its row', async () => {
     const summary = {
       id: 'wf-persisted', name: 'Persisted workflow', project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 0, misconfigured_step_count: 0, unsafe_step_count: 0,
@@ -950,14 +949,10 @@ describe('WorkflowsPage', () => {
       workspace_config: null, concurrency_limit: null, enabled: true, pinned: false,
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as Workflow;
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'workflows',
-      resourceId: summary.id,
-    }));
     mockWorkflowsApi.list.mockResolvedValueOnce([summary]);
     mockWorkflowsApi.get.mockResolvedValueOnce(workflow);
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'workflows', resourceId: summary.id, runId: null }} />);
 
     await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith(summary.id));
     expect(screen.getByTestId('workflow-detail-pane')).toBeInTheDocument();
@@ -1179,10 +1174,6 @@ describe('WorkflowsPage', () => {
   });
 
   it('keeps the pinned workflow, starred and highlighted, in the sidebar while its detail is selected', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({
-      tab: 'workflows',
-      resourceId: 'wf-pin',
-    }));
     const summary: WorkflowSummary = {
       id: 'wf-pin', name: 'Pinned detail', project_id: null, project_name: null,
       trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0, unsafe_step_count: 0,
@@ -1197,7 +1188,7 @@ describe('WorkflowsPage', () => {
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     } as Workflow);
 
-    await wrap(<WorkflowsPage projects={[]} />);
+    await wrap(<WorkflowsPage projects={[]} selection={{ tab: 'workflows', resourceId: 'wf-pin', runId: null }} />);
 
     const sidebar = screen.getByRole('complementary', { name: 'Automatisation' });
     const row = within(sidebar).getByRole('button', { name: 'Ouvrir Pinned detail' });
@@ -1892,14 +1883,40 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'change'));
   });
 
-  it('restores the last visit at the bare address and says so', async () => {
-    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: null }));
+  it('opens on the address it is given, says so once, and records it as the last visit', async () => {
+    // What the previous visit left behind is the route's to restore, not the page's.
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: 'qa-old' }));
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange}
+      selection={{ tab: 'skills', resourceId: null, runId: null }} />);
+
+    expect(onSelectionChange).toHaveBeenCalledExactlyOnceWith({ tab: 'skills', resourceId: null, runId: null }, 'restore');
+    expect(JSON.parse(localStorage.getItem('kronn:automationNavigation') ?? '{}')).toEqual({ tab: 'skills', resourceId: null });
+  });
+
+  it('opens on the workflows list without an address', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickApis', resourceId: 'qa-old' }));
     const onSelectionChange = vi.fn();
 
     await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange} />);
 
-    expect(onSelectionChange).toHaveBeenCalledWith({ tab: 'quickApis', resourceId: null, runId: null }, 'restore');
-    expect(onSelectionChange).toHaveBeenCalledTimes(1);
+    expect(onSelectionChange).toHaveBeenCalledExactlyOnceWith({ tab: 'workflows', resourceId: null, runId: null }, 'restore');
+  });
+
+  it('lets go of a resource the loaded list does not know as its own word, not the reader\'s', async () => {
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([]);
+    const onSelectionChange = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} onSelectionChange={onSelectionChange}
+      selection={{ tab: 'quickPrompts', resourceId: 'qp-gone', runId: null }} />);
+
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore'));
+    // Said once each: the first word, then the one that let go.
+    expect(onSelectionChange.mock.calls).toEqual([
+      [{ tab: 'quickPrompts', resourceId: 'qp-gone', runId: null }, 'restore'],
+      [{ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore'],
+    ]);
   });
 
   it('keeps the full focused run when the compact page already contains its id', async () => {

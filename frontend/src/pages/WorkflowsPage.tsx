@@ -1,6 +1,7 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
-import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab } from '../lib/routes';
+import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab, type SelectionReason } from '../lib/routes';
+import { writeAutomationLastVisit, type AutomationLastVisit } from '../lib/automationNavigation';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -157,14 +158,7 @@ type AutomationResource = {
   skill?: Skill;
 };
 
-const AUTOMATION_TABS: AutomationTab[] = ['workflows', 'quickPrompts', 'quickApis', 'quickExecs', 'skills'];
-const AUTOMATION_NAVIGATION_STORAGE_KEY = 'kronn:automationNavigation';
 const AUTOMATION_COLLAPSED_STORAGE_KEY = 'kronn:automationCollapsedSections';
-
-interface AutomationNavigationState {
-  tab: AutomationTab;
-  resourceId: string | null;
-}
 
 interface AutomationResourceRowProps {
   resourceId: string;
@@ -263,26 +257,6 @@ function AutomationResourceRow({
   );
 }
 
-function isAutomationTab(value: unknown): value is AutomationTab {
-  return typeof value === 'string' && AUTOMATION_TABS.includes(value as AutomationTab);
-}
-
-function readAutomationNavigation(): AutomationNavigationState {
-  try {
-    const raw = localStorage.getItem(AUTOMATION_NAVIGATION_STORAGE_KEY);
-    if (!raw) return { tab: 'workflows', resourceId: null };
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
-      tab: isAutomationTab(parsed.tab) ? parsed.tab : 'workflows',
-      resourceId: typeof parsed.resourceId === 'string' && parsed.resourceId.trim()
-        ? parsed.resourceId
-        : null,
-    };
-  } catch {
-    return { tab: 'workflows', resourceId: null };
-  }
-}
-
 function readCollapsedAutomationSections(): Set<string> {
   try {
     const parsed = JSON.parse(
@@ -318,12 +292,16 @@ interface WorkflowsPageProps {
    * The tab and the resource open in it, when the caller owns them (the
    * address does): the page reports every change through `onSelectionChange`
    * and follows whatever it is then given — a workflow with a run to reveal,
-   * a Quick Prompt, a skill. Leave undefined to let the page keep its own,
-   * restored from the last visit.
+   * a Quick Prompt, a skill. The bare address is the route's to resolve, from
+   * the last visit the page records. Leave undefined to let the page keep
+   * its own, from the workflows list.
    */
   selection?: AutomationSelection;
-  /** `restore` is the page's own first word, from the last visit; `change` is the reader's. */
-  onSelectionChange?: (selection: AutomationSelection, reason: 'restore' | 'change') => void;
+  /**
+   * `restore` is the page's own word: its first, and the one that lets go of
+   * a resource the loaded list does not know. `change` is the reader's.
+   */
+  onSelectionChange?: (selection: AutomationSelection, reason: SelectionReason) => void;
   /** The router's location, new on every navigation — even one that comes
    *  back to the same address, whose key is unchanged. Listed with the
    *  selection above so it is renewed each time: the router renders in a
@@ -381,9 +359,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // The one-shot arrival target, taken during initial state creation so the
   // first render is already on its tab.
   const [postImprovedQpId, setPostImprovedQpId] = useState<string | null>(highlightQuickPromptId);
-  // The address, when it names a tab and resource; otherwise the last visit.
-  const [initialAutomationNavigation] = useState<AutomationNavigationState>(() =>
-    selection ? { tab: selection.tab, resourceId: selection.resourceId } : readAutomationNavigation());
+  // The tab and resource the page opens on: the address's.
+  const [initialAutomationNavigation] = useState<AutomationLastVisit>(() =>
+    selection ? { tab: selection.tab, resourceId: selection.resourceId } : { tab: 'workflows', resourceId: null });
   const [tab, setTab] = useState<AutomationTab>(
     postImprovedQpId ? 'quickPrompts' : initialAutomationNavigation.tab,
   );
@@ -551,20 +529,20 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           : tab === 'skills'
             ? (invalidSkillSelection ? null : selectedSkillId)
             : (invalidQuickExecSelection ? null : selectedQuickExecId);
-    try {
-      localStorage.setItem(
-        AUTOMATION_NAVIGATION_STORAGE_KEY,
-        JSON.stringify({ tab, resourceId }),
-      );
-    } catch {
-      // localStorage may be unavailable in private/restricted browser modes.
-    }
+    writeAutomationLastVisit({ tab, resourceId });
     const editingId = tab === 'workflows' ? editingWorkflow?.id ?? pendingEditId : null;
     const editor = tab !== 'workflows' ? null : showCreate ? 'create' : editingId ? 'edit' : null;
     const current: AutomationSelection = editor
       ? { tab, resourceId: editor === 'edit' ? editingId : null, runId: null, editor }
       : { tab, resourceId, runId: tab === 'workflows' && resourceId ? focusRunId : null };
-    const reason = currentSelectionRef.current ? 'change' : 'restore';
+    // Letting go of a resource the loaded list does not know is the page's
+    // own word, like its first: the address it corrects is replaced, so Back
+    // does not bounce the reader between the two.
+    const previous = currentSelectionRef.current;
+    // Said once: the address only hears what changes.
+    if (previous !== null && sameAutomationSelection(previous, current)) return;
+    const letGo = previous !== null && previous.tab === tab && previous.resourceId !== null && resourceId === null && !editor;
+    const reason: SelectionReason = previous === null || letGo ? 'restore' : 'change';
     currentSelectionRef.current = current;
     onSelectionChange?.(current, reason);
   }, [

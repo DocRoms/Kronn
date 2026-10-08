@@ -1,10 +1,12 @@
-import { useCallback, useMemo, useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useLayoutEffect, useRef } from 'react';
 import { useLocation, useParams } from 'react-router';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
+import { readAutomationLastVisit } from '../lib/automationNavigation';
 import { isUsable } from '../lib/constants';
 import { useDashboardContext } from '../lib/dashboardContext';
 import {
-  automationEditorFromPath, automationTabFromPath, sameAutomationSelection, type AutomationIntent, type AutomationSelection,
+  automationEditorFromPath, automationPath, automationTabFromPath, sameAutomationSelection,
+  type AutomationIntent, type AutomationSelection, type SelectionReason,
 } from '../lib/routes';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
 import { useLocationIntent } from './useLocationIntent';
@@ -26,20 +28,32 @@ export function WorkflowsRoute() {
   const runId = params.runId ?? null;
   // `/workflows/new` and `/workflows/<id>/edit`: the workflow wizard has the pane.
   const editor = automationEditorFromPath(pathname);
-  const selection = useMemo<AutomationSelection>(
-    () => (editor ? { tab, resourceId, runId, editor } : { tab, resourceId, runId }),
-    [tab, resourceId, runId, editor],
+  const [intent, consumeIntent] = useLocationIntent<AutomationIntent>();
+  // The bare `/workflows` names nothing: it reopens where the previous visit
+  // left off, in place of itself. An explicit address — a tab, a resource,
+  // the wizard — and Back/Forward are what they say. A preset arriving at the
+  // bare address opens the wizard on the workflows list instead.
+  const bare = tab === 'workflows' && !resourceId && !editor;
+  const restored = useMemo(
+    () => (bare && !intent?.preset ? readAutomationLastVisit() : null),
+    [bare, intent?.preset],
   );
-  // A choice is a step Back can undo; what the page restores on its own at
-  // the bare address replaces it instead. The address is read through a ref:
+  const selection = useMemo<AutomationSelection>(() => {
+    if (restored) return { tab: restored.tab, resourceId: restored.resourceId, runId: null };
+    return editor ? { tab, resourceId, runId, editor } : { tab, resourceId, runId };
+  }, [restored, tab, resourceId, runId, editor]);
+  useEffect(() => {
+    if (restored && automationPath(restored) !== pathname) nav.toAutomation(restored, { replace: true });
+  }, [restored, pathname, nav]);
+  // A choice is a step Back can undo; what the page restores or lets go on
+  // its own replaces the address instead. The address is read through a ref:
   // the page lists this callback in an effect's dependencies.
   const addressed = useRef(selection);
   useLayoutEffect(() => { addressed.current = selection; }, [selection]);
-  const handleSelectionChange = useCallback((next: AutomationSelection, reason: 'restore' | 'change') => {
+  const handleSelectionChange = useCallback((next: AutomationSelection, reason: SelectionReason) => {
     if (sameAutomationSelection(next, addressed.current)) return;
     nav.toAutomation(next, { replace: reason === 'restore' });
   }, [nav]);
-  const [intent, consumeIntent] = useLocationIntent<AutomationIntent>();
   return (
     <WorkflowsPage
       projects={ctx.projects}

@@ -736,7 +736,9 @@ export function Dashboard({ onReset }: DashboardProps) {
               onClick={event => {
                 if (!isPlainLeftClick(event)) return;
                 event.preventDefault();
-                nav.toPage(id);
+                // The tab of the page already open is not a navigation: the
+                // page keeps what it shows, and its address stays.
+                if (page !== id) nav.toPage(id);
               }}
               title={label}
             >

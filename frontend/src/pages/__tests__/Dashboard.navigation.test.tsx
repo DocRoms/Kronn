@@ -220,6 +220,18 @@ describe('Dashboard navigation', () => {
     expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-7');
   });
 
+  it('does nothing on the tab of the page already open: its address and history stay', async () => {
+    await renderDashboard('/discussions/disc-deep');
+    expect(await screen.findByTestId('discussion-page')).toHaveTextContent('disc-deep');
+    const depth = window.history.length;
+
+    await act(async () => { navTab('discussions').click(); });
+
+    expect(window.location.pathname).toBe('/discussions/disc-deep');
+    expect(window.history.length).toBe(depth);
+    expect(screen.getByTestId('discussion-page')).toHaveTextContent('disc-deep');
+  });
+
   it('lets the reader leave a discussion address through the nav', async () => {
     await renderDashboard('/discussions/disc-deep');
     expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();

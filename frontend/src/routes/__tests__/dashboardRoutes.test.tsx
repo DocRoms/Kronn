@@ -605,7 +605,7 @@ describe('Workflows route', () => {
     await waitFor(() => expect(received.workflows().selection).toEqual({ tab: 'workflows', resourceId: null, runId: null }));
   });
 
-  it('lets what the page restores on its own replace the bare address', async () => {
+  it('lets what the page restores or lets go on its own replace the address', async () => {
     await open('/workflows');
     const depth = window.history.length;
 
@@ -613,6 +613,59 @@ describe('Workflows route', () => {
 
     expect(window.location.pathname).toBe('/workflows/skills/skill-1');
     expect(window.history.length).toBe(depth);
+
+    act(() => received.workflows().onSelectionChange?.({ tab: 'skills', resourceId: null, runId: null }, 'restore'));
+
+    expect(window.location.pathname).toBe('/workflows/skills');
+    expect(window.history.length).toBe(depth);
+  });
+
+  it('reopens the bare address where the previous visit left off, in place of it', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickPrompts', resourceId: 'qp-1' }));
+    const depth = window.history.length;
+    await open('/workflows');
+
+    await waitFor(() => expect(window.location.pathname).toBe('/workflows/qp/qp-1'));
+    expect(window.history.length).toBe(depth);
+    expect(received.workflows().selection).toEqual({ tab: 'quickPrompts', resourceId: 'qp-1', runId: null });
+    localStorage.removeItem('kronn:automationNavigation');
+  });
+
+  it('leaves the bare address alone when the previous visit was the workflows list', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'workflows', resourceId: null }));
+    const depth = window.history.length;
+    await open('/workflows');
+
+    expect(window.location.pathname).toBe('/workflows');
+    expect(window.history.length).toBe(depth);
+    expect(received.workflows().selection).toEqual({ tab: 'workflows', resourceId: null, runId: null });
+    localStorage.removeItem('kronn:automationNavigation');
+  });
+
+  it('lets an explicit address, and Back to it, win over the previous visit', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickPrompts', resourceId: 'qp-1' }));
+    await open('/workflows/qa/qa-1');
+    expect(window.location.pathname).toBe('/workflows/qa/qa-1');
+    expect(received.workflows().selection).toEqual({ tab: 'quickApis', resourceId: 'qa-1', runId: null });
+
+    act(() => received.workflows().onSelectionChange?.({ tab: 'skills', resourceId: null, runId: null }, 'change'));
+    expect(window.location.pathname).toBe('/workflows/skills');
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/workflows/qa/qa-1'));
+    expect(received.workflows().selection).toEqual({ tab: 'quickApis', resourceId: 'qa-1', runId: null });
+    localStorage.removeItem('kronn:automationNavigation');
+  });
+
+  it('opens the wizard on the workflows list when a preset arrives at the bare address', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'quickPrompts', resourceId: 'qp-1' }));
+    await open('/discussions');
+    await act(async () => received.discussions().onLaunchWorkflowFromPreset?.('ticket-to-pr', 'proj-1'));
+
+    expect(window.location.pathname).toBe('/workflows');
+    expect(received.workflows().selection).toEqual({ tab: 'workflows', resourceId: null, runId: null });
+    expect(received.workflows().pendingPreset).toEqual({ presetId: 'ticket-to-pr', projectId: 'proj-1' });
+    localStorage.removeItem('kronn:automationNavigation');
   });
 
   it('leaves the address alone when the page confirms what it names', async () => {
