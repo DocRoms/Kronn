@@ -100,7 +100,8 @@ export interface ProjectCardProps {
   /** What the address names inside this project: a view, and the code file or
    * docs folder it shows. Absent, the card keeps its own view. */
   location?: ProjectLocation | null;
-  /** Reports a view the reader picks, so the address follows it. */
+  /** Reports a view the reader picks, and the code file they open in it, so
+   * the address follows them. */
   onLocationChange?: (location: ProjectLocation) => void;
 }
 
@@ -162,6 +163,12 @@ export function ProjectCard({
       // localStorage may be unavailable in private/restricted browser modes.
     }
     onLocationChange?.({ view: 'code', file: path, line });
+  }, [onLocationChange]);
+  // The reader opened another file in the code view: the address names it,
+  // without the line of the link that brought them here.
+  const followCodeFile = useCallback((path: string) => {
+    setOwnCodeFile({ path, line: null });
+    onLocationChange?.({ view: 'code', file: path, line: null });
   }, [onLocationChange]);
   const reportDockerRunning = useCallback(
     (running: boolean) => onDockerRunningChange?.(proj.id, running),
@@ -2014,6 +2021,7 @@ export function ProjectCard({
                 projectId={proj.id}
                 initialPath={codeInitialPath}
                 initialLine={codeInitialLine}
+                onPathChange={followCodeFile}
               />
             </section>
           )}

@@ -377,6 +377,21 @@ describe('Projects route', () => {
     await waitFor(() => expect(received.projects().projectLocation?.view).toBe('code'));
   });
 
+  it('follows the file the reader opens in the code view, a step Back undoes', async () => {
+    await open('/projects/proj-1/code?file=README.md&line=7');
+    const depth = window.history.length;
+
+    await act(async () => received.projects().onProjectLocationChange?.({ view: 'code', file: 'src/other.ts', line: null }));
+
+    expect(window.location.pathname).toBe('/projects/proj-1/code');
+    expect(window.location.search).toBe('?file=src%2Fother.ts');
+    expect(window.history.length).toBe(depth + 1);
+    expect(received.projects().projectLocation).toEqual({ view: 'code', file: 'src/other.ts', line: null, folder: null });
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(received.projects().projectLocation).toEqual({ view: 'code', file: 'README.md', line: 7, folder: null }));
+  });
+
   it('leaves the view to the project when the address names none, or one it does not know', async () => {
     await open('/projects/proj-1');
     expect(received.projects().projectLocation).toBeNull();

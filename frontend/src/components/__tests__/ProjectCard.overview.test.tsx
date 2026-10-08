@@ -80,8 +80,13 @@ vi.mock('../../lib/I18nContext', () => ({
 }));
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 vi.mock('../ProjectCodePanel', () => ({
-  ProjectCodePanel: ({ projectId, initialPath }: { projectId: string; initialPath?: string | null }) => (
-    <div data-testid="project-code-panel">{projectId}:{initialPath ?? 'root'}</div>
+  ProjectCodePanel: ({ projectId, initialPath, onPathChange }: {
+    projectId: string; initialPath?: string | null; onPathChange?: (path: string) => void;
+  }) => (
+    <div data-testid="project-code-panel">
+      {projectId}:{initialPath ?? 'root'}
+      <button type="button" onClick={() => onPathChange?.('src/other.ts')}>open other</button>
+    </div>
   ),
 }));
 vi.mock('../ProjectDockerPanel', () => ({
@@ -126,6 +131,48 @@ describe('ProjectCard — repository overview', () => {
     clearCachedResources();
     localStorage.removeItem('kronn:projectDetailView');
     sessionStorage.clear();
+  });
+
+  it('reports the file the reader opens in the code view, so the address follows it', () => {
+    const onLocationChange = vi.fn();
+    const card = (location: ComponentProps<typeof ProjectCard>['location']) => (
+      <ProjectCard
+        project={PROJECT}
+        dockerRunning
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+        location={location}
+        onLocationChange={onLocationChange}
+      />
+    );
+    const view = render(card({ view: 'code', file: 'README.md', line: 4 }));
+    expect(screen.getByTestId('project-code-panel')).toHaveTextContent('README.md');
+
+    fireEvent.click(screen.getByRole('button', { name: 'open other' }));
+
+    // Said without the line of the link that brought the reader here.
+    expect(onLocationChange).toHaveBeenCalledExactlyOnceWith({ view: 'code', file: 'src/other.ts', line: null });
+
+    // The address follows, and the panel is given the file it already shows.
+    view.rerender(card({ view: 'code', file: 'src/other.ts', line: null }));
+    expect(screen.getByTestId('project-code-panel')).toHaveTextContent('src/other.ts');
   });
 
   it('separates audit and docs, keeps the active tab, and consumes an audit deep-link', async () => {
