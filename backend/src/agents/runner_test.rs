@@ -608,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_mcp_registry_leaves_out_a_server_whose_command_is_not_installed() {
+    fn acp_mcp_registry_leaves_out_only_a_bare_command_found_nowhere() {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join(".mcp.json"),
@@ -616,7 +616,9 @@ mod tests {
                 "mcpServers": {
                     "present": {"command": installed(&project, "present-server")},
                     "ghost": {"command": "kronn-test-no-such-mcp-command"},
-                    "ghost-path": {"command": project.path().join("absent").to_string_lossy()}
+                    "relative": {"command": "./tools/project-mcp"},
+                    "absolute": {"command": project.path().join("built-later").to_string_lossy()},
+                    "on-path": {"command": "sh"}
                 }
             })
             .to_string(),
@@ -629,7 +631,11 @@ mod tests {
             .filter(|id| id != "kronn-internal")
             .collect();
 
-        assert_eq!(ids, vec!["present".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["absolute", "on-path", "present", "relative"],
+            "only the bare name found nowhere is left out; a path is the runtime's to resolve"
+        );
     }
 
     /// KT-543 — an ACP agent that cannot reach the bridge is mute in the room.
@@ -13057,6 +13063,7 @@ Suite de la réponse.";
                 http_cancel: None,
                 pgid: Some(pgid),
                 token_fragments: false,
+                activity_watched: false,
                 bridge_token: None,
             };
             let exit = process.wait().await.expect("leader exits");
@@ -13184,6 +13191,7 @@ sleep 3600
             http_cancel: None,
             pgid,
             token_fragments: false,
+            activity_watched: false,
             bridge_token: None,
         };
 
@@ -13264,6 +13272,7 @@ sleep 3600
             http_cancel: None,
             pgid: None,
             token_fragments: false,
+            activity_watched: false,
             bridge_token: None,
         };
 

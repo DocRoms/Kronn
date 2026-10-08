@@ -1,5 +1,6 @@
-//! What a native ACP runtime that stops answering is told to the user: the
-//! startup phase it never finished, or a prompt it never answered. The
+//! What an ACP runtime that fails to start, or stops answering, is told to the
+//! user: the startup phase it failed or never finished, or a prompt it never
+//! answered. The
 //! runner's start error is a string, so the phase travels as a JSON header the
 //! discussion layer reads back to say it in the user's language.
 
@@ -8,8 +9,12 @@ use std::time::Duration;
 
 use crate::models::AgentType;
 
-/// Leads a native ACP start error that a timeout produced.
-pub const NATIVE_ACP_START_TIMEOUT: &str = "native_acp_start_timeout";
+/// Leads an ACP start error raised after the runtime was spawned. It is
+/// settled with a message, never deferred: retrying would repeat it unseen.
+pub const ACP_START_FAILED: &str = "acp_start_failed";
+
+/// How much of a runtime's own error a message quotes.
+const DETAIL_MAX_CHARS: usize = 300;
 
 /// How many server names a message lists before it stops.
 const LISTED_SERVERS: usize = 6;
@@ -20,17 +25,22 @@ pub enum AcpStartPhase {
     Initialize,
     Session,
     ModelSelection,
+    /// Kronn's own preparation once the session is open.
+    Start,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcpStartTimeout {
+pub struct AcpStartFailure {
     pub phase: AcpStartPhase,
     pub secs: u64,
     /// Project MCP servers declared to the session: the likely blockers.
     pub servers: Vec<String>,
+    /// The runtime's error, redacted and bounded; `None` for a timeout.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
-impl AcpStartTimeout {
+impl AcpStartFailure {
     pub fn new(phase: AcpStartPhase, waited: Duration, servers: Vec<String>) -> Self {
         // Rounded: the bound fires a few milliseconds past itself.
         let secs = (waited.as_millis() as u64 + 500) / 1000;
@@ -38,30 +48,42 @@ impl AcpStartTimeout {
             phase,
             secs,
             servers,
+            detail: None,
+        }
+    }
+
+    /// A phase that answered with an error instead of timing out.
+    pub fn failed(phase: AcpStartPhase, error: &str) -> Self {
+        let redacted = crate::core::redact::redact_for_audit_artifact(error).0;
+        let mut detail: String = redacted.chars().take(DETAIL_MAX_CHARS).collect();
+        if redacted.chars().nth(DETAIL_MAX_CHARS).is_some() {
+            detail.push('…');
+        }
+        Self {
+            phase,
+            secs: 0,
+            servers: Vec::new(),
+            detail: Some(detail),
         }
     }
 
     /// The start error: the JSON header, then the English message.
     pub fn to_error(&self, agent: &AgentType) -> String {
         let header = serde_json::to_string(self).unwrap_or_else(|_| "{}".into());
-        format!(
-            "{NATIVE_ACP_START_TIMEOUT} {header}\n{}",
-            self.message(agent, "en")
-        )
+        format!("{ACP_START_FAILED} {header}\n{}", self.message(agent, "en"))
     }
 
     pub fn from_error(error: &str) -> Option<Self> {
-        let header = error
-            .strip_prefix(NATIVE_ACP_START_TIMEOUT)?
-            .lines()
-            .next()?
-            .trim();
+        let header = error.strip_prefix(ACP_START_FAILED)?.lines().next()?.trim();
         serde_json::from_str(header).ok()
     }
 
     /// The message in `language` (`fr`, `es`, `zh`, else English).
     pub fn message(&self, agent: &AgentType, language: &str) -> String {
         let label = super::runner::agent_settings_label(agent);
+        if let Some(detail) = &self.detail {
+            return failure_message(label, self.phase, detail, language);
+        }
         let secs = self.secs;
         let names = listed(&self.servers);
         match (self.phase, names.is_empty()) {
@@ -107,7 +129,7 @@ impl AcpStartTimeout {
                     "{label} did not answer initialization within {secs} s. Kronn stopped {label}. Retry, and check that it starts outside Kronn."
                 ),
             },
-            (AcpStartPhase::ModelSelection, _) => match language {
+            (AcpStartPhase::ModelSelection | AcpStartPhase::Start, _) => match language {
                 "fr" => format!(
                     "{label} n'a pas appliqué le modèle choisi en {secs} s. Kronn a arrêté {label}. Réessayez, ou choisissez un autre modèle."
                 ),
@@ -121,6 +143,47 @@ impl AcpStartTimeout {
                     "{label} did not apply the chosen model within {secs} s. Kronn stopped {label}. Retry, or pick another model."
                 ),
             },
+        }
+    }
+}
+
+fn failure_message(label: &str, phase: AcpStartPhase, detail: &str, language: &str) -> String {
+    match language {
+        "fr" => {
+            let what = match phase {
+                AcpStartPhase::Initialize => "s'initialiser",
+                AcpStartPhase::Session => "ouvrir sa session",
+                AcpStartPhase::ModelSelection => "appliquer le modèle choisi",
+                AcpStartPhase::Start => "démarrer",
+            };
+            format!("{label} n'a pas pu {what} : {detail}. Kronn a arrêté {label}. Corrigez la cause indiquée, puis réessayez.")
+        }
+        "es" => {
+            let what = match phase {
+                AcpStartPhase::Initialize => "inicializarse",
+                AcpStartPhase::Session => "abrir su sesión",
+                AcpStartPhase::ModelSelection => "aplicar el modelo elegido",
+                AcpStartPhase::Start => "arrancar",
+            };
+            format!("{label} no pudo {what}: {detail}. Kronn detuvo {label}. Corrige la causa indicada y vuelve a intentarlo.")
+        }
+        "zh" => {
+            let what = match phase {
+                AcpStartPhase::Initialize => "完成初始化",
+                AcpStartPhase::Session => "打开会话",
+                AcpStartPhase::ModelSelection => "应用所选模型",
+                AcpStartPhase::Start => "启动",
+            };
+            format!("{label} 无法{what}：{detail}。Kronn 已停止 {label}。请修正所示原因后重试。")
+        }
+        _ => {
+            let what = match phase {
+                AcpStartPhase::Initialize => "initialize",
+                AcpStartPhase::Session => "open its session",
+                AcpStartPhase::ModelSelection => "apply the chosen model",
+                AcpStartPhase::Start => "start",
+            };
+            format!("{label} could not {what}: {detail}. Kronn stopped {label}. Fix the cause shown, then retry.")
         }
     }
 }
@@ -192,24 +255,24 @@ mod tests {
 
     #[test]
     fn a_start_timeout_round_trips_through_the_start_error() {
-        let timeout = AcpStartTimeout::new(
+        let timeout = AcpStartFailure::new(
             AcpStartPhase::Session,
             Duration::from_millis(90_004),
             vec!["Memory".into(), "Sequential Thinking".into()],
         );
         let error = timeout.to_error(&AgentType::OpenCode);
-        assert!(error.starts_with(NATIVE_ACP_START_TIMEOUT));
+        assert!(error.starts_with(ACP_START_FAILED));
         assert!(
             error.contains("OpenCode did not open its session within 90 s"),
             "{error}"
         );
-        assert_eq!(AcpStartTimeout::from_error(&error), Some(timeout));
-        assert_eq!(AcpStartTimeout::from_error("ACP spawn failed"), None);
+        assert_eq!(AcpStartFailure::from_error(&error), Some(timeout));
+        assert_eq!(AcpStartFailure::from_error("ACP spawn failed"), None);
     }
 
     #[test]
     fn every_language_names_the_agent_the_phase_and_the_servers() {
-        let timeout = AcpStartTimeout::new(
+        let timeout = AcpStartFailure::new(
             AcpStartPhase::Session,
             Duration::from_secs(90),
             vec!["Hang".into()],
@@ -228,10 +291,31 @@ mod tests {
             assert!(message.contains("Hang"), "{language}: {message}");
         }
         let initialize =
-            AcpStartTimeout::new(AcpStartPhase::Initialize, Duration::from_secs(30), vec![]);
+            AcpStartFailure::new(AcpStartPhase::Initialize, Duration::from_secs(30), vec![]);
         assert!(initialize
             .message(&AgentType::Vibe, "es")
             .starts_with("Vibe no respondió a la inicialización en 30 s"));
+    }
+
+    #[test]
+    fn a_startup_error_is_quoted_redacted_in_every_language() {
+        let failure = AcpStartFailure::failed(
+            AcpStartPhase::Session,
+            "ACP transport failed: auth refused for key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+        );
+        let error = failure.to_error(&AgentType::OpenCode);
+        assert_eq!(AcpStartFailure::from_error(&error), Some(failure.clone()));
+        for language in ["fr", "en", "es", "zh"] {
+            let message = failure.message(&AgentType::OpenCode, language);
+            assert!(message.contains("auth refused"), "{language}: {message}");
+            assert!(
+                !message.contains("abcdefghijklmnop"),
+                "{language}: {message}"
+            );
+        }
+        assert!(failure
+            .message(&AgentType::OpenCode, "fr")
+            .starts_with("OpenCode n'a pas pu ouvrir sa session : "));
     }
 
     #[test]

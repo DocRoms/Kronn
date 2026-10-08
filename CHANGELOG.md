@@ -51,6 +51,9 @@ Release notes for 0.9.3 and earlier are available in the
 - Agent text and tool metadata in transcripts, audit streams and run records
   stay visible to the project's humans and to agents holding a bridge token
   for that project; per-agent filtering is planned for 0.15.
+- On Windows, stopping a native ACP agent ends the agent's own process but not
+  the MCP servers or tools it started; owning the whole tree (a Job Object) is
+  planned for 0.15.
 
 ### Added
 
@@ -252,13 +255,17 @@ Release notes for 0.9.3 and earlier are available in the
   answering no longer leaves a discussion silent. Opening a session now waits
   90 s, enough for OpenCode's 30 s per MCP server; the 30 s limit lost that
   race to one slow project server, and the turn was deferred and retried
-  without a word. A phase that times out stops the agent, settles the turn as
-  failed and posts a translated message naming the phase and the project
-  servers it was starting. A prompt that gets no answer at all now stops at
-  the configured inactivity delay, not 15 minutes, with its own message. A
-  project server whose command is missing is no longer declared to the
-  session. A stop by Kronn's inactivity watchdog is no longer headed by a
-  wrong "Network error" hint.
+  without a word. A startup phase that times out or returns an error stops the
+  agent, settles the turn as failed and posts a translated message naming the
+  phase, the error or the project servers it was starting; a stop during
+  startup is honoured at once. A native prompt now stops at the configured
+  inactivity delay, not 15 minutes, measured on every update the runtime sends
+  (tool calls, thoughts, keepalives), not on reply text: the discussion and
+  workflow timers leave an ACP run's inactivity to it, parallel tool calls
+  each keep their wider bound, and the delay applies as soon as the last one
+  ends. A project server named by a bare command found nowhere on PATH is no
+  longer declared to the session. A stop by Kronn's inactivity watchdog is no
+  longer headed by a wrong "Network error" hint.
 - The launch card's step details now show the model and efforts of the
   step's tier (economy or reasoning), not always those of the default tier
   (KT-1095).

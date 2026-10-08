@@ -6708,6 +6708,7 @@ mod tests {
             use crate::acp::AcpSessionEvent;
             let _ = events
                 .send(AcpSessionEvent::ToolCall {
+                    id: None,
                     name: "Bash".into(),
                 })
                 .await;

@@ -685,6 +685,12 @@ fn model_stall_notice(stderr: &[String]) -> Option<String> {
         .map(|reason| format!("⚠️ **Agent interrupted by Kronn.** {reason}"))
 }
 
+/// The text-silence bound the stream consumer applies, or `None` when the run's
+/// own activity watchdog owns inactivity (the global deadline still holds).
+fn consumer_text_stall(activity_watched: bool, stall: Duration) -> Option<Duration> {
+    (!activity_watched).then_some(stall)
+}
+
 /// A native ACP prompt that never sent anything: said in the user's language,
 /// naming the agent and the delay, instead of the generic stall reason.
 fn silent_native_prompt_notice(
@@ -916,7 +922,7 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
-        || error.starts_with(crate::agents::acp_start::NATIVE_ACP_START_TIMEOUT)
+        || error.starts_with(crate::agents::acp_start::ACP_START_FAILED)
         || non_retryable_http_status
         || deterministic_nul_byte
     {
@@ -3521,6 +3527,10 @@ async fn make_agent_stream_inner(
                     Duration::from_secs(stall_timeout_min as u64 * 60),
                     NON_STREAMING_STALL_TIMEOUT,
                 );
+                // An ACP run's own watchdog sees every update, tool calls and
+                // thoughts included, and ends a silent run itself: timing the
+                // text alone would kill a run busy with a tool.
+                let text_stall = consumer_text_stall(process.activity_watched(), stall_timeout);
                 let mut was_interrupted = false;
                 let mut timeout_reason: Option<AgentTimeoutReason> = None;
                 // Set when we break the loop because the agent emitted a
@@ -3573,7 +3583,10 @@ async fn make_agent_stream_inner(
                         None
                     }
                     _ = async {
-                        tokio::time::sleep(stall_timeout).await
+                        match text_stall {
+                            Some(limit) => tokio::time::sleep(limit).await,
+                            None => std::future::pending::<()>().await,
+                        }
                     } => {
                         tracing::warn!("Agent stream stall timeout ({:?}) — no output", stall_timeout);
                         was_interrupted = true;
@@ -4911,7 +4924,7 @@ async fn make_agent_stream_inner(
                 // A native agent without full access: said in the user's
                 // language, and settled, never deferred and retried.
                 let refused_full_access = e.starts_with(runner::NATIVE_FULL_ACCESS_REQUIRED);
-                let start_timeout = crate::agents::acp_start::AcpStartTimeout::from_error(&e);
+                let start_timeout = crate::agents::acp_start::AcpStartFailure::from_error(&e);
                 // Both are settled now, in the user's language: deferring them
                 // would only repeat the same refusal or wait.
                 let settled_now = refused_full_access || start_timeout.is_some();
@@ -7857,7 +7870,7 @@ mod connection_fallback_tests {
 #[cfg(test)]
 mod native_acp_start_timeout_tests {
     use super::{agent_start_failure_outcome, silent_native_prompt_notice, AgentExecutionOutcome};
-    use crate::agents::acp_start::{AcpStartPhase, AcpStartTimeout};
+    use crate::agents::acp_start::{AcpStartFailure, AcpStartPhase};
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
 
@@ -8009,10 +8022,16 @@ for line in sys.stdin:
 
     #[test]
     fn a_start_timeout_is_settled_not_deferred() {
-        let error = AcpStartTimeout::new(AcpStartPhase::Session, Duration::from_secs(90), vec![])
+        let error = AcpStartFailure::new(AcpStartPhase::Session, Duration::from_secs(90), vec![])
             .to_error(&AgentType::OpenCode);
         assert!(matches!(
             agent_start_failure_outcome(&AgentType::OpenCode, &error),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+        let refused = AcpStartFailure::failed(AcpStartPhase::Session, "JSON-RPC -32603: rejected")
+            .to_error(&AgentType::OpenCode);
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, &refused),
             AgentExecutionOutcome::PreflightFailed { .. }
         ));
         assert!(matches!(
@@ -8063,6 +8082,13 @@ for line in sys.stdin:
             .is_none(),
             "only native ACP runtimes"
         );
+    }
+
+    #[test]
+    fn the_consumer_stands_down_when_the_run_watches_its_own_activity() {
+        let stall = Duration::from_secs(300);
+        assert_eq!(super::consumer_text_stall(false, stall), Some(stall));
+        assert_eq!(super::consumer_text_stall(true, stall), None);
     }
 
     #[test]

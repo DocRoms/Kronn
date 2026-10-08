@@ -1763,6 +1763,10 @@ pub struct AgentProcess {
     /// agent type is what broke: the type says which CLI runs, not how its
     /// output is framed.
     token_fragments: bool,
+    /// The run owns an activity watchdog that every runtime update beats (an
+    /// ACP session: text, thoughts, tool calls, keepalives). Consumers then
+    /// leave inactivity to it instead of timing the text alone.
+    activity_watched: bool,
     /// The launch's scoped bridge token; dropping the process revokes it.
     bridge_token: Option<crate::core::bridge_token::BridgeTokenGuard>,
 }
@@ -1908,6 +1912,11 @@ impl AgentProcess {
     ///
     /// The transport declares it. The HTTP check remains for the providers that
     /// stream model tokens without going through the ACP core.
+    /// See the field: the run's own watchdog judges its inactivity.
+    pub fn activity_watched(&self) -> bool {
+        self.activity_watched
+    }
+
     pub fn raw_token_stream(&self) -> bool {
         self.token_fragments || is_http_chat_agent(&self.agent_type)
     }
@@ -2102,6 +2111,11 @@ pub trait AgentIo: Send {
     fn reported_cost_usd_micros(&self) -> Option<u64> {
         None
     }
+    /// Whether the run's own activity watchdog judges inactivity; see
+    /// `AgentProcess::activity_watched`. A text-only timer must then stand down.
+    fn activity_watched(&self) -> bool {
+        false
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -2128,6 +2142,9 @@ impl AgentIo for AgentProcess {
     }
     fn raw_token_stream(&self) -> bool {
         AgentProcess::raw_token_stream(self)
+    }
+    fn activity_watched(&self) -> bool {
+        self.activity_watched
     }
     fn reported_token_usage(&self) -> Option<u64> {
         AgentProcess::reported_token_usage(self)
@@ -2378,6 +2395,8 @@ pub struct ScriptedProcess {
     /// Usage a structured transport (ACP) would report for the run.
     reported_usage: Option<u64>,
     reported_prompt_cache: PromptCacheUsage,
+    activity_watched: bool,
+    first_line_after: Option<Duration>,
 }
 
 #[cfg(test)]
@@ -2396,6 +2415,8 @@ impl ScriptedProcess {
             hangs_forever: false,
             reported_usage: None,
             reported_prompt_cache: PromptCacheUsage::default(),
+            activity_watched: false,
+            first_line_after: None,
         }
     }
 
@@ -2413,6 +2434,8 @@ impl ScriptedProcess {
             hangs_forever: false,
             reported_usage: None,
             reported_prompt_cache: PromptCacheUsage::default(),
+            activity_watched: false,
+            first_line_after: None,
         }
     }
 
@@ -2439,6 +2462,18 @@ impl ScriptedProcess {
         self
     }
 
+    /// Its run owns an activity watchdog (an ACP session).
+    pub fn with_activity_watched(mut self) -> Self {
+        self.activity_watched = true;
+        self
+    }
+
+    /// Silent for `delay` before its first line.
+    pub fn with_first_line_after(mut self, delay: Duration) -> Self {
+        self.first_line_after = Some(delay);
+        self
+    }
+
     /// A process that produces nothing and never exits, so the caller's deadline
     /// is the only thing that can end the loop. Pair with a paused Tokio clock.
     pub fn hanging() -> Self {
@@ -2459,6 +2494,9 @@ impl AgentIo for ScriptedProcess {
         if self.hangs_forever {
             std::future::pending::<()>().await;
         }
+        if let Some(delay) = self.first_line_after.take() {
+            tokio::time::sleep(delay).await;
+        }
         self.lines.pop_front()
     }
     fn output_mode(&self) -> OutputMode {
@@ -2466,6 +2504,9 @@ impl AgentIo for ScriptedProcess {
     }
     fn reported_token_usage(&self) -> Option<u64> {
         self.reported_usage
+    }
+    fn activity_watched(&self) -> bool {
+        self.activity_watched
     }
     fn reported_prompt_cache(&self) -> PromptCacheUsage {
         self.reported_prompt_cache
@@ -4559,6 +4600,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         http_cancel: None,
         pgid,
         token_fragments: false,
+        activity_watched: false,
         bridge_token: bridge,
     })
 }
@@ -4868,7 +4910,7 @@ async fn run_acp_session(
         idle_timeout,
         step_tools,
     } = request;
-    use super::acp_start::{AcpStartPhase, AcpStartTimeout};
+    use super::acp_start::{AcpStartFailure, AcpStartPhase};
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
     };
@@ -4879,44 +4921,61 @@ async fn run_acp_session(
         acp_project_mcp_servers(project_path, *agent_type == AgentType::ClaudeCode),
         step_tools,
     );
-    // A phase that timed out is reported with its own bound and, for the
-    // session, the project servers it was starting, so it is settled with a
-    // message instead of being deferred and retried in silence.
+    // Every startup failure here comes from a runtime that was already
+    // spawned: it is reported with its phase (and, for a timeout, its bound
+    // and the project servers the session was starting) so it is settled with
+    // a message instead of being deferred and retried in silence.
     let project_servers: Vec<String> = mcp_servers
         .iter()
         .filter(|server| !crate::acp::is_bridge_like(&server.id))
         .map(|server| server.id.clone())
         .collect();
-    let start_timeout = |error: &crate::acp::AcpError, phase: AcpStartPhase, started: Instant| {
+    let timed_out = |error: &crate::acp::AcpError, phase: AcpStartPhase, started: Instant| {
         matches!(error, crate::acp::AcpError::Timeout(_)).then(|| {
             let servers = if phase == AcpStartPhase::Session {
                 project_servers.clone()
             } else {
                 Vec::new()
             };
-            AcpStartTimeout::new(phase, started.elapsed(), servers).to_error(agent_type)
+            AcpStartFailure::new(phase, started.elapsed(), servers).to_error(agent_type)
         })
     };
+    let failed = |phase: AcpStartPhase, error: String| {
+        AcpStartFailure::failed(phase, &error).to_error(agent_type)
+    };
+    let cancelled = || format!("{agent_type:?} ACP start cancelled");
+
     let started = Instant::now();
-    if let Err(error) = host
-        .negotiate(AcpInitialize {
+    let negotiated = until_cancelled(
+        parent_cancel,
+        host.negotiate(AcpInitialize {
             protocol_version: 1,
             cwd: work_dir.to_string_lossy().into_owned(),
             mcp_servers: mcp_servers.clone(),
-        })
-        .await
-    {
-        let failure = start_timeout(&error, AcpStartPhase::Initialize, started)
-            .unwrap_or_else(|| format!("{agent_type:?} ACP initialize failed: {error}"));
-        return Err(acp_start_failure(&host, failure).await);
+        }),
+    )
+    .await;
+    match negotiated {
+        None => return Err(acp_start_failure(&host, cancelled()).await),
+        Some(Err(error)) => {
+            let failure =
+                timed_out(&error, AcpStartPhase::Initialize, started).unwrap_or_else(|| {
+                    failed(
+                        AcpStartPhase::Initialize,
+                        format!("{agent_type:?} ACP initialize failed: {error}"),
+                    )
+                });
+            return Err(acp_start_failure(&host, failure).await);
+        }
+        Some(Ok(_)) => {}
     }
     if !mcp_servers.is_empty() {
         if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
-            return Err(acp_start_failure(
-                &host,
+            let failure = failed(
+                AcpStartPhase::Initialize,
                 format!("{agent_type:?} ACP cannot start with the project MCP registry: {error}"),
-            )
-            .await);
+            );
+            return Err(acp_start_failure(&host, failure).await);
         }
     }
     let (resumed, resume_failed) = match resume_id {
@@ -4924,25 +4983,29 @@ async fn run_acp_session(
             let agent = match acp_agent(agent_type) {
                 Some(agent) => agent,
                 None => {
-                    return Err(acp_start_failure(
-                        &host,
+                    let failure = failed(
+                        AcpStartPhase::Session,
                         format!("{agent_type:?} has no ACP session identity"),
-                    )
-                    .await)
+                    );
+                    return Err(acp_start_failure(&host, failure).await);
                 }
             };
             let target = match AcpSessionTarget::new(agent, conversation_id.to_owned()) {
                 Ok(target) => target,
                 Err(error) => {
-                    return Err(acp_start_failure(
-                        &host,
+                    let failure = failed(
+                        AcpStartPhase::Session,
                         format!("{agent_type:?} ACP resume target is invalid: {error}"),
-                    )
-                    .await)
+                    );
+                    return Err(acp_start_failure(&host, failure).await);
                 }
             };
             let started = Instant::now();
-            match host.resume_session(&target).await {
+            let Some(resumed) = until_cancelled(parent_cancel, host.resume_session(&target)).await
+            else {
+                return Err(acp_start_failure(&host, cancelled()).await);
+            };
+            match resumed {
                 Ok(()) => (Some(target), false),
                 // Capability absence and a positively identified missing
                 // session are safe before a prompt has any external effect.
@@ -4953,9 +5016,12 @@ async fn run_acp_session(
                 }) => (None, true),
                 Err(crate::acp::AcpError::SessionNotFound) => (None, true),
                 Err(error) => {
-                    let failure = start_timeout(&error, AcpStartPhase::Session, started)
+                    let failure = timed_out(&error, AcpStartPhase::Session, started)
                         .unwrap_or_else(|| {
-                            format!("{agent_type:?} ACP session resume failed: {error}")
+                            failed(
+                                AcpStartPhase::Session,
+                                format!("{agent_type:?} ACP session resume failed: {error}"),
+                            )
                         });
                     return Err(acp_start_failure(&host, failure).await);
                 }
@@ -4967,12 +5033,16 @@ async fn run_acp_session(
         Some(target) => target,
         None => {
             let started = Instant::now();
-            match host.create_session().await {
-                Ok(session) => session,
-                Err(error) => {
-                    let failure = start_timeout(&error, AcpStartPhase::Session, started)
+            match until_cancelled(parent_cancel, host.create_session()).await {
+                None => return Err(acp_start_failure(&host, cancelled()).await),
+                Some(Ok(session)) => session,
+                Some(Err(error)) => {
+                    let failure = timed_out(&error, AcpStartPhase::Session, started)
                         .unwrap_or_else(|| {
-                            format!("{agent_type:?} ACP session creation failed: {error}")
+                            failed(
+                                AcpStartPhase::Session,
+                                format!("{agent_type:?} ACP session creation failed: {error}"),
+                            )
                         });
                     return Err(acp_start_failure(&host, failure).await);
                 }
@@ -4985,7 +5055,7 @@ async fn run_acp_session(
                 .persist(agent_type, work_dir, &session.session_id)
                 .await
             {
-                return Err(acp_start_failure(&host, error).await);
+                return Err(acp_start_failure(&host, failed(AcpStartPhase::Start, error)).await);
             }
         }
     }
@@ -5001,7 +5071,12 @@ async fn run_acp_session(
     // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
         let started = Instant::now();
-        match host.select_model(&session, model).await {
+        let Some(selected) =
+            until_cancelled(parent_cancel, host.select_model(&session, model)).await
+        else {
+            return Err(acp_start_failure(&host, cancelled()).await);
+        };
+        match selected {
             Ok(true) => {
                 provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
                 tracing::debug!(agent = ?agent_type, model, "ACP model selection applied");
@@ -5009,16 +5084,16 @@ async fn run_acp_session(
             Ok(false) => {
                 provenance::resolve_model(provenance.as_ref(), Some(model), Some(false));
                 if host.offers_model_catalogue().await {
-                    return Err(acp_start_failure(
-                        &host,
+                    let failure = failed(
+                        AcpStartPhase::ModelSelection,
                         format!(
                             "{agent_type:?} does not offer the model '{model}' for this \
                              working directory, so it would run another one. Pick a model \
                              it lists here, or declare '{model}' in a config {agent_type:?} \
                              reads from this directory."
                         ),
-                    )
-                    .await);
+                    );
+                    return Err(acp_start_failure(&host, failure).await);
                 }
                 tracing::debug!(
                     agent = ?agent_type,
@@ -5027,9 +5102,12 @@ async fn run_acp_session(
                 );
             }
             Err(error) => {
-                let failure = start_timeout(&error, AcpStartPhase::ModelSelection, started)
+                let failure = timed_out(&error, AcpStartPhase::ModelSelection, started)
                     .unwrap_or_else(|| {
-                        format!("{agent_type:?} ACP model selection failed: {error}")
+                        failed(
+                            AcpStartPhase::ModelSelection,
+                            format!("{agent_type:?} ACP model selection failed: {error}"),
+                        )
                     });
                 return Err(acp_start_failure(&host, failure).await);
             }
@@ -5083,11 +5161,11 @@ async fn run_acp_session(
     {
         Ok(lifeline) => lifeline,
         Err(error) => {
-            return Err(acp_start_failure(
-                &host,
-                format!("OpenCode ACP lifeline spawn failed: {error}"),
-            )
-            .await)
+            let failure = failed(
+                AcpStartPhase::Start,
+                format!("{agent_type:?} ACP lifeline spawn failed: {error}"),
+            );
+            return Err(acp_start_failure(&host, failure).await);
         }
     };
     let lifeline_stdin = lifeline.stdin.take();
@@ -5117,7 +5195,7 @@ async fn run_acp_session(
                     AcpSessionEvent::CliSessionObserved(session_id) => {
                         provenance::observe_session(provenance.as_ref(), &session_id);
                     }
-                    AcpSessionEvent::ToolCall { name } => {
+                    AcpSessionEvent::ToolCall { id, name } => {
                         // A tool call is not text. Forwarding it on `tx` — the
                         // channel carrying the reply itself — glued
                         // "[ClaudeCode tool: ToolSearch]" into the middle of the
@@ -5136,11 +5214,11 @@ async fn run_acp_session(
                         // KT-932 follow-up — a tool call is open: measure
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
-                        forwarder_idle.begin_tool(&name, tool_execution_limit);
+                        forwarder_idle.begin_tool(id.as_deref(), &name, tool_execution_limit);
                     }
-                    AcpSessionEvent::ToolCallEnded => {
+                    AcpSessionEvent::ToolCallEnded { id } => {
                         // Back to watching the model itself.
-                        forwarder_idle.end_tool();
+                        forwarder_idle.end_tool(id.as_deref());
                     }
                     AcpSessionEvent::ToolActivity(update) => {
                         // Counted once per call, whatever its progress updates.
@@ -5296,6 +5374,7 @@ async fn run_acp_session(
         http_cancel: Some(cancel),
         pgid: None,
         token_fragments: true,
+        activity_watched: true,
         bridge_token: None,
     })
 }
@@ -5312,6 +5391,20 @@ fn acp_failure_diagnostic(operation: &str, error: &str) -> String {
     format!("ACP {operation} failed: {excerpt}")
 }
 
+/// `future`'s output, or `None` once `cancel` fires first.
+async fn until_cancelled<T>(
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    match cancel {
+        Some(cancel) => tokio::select! {
+            _ = cancel.cancelled() => None,
+            output = future => Some(output),
+        },
+        None => Some(future.await),
+    }
+}
+
 /// Preserve the startup failure while surfacing a lifecycle failure as well.
 /// Native transports own a subprocess, so every return before the turn task is
 /// spawned must explicitly finish that transport.
@@ -5320,6 +5413,15 @@ async fn acp_start_failure(host: &crate::acp::AcpHost, failure: String) -> Strin
         Ok(()) => failure,
         Err(error) => format!("{failure}; ACP shutdown failed: {error}"),
     }
+}
+
+/// Whether a project MCP server's launch would fail to find its command. Only
+/// a bare name is judged, the way the launch resolves it (the platform PATH,
+/// and PATHEXT on Windows); a relative or absolute path resolves against the
+/// runtime's own directory and is always kept.
+fn mcp_command_missing(command: &str, work_dir: &Path) -> bool {
+    let bare = !command.contains('/') && !command.contains('\\');
+    bare && which::which_in(command, crate::core::child_env::var_os("PATH"), work_dir).is_err()
 }
 
 /// ACP receives only command-only MCP declarations from Kronn's canonical
@@ -5413,7 +5515,7 @@ fn acp_project_mcp_servers(
             // inside the agent's start; it is left out, as the sync does.
             if !command.trim().is_empty()
                 && !leaks
-                && !crate::core::mcp_scanner::is_command_available(&command)
+                && mcp_command_missing(&command, Path::new(project_path))
             {
                 tracing::warn!(
                     "MCP server '{id}' command '{command}' not found in PATH — not declared to the ACP session"
@@ -11455,6 +11557,7 @@ async fn start_ollama_http_with_idle(
         http_cancel: Some(http_cancel),
         pgid: None,
         token_fragments: false,
+        activity_watched: false,
         bridge_token: None,
     })
 }
@@ -13893,6 +13996,7 @@ mod acp_resume_tests {
                         .unwrap();
                     events
                         .send(AcpSessionEvent::ToolCall {
+                            id: None,
                             name: "read_file".into(),
                         })
                         .await
@@ -14327,7 +14431,7 @@ mod acp_resume_tests {
                 panic!("ambiguous resume failures must be surfaced");
             };
             // A timeout is still surfaced, as the session phase it stopped in.
-            let timed_out = crate::agents::acp_start::AcpStartTimeout::from_error(&error)
+            let timed_out = crate::agents::acp_start::AcpStartFailure::from_error(&error)
                 .is_some_and(|timeout| {
                     timeout.phase == crate::agents::acp_start::AcpStartPhase::Session
                 });

@@ -401,7 +401,11 @@ impl AcpTransport for ClaudeAcpAdapter {
                             trace.status.as_deref(),
                             Some("completed" | "failed" | "cancelled")
                         ) {
-                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                            let _ = events
+                                .send(AcpSessionEvent::ToolCallEnded {
+                                    id: Some(trace.id.clone()),
+                                })
+                                .await;
                         }
                         let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
                     }
@@ -447,7 +451,9 @@ impl AcpTransport for ClaudeAcpAdapter {
                                     ),
                                 ))
                                 .await;
-                            let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                            let _ = events
+                                .send(AcpSessionEvent::ToolCall { id: None, name })
+                                .await;
                         }
                         // A tool's input is never read: nothing of it is shown.
                         StreamJsonEvent::ToolInputDelta(_) => {}
@@ -621,6 +627,7 @@ mod tests {
             .position(|event| {
                 *event
                     == AcpSessionEvent::ToolCall {
+                        id: None,
                         name: "Read".into(),
                     }
             })

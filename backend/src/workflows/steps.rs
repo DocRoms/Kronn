@@ -1416,9 +1416,17 @@ async fn drive_agent_to_output(
     // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
     // stream lines.
     let raw_stream = process.raw_token_stream();
+    // An ACP run's own watchdog sees tool calls, thoughts and keepalives and
+    // already ends a silent run with this delay; timing text alone would kill
+    // a run busy with a tool.
+    let text_stall = (!process.activity_watched()).then_some(stall_timeout);
 
     loop {
-        match timeout(stall_timeout, process.next_line()).await {
+        let next = match text_stall {
+            Some(limit) => timeout(limit, process.next_line()).await,
+            None => Ok(process.next_line().await),
+        };
+        match next {
             Ok(Some(line)) => {
                 if is_stream_json {
                     match runner::parse_claude_stream_line(&line) {
@@ -2628,6 +2636,32 @@ mod drive_agent_to_output_tests {
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
     use super::format_silent_exit_error;
     use super::{drive_agent_to_output, native_tool_calls_from_stderr};
+
+    /// An ACP run's own watchdog owns inactivity: a step waits through a long
+    /// text silence (tool work) instead of killing it, and a plain CLI is
+    /// still killed on the same silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_leaves_inactivity_to_an_acp_run_s_own_watchdog() {
+        use crate::agents::runner::ScriptedProcess;
+        let quiet = std::time::Duration::from_secs(5);
+        let stall = std::time::Duration::from_secs(1);
+        let watched = ScriptedProcess::raw(["built"])
+            .with_first_line_after(quiet)
+            .with_activity_watched();
+        let output =
+            drive_agent_to_output(watched, None, None, stall, &AgentType::OpenCode, "build")
+                .await
+                .expect("not killed on text silence");
+        assert_eq!(output.text, "built");
+
+        let plain = ScriptedProcess::raw(["built"]).with_first_line_after(quiet);
+        let error = drive_agent_to_output(plain, None, None, stall, &AgentType::Codex, "build")
+            .await
+            .expect_err("a text-only run is still timed by its text");
+        assert!(error
+            .to_string()
+            .contains("Agent stalled (no output for 1s)"));
+    }
     use crate::agents::runner::ScriptedProcess;
     use crate::models::AgentType;
     use std::time::Duration;

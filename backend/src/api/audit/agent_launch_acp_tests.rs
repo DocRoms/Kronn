@@ -141,6 +141,7 @@ impl AcpTransport for ScriptedAgent {
                 for call in 1..=u64::from(calls) {
                     let _ = events
                         .send(AcpSessionEvent::ToolCall {
+                            id: Some(call.to_string()),
                             name: "Read".into(),
                         })
                         .await;
@@ -157,7 +158,11 @@ impl AcpTransport for ScriptedAgent {
                             .unwrap(),
                         ))
                         .await;
-                    let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                    let _ = events
+                        .send(AcpSessionEvent::ToolCallEnded {
+                            id: Some(call.to_string()),
+                        })
+                        .await;
                     let _ = events
                         .send(AcpSessionEvent::Usage {
                             input_tokens: 100 * call,

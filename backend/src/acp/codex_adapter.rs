@@ -245,6 +245,8 @@ enum CodexLineEvent {
     ThreadStarted(Option<String>),
     Text(String),
     ToolCall {
+        /// The item id: its start and its end name the same call.
+        id: Option<String>,
         name: String,
         trace: Option<crate::agents::tool_trace::ToolTraceUpdate>,
         ended: bool,
@@ -310,6 +312,10 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
                     category,
                 );
                 CodexLineEvent::ToolCall {
+                    id: json
+                        .pointer("/item/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     name: trace
                         .as_ref()
                         .and_then(|trace| trace.name.clone())
@@ -543,18 +549,24 @@ impl AcpTransport for CodexAcpAdapter {
                         let _ = events.send(AcpSessionEvent::TextDelta(text)).await;
                     }
                     CodexLineEvent::ToolCall {
+                        id,
                         name,
                         trace,
                         ended,
                         activity,
                     } => {
                         let _ = events.send(AcpSessionEvent::ToolActivity(activity)).await;
-                        let _ = events.send(AcpSessionEvent::ToolCall { name }).await;
+                        let _ = events
+                            .send(AcpSessionEvent::ToolCall {
+                                id: id.clone(),
+                                name,
+                            })
+                            .await;
                         if let Some(trace) = trace {
                             let _ = events.send(AcpSessionEvent::ToolTrace(trace)).await;
                         }
                         if ended {
-                            let _ = events.send(AcpSessionEvent::ToolCallEnded).await;
+                            let _ = events.send(AcpSessionEvent::ToolCallEnded { id }).await;
                         }
                     }
                     CodexLineEvent::Usage {
