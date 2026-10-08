@@ -65,6 +65,13 @@ pub struct CodexAcpAdapter {
 }
 
 impl CodexAcpAdapter {
+    /// Runs `program` instead of the vendor CLI.
+    #[cfg(test)]
+    pub(crate) fn with_program(mut self, program: &std::path::Path) -> Self {
+        self.program = program.to_string_lossy().into_owned();
+        self
+    }
+
     pub fn new(
         model: Option<String>,
         reasoning_effort: Option<String>,
@@ -583,7 +590,13 @@ impl AcpTransport for CodexAcpAdapter {
                             .await;
                     }
                     CodexLineEvent::Fatal(message) => fatal = Some(message),
-                    CodexLineEvent::Skip => {}
+                    // Reasoning and other items shown to no one still prove
+                    // the run alive to its inactivity watchdog.
+                    CodexLineEvent::Skip => {
+                        if crate::acp::is_runtime_frame(&line) {
+                            let _ = events.send(AcpSessionEvent::Activity).await;
+                        }
+                    }
                 },
                 Ok(None) => break,
                 Err(error) => {

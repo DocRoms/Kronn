@@ -260,7 +260,8 @@ Release notes for 0.9.3 and earlier are available in the
   phase, the error or the project servers it was starting; a stop during
   startup is honoured at once. A native prompt now stops at the configured
   inactivity delay, not 15 minutes, measured on every update the runtime sends
-  (tool calls, thoughts, keepalives), not on reply text: the discussion and
+  (tool calls, thoughts, Claude thinking and Codex reasoning, keepalives), not
+  on reply text: the discussion and
   workflow timers leave an ACP run's inactivity to it, parallel tool calls
   each keep their wider bound, and the delay applies as soon as the last one
   ends. A project server named by a bare command found nowhere on PATH is no

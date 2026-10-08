@@ -1045,6 +1045,121 @@ async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
     );
 }
 
+/// An adapted turn that only reasons — thinking deltas, reasoning items —
+/// for longer than the delay is alive, not silent: it is not cut.
+#[cfg(unix)]
+async fn a_reasoning_only_adapted_turn_outlives_the_delay(
+    agent: &AgentType,
+    transport: Arc<dyn crate::acp::AcpTransport>,
+    project: &tempfile::TempDir,
+    answer: &str,
+) {
+    let started = std::time::Instant::now();
+    let mut running = run_acp_session(
+        AcpSessionRequest {
+            step_tools: None,
+            agent_type: agent,
+            work_dir: project.path(),
+            prompt: "think",
+            system_context: "",
+            project_path: "",
+            model_flag: None,
+            reasoning_effort: None,
+            parent_cancel: None,
+            discussion_id: None,
+            resume_id: None,
+            session_store: None,
+            fallback_prompt: None,
+            provenance: None,
+            activity: None,
+            idle_timeout: Some(Duration::from_secs(1)),
+        },
+        transport,
+    )
+    .await
+    .expect("the adapted turn starts");
+    let text = drain(&mut running).await;
+    assert!(
+        started.elapsed() > Duration::from_secs(3),
+        "{agent:?}: reasoned past the 1 s delay"
+    );
+    assert_eq!(text, answer, "{agent:?}: {}", stderr_of(&running));
+    assert!(
+        running.child.wait().await.expect("lifeline").success(),
+        "{agent:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_claude_turn_that_only_thinks_is_not_cut() {
+    let project = tempfile::tempdir().unwrap();
+    let fixture = crate::acp::test_support::write_fixture_script(
+        project.path(),
+        r#"
+cat >/dev/null
+for i in 1 2 3 4 5 6 7 8; do
+  sleep 0.4
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}'
+done
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thought it through"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2}}'
+"#,
+    );
+    let adapter = crate::acp::ClaudeAcpAdapter::new(
+        None,
+        None,
+        false,
+        None,
+        crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
+    )
+    .with_program(&fixture);
+    a_reasoning_only_adapted_turn_outlives_the_delay(
+        &AgentType::ClaudeCode,
+        Arc::new(adapter),
+        &project,
+        "thought it through",
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_codex_turn_that_only_reasons_is_not_cut() {
+    let project = tempfile::tempdir().unwrap();
+    let fixture = crate::acp::test_support::write_fixture_script(
+        project.path(),
+        r#"
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"th-reasoning"}'
+for i in 1 2 3 4 5 6 7 8; do
+  sleep 0.4
+  printf '%s\n' "{\"type\":\"item.updated\",\"item\":{\"id\":\"r1\",\"type\":\"reasoning\",\"text\":\"step $i\"}}"
+done
+printf '%s\n' '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"reasoned it out"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2}}'
+"#,
+    );
+    let adapter = crate::acp::CodexAcpAdapter::new(
+        None,
+        None,
+        false,
+        None,
+        None,
+        crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
+    )
+    .with_program(&fixture);
+    a_reasoning_only_adapted_turn_outlives_the_delay(
+        &AgentType::Codex,
+        Arc::new(adapter),
+        &project,
+        "reasoned it out",
+    )
+    .await;
+}
+
 /// The prompt half: a session that opens, then never says a word. The run
 /// fails on the configured delay with the no-first-token reason the discussion
 /// turns into its own message, and the process group is gone.

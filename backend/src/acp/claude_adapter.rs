@@ -58,6 +58,13 @@ pub struct ClaudeAcpAdapter {
 }
 
 impl ClaudeAcpAdapter {
+    /// Runs `program` instead of the vendor CLI.
+    #[cfg(test)]
+    pub(crate) fn with_program(mut self, program: &std::path::Path) -> Self {
+        self.program = program.to_string_lossy().into_owned();
+        self
+    }
+
     pub fn new(
         model: Option<String>,
         reasoning_effort: Option<String>,
@@ -455,16 +462,26 @@ impl AcpTransport for ClaudeAcpAdapter {
                                 .send(AcpSessionEvent::ToolCall { id: None, name })
                                 .await;
                         }
-                        // A tool's input is never read: nothing of it is shown.
-                        StreamJsonEvent::ToolInputDelta(_) => {}
+                        // A tool's input is never read: nothing of it is shown,
+                        // but it is the runtime at work.
+                        StreamJsonEvent::ToolInputDelta(_) => {
+                            let _ = events.send(AcpSessionEvent::Activity).await;
+                        }
                         StreamJsonEvent::ToolEnd => {
                             text_blocks.block_ended();
+                            let _ = events.send(AcpSessionEvent::Activity).await;
                         }
                         StreamJsonEvent::TerminalError(terminal_failure) => {
                             failure = Some(terminal_failure.user_message());
                         }
-                        // The adapter carries its own ACP session identity.
-                        StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {}
+                        // The adapter carries its own ACP session identity. A
+                        // valid line shown to no one (thinking, keepalive) still
+                        // proves the run alive to its inactivity watchdog.
+                        StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {
+                            if crate::acp::is_runtime_frame(&line) {
+                                let _ = events.send(AcpSessionEvent::Activity).await;
+                            }
+                        }
                     }
                 }
                 Ok(None) => break,

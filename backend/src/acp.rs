@@ -579,6 +579,13 @@ pub trait AcpTransport: Send + Sync {
     }
 }
 
+/// Whether an adapter's stdout line is a JSON frame from the runtime, as
+/// opposed to blank or stray text: a frame is progress even when it carries
+/// nothing to show.
+pub(crate) fn is_runtime_frame(line: &str) -> bool {
+    serde_json::from_str::<Value>(line.trim()).is_ok_and(|value| value.is_object())
+}
+
 /// A sequential ND-JSON ACP client for native ACP CLIs. The wire is kept here
 /// rather than sharing the Claude stream parser: ACP messages are JSON-RPC
 /// request/response objects and notifications, not model output.
