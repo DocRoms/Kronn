@@ -71,13 +71,16 @@ test.describe('Routing — addresses', () => {
   });
 
   test('the bare and unknown addresses land on Projects', async ({ page }) => {
-    await page.goto('/');
-    await expect(current(page, 'nav-projects')).toHaveAttribute('aria-current', 'page');
-    expect(new URL(page.url()).pathname).toBe('/projects');
-
-    await page.goto('/nowhere/at/all');
-    await expect(current(page, 'nav-projects')).toHaveAttribute('aria-current', 'page');
-    expect(new URL(page.url()).pathname).toBe('/projects');
+    // With projects, the page opens the first one on its own and that one
+    // replaces the bare address; without, the bare address is the final state.
+    const settled = projectId ? /\/projects\/[^/]+$/ : /\/projects$/;
+    for (const start of ['/', '/nowhere/at/all']) {
+      await page.goto(start);
+      await expect(current(page, 'nav-projects')).toHaveAttribute('aria-current', 'page');
+      await page.waitForURL(settled);
+      if (projectId) await expect(page.locator('.project-detail-header')).toBeVisible();
+      else await expect(page.locator('.project-detail-empty')).toBeVisible();
+    }
   });
 
   test('the nav writes the address; Back and Forward follow it', async ({ page }) => {

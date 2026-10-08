@@ -279,6 +279,10 @@ describe('App', () => {
     ['#project-proj-7', '/projects/proj-7', ''],
     ['#discussion-disc-42', '/discussions/disc-42', ''],
     ['#discussion-disc%2F42?message=msg-1', '/discussions/disc%2F42', '?message=msg-1'],
+    // An id that cannot be decoded names nothing: its page, without a crash.
+    ['#discussion-%E0%A4%A', '/discussions', ''],
+    ['#project-%E0%A4%A', '/projects', ''],
+    ['#page/%E0%A4%A', '/pages', ''],
   ])('sends the legacy %s link to %s, on the dashboard', async (hash, path, search) => {
     vi.mocked(setupApi.getStatus).mockResolvedValue(setupComplete);
 

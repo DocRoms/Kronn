@@ -17,7 +17,18 @@ describe('legacyHashToPath', () => {
 
   it('keeps the encoding of what follows the prefix untouched', () => {
     // The route decodes it once, exactly as the browser did for the hash.
-    expect(legacyHashToPath('#page/%E0%A4%A')).toBe('/standalone/pages/%E0%A4%A');
+    expect(legacyHashToPath('#page/page%2F%C3%A9quipe?tv=1')).toBe('/standalone/pages/page%2F%C3%A9quipe?tv=1');
+    expect(legacyHashToPath('#discussion-disc%20a?message=m%201')).toBe('/discussions/disc%20a?message=m%201');
+  });
+
+  it.each([
+    ['#page/%E0%A4%A', '/pages'],
+    ['#page/%E0%A4%A?tv=1', '/pages'],
+    ['#discussion-%E0%A4%A', '/discussions'],
+    ['#discussion-%E0%A4%A?message=m-1', '/discussions'],
+    ['#project-%E0%A4%A', '/projects'],
+  ])('sends a link whose id cannot be decoded, %s, to its page', (hash, path) => {
+    expect(legacyHashToPath(hash)).toBe(path);
   });
 
   it.each([

@@ -781,6 +781,14 @@ describe('Discussions route', () => {
     expect(props.openDiscussionId).toBeNull();
   });
 
+  it('hands an id that cannot be decoded to the page as it is, like any unknown id', async () => {
+    await open('/discussions/%E0%A4%A');
+
+    expect(window.location.pathname).toBe('/discussions/%E0%A4%A');
+    expect(received.discussions().openDiscussionId).toBe('%E0%A4%A');
+    expect(received.discussions().initialActiveDiscussionId).toBe('%E0%A4%A');
+  });
+
   it('names no message without a discussion', async () => {
     await open('/discussions?message=msg-2');
 
