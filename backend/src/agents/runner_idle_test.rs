@@ -1045,6 +1045,12 @@ async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
     );
 }
 
+/// The delay a reasoning-only turn must outlive. The fixtures beat every
+/// 0.5 s for 6 s: a 6× margin per gap holds on a loaded machine, and the
+/// turn still lasts twice the delay.
+#[cfg(unix)]
+const REASONING_DELAY: Duration = Duration::from_secs(3);
+
 /// An adapted turn that only reasons — thinking deltas, reasoning items —
 /// for longer than the delay is alive, not silent: it is not cut.
 #[cfg(unix)]
@@ -1072,18 +1078,21 @@ async fn a_reasoning_only_adapted_turn_outlives_the_delay(
             fallback_prompt: None,
             provenance: None,
             activity: None,
-            idle_timeout: Some(Duration::from_secs(1)),
+            idle_timeout: Some(REASONING_DELAY),
         },
         transport,
     )
     .await
     .expect("the adapted turn starts");
     let text = drain(&mut running).await;
-    assert!(
-        started.elapsed() > Duration::from_secs(3),
-        "{agent:?}: reasoned past the 1 s delay"
-    );
+    // A cut ends the turn without its answer; the stall reason in stderr
+    // says after how many beats.
     assert_eq!(text, answer, "{agent:?}: {}", stderr_of(&running));
+    assert!(
+        started.elapsed() > REASONING_DELAY + Duration::from_secs(2),
+        "{agent:?}: reasoned well past the delay, {:?}",
+        started.elapsed()
+    );
     assert!(
         running.child.wait().await.expect("lifeline").success(),
         "{agent:?}"
@@ -1099,8 +1108,8 @@ async fn a_claude_turn_that_only_thinks_is_not_cut() {
         project.path(),
         r#"
 cat >/dev/null
-for i in 1 2 3 4 5 6 7 8; do
-  sleep 0.4
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 0.5
   printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}'
 done
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thought it through"}}}'
@@ -1134,8 +1143,8 @@ async fn a_codex_turn_that_only_reasons_is_not_cut() {
         r#"
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"th-reasoning"}'
-for i in 1 2 3 4 5 6 7 8; do
-  sleep 0.4
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 0.5
   printf '%s\n' "{\"type\":\"item.updated\",\"item\":{\"id\":\"r1\",\"type\":\"reasoning\",\"text\":\"step $i\"}}"
 done
 printf '%s\n' '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"reasoned it out"}}'
