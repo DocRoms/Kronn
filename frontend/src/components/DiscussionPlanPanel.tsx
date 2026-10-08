@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { discussionPath, projectPath } from '../lib/routes';
+
+const subDiscussionPath = (discussionId: string | undefined) => (discussionId ? discussionPath(discussionId) : null);
 import {
   Archive,
   ArrowRight,
@@ -590,6 +594,7 @@ export function DiscussionPlanPanel({
             className="plan-task-action"
             title={t('orch.openSubDiscussion')}
             aria-label={t('orch.openSubDiscussion')}
+            {...newTabClickProps(subDiscussionPath(subDiscussionByTaskId.get(relation.task.id)))}
             onClick={() => {
               const target = subDiscussionByTaskId.get(relation.task.id);
               if (target) onNavigateDiscussion(target);
@@ -687,6 +692,7 @@ export function DiscussionPlanPanel({
             {targetDiscussionId && onNavigateDiscussion && (
               <button
                 type="button"
+                {...newTabClickProps(discussionPath(targetDiscussionId))}
                 onClick={() => onNavigateDiscussion(targetDiscussionId)}
                 aria-label={t('planning.openDependencyDiscussion', dependency.title)}
               >
@@ -696,6 +702,7 @@ export function DiscussionPlanPanel({
             {targetProjectId && onNavigateProject && (
               <button
                 type="button"
+                {...newTabClickProps(projectPath(targetProjectId))}
                 onClick={() => onNavigateProject(targetProjectId)}
                 aria-label={t('planning.openDependencyProject', dependency.title)}
               >

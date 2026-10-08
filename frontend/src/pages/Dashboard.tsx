@@ -1,4 +1,5 @@
 import './Dashboard.css';
+import { isPlainLeftClick } from '../lib/newTabNavigation';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
@@ -23,7 +24,7 @@ import { TourOverlay } from '../components/tour/TourOverlay';
 import { TourHelpButton } from '../components/tour/TourHelpButton';
 import { fetchSttModelId } from '../lib/stt-models';
 import { readActiveDiscussionId, writeActiveDiscussionId } from '../lib/dashboard-navigation';
-import { DEFAULT_PAGE, pathToPage, type DashboardPage } from '../lib/routes';
+import { DEFAULT_PAGE, PAGE_PATHS, pathToPage, type DashboardPage } from '../lib/routes';
 import type { DashboardOutletContext, DiscussionPrefill } from '../lib/dashboardContext';
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { PRELOADED_ROUTES } from '../routes/lazyRoutes';
@@ -65,8 +66,8 @@ export function Dashboard({ onReset }: DashboardProps) {
   });
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(readActiveDiscussionId);
   const [activeRunsPopoverOpen, setActiveRunsPopoverOpen] = useState(false);
-  const projectsTabRef = useRef<HTMLButtonElement>(null);
-  const workflowsTabRef = useRef<HTMLButtonElement>(null);
+  const projectsTabRef = useRef<HTMLAnchorElement>(null);
+  const workflowsTabRef = useRef<HTMLAnchorElement>(null);
   const auditsTriggerRef = useRef<HTMLButtonElement>(null);
   const runsTriggerRef = useRef<HTMLButtonElement>(null);
   // 0.8.2 — Deep-link from the validation-discussion CTA: opens the
@@ -713,9 +714,13 @@ export function Dashboard({ onReset }: DashboardProps) {
           // config in this Kronn instance.
           ['settings', Settings, t('nav.config')],
         ] as [DashboardPage, typeof Folder, string][]).map(([id, Icon, label]) => {
+          // A link to the page's address: a plain click stays in the app,
+          // Ctrl/Cmd/Shift-click, a middle click or the context menu open
+          // the page in a new tab or window, as the browser does for links.
           const btn = (
-            <button
+            <a
               key={id}
+              href={PAGE_PATHS[id]}
               className="dash-nav-btn"
               data-active={page === id}
               data-mobile={isMobile}
@@ -728,7 +733,11 @@ export function Dashboard({ onReset }: DashboardProps) {
               aria-current={page === id ? 'page' : undefined}
               aria-label={isMobile ? label : undefined}
               ref={id === 'projects' ? projectsTabRef : id === 'workflows' ? workflowsTabRef : undefined}
-              onClick={() => nav.toPage(id)}
+              onClick={event => {
+                if (!isPlainLeftClick(event)) return;
+                event.preventDefault();
+                nav.toPage(id);
+              }}
               title={label}
             >
               <Icon size={isMobile ? 16 : 14} />
@@ -765,7 +774,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                   {activeAudits.length}
                 </span>
               )}
-            </button>
+            </a>
           );
           return btn;
         })}

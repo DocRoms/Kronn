@@ -427,6 +427,43 @@ describe('PlanningPage', () => {
     expect(container.querySelector('.collection-shell-detail > .planning-detail')).toBe(panel);
   });
 
+  it('opens a task row in a new tab on a Ctrl-click, without selecting it', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/planning/task-1`, '_blank', 'noopener,noreferrer');
+    expect(mocks.get).not.toHaveBeenCalled();
+    expect(screen.queryByRole('complementary', { name: 'planning.taskActions' })).toBeNull();
+    open.mockRestore();
+  });
+
+  it('opens a linked discussion of a task in a new tab on a Ctrl-click, without navigating in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    mocks.get.mockResolvedValue(detail(summary({ discussion_ids: ['disc-7'] })));
+    const onNavigateDiscussion = vi.fn();
+    render(
+      <PlanningPage
+        initialSelectedTaskId="task-1"
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    const link = await screen.findByRole('button', { name: 'disc-7' });
+    fireEvent.click(link, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/disc-7`, '_blank', 'noopener,noreferrer');
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('opens a directly linked task detail on mount', async () => {
     render(
       <PlanningPage

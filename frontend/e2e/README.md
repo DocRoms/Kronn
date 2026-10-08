@@ -245,7 +245,9 @@ Depuis le routage côté client (React Router 8), chaque page et chaque ressourc
 ouverte a une adresse. `routing-addresses.spec.ts` les pilote dans un vrai
 navigateur : les sept pages, `/discussions/<id>`, `/planning/<id>`,
 `/workflows/qp/<id>`, `/projects/<id>`, précédent/suivant, rechargement, et les
-anciens liens `#discussion-`, `#project-`, `#config`, `#…/mosaic?`. Elle crée
+anciens liens `#discussion-`, `#project-`, `#config`, `#…/mosaic?`, et
+l'ouverture dans un nouvel onglet (Ctrl/Cmd-clic et clic molette sur un onglet
+de navigation et sur une discussion, l'onglet courant ne bougeant pas). Elle crée
 ce qu'elle ouvre par l'API ; la partie projet a besoin de `KRONN_REPOS_DIR`
 (le dossier de dépôts du lanceur bac à sable) et s'ignore sinon.
 

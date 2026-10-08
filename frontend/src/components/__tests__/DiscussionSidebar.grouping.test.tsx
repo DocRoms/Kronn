@@ -892,6 +892,34 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-99');
   });
 
+  it('parent-workflow pill opens the workflow in a new tab on Ctrl-click, without navigating here', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigateWorkflow = vi.fn();
+    const summaries = [mkBatchSummary({
+      run_id: runId,
+      quick_prompt_name: 'Compare agents',
+      parent_workflow_id: 'wf-99',
+      parent_workflow_name: 'Nightly Audit',
+      parent_run_sequence: 5,
+    })];
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={summaries}
+        onNavigateWorkflow={onNavigateWorkflow}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    openBatchMenu();
+    fireEvent.click(screen.getByRole('button', { name: /Nightly Audit/ }), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/wf-99`, '_blank', 'noopener,noreferrer');
+    expect(onNavigateWorkflow).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('delete-batch button confirms then calls onDeleteBatch with run id + count', async () => {
     const onDeleteBatch = vi.fn();
     // happy-dom has no window.confirm — assign a stub rather than spyOn.

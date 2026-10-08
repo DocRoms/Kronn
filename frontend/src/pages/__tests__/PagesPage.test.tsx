@@ -357,6 +357,24 @@ describe('PagesPage', () => {
     expect(pagesApi.get).toHaveBeenCalledTimes(1);
   });
 
+  it('opens a Page row in a new tab on a Ctrl-click, without selecting it', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const other: LivePage = { ...page, id: 'page-2', title: 'Second' };
+    vi.mocked(pagesApi.list).mockResolvedValue([page, other]);
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    // No mockClear: a later test reads this mock's first recorded call.
+    const callsBefore = vi.mocked(pagesApi.get).mock.calls.length;
+
+    fireEvent.click(getCanonicalPageRow('Second'), { ctrlKey: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/pages/page-2`, '_blank', 'noopener,noreferrer');
+    expect(vi.mocked(pagesApi.get).mock.calls.slice(callsBefore).map(([id]) => id)).not.toContain('page-2');
+    expect(screen.queryByRole('heading', { name: 'Second' })).toBeNull();
+    open.mockRestore();
+  });
+
   it('uses checkbox semantics for transient Page bulk selection', async () => {
     render(<PagesPage />);
     await screen.findByTestId('live-page-frame');

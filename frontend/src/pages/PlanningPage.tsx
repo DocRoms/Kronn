@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { discussionPath, planningTaskPath } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import {
   Archive,
   Check,
@@ -317,6 +319,7 @@ export function PlanningPage({
       <div className="planning-shell">
         <CollectionShell<PlanningTaskSummary>
           ariaLabel={t('planning.title')}
+          getItemPath={task => planningTaskPath(task.id)}
           title={<><Target size={17} /> {t('planning.title')}</>}
           titleCount={tasks.length}
           headerActions={<>
@@ -1033,7 +1036,7 @@ function PlanningDetailForm({
         <section className="planning-detail-links">
           <h3>{t('planning.linkedDiscussions')}</h3>
           {task.discussion_ids.map(id => (
-            <button type="button" key={id} onClick={() => onNavigateDiscussion(id)}>
+            <button type="button" key={id} {...newTabClickProps(discussionPath(id))} onClick={() => onNavigateDiscussion(id)}>
               <Link2 size={12} />
               {discussions.find(discussion => discussion.id === id)?.title ?? id}
               <ChevronRight size={12} />

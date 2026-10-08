@@ -27,6 +27,11 @@ Release notes for 0.9.3 and earlier are available in the
   keep working for good, from Live Pages, messages, bookmarks and the `kronn`
   CLI alike. The desktop app's embedded server answers a reload on any of these
   addresses with the app.
+- Ctrl/Cmd-click, Shift-click or a middle click opens a page in a new tab:
+  the navigation tabs, and the rows and links that open a discussion, a
+  project and its views, a workflow and its runs, a Quick Prompt/API/Exec, a
+  task, a plugin or an Artifact. A plain click still opens it in place; the
+  look of every element is unchanged.
 - Views inside a page have their own address too: a project's view
   (`/projects/<id>/code?file=<path>&line=<n>`, `/projects/<id>/git`, …), the
   workflow wizard (`/workflows/new`, `/workflows/<id>/edit`), a comparison of

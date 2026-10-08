@@ -208,6 +208,32 @@ describe('DiscussionPlanPanel', () => {
     expect(onNavigateDiscussion).toHaveBeenCalledWith('child-room');
   });
 
+  it('opens a worker room in a new tab on a Ctrl-click, without navigating in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigateDiscussion = vi.fn();
+    mocks.discussionLinks.mockResolvedValue([{
+      execution_id: 'exec-1', orchestration_run_id: 'run-1', task_id: 'task-1',
+      task_reference: 'KT-1', task_title: 'Build the panel',
+      parent_discussion_id: 'disc-1', sub_discussion_id: 'child-room',
+      status: 'Working',
+    }]);
+
+    render(
+      <DiscussionPlanPanel
+        discussionId="disc-1"
+        onClose={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+        toast={vi.fn()}
+      />,
+    );
+
+    const jump = await screen.findAllByTitle('orch.openSubDiscussion');
+    fireEvent.click(jump[0], { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions/child-room`, '_blank', 'noopener,noreferrer');
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('offers no jump for a task that has no worker room', async () => {
     // The affordance must not appear on every row: an unlaunched task has
     // nowhere to go, and a dead control is worse than none.

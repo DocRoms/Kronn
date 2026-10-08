@@ -210,6 +210,18 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     expect(onNavigatePage).toHaveBeenCalledWith('8faf5138-8d45-4548-8f12-e0ac21e22cc5');
   });
 
+  it('opens the target Page in a new tab on a Ctrl-click, without navigating in the app', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigatePage = vi.fn();
+    const { container } = renderDetail(pagePipelineSteps, { onNavigatePage });
+    fireEvent.click(container.querySelectorAll('.wf-pipe-chip-open')[2] as HTMLElement);
+
+    fireEvent.click(screen.getByRole('button', { name: 'wiz.publishPageOpen' }), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/pages/8faf5138-8d45-4548-8f12-e0ac21e22cc5`, '_blank', 'noopener,noreferrer');
+    expect(onNavigatePage).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('shows a copyable canonical ID on every step', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {

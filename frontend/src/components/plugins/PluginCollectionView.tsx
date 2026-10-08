@@ -1,4 +1,5 @@
 import { ChevronRight, Clock, Plus, Puzzle, Trash2, CheckSquare, Plug, Key } from 'lucide-react';
+import { pluginPath } from '../../lib/routes';
 import type { McpConfigDisplay } from '../../types/generated';
 import { CollectionShell } from '../CollectionShell';
 import { CollectionFavoritesHeader } from '../CollectionFavoritesHeader';
@@ -31,6 +32,7 @@ export function PluginCollectionView({ state }: { state: McpPageState }) {
   return <div className="mcp-plugin-shell">
     <CollectionShell<McpConfigDisplay>
       ariaLabel={t('mcp.title')}
+      getItemPath={config => pluginPath(config.id)}
       title={<><Puzzle size={17} /> <MatrixText text={t('mcp.title')} /></>}
       titleCount={totalConfigs}
       headerActions={<>

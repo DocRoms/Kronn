@@ -956,6 +956,28 @@ describe('McpPage', () => {
     expect(document.querySelector('.mcp-detail-inline')).not.toBeNull();
   });
 
+  it('opens a plugin row in a new tab on a Ctrl-click, without selecting it', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
+      configs: [
+        makeConfig('github-config', 'github', 'GitHub'),
+        makeConfig('slack-config', 'slack', 'Slack'),
+      ],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+    const slack = screen.getByRole('button', { name: 'Slack — Voir les détails' });
+    fireEvent.click(slack, { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/plugins/slack-config`, '_blank', 'noopener,noreferrer');
+    expect(slack).not.toHaveAttribute('aria-current', 'true');
+    open.mockRestore();
+  });
+
   it('clears a plugin selection when filtering hides its configuration', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],

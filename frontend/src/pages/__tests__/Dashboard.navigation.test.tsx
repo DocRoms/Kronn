@@ -76,7 +76,7 @@ async function renderDashboard(initialPath = '/') {
 }
 
 const navTab = (page: string) => {
-  const tab = document.querySelector<HTMLButtonElement>(`[data-tour-id="nav-${page}"]`);
+  const tab = document.querySelector<HTMLAnchorElement>(`[data-tour-id="nav-${page}"]`);
   if (!tab) throw new Error(`No nav tab for ${page}`);
   return tab;
 };
@@ -109,8 +109,8 @@ describe('Dashboard navigation', () => {
       current_file: null, started_at: '2026-01-01T00:00:00Z', kind: 'full_audit',
     }]);
     await renderDashboard();
-    const projectsTab = document.querySelector<HTMLButtonElement>('[data-tour-id="nav-projects"]');
-    const workflowsTab = document.querySelector<HTMLButtonElement>('[data-tour-id="nav-workflows"]');
+    const projectsTab = document.querySelector<HTMLAnchorElement>('[data-tour-id="nav-projects"]');
+    const workflowsTab = document.querySelector<HTMLAnchorElement>('[data-tour-id="nav-workflows"]');
     expect(projectsTab).not.toBeNull();
     expect(workflowsTab).not.toBeNull();
     expect(screen.getByTestId('active-audits-trigger')).toBeInTheDocument();
@@ -141,7 +141,7 @@ describe('Dashboard navigation', () => {
   });
   it('reveals Artifacts only after the first Artifact has activated the capability', async () => {
     await renderDashboard();
-    expect(screen.queryByRole('button', { name: 'Artifacts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Artifacts' })).not.toBeInTheDocument();
     cleanup();
 
     vi.mocked(pagesApi.capability).mockResolvedValue({
@@ -150,9 +150,9 @@ describe('Dashboard navigation', () => {
     });
     await renderDashboard();
 
-    const button = await screen.findByRole('button', { name: 'Artifacts' });
+    const button = await screen.findByRole('link', { name: 'Artifacts' });
     const navOrder = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.dash-nav-tabs [data-tour-id^="nav-"]'),
+      document.querySelectorAll<HTMLAnchorElement>('.dash-nav-tabs [data-tour-id^="nav-"]'),
       item => item.dataset.tourId,
     );
     expect(navOrder).toEqual([
@@ -173,13 +173,13 @@ describe('Dashboard navigation', () => {
       .mockResolvedValueOnce({ activated: false, activated_at: null })
       .mockResolvedValueOnce({ activated: true, activated_at: '2026-08-26T16:00:00Z' });
     await renderDashboard();
-    expect(screen.queryByRole('button', { name: 'Artifacts' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Artifacts' })).not.toBeInTheDocument();
 
     await act(async () => {
       window.dispatchEvent(new Event('kronn:pages-activated'));
     });
 
-    const pagesButton = await screen.findByRole('button', { name: 'Artifacts' });
+    const pagesButton = await screen.findByRole('link', { name: 'Artifacts' });
     expect(pagesApi.capability).toHaveBeenCalledTimes(2);
     pagesButton.click();
     expect(await screen.findByTestId('pages-page')).toBeInTheDocument();
@@ -265,6 +265,30 @@ describe('Dashboard page addresses', () => {
     ['mcps', '/plugins', 'mcp-page'],
     ['settings', '/config', 'settings-page'],
   ] as const;
+
+  it('makes every tab a link to its page, so a modified click opens it in a new tab', async () => {
+    await renderDashboard('/projects');
+    expect(navTab('discussions')).toHaveAttribute('href', '/discussions');
+    expect(navTab('settings')).toHaveAttribute('href', '/config');
+    expect(navTab('mcps')).toHaveAttribute('href', '/plugins');
+
+    // Ctrl/Cmd/Shift-click or a middle click: left to the browser (new tab /
+    // window), so the app does not navigate.
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, ...init });
+      act(() => { navTab('discussions').dispatchEvent(click); });
+      expect(click.defaultPrevented).toBe(false);
+      expect(screen.queryByTestId('discussion-page')).toBeNull();
+      expect(navTab('projects')).toHaveAttribute('aria-current', 'page');
+    }
+
+    // A plain click stays in the app.
+    const plain = new MouseEvent('click', { bubbles: true, cancelable: true });
+    await act(async () => { navTab('discussions').dispatchEvent(plain); });
+    expect(plain.defaultPrevented).toBe(true);
+    expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/discussions');
+  });
 
   it('lands on Projects from the bare address', async () => {
     await renderDashboard('/');

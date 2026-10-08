@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { planningTaskPath } from '../lib/routes';
 import {
   Check,
   ChevronRight,
@@ -150,6 +152,7 @@ export function ProjectTasksPanel({
       <button
         type="button"
         className="dash-icon-btn project-task-open"
+        {...newTabClickProps(planningTaskPath(task.id))}
         onClick={() => onOpenPlanning(task.id)}
         aria-label={t('projects.tasks.openTask', task.reference)}
         title={t('projects.tasks.openTask', task.reference)}

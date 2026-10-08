@@ -114,6 +114,16 @@ describe('ActiveRunsPopover', () => {
     expect(onNavigate).toHaveBeenCalledWith('workflow-1');
   });
 
+  it('opens a run row in a new tab on Ctrl-click, without navigating here', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNavigate = vi.fn();
+    render(<I18nProvider><ActiveRunsPopover workflows={[workflow]} onClose={vi.fn()} onNavigateToWorkflow={onNavigate} onViewAllWorkflows={vi.fn()} /></I18nProvider>);
+    fireEvent.click(screen.getByRole('button', { name: /Release/ }), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/workflow-1`, '_blank', 'noopener,noreferrer');
+    expect(onNavigate).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('navigates from the footer', () => {
     const onViewAll = vi.fn();
     render(<I18nProvider><ActiveRunsPopover workflows={[]} onClose={vi.fn()} onNavigateToWorkflow={vi.fn()} onViewAllWorkflows={onViewAll} /></I18nProvider>);

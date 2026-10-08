@@ -1,6 +1,6 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
-import { sameAutomationSelection, type AutomationSelection, type AutomationTab } from '../lib/routes';
+import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab } from '../lib/routes';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
 import { appendLiveBuffer } from '../lib/workflowUiUtils';
 import { useIsMobile } from '../hooks/useMediaQuery';
@@ -2304,6 +2304,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         ariaLabel={t('wf.title')}
         items={automationResources}
         getId={resource => resource.id}
+        getItemPath={resource => automationPath({ tab: resource.kind, resourceId: resource.resourceId })}
         getLabel={resource => resource.searchText}
         // The search is applied by the shell; the chips own the rest.
         itemFilter={resource => matchesAutomationFilters(resource, automationFilters, ['query'])}

@@ -733,4 +733,99 @@ describe('ProjectCard — repository overview', () => {
 
     expect(onNavigate).toHaveBeenCalledWith('planning:task-42');
   });
+
+  it('opens a detail tab or an overview shortcut in a new tab on Ctrl-click, without switching view', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+    const detailBody = document.querySelector('.dash-card-body');
+    expect(detailBody).toHaveAttribute('data-detail-view', 'overview');
+
+    const gitTab = screen.getByRole('button', { name: 'projects.master.tab.git' });
+    fireEvent.click(gitTab, { ctrlKey: true });
+    expect(open).toHaveBeenLastCalledWith(
+      `${window.location.origin}/projects/p-overview/git`, '_blank', 'noopener,noreferrer',
+    );
+    expect(gitTab).toHaveAttribute('data-active', 'false');
+
+    const codeShortcut = document.querySelector('.project-overview-grid')!;
+    fireEvent.click(within(codeShortcut as HTMLElement).getByRole('button', { name: /projects\.master\.tab\.code/ }), { ctrlKey: true });
+    expect(open).toHaveBeenLastCalledWith(
+      `${window.location.origin}/projects/p-overview/code`, '_blank', 'noopener,noreferrer',
+    );
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(detailBody).toHaveAttribute('data-detail-view', 'overview');
+    open.mockRestore();
+  });
+
+  it('opens a project discussion row in a new tab on Ctrl-click, without opening it here', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onOpenDiscussion = vi.fn();
+    const discussions = [{
+      id: 'disc-new-tab',
+      project_id: PROJECT.id,
+      title: 'Release notes',
+      agent: 'Codex',
+      messages: [],
+      message_count: 1,
+      non_system_message_count: 1,
+      archived: false,
+      updated_at: '2026-07-25T00:00:00Z',
+    }] as unknown as Discussion[];
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={discussions}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={onOpenDiscussion}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /projects\.master\.tab\.discussions 1/ }));
+    fireEvent.click(screen.getByText('Release notes'), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/discussions/disc-new-tab`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onOpenDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
 });

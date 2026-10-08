@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { isPlainLeftClick } from '../lib/newTabNavigation';
 import { AlertTriangle, CheckCircle2, Clock3, ExternalLink, Loader2, XCircle } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { formatDurationCompact } from '../lib/kronnToolParser';
@@ -201,7 +202,7 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
             // without reloading the app; a modified click keeps the browser's
             // own behaviour (new tab, new window).
             onClick={event => {
-              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              if (!isPlainLeftClick(event)) return;
               event.preventDefault();
               navigateAppTab(runHref);
             }}

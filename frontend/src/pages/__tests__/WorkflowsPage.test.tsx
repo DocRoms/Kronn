@@ -461,6 +461,22 @@ describe('WorkflowsPage', () => {
     const groupHeaders = (sidebar: HTMLElement) => Array.from(sidebar.querySelectorAll('.automation-group-header'))
       .map(header => header.getAttribute('aria-label'));
 
+    it('opens a workflow or a Quick Prompt row in a new tab on a Ctrl-click, without selecting it', async () => {
+      const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+      const { sidebar } = await showLibrary();
+      expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
+
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Beta flow' }), { ctrlKey: true });
+      expect(open).toHaveBeenLastCalledWith(`${window.location.origin}/workflows/wf-beta`, '_blank', 'noopener,noreferrer');
+      fireEvent.click(within(sidebar).getByRole('button', { name: 'Ouvrir Gamma prompt' }), { ctrlKey: true });
+      expect(open).toHaveBeenLastCalledWith(`${window.location.origin}/workflows/qp/qp-gamma`, '_blank', 'noopener,noreferrer');
+
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(document.querySelector('.automation-page')).toHaveAttribute('data-has-selection', 'false');
+      expect(localStorage.getItem('kronn:automationLastOpened')).toBeNull();
+      open.mockRestore();
+    });
+
     it('groups by type at first, with a dot and a count per group, then by project, then flat', async () => {
       const { sidebar, groupBy } = await showLibrary();
       expect(groupBy('Type')).toHaveAttribute('aria-pressed', 'true');

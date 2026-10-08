@@ -108,6 +108,18 @@ and only Configuration reads it, as the section to scroll to.
   `[src: file: frontend/src/main.tsx:44-49]`
   `[src: file: frontend/src/routes/DiscussionsRoute.tsx:20-32]`
   `[src: file: frontend/src/pages/DiscussionsPage.tsx:364-368]`
+- **Open in a new tab** — anything that opens a view with an address opens it
+  in a new tab on Ctrl/Cmd/Shift-click or a middle click, and in this tab on a
+  plain click. The dashboard tabs and the run-card links are real `<a href>`
+  links, so the context menu and the URL preview work too. Every other row,
+  card or button keeps its element, and so its exact look: it spreads
+  `newTabClickProps(path)`, which opens the modified clicks itself and leaves a
+  click on a control nested in it (favourite, menu, checkbox) to that control.
+  `CollectionShell` does it for every list through `getItemPath`. Not covered:
+  a jump carried by an arrival intent (a batch group to focus), which a new tab
+  cannot receive, and rows in multi-selection, where a click ticks.
+  `[src: file: frontend/src/lib/newTabNavigation.ts:1-63]`
+  `[src: file: frontend/src/components/CollectionShell.tsx:435-440]`
 - **Serving** — a reload on a deep address needs the server to answer it with
   `index.html`: nginx does under Docker, the embedded desktop server does
   through `frontend_spa_service`. Unknown `/api/…` and `/assets/…` paths stay

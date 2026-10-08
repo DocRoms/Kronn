@@ -319,7 +319,7 @@ describe('Dashboard — mobile responsive', () => {
 
     // On mobile, nav buttons should have title attributes (for accessibility)
     // but should NOT display text labels inline (only icons)
-    const navButtons = Array.from(document.body.querySelectorAll('button[title]'));
+    const navButtons = Array.from(document.body.querySelectorAll('.dash-nav-tabs [title]'));
     const tabButtons = navButtons.filter(b => {
       const title = b.getAttribute('title');
       return title && ['Projets', 'Discussions', 'MCPs', 'Workflows', 'Config'].includes(title);

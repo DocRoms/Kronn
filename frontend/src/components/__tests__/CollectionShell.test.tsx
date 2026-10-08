@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -11,7 +11,7 @@ const items: Item[] = [{ id: 'one', name: 'One', favorite: true }, { id: 'two', 
 const labels = { search: 'Search', favorites: 'Favorites', clearFilters: 'Clear filters', moreActions: 'More actions', openCollection: 'Open collection', closeCollection: 'Close collection', selectItem: 'selected' };
 const collectionShellCss = readFileSync(resolve(process.cwd(), 'src/components/CollectionShell.css'), 'utf8');
 
-function Fixture({ mobile = false, ariaLabel = 'Test collection', persistentFavorites = false }: { mobile?: boolean; ariaLabel?: string; persistentFavorites?: boolean }) {
+function Fixture({ mobile = false, ariaLabel = 'Test collection', persistentFavorites = false, withPaths = false }: { mobile?: boolean; ariaLabel?: string; persistentFavorites?: boolean; withPaths?: boolean }) {
   const [query, setQuery] = useState('');
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [filter, setFilter] = useState<string | null>(null);
@@ -21,6 +21,7 @@ function Fixture({ mobile = false, ariaLabel = 'Test collection', persistentFavo
   const { ids: persistedFavoriteIds, toggle: togglePersistedFavorite } = usePersistentIdSet(`kronn:test-collection-favorites:${ariaLabel}`, items.map(item => item.id), true);
   return <CollectionShell<Item>
     ariaLabel={ariaLabel} items={items} getId={item => item.id} getLabel={item => item.name}
+    getItemPath={withPaths ? item => `/things/${item.id}` : undefined}
     isFavorite={item => persistentFavorites ? persistedFavoriteIds.has(item.id) : item.favorite}
     onToggleFavorite={persistentFavorites ? item => togglePersistedFavorite(item.id) : undefined}
     filters={[{ id: 'archived', label: 'Archived', matches: item => !!item.archived }]}
@@ -33,6 +34,21 @@ function Fixture({ mobile = false, ariaLabel = 'Test collection', persistentFavo
 }
 
 describe('CollectionShell', () => {
+  it('opens a row in a new tab on a modified click, and keeps the plain click for selection', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(<Fixture withPaths />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Two' }), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/things/two`, '_blank', 'noopener,noreferrer');
+    expect(screen.getByText('Detail: One')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Two' }));
+    expect(screen.getByText('Detail: Two')).toBeInTheDocument();
+    expect(open).toHaveBeenCalledTimes(1);
+    open.mockRestore();
+  });
+
+
   it('defines the canonical separated gradient surface for right-pane headers', () => {
     const rule = collectionShellCss.match(/\.collection-detail-header\s*\{([^}]*)\}/)?.[1] ?? '';
 

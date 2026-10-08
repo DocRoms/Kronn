@@ -114,6 +114,43 @@ test.describe('Routing — addresses', () => {
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
   });
 
+  test('a modified or middle click opens a page or a row in a new tab, and leaves this one where it is', async ({ page, context }) => {
+    await page.goto(`/discussions/${discA.id}`);
+    await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
+
+    // A nav tab is a link: Ctrl/Cmd-click is the browser's own new tab.
+    const [planningTab] = await Promise.all([
+      context.waitForEvent('page'),
+      current(page, 'nav-planning').click({ modifiers: ['ControlOrMeta'] }),
+    ]);
+    await planningTab.waitForLoadState();
+    expect(new URL(planningTab.url()).pathname).toBe('/planning');
+    await planningTab.close();
+
+    // A sidebar row keeps its element; the app opens the new tab itself.
+    const row = page.locator(`[data-tour-disc-id="${discB.id}"] .disc-item-open`).first();
+    const [discussionTab] = await Promise.all([
+      context.waitForEvent('page'),
+      row.click({ modifiers: ['ControlOrMeta'] }),
+    ]);
+    await discussionTab.waitForLoadState();
+    expect(new URL(discussionTab.url()).pathname).toBe(`/discussions/${discB.id}`);
+    await expect(discussionTab.locator('.disc-chat-header-title')).toContainText(discB.title);
+    await discussionTab.close();
+
+    const [middleTab] = await Promise.all([
+      context.waitForEvent('page'),
+      row.click({ button: 'middle' }),
+    ]);
+    await middleTab.waitForLoadState();
+    expect(new URL(middleTab.url()).pathname).toBe(`/discussions/${discB.id}`);
+    await middleTab.close();
+
+    // This tab never moved.
+    expect(new URL(page.url()).pathname).toBe(`/discussions/${discA.id}`);
+    await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
+  });
+
   test('a planning task address opens its detail, and a reload keeps it', async ({ page }) => {
     await page.goto(`/planning/${taskId}`);
     await expect(page.locator('.planning-detail-title')).toHaveValue(taskTitle);

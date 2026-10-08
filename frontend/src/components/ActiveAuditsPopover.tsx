@@ -12,6 +12,8 @@
  *
  * Reuses the same CSS classes as ActiveRunsPopover for visual parity.
  */
+import { newTabClickProps } from '../lib/newTabNavigation';
+import { projectPath } from '../lib/routes';
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { useActivityPopover } from '../hooks/useActivityPopover';
@@ -33,7 +35,7 @@ export interface ActiveAuditsPopoverProps {
    *  fleet-wide audit-status snapshot. */
   onAfterCancel?: () => void;
   triggerRef?: RefObject<HTMLButtonElement | null>;
-  focusFallbackRef?: RefObject<HTMLButtonElement | null>;
+  focusFallbackRef?: RefObject<HTMLElement | null>;
 }
 
 function formatElapsed(ms: number, t: (k: string, ...a: (string | number)[]) => string): string {
@@ -137,6 +139,7 @@ export function ActiveAuditsPopover({
                 <button
                   type="button"
                   className="wf-active-runs-item-body"
+                  {...newTabClickProps(projectPath(a.project_id))}
                   onClick={() => onNavigateToProject(a.project_id)}
                 >
                   <Loader2 size={12} className="spin text-accent" />

@@ -12,7 +12,7 @@ import { ListControls } from './ListControls';
 import { CollectionShell, type CollectionFilter } from './CollectionShell';
 import { projects as projectsApi } from '../lib/api';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
-import type { ProjectLocation } from '../lib/routes';
+import { projectPath, type ProjectLocation } from '../lib/routes';
 import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, ModelTiersConfig, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronRight, AlertTriangle,
@@ -316,6 +316,7 @@ export function ProjectList({
           titleCount={visibleProjects.length}
           items={sortedProjects}
           getId={project => project.id}
+          getItemPath={project => projectPath(project.id)}
           getLabel={project => `${project.name} ${project.path}`}
           isFavorite={project => favoriteIds.has(project.id)}
           onToggleFavorite={project => toggleFavorite(project.id)}

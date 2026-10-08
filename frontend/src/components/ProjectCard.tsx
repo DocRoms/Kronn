@@ -42,7 +42,8 @@ import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCached
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
-import { PROJECT_VIEWS, type ProjectLocation, type ProjectView } from '../lib/routes';
+import { PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 
 type ProjectDetailView = ProjectView;
 
@@ -1305,6 +1306,7 @@ export function ProjectCard({
                 key={view}
                 type="button"
                 data-active={detailView === view}
+                {...newTabClickProps(projectPath(proj.id, { view }))}
                 onClick={() => selectDetailView(view)}
               >
                 <Icon size={13} /> {label}
@@ -1862,17 +1864,17 @@ export function ProjectCard({
                 enabled={detailMode && isOpen && detailView === 'overview' && proj.path_exists !== false}
               />
               <div className="project-overview-grid">
-                <button type="button" onClick={() => selectDetailView('discussions')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'discussions' }))} onClick={() => selectDetailView('discussions')}>
                   <MessageSquare size={16} />
                   <strong>{projDiscussions.length}</strong>
                   <span>{t('projects.master.tab.discussions')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('tasks')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'tasks' }))} onClick={() => selectDetailView('tasks')}>
                   <ListTodo size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.tasks')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('audit')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'audit' }))} onClick={() => selectDetailView('audit')}>
                   <Cpu size={16} />
                   <strong>
                     {proj.audit_status === 'Validated'
@@ -1887,12 +1889,12 @@ export function ProjectCard({
                   </strong>
                   <span>{t('projects.master.tab.audit')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('docs')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'docs' }))} onClick={() => selectDetailView('docs')}>
                   <BookOpen size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.docs')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('code')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'code' }))} onClick={() => selectDetailView('code')}>
                   <Code2 size={16} />
                   <strong>{t('projects.master.overview.browse')}</strong>
                   <span>{t('projects.master.tab.code')}</span>
@@ -1931,7 +1933,7 @@ export function ProjectCard({
                   <strong>{proj.tech_debt_count ?? 0}</strong>
                   <span>{t('projects.master.sort.techDebt')}</span>
                 </button>
-                <button type="button" onClick={() => selectDetailView('audit')}>
+                <button type="button" {...newTabClickProps(projectPath(proj.id, { view: 'audit' }))} onClick={() => selectDetailView('audit')}>
                   <RefreshCw size={16} />
                   <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
                   <span>{t('projects.master.overview.stale')}</span>
@@ -2130,7 +2132,7 @@ export function ProjectCard({
                     {t('config.enabled')}
                   </span>
                 </div>
-                <div className="flex-1 cursor-pointer" onClick={() => onOpenDiscussion(disc.id)}>
+                <div className="flex-1 cursor-pointer" {...newTabClickProps(discussionPath(disc.id))} onClick={() => onOpenDiscussion(disc.id)}>
                   <span className="dash-row-disc-title">
                     {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
                     {disc.title}
@@ -2139,7 +2141,7 @@ export function ProjectCard({
                     {unseenBasis(disc)} msg · {disc.agent}
                   </span>
                 </div>
-                <button className="dash-icon-btn" onClick={() => onOpenDiscussion(disc.id)} aria-label="Open discussion">
+                <button className="dash-icon-btn" {...newTabClickProps(discussionPath(disc.id))} onClick={() => onOpenDiscussion(disc.id)} aria-label="Open discussion">
                   <ChevronRight size={12} />
                 </button>
               </div>
@@ -2300,6 +2302,7 @@ export function ProjectCard({
                     </p>
                     <button
                       className="dash-icon-btn dash-btn-accent-border"
+                      {...newTabClickProps(discussionPath(bootstrapDisc.id))}
                       onClick={() => onOpenDiscussion(bootstrapDisc.id)}
                     >
                       <MessageSquare size={12} /> {t('audit.resumeBootstrap')}

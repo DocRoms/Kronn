@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { livePagePath } from '../lib/routes';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
@@ -703,6 +704,7 @@ export function PagesPage({
         ariaLabel={t('pages.title')}
         items={pages}
         getId={page => page.id}
+        getItemPath={page => livePagePath(page.id)}
         getLabel={page => `${page.title} ${page.slug}`}
         persistence={{ query, onQueryChange: setQuery, favoritesOnly: false, onFavoritesOnlyChange: () => {} }}
         selectedId={selectedId}

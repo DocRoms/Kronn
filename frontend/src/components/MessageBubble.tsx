@@ -1,5 +1,6 @@
 import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
-import type { ProjectLocation, SettingsIntent } from '../lib/routes';
+import { projectPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
   createContext,
@@ -335,6 +336,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           onNavigate('projects', { projectId, projectAt: { view: 'code', file: path, line } });
           return true;
         }
+      : undefined,
+    projectFilePath: projectId
+      ? (path, line) => projectPath(projectId, { view: 'code', file: path, line })
       : undefined,
   }), [attachments, discussionMedia, projectId, onNavigate]);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1695,6 +1699,7 @@ function MarkdownLink({ href, children }: MdProps) {
         kind={kind}
         attachment={attachmentForLink(href, fileLinks.attachments)}
         onOpenProjectFile={fileLinks.onOpenProjectFile}
+        projectFilePath={fileLinks.projectFilePath}
         onOpenAttachment={fileLinks.onOpenAttachment}
       >
         {children}
@@ -1706,11 +1711,12 @@ function MarkdownLink({ href, children }: MdProps) {
 
 // A path on the agent's machine means nothing to the browser: open the
 // attachment it names, or say plainly that the file is not here.
-function FileLink({ href, kind, attachment, onOpenProjectFile, onOpenAttachment, children }: {
+function FileLink({ href, kind, attachment, onOpenProjectFile, projectFilePath, onOpenAttachment, children }: {
   href: string;
   kind: 'local' | 'project';
   attachment?: ContextFile;
   onOpenProjectFile?: MessageFileLinkContextValue['onOpenProjectFile'];
+  projectFilePath?: MessageFileLinkContextValue['projectFilePath'];
   onOpenAttachment?: (file: ContextFile) => void;
   children?: MdProps['children'];
 }) {
@@ -1729,6 +1735,7 @@ function FileLink({ href, kind, attachment, onOpenProjectFile, onOpenAttachment,
           className="disc-md-file-link-open"
           title={t('disc.localFile.openInProject')}
           aria-label={t('disc.localFile.openInProject')}
+          {...newTabClickProps(projectFilePath?.(path, line))}
           onClick={() => {
             if (opening.current) return;
             opening.current = true;
