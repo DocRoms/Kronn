@@ -45,7 +45,10 @@ export function DiscussionsRoute() {
       refetchDiscussions={ctx.refetchDiscussions}
       refetchProjects={ctx.refetchProjects}
       onNavigate={(target, opts) => {
-        if (opts?.projectId) nav.toProject(opts.projectId);
+        // The requested page wins: a project id only opens that project when
+        // Projects is where the caller goes (the dev kickoff names its project
+        // but stays on Discussions, where its prefilled form opens).
+        if (target === 'projects' && opts?.projectId) nav.toProject(opts.projectId);
         else if (!opts?.workflowId) nav.toPage(target as DashboardPage);
         if (opts?.scrollTo) {
           const anchorId = opts.scrollTo;

@@ -5,6 +5,7 @@ import { formatDurationCompact } from '../lib/kronnToolParser';
 import { runsApi } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { mediaRunDetails } from '../lib/mediaRunResult';
+import { navigateAppTab } from '../lib/live-page-navigation';
 import { flatEntries, quickApiPreview } from '../lib/runResultPreview';
 import {
   sharedRunStatusCardModel,
@@ -182,6 +183,8 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
   // rendering they have today.
   const foldResult = model.kind === 'media' || apiPreview != null || execEntries != null;
 
+  const runHref = model.href;
+
   return (
     <section ref={rootRef} className="run-status-card" data-status={model.status} data-kind={model.kind} data-testid="run-status-card">
       <div className="run-status-card-header">
@@ -189,8 +192,20 @@ export function RunStatusCard({ model: initialModel, runId, compact = false, hid
         <span className="run-status-card-status" data-status={model.status}>
           {statusIcon(model.status)} {t(`run.status.${model.status}`)}
         </span>
-        {!hideRunLink && model.href && (
-          <a className="run-status-card-link" href={model.href} aria-label={t('run.open')}>
+        {!hideRunLink && runHref && (
+          <a
+            className="run-status-card-link"
+            href={runHref}
+            aria-label={t('run.open')}
+            // An address of this app: a plain click follows it in this tab
+            // without reloading the app; a modified click keeps the browser's
+            // own behaviour (new tab, new window).
+            onClick={event => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+              event.preventDefault();
+              navigateAppTab(runHref);
+            }}
+          >
             <ExternalLink size={14} aria-hidden />
           </a>
         )}

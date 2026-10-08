@@ -1,4 +1,5 @@
 import type { SharedRun } from '../types/generated';
+import { automationPath, discussionPath, workflowPath, type AutomationTab } from './routes';
 
 // `media` is ONE kind for both image and video: the execution family is
 // identical and only the output differs, so the modality is read from
@@ -37,6 +38,22 @@ export type RunStatusCardModel = {
   href?: string | null;
 };
 
+// The Automation tab a source of each kind lives in. A media run has no page
+// of its own, so it has no address.
+const RUN_SOURCE_TABS: Partial<Record<RunStatusCardKind, AutomationTab>> = {
+  quick_prompt: 'quickPrompts',
+  quick_api: 'quickApis',
+  quick_exec: 'quickExecs',
+};
+
+/** Where a run is read: its discussion, else its workflow with the run revealed, else its source. */
+export function sharedRunAddress(run: Pick<SharedRun, 'id' | 'kind' | 'source_id' | 'discussion_id'>): string | null {
+  if (run.discussion_id) return discussionPath(run.discussion_id);
+  if (run.kind === 'workflow') return workflowPath(run.source_id, run.id);
+  const tab = RUN_SOURCE_TABS[run.kind];
+  return tab ? automationPath({ tab, resourceId: run.source_id }) : null;
+}
+
 /** The single SharedRun -> RunStatusCardModel projection. Every consumer must
  * reuse this mapper so href and progress semantics cannot drift. */
 export function sharedRunStatusCardModel(
@@ -60,11 +77,7 @@ export function sharedRunStatusCardModel(
     diagnostic: run.diagnostic,
     execDetails: run.exec_details,
     freshness,
-    href: run.discussion_id
-      ? `/discussions/${run.discussion_id}`
-      : run.kind === 'workflow'
-        ? `/workflows/${run.source_id}?run=${run.id}`
-        : `/workflows?kind=${run.kind}&source=${run.source_id}&run=${run.id}`,
+    href: sharedRunAddress(run),
   };
 }
 

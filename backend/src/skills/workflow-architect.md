@@ -354,7 +354,7 @@ Use as the durable sink for a Kronn Live Page. A Page is a shared destination, n
 }
 ```
 
-The Page must already declare every named dataset. `replace` updates a snapshot, `append` adds time-series observations, and `upsert` updates a collection and therefore requires `key_field`. A publish applies every write atomically. The Page HTML is presentation-only: it receives `window.KronnPageData` plus a `kronn:page-data` event in a sandbox with no external network. Opened standalone as `#page/<id>?key=value`, it also gets short view hints in `KronnPageData.page.params` (e.g. `tv=1`). Use `page_get()` before `page_update_html()` because HTML updates replace the complete document and create an immutable revision.
+The Page must already declare every named dataset. `replace` updates a snapshot, `append` adds time-series observations, and `upsert` updates a collection and therefore requires `key_field`. A publish applies every write atomically. The Page HTML is presentation-only: it receives `window.KronnPageData` plus a `kronn:page-data` event in a sandbox with no external network. Opened standalone as `/standalone/pages/<id>?key=value`, it also gets short view hints in `KronnPageData.page.params` (e.g. `tv=1`). Use `page_get()` before `page_update_html()` because HTML updates replace the complete document and create an immutable revision.
 
 When the user wants a Page CTA to launch an existing QP, QA, QE or Workflow,
 pair the visible element's stable `data-kronn-action` with an inert

@@ -755,6 +755,16 @@ describe('Discussions route', () => {
     expect(window.location.pathname).toBe('/projects/proj-1');
   });
 
+  it('stays on Discussions when the page asked for is Discussions, even with a project named', async () => {
+    // The dev kickoff (after « issues created ») prefills a discussion for its
+    // project and asks for Discussions, where the prefilled form opens.
+    await open('/discussions/disc-1');
+
+    await act(async () => received.discussions().onNavigate('discussions', { projectId: 'proj-1' }));
+
+    expect(window.location.pathname).toBe('/discussions');
+  });
+
   it('scrolls to the named anchor of the page it jumps to', async () => {
     vi.useFakeTimers();
     try {

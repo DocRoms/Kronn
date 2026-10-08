@@ -55,7 +55,7 @@ test.describe('Live Page inline action — launch and secure discussion deep lin
     const created = (await pageResponse.json()) as { data: { id: string } };
     const pageId = created.data.id;
 
-    await page.goto(`/#page/${pageId}`);
+    await page.goto(`/standalone/pages/${encodeURIComponent(pageId)}`);
     const frame = page.frameLocator('[data-testid="standalone-live-page-frame"]');
     await frame.locator('[data-kronn-action="frame"]').click();
 

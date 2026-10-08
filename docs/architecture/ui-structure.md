@@ -51,8 +51,8 @@ address that replaced it, from one place: `legacyHashToPath` in
 `lib/legacyRoutes.ts`, applied by the app root whatever path it was opened
 on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
 `#pages/mosaic?…`, `#discussions/mosaic?…`, `#settings/artifacts?…` and
-`#config` are all mapped. The
-hash is otherwise only an in-page anchor (`/config#settings-api-audit`).
+`#config` are all mapped. Any other hash is left alone: no page reads it
+on arrival, so it routes nowhere.
 `[src: file: frontend/src/lib/legacyRoutes.ts:13-35]`
 `[src: file: frontend/src/App.tsx:159-162]`
 
