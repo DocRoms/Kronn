@@ -1,5 +1,5 @@
 import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
-import type { ProjectLocation } from '../lib/routes';
+import type { ProjectLocation, SettingsIntent } from '../lib/routes';
 import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
   createContext,
@@ -272,7 +272,7 @@ export interface MessageBubbleProps {
   onRetry: () => void;
   onRetryAgentDispatch?: (dispatchId: string, agentType: AgentType) => void;
   onExpandSummary: (msgId: string) => void;
-  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; modelTier?: SettingsIntent['modelTier'] }) => void;
   /** Discussion id, threaded through to MarkdownContent so the
    *  `kronn-doc-preview` fence handler knows which generated-files
    *  directory to target when the user clicks "Export PDF". */
@@ -1224,13 +1224,12 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               className="disc-scan-btn"
               style={{ fontSize: 11, padding: '5px 12px' }}
               onClick={() => {
-                try {
-                  sessionStorage.setItem('kronn:model-config-target', JSON.stringify({
-                    agentType: msg.agent_type,
-                    tier: modelError.tier,
-                  }));
-                } catch { /* private mode / quota: section navigation still works */ }
-                onNavigate('settings', { scrollTo: 'settings-agent-config' });
+                // The agent and tier travel with the navigation: Configuration
+                // unfolds that agent's card and points at the tier's picker.
+                onNavigate('settings', {
+                  scrollTo: 'settings-agent-config',
+                  modelTier: msg.agent_type ? { agentType: msg.agent_type, tier: modelError.tier } : undefined,
+                });
               }}
             >
               <Settings size={11} />

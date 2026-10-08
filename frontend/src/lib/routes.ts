@@ -90,6 +90,15 @@ export function pluginPath(configId: string): string {
   return `${PAGE_PATHS.mcps}/${encodeURIComponent(configId)}`;
 }
 
+/** The model tiers an agent runs on. */
+export type ModelTierName = 'economy' | 'default' | 'reasoning';
+
+/** What a navigation to Configuration asks it to do once, on arrival. */
+export interface SettingsIntent {
+  /** Unfold this agent's card and point at this tier's model picker (a model error). */
+  modelTier?: { agentType: string; tier: ModelTierName };
+}
+
 /** Configuration scrolled to one of its sections (`settings-…`), named by the hash. */
 export function settingsSectionPath(sectionId: string): string {
   return `${PAGE_PATHS.settings}#${encodeURIComponent(sectionId)}`;

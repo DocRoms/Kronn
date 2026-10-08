@@ -81,12 +81,14 @@ and only Configuration reads it, as the section to scroll to.
   else in a new one. `[src: file: frontend/src/lib/live-page-sandbox.ts:720-736]`
 - **Arrival intents** — what a navigation asks the page to do once it lands
   (run the agent, focus a batch group, open a discussion's Git panel on a
-  workspace, flash a just-improved Quick Prompt) travels as history state and is
+  workspace, flash a just-improved Quick Prompt, point Configuration at the
+  agent tier a model error names) travels as history state and is
   consumed by replacing the entry without it, so a reload or a Back never
   replays it. `[src: file: frontend/src/routes/useLocationIntent.ts:9-20]`
 - **Every selection has an address** — the shell's outlet context carries
-  fleet data and services only; nothing is handed from page to page any
-  more. A page that can be owned by its caller takes the open resource and a
+  fleet data and services, plus one hand-off: the prefill of a new
+  discussion (`discPrefill`), a one-shot the Discussions page copies into its
+  form and clears at once. Nothing else is handed from page to page. A page that can be owned by its caller takes the open resource and a
   change callback (`selectedTaskId`/`onSelectedTaskChange`, `selection`/
   `onSelectionChange`, a project's `location`/`onLocationChange`,
   `compareRunId`/`onCompareChange`, …) and still works alone, keeping its own

@@ -1,5 +1,6 @@
 import { exportAndDownload } from '../lib/exportDownload';
 import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
+import type { SettingsIntent } from '../lib/routes';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
 import { ApiCallLogsPage } from './ApiCallLogsPage';
@@ -159,6 +160,9 @@ interface SettingsPageProps {
   hasConfiguredApi?: boolean;
   /** A site to type into Artifacts → External content (from a blocked embed). */
   embedOriginPrefill?: EmbedOriginPrefill | null;
+  /** An agent tier to point at (from a model error), acknowledged via `onModelTierTargetConsumed`. */
+  modelTierTarget?: SettingsIntent['modelTier'] | null;
+  onModelTierTargetConsumed?: () => void;
 }
 
 export function SettingsPage({
@@ -175,6 +179,8 @@ export function SettingsPage({
   toast,
   hasConfiguredApi = false,
   embedOriginPrefill = null,
+  modelTierTarget = null,
+  onModelTierTargetConsumed,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
   const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
@@ -659,6 +665,8 @@ export function SettingsPage({
             t={t}
             usagePanel={<UsageSection onNavigateDiscussion={onNavigateDiscussion} />}
             inDocker={inDocker}
+            modelTierTarget={modelTierTarget}
+            onModelTierTargetConsumed={onModelTierTargetConsumed}
           />
         </div>
       </div>

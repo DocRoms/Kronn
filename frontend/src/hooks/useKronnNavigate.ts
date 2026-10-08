@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import {
   PAGE_PATHS, automationPath, discussionComparePath, discussionPath, livePagePath, planningTaskPath, pluginPath, projectPath, settingsSectionPath, workflowPath,
   type AutomationIntent, type AutomationSelection, type DashboardPage, type DiscussionsIntent, type ProjectLocation,
+  type SettingsIntent,
 } from '../lib/routes';
 
 export interface KronnNavigateOptions {
@@ -28,8 +29,8 @@ export interface KronnNavigate {
   toAutomation: (selection: AutomationSelection, options?: KronnNavigateOptions & { intent?: AutomationIntent }) => void;
   /** The Automation page as it was left, and what to do on arrival. */
   toWorkflows: (intent?: AutomationIntent) => void;
-  /** Configuration, scrolled to one of its sections. */
-  toSettingsSection: (sectionId: string) => void;
+  /** Configuration, scrolled to one of its sections, and what to do there on arrival. */
+  toSettingsSection: (sectionId: string, intent?: SettingsIntent) => void;
   /** The Plugins page with this config open. */
   toPlugin: (configId: string, options?: KronnNavigateOptions) => void;
   /** The Artifacts page with this Page open. */
@@ -86,8 +87,8 @@ export function useKronnNavigate(): KronnNavigate {
     toWorkflows: (intent = {}) => {
       void navigateRef.current(PAGE_PATHS.workflows, { state: intent.preset ? { preset: intent.preset } : null });
     },
-    toSettingsSection: (sectionId) => {
-      void navigateRef.current(settingsSectionPath(sectionId));
+    toSettingsSection: (sectionId, intent) => {
+      void navigateRef.current(settingsSectionPath(sectionId), { state: intent?.modelTier ? { modelTier: intent.modelTier } : null });
     },
     toPlugin: (configId, options) => {
       void navigateRef.current(pluginPath(configId), { replace: options?.replace });

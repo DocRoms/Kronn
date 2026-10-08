@@ -68,7 +68,12 @@ export function DiscussionsRoute() {
         // but stays on Discussions, where its prefilled form opens).
         if (target === 'projects' && opts?.projectId) nav.toProject(opts.projectId, opts.projectAt);
         // A Configuration section has its own address, scrolled to on arrival.
-        else if (target === 'settings' && opts?.scrollTo) nav.toSettingsSection(opts.scrollTo);
+        else if (target === 'settings' && opts?.scrollTo) {
+          nav.toSettingsSection(opts.scrollTo, opts.modelTier ? { modelTier: opts.modelTier } : undefined);
+        }
+        // Already on Discussions: nothing to navigate (the dev kickoff only
+        // prefills a new discussion, whose form opens over the current one).
+        else if (target === 'discussions') return;
         else if (!opts?.workflowId && !(target === 'workflows' && opts?.quickPromptId)) nav.toPage(target as DashboardPage);
         // Sidebar batch pastille → the parent workflow's own address.
         if (opts?.workflowId) nav.toWorkflow(opts.workflowId);

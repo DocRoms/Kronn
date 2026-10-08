@@ -840,14 +840,34 @@ describe('Discussions route', () => {
     expect(window.location.pathname).toBe('/projects/proj-1');
   });
 
-  it('stays on Discussions when the page asked for is Discussions, even with a project named', async () => {
+  it('does not move when the page asked for is Discussions, even with a project named', async () => {
     // The dev kickoff (after « issues created ») prefills a discussion for its
-    // project and asks for Discussions, where the prefilled form opens.
+    // project and asks for Discussions, where it already is: as before pages
+    // had addresses, the form opens over the discussion, whose address stays.
     await open('/discussions/disc-1');
+    const depth = window.history.length;
 
     await act(async () => received.discussions().onNavigate('discussions', { projectId: 'proj-1' }));
 
-    expect(window.location.pathname).toBe('/discussions');
+    expect(window.location.pathname).toBe('/discussions/disc-1');
+    expect(window.history.length).toBe(depth);
+  });
+
+  it('points Configuration at the agent tier a model error names, once', async () => {
+    await open('/discussions/disc-1');
+
+    await act(async () => received.discussions().onNavigate('settings', {
+      scrollTo: 'settings-agent-config',
+      modelTier: { agentType: 'LiteLlm', tier: 'default' },
+    }));
+
+    expect(window.location.pathname).toBe('/config');
+    expect(window.location.hash).toBe('#settings-agent-config');
+    expect(received.settings().modelTierTarget).toEqual({ agentType: 'LiteLlm', tier: 'default' });
+    // Acknowledged: a reload or a Back never points at it again.
+    await act(async () => received.settings().onModelTierTargetConsumed?.());
+    expect(received.settings().modelTierTarget).toBeNull();
+    expect(window.location.hash).toBe('#settings-agent-config');
   });
 
   it('jumps to a Configuration section at its own address, scrolled into view on arrival', async () => {

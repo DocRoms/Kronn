@@ -4,8 +4,9 @@ import type { EmbedOriginPrefill } from '../components/settings/ExternalContentS
 import { useKronnNavigate } from '../hooks/useKronnNavigate';
 import { useDashboardContext } from '../lib/dashboardContext';
 import { embedSettingsOrigin } from '../lib/live-page-navigation';
-import { EMBED_SETTINGS_PATH } from '../lib/routes';
+import { EMBED_SETTINGS_PATH, type SettingsIntent } from '../lib/routes';
 import { SettingsPage } from '../pages/SettingsPage';
+import { useLocationIntent } from './useLocationIntent';
 
 // Long enough for a section fed by a request to appear.
 const SECTION_WAIT_MS = 2000;
@@ -13,6 +14,8 @@ const SECTION_WAIT_MS = 2000;
 export function SettingsRoute() {
   const ctx = useDashboardContext();
   const nav = useKronnNavigate();
+  // A model error points at one agent's tier: a one-shot arrival intent.
+  const [intent, consumeIntent] = useLocationIntent<SettingsIntent>();
   // A blocked embed links to the allowed-sites section with its site typed in
   // (`/config/artifacts?origin=…`), from this tab or from a standalone Page.
   // The address is an arrival: it types its site in once, then gives way to
@@ -65,6 +68,8 @@ export function SettingsRoute() {
       onNavigateDiscussion={nav.toDiscussion}
       toast={ctx.toast}
       embedOriginPrefill={embedOriginPrefill}
+      modelTierTarget={intent?.modelTier ?? null}
+      onModelTierTargetConsumed={consumeIntent}
       // The API audit section only shows once at least one API plugin
       // (registry or custom) has a config in this Kronn instance.
       hasConfiguredApi={ctx.mcpOverview.configs.some(cfg =>

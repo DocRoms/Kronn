@@ -1,6 +1,6 @@
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import { workflowExecLines } from '../lib/agentExecLines';
-import type { ProjectLocation } from '../lib/routes';
+import type { ProjectLocation, SettingsIntent } from '../lib/routes';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -347,7 +347,7 @@ export interface DiscussionsPageProps {
   agentAccess: AgentsConfig | null;
   refetchDiscussions: () => void;
   refetchProjects: () => void;
-  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; workflowId?: string; quickPromptId?: string }) => void;
+  onNavigate: (page: string, opts?: { projectId?: string; projectAt?: ProjectLocation; scrollTo?: string; workflowId?: string; quickPromptId?: string; modelTier?: SettingsIntent['modelTier'] }) => void;
   prefill?: { projectId: string; title: string; prompt: string; locked?: boolean } | null;
   initialActiveDiscussionId?: string | null;
   initialMessageId?: string | null;
