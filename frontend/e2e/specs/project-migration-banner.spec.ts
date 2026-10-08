@@ -80,7 +80,7 @@ test.describe('Project — docs migration banner', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           success: true,
-          data: { status: 'Migrated', files_moved: 5, refs_rewritten: 2, symlink_created: false },
+          data: { status: 'migrated', files_moved: 5, refs_rewritten: 2, symlink_created: false },
           error: null,
         }),
       });
@@ -111,6 +111,8 @@ test.describe('Project — docs migration banner', () => {
     expect(migrateCalledWith).toEqual({ id: 'p-legacy', create_symlink: false });
   });
 
+  // A refused migration is an API error (KT-1076: the backend answers
+  // `success: false` with the reason; there is no `Failed` status).
   test('Failed outcome surfaces the inline reason without clearing the banner', async ({ page }) => {
     await page.route('**/api/projects', route =>
       route.fulfill({
@@ -125,9 +127,9 @@ test.describe('Project — docs migration banner', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          success: true,
-          data: { status: 'Failed', reason: 'docs/ exists with non-empty content — manual merge required' },
-          error: null,
+          success: false,
+          data: null,
+          error: 'docs/ exists with non-empty content — manual merge required',
         }),
       })
     );

@@ -585,6 +585,38 @@ pub async fn embed_origins(State(state): State<AppState>) -> Json<ApiResponse<Ve
     ))
 }
 
+/// Path the Docker gateway asks, through `auth_request`, for each app
+/// document's `frame-src`. Open like `/api/health`: the gateway cannot present
+/// the browser's credentials, and the value is the CSP header of that document.
+pub const EMBED_FRAME_SRC_PATH: &str = "/api/embed-origins/frame-src";
+
+/// Header carrying the sources; the gateway copies it into its CSP.
+pub const EMBED_FRAME_SRC_HEADER: &str = "x-kronn-frame-src";
+
+/// GET /api/embed-origins/frame-src: 204 with `X-Kronn-Frame-Src`.
+pub async fn embed_frame_src(
+    State(state): State<AppState>,
+) -> (
+    axum::http::StatusCode,
+    [(&'static str, axum::http::HeaderValue); 2],
+) {
+    let config = state.config.read().await;
+    let sources = crate::core::embed_origins::frame_src_sources(&config.embed_allowed_origins);
+    drop(config);
+    let value = axum::http::HeaderValue::from_str(&sources)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("'self'"));
+    (
+        axum::http::StatusCode::NO_CONTENT,
+        [
+            (EMBED_FRAME_SRC_HEADER, value),
+            (
+                "cache-control",
+                axum::http::HeaderValue::from_static("no-store"),
+            ),
+        ],
+    )
+}
+
 /// POST /api/config/embed-origins: allow and revoke origins, then persist.
 /// Returns the new list.
 pub async fn change_embed_origins(

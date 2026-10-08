@@ -1471,6 +1471,32 @@ mod tests {
         );
     }
 
+    /// The Docker gateway reads `frame-src` without the browser's credentials:
+    /// open with auth enabled, and exactly `'self'` plus the allowed sites.
+    #[tokio::test]
+    async fn embed_frame_src_is_open_and_lists_exactly_the_allowed_sites() {
+        let state = test_state_with_token("secret-test-token");
+        state.config.write().await.embed_allowed_origins = vec![
+            "https://suno.com".to_string(),
+            "https://a.example;report-uri".to_string(),
+        ];
+        let req = Request::builder()
+            .method("GET")
+            .uri(crate::api::live_pages::EMBED_FRAME_SRC_PATH)
+            .body(Body::empty())
+            .unwrap();
+        let resp = build_router_with_auth(state, true)
+            .oneshot(req)
+            .await
+            .expect("oneshot failed");
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            resp.headers()[crate::api::live_pages::EMBED_FRAME_SRC_HEADER],
+            "'self' https://suno.com"
+        );
+        assert_eq!(resp.headers()["cache-control"], "no-store");
+    }
+
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
     /// agent Install button — installs land in the container under Docker, so
     /// the UI must point to the host-side CLI instead. Health is unauthed.

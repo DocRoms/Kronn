@@ -57,6 +57,9 @@ pub fn tool_execution_timeout(model_limit: Duration) -> Duration {
     model_limit.saturating_mul(TOOL_TIMEOUT_MULTIPLIER)
 }
 
+/// The progress a stall reason gives when nothing at all came back.
+pub const NO_FIRST_TOKEN: &str = "without ever sending a first token";
+
 /// Leads every explicit stall reason. It is the same wording the workflow step
 /// watchdog has always used, so `is_stall_error` and a step's `on_timeout`
 /// routing keep recognising a stalled run whichever watchdog fired first.
@@ -74,11 +77,12 @@ struct Shared {
     /// The limit currently in force: the model's own delay, or — while a tool
     /// call is open — the much wider [`tool_execution_timeout`].
     active_limit_us: AtomicU64,
-    /// Name of the tool call presently open, if any. Set by
-    /// [`IdleWatchdog::begin_tool`], cleared by [`IdleWatchdog::end_tool`];
-    /// read back so an expiry while a tool is running can name it in the
-    /// failure reason.
-    active_tool: Mutex<Option<String>>,
+    /// The tool calls still open, oldest first, by call id when the runtime
+    /// gives one. Parallel calls each hold the tool bound until they end.
+    open_tools: Mutex<Vec<(Option<String>, String)>>,
+    /// Wakes [`IdleWatchdog::expired`] when the limit in force changes, so a
+    /// narrower one applies at once instead of after the old deadline.
+    limit_changed: tokio::sync::Notify,
 }
 
 /// Progress clock shared between whoever sees the model's output and whoever
@@ -101,7 +105,8 @@ impl IdleWatchdog {
                 last_beat_us: AtomicU64::new(0),
                 beats: AtomicU64::new(0),
                 active_limit_us: AtomicU64::new(micros(limit)),
-                active_tool: Mutex::new(None),
+                open_tools: Mutex::new(Vec::new()),
+                limit_changed: tokio::sync::Notify::new(),
             }),
             model_limit: limit,
         }
@@ -125,28 +130,60 @@ impl IdleWatchdog {
 
     /// A tool call started: the model's own silence budget is suspended, and
     /// `limit` — expected to be [`tool_execution_timeout`] of the model's own
-    /// delay — takes over until [`IdleWatchdog::end_tool`] or a fresh
-    /// [`IdleWatchdog::begin_tool`] replaces it.
-    pub fn begin_tool(&self, name: &str, limit: Duration) {
-        *self.shared.active_tool.lock().unwrap() = Some(name.to_owned());
-        self.shared
-            .active_limit_us
-            .store(micros(limit), Ordering::Release);
+    /// delay — takes over until every open call has ended. A call already
+    /// open under the same `id` is a progress update, not a new call.
+    pub fn begin_tool(&self, id: Option<&str>, name: &str, limit: Duration) {
+        let mut open = self.shared.open_tools.lock().unwrap();
+        let known = id.is_some_and(|id| {
+            open.iter()
+                .any(|(open_id, _)| open_id.as_deref() == Some(id))
+        });
+        if !known {
+            open.push((id.map(str::to_owned), name.to_owned()));
+        }
+        self.set_limit(limit);
     }
 
-    /// The tool call that was running reached a terminal state (success,
-    /// failure or cancellation): back to watching the model itself.
-    pub fn end_tool(&self) {
-        *self.shared.active_tool.lock().unwrap() = None;
-        self.shared
-            .active_limit_us
-            .store(micros(self.model_limit), Ordering::Release);
+    /// A tool call reached a terminal state (success, failure or
+    /// cancellation). An id that is not open, or no id, closes the latest
+    /// call announced without one: some runtimes number their ends only.
+    /// The model's own delay is back once no call remains open.
+    pub fn end_tool(&self, id: Option<&str>) {
+        let mut open = self.shared.open_tools.lock().unwrap();
+        let by_id = id.and_then(|id| {
+            open.iter()
+                .position(|(open_id, _)| open_id.as_deref() == Some(id))
+        });
+        let index = by_id
+            .or_else(|| open.iter().rposition(|(open_id, _)| open_id.is_none()))
+            .or_else(|| id.is_none().then(|| open.len().checked_sub(1)).flatten());
+        if let Some(index) = index {
+            open.remove(index);
+        }
+        if open.is_empty() {
+            self.set_limit(self.model_limit);
+        }
     }
 
-    /// The tool call presently open, if a silence is being measured against
+    fn set_limit(&self, limit: Duration) {
+        let previous = self
+            .shared
+            .active_limit_us
+            .swap(micros(limit), Ordering::AcqRel);
+        if previous != micros(limit) {
+            self.shared.limit_changed.notify_waiters();
+        }
+    }
+
+    /// The oldest tool call still open, if a silence is being measured against
     /// its bound rather than the model's own delay.
     pub fn active_tool(&self) -> Option<String> {
-        self.shared.active_tool.lock().unwrap().clone()
+        self.shared
+            .open_tools
+            .lock()
+            .unwrap()
+            .first()
+            .map(|(_, name)| name.clone())
     }
 
     /// How many times progress was reported — what a stall message says the
@@ -164,12 +201,23 @@ impl IdleWatchdog {
     /// rounded up to two.
     pub async fn expired(&self) {
         loop {
+            // Registered before the state is read, so a change in between
+            // still wakes this wait.
+            let changed = self.shared.limit_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let last = self.shared.last_beat_us.load(Ordering::Acquire);
             let limit = self.limit();
             let deadline = self.shared.origin + Duration::from_micros(last) + limit;
-            tokio::time::sleep_until(deadline).await;
-            if self.shared.last_beat_us.load(Ordering::Acquire) == last && self.limit() == limit {
-                return;
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    if self.shared.last_beat_us.load(Ordering::Acquire) == last
+                        && self.limit() == limit
+                    {
+                        return;
+                    }
+                }
+                _ = &mut changed => {}
             }
         }
     }
@@ -403,7 +451,7 @@ mod tests {
     async fn a_tool_call_in_progress_is_bound_by_its_own_wider_limit() {
         let watchdog = IdleWatchdog::new(Duration::from_secs(60));
         let tool_limit = tool_execution_timeout(Duration::from_secs(60));
-        watchdog.begin_tool("cargo test", tool_limit);
+        watchdog.begin_tool(None, "cargo test", tool_limit);
         let started = Instant::now();
 
         watchdog.expired().await;
@@ -427,7 +475,7 @@ mod tests {
     async fn progress_on_an_open_tool_call_restarts_its_own_window() {
         let watchdog = IdleWatchdog::new(Duration::from_secs(60));
         let tool_limit = Duration::from_secs(600);
-        watchdog.begin_tool("cargo test", tool_limit);
+        watchdog.begin_tool(None, "cargo test", tool_limit);
         let started = Instant::now();
         let producer = watchdog.clone();
         tokio::spawn(async move {
@@ -446,8 +494,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn ending_a_tool_call_restores_the_models_own_limit() {
         let watchdog = IdleWatchdog::new(Duration::from_secs(60));
-        watchdog.begin_tool("cargo test", Duration::from_secs(3_600));
-        watchdog.end_tool();
+        watchdog.begin_tool(None, "cargo test", Duration::from_secs(3_600));
+        watchdog.end_tool(None);
         assert_eq!(watchdog.active_tool(), None);
         assert_eq!(watchdog.limit(), Duration::from_secs(60));
 
@@ -456,15 +504,50 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_secs(60));
     }
 
-    /// A second tool call reported while the first is still open (no terminal
-    /// update observed) simply replaces it: the clock and the named tool both
-    /// move on, nothing is left pointing at the first.
+    /// Two tool calls run side by side: the first one ending leaves the
+    /// second on the tool bound; only the last end hands the clock back.
     #[tokio::test(start_paused = true)]
-    async fn beginning_a_new_tool_call_replaces_the_one_in_progress() {
+    async fn overlapping_tool_calls_keep_the_tool_bound_until_the_last_ends() {
         let watchdog = IdleWatchdog::new(Duration::from_secs(60));
-        watchdog.begin_tool("first", Duration::from_secs(600));
-        watchdog.begin_tool("second", Duration::from_secs(1_200));
-        assert_eq!(watchdog.active_tool(), Some("second".to_owned()));
-        assert_eq!(watchdog.limit(), Duration::from_secs(1_200));
+        let tool_limit = Duration::from_secs(600);
+        watchdog.begin_tool(Some("a"), "build", tool_limit);
+        watchdog.begin_tool(Some("b"), "tests", tool_limit);
+        watchdog.begin_tool(Some("a"), "build", tool_limit);
+        watchdog.end_tool(Some("a"));
+        assert_eq!(watchdog.limit(), tool_limit, "\"tests\" is still running");
+        assert_eq!(watchdog.active_tool(), Some("tests".to_owned()));
+        watchdog.end_tool(Some("b"));
+        assert_eq!(watchdog.limit(), Duration::from_secs(60));
+        assert_eq!(watchdog.active_tool(), None);
+
+        // Calls a runtime numbers only by their ends balance the same way.
+        watchdog.begin_tool(None, "one", tool_limit);
+        watchdog.begin_tool(None, "two", tool_limit);
+        watchdog.end_tool(Some("unknown-id"));
+        assert_eq!(watchdog.limit(), tool_limit);
+        watchdog.end_tool(None);
+        assert_eq!(watchdog.limit(), Duration::from_secs(60));
+    }
+
+    /// A tool ending mid-wait applies the model's delay at once: the wait does
+    /// not sleep on until the tool's own, much later deadline.
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_ending_mid_wait_wakes_the_watchdog_onto_the_model_delay() {
+        let watchdog = IdleWatchdog::new(Duration::from_secs(60));
+        watchdog.begin_tool(Some("a"), "build", Duration::from_secs(3_600));
+        let started = Instant::now();
+        let producer = watchdog.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            producer.end_tool(Some("a"));
+        });
+
+        watchdog.expired().await;
+
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(60),
+            "the model delay from the last beat, not the tool's hour"
+        );
     }
 }

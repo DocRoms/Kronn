@@ -3473,4 +3473,124 @@ mod tests {
         backup_config_without_credentials(empty.path()).unwrap();
         assert!(!empty.path().join("config.toml.backup").exists());
     }
+
+    /// An unparseable older backup may hold the only copy of a key: it is
+    /// rotated verbatim, never scrubbed into nothing nor overwritten.
+    #[test]
+    fn an_unparseable_older_backup_is_rotated_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = "encryption_secret = \"K_ONLY\"\nbroken = [\n";
+        std::fs::write(dir.path().join("config.toml.backup"), old).unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
+        backup_config_without_credentials(dir.path()).unwrap();
+        let rotated: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.toml.backup.")
+            })
+            .collect();
+        assert_eq!(rotated.len(), 1);
+        assert_eq!(std::fs::read_to_string(rotated[0].path()).unwrap(), old);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = rotated[0].metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let current = std::fs::read_to_string(dir.path().join("config.toml.backup")).unwrap();
+        assert!(current.contains("port = 2"));
+    }
+
+    /// A config.toml or backup that cannot be read is an error, not a silent
+    /// skip, and the unreadable entry is left as it was.
+    #[test]
+    fn an_unreadable_config_or_backup_fails_the_config_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("config.toml")).unwrap();
+        assert!(backup_config_without_credentials(dir.path()).is_err());
+        assert!(!dir.path().join("config.toml.backup").exists());
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[server]\nport = 2\n").unwrap();
+        let backup = dir.path().join("config.toml.backup");
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("marker"), "keep").unwrap();
+        assert!(backup_config_without_credentials(dir.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(backup.join("marker")).unwrap(),
+            "keep"
+        );
+    }
+
+    /// The OpenRouter repair rewrites only the exact constraint it knows; any
+    /// other schema is refused and left untouched.
+    #[test]
+    fn the_openrouter_repair_refuses_an_unknown_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        assert!(
+            ensure_openrouter_preset(&tx).is_err(),
+            "a missing table is an error"
+        );
+        drop(tx);
+
+        let foreign = "CREATE TABLE external_api_connections (\
+                       id TEXT PRIMARY KEY, \
+                       origin_preset TEXT CHECK (origin_preset IN ('custom')))";
+        conn.execute_batch(foreign).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let err = ensure_openrouter_preset(&tx).unwrap_err().to_string();
+        assert!(err.contains("unknown origin_preset constraint"), "{err}");
+        drop(tx);
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name = 'external_api_connections'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql, foreign);
+
+        let known = "CREATE TABLE external_api_connections (\
+                     id TEXT PRIMARY KEY, \
+                     origin_preset TEXT CHECK (origin_preset IN ('litellm', 'nvidia', 'open_router', 'other')))";
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(known).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        ensure_openrouter_preset(&tx).unwrap();
+    }
+
+    /// A receipt recorded under a migration's pre-rebase name counts as that
+    /// migration applied; an unrelated name never does.
+    #[test]
+    fn a_legacy_receipt_counts_as_its_renamed_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, \
+             applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+        )
+        .unwrap();
+        assert!(!migration_is_applied(&conn, "113_session_alias_ordinal").unwrap());
+        conn.execute(
+            "INSERT INTO _migrations (name) VALUES ('107_session_alias_ordinal')",
+            [],
+        )
+        .unwrap();
+        assert!(migration_is_applied(&conn, "113_session_alias_ordinal").unwrap());
+        assert!(!migration_is_applied(&conn, "114_awareness_stalled_offers").unwrap());
+        assert!(!migration_is_applied(&conn, "001_initial").unwrap());
+    }
+
+    /// An empty database file has nothing to save: no backup is written.
+    #[test]
+    fn an_empty_database_file_gets_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("kronn.db");
+        std::fs::write(&db, b"").unwrap();
+        backup_before_migration(&db, |_| Ok(u64::MAX)).unwrap();
+        assert!(!db.with_extension("db.backup").exists());
+    }
 }

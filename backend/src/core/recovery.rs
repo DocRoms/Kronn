@@ -225,15 +225,26 @@ pub const IMPORTED_PREFIX: &str = "recovery.imported-";
 /// Store an imported blob under a new timestamped name; never replaces
 /// `recovery.key` nor an earlier import. Returns the file name.
 pub fn save_imported_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<String> {
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
-    let mut name = format!("{IMPORTED_PREFIX}{stamp}.key");
-    let mut n = 1;
-    while dir.join(&name).exists() {
-        name = format!("{IMPORTED_PREFIX}{stamp}-{n}.key");
-        n += 1;
-    }
+    save_stamped_blob(dir, IMPORTED_PREFIX, blob)
+}
+
+/// Save `blob` under `<prefix><UTC stamp>.key`, never replacing an existing file.
+fn save_stamped_blob(dir: &Path, prefix: &str, blob: &RecoveryBlob) -> std::io::Result<String> {
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ").to_string();
+    let name = free_blob_name(dir, prefix, &stamp);
     save_blob_as(dir, &name, blob)?;
     Ok(name)
+}
+
+/// First `<prefix><stamp>[-n].key` not taken in `dir`.
+fn free_blob_name(dir: &Path, prefix: &str, stamp: &str) -> String {
+    let mut name = format!("{prefix}{stamp}.key");
+    let mut n = 1;
+    while dir.join(&name).exists() {
+        name = format!("{prefix}{stamp}-{n}.key");
+        n += 1;
+    }
+    name
 }
 
 /// File-name prefix of a replaced `recovery.key` that wrapped another key.
@@ -241,15 +252,7 @@ pub const PREVIOUS_PREFIX: &str = "recovery.previous-";
 
 /// Keep a replaced `recovery.key` that wraps another key than the active one.
 pub fn save_previous_blob(dir: &Path, blob: &RecoveryBlob) -> std::io::Result<String> {
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
-    let mut name = format!("{PREVIOUS_PREFIX}{stamp}.key");
-    let mut n = 1;
-    while dir.join(&name).exists() {
-        name = format!("{PREVIOUS_PREFIX}{stamp}-{n}.key");
-        n += 1;
-    }
-    save_blob_as(dir, &name, blob)?;
-    Ok(name)
+    save_stamped_blob(dir, PREVIOUS_PREFIX, blob)
 }
 
 /// Kept blobs of a replaced `recovery.key`, newest first.
@@ -467,5 +470,77 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!has_tmp);
+    }
+
+    #[test]
+    fn a_code_with_a_valid_salt_but_no_payload_is_refused() {
+        let salt = B64.encode([7u8; SALT_LEN]);
+        let err = from_code(&format!("KRECOV1.{salt}.")).unwrap_err();
+        assert!(err.contains("empty payload"), "{err}");
+    }
+
+    #[test]
+    fn a_fingerprint_without_its_checksum_is_kept_unverified() {
+        let key = a_key();
+        let blob = wrap_key(&key, "pp").unwrap();
+        let fp = blob.fingerprint.clone().unwrap();
+        let code = format!("KRECOV1.{}.{}.{fp}", B64.encode(blob.salt), blob.wrapped);
+        let parsed = from_code(&code).unwrap();
+        assert_eq!(parsed.fingerprint, None);
+        assert_eq!(unwrap_key(&parsed, "pp").unwrap(), key);
+        // A checksum that does not bind this payload is refused outright.
+        let bad = format!("{code}.{}", "0".repeat(16));
+        assert!(from_code(&bad).unwrap_err().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn a_stamped_blob_never_takes_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = "20261008T120000.000000Z";
+        assert_eq!(
+            free_blob_name(dir.path(), PREVIOUS_PREFIX, stamp),
+            format!("{PREVIOUS_PREFIX}{stamp}.key")
+        );
+        std::fs::write(
+            dir.path().join(format!("{PREVIOUS_PREFIX}{stamp}.key")),
+            "a",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(format!("{PREVIOUS_PREFIX}{stamp}-1.key")),
+            "b",
+        )
+        .unwrap();
+        assert_eq!(
+            free_blob_name(dir.path(), PREVIOUS_PREFIX, stamp),
+            format!("{PREVIOUS_PREFIX}{stamp}-2.key")
+        );
+        // Another prefix with the same stamp is not a collision.
+        assert_eq!(
+            free_blob_name(dir.path(), IMPORTED_PREFIX, stamp),
+            format!("{IMPORTED_PREFIX}{stamp}.key")
+        );
+    }
+
+    #[test]
+    fn kept_and_imported_blobs_stay_apart_and_list_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = wrap_key(&a_key(), "pp").unwrap();
+        let second = wrap_key(&a_key(), "pp").unwrap();
+        let imported = wrap_key(&a_key(), "pp").unwrap();
+        let a = save_previous_blob(dir.path(), &first).unwrap();
+        // Distinct stamps: a same-microsecond suffix would not sort as newer.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = save_previous_blob(dir.path(), &second).unwrap();
+        assert_ne!(a, b);
+        save_imported_blob(dir.path(), &imported).unwrap();
+        std::fs::write(
+            dir.path().join(format!("{PREVIOUS_PREFIX}junk.key")),
+            "garbage",
+        )
+        .unwrap();
+        assert_eq!(previous_blobs(dir.path()), vec![second, first]);
+        assert_eq!(imported_blobs(dir.path()), vec![imported]);
+        assert!(!is_configured(dir.path()), "neither replaces recovery.key");
     }
 }

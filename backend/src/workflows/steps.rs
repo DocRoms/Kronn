@@ -350,6 +350,7 @@ pub async fn execute_step(
     // effective model is the only value allowed to reach the transport.
     let preflight = match preflight_workflow_launch(
         catalog_db,
+        work_dir,
         step,
         resolved_connection.as_ref(),
         model_override.as_deref(),
@@ -507,6 +508,7 @@ pub async fn execute_step(
                         let mut repair_valid = false;
                         let repair_preflight = match preflight_workflow_launch(
                             catalog_db,
+                            work_dir,
                             step,
                             resolved_connection.as_ref(),
                             model_override.as_deref(),
@@ -618,6 +620,7 @@ pub async fn execute_step(
                             let escalated_model = step_model_override(&escalated, None);
                             let escalation_preflight = match preflight_workflow_launch(
                                 catalog_db,
+                                work_dir,
                                 &escalated,
                                 None,
                                 escalated_model.as_deref(),
@@ -1075,6 +1078,7 @@ pub(crate) async fn resolve_step_connection(
 
 async fn preflight_workflow_launch(
     catalog_db: Option<&crate::db::Database>,
+    #[cfg_attr(not(test), allow(unused_variables))] work_dir: &str,
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
     effective_model: Option<&str>,
@@ -1103,16 +1107,22 @@ async fn preflight_workflow_launch(
         .as_ref()
         .and_then(|settings| settings.tier)
         .unwrap_or_default();
-    crate::core::model_catalog::preflight_resolve(
+    let resolution = crate::core::model_catalog::preflight_resolve(
         database,
         runtime_target_id.as_deref(),
         step.agent.clone(),
         tier,
         effective_model,
         model_tiers,
-    )
-    .await
-    .map_err(|failure| {
+    );
+    // A routed work dir stands in for the CLI, as in the runner's install check.
+    #[cfg(test)]
+    let resolution = crate::core::model_catalog::test_routed_discovery(
+        runner::resolve_agent_work_dir(Some(work_dir), work_dir)
+            .is_ok_and(|dir| runner::test_acp_routes::is_routed(&dir)),
+        resolution,
+    );
+    resolution.await.map_err(|failure| {
         anyhow::anyhow!(
             "model_catalog_preflight_failed:{}",
             serde_json::to_string(&failure).unwrap_or_default()
@@ -1416,9 +1426,17 @@ async fn drive_agent_to_output(
     // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
     // stream lines.
     let raw_stream = process.raw_token_stream();
+    // An ACP run's own watchdog sees tool calls, thoughts and keepalives and
+    // already ends a silent run with this delay; timing text alone would kill
+    // a run busy with a tool.
+    let text_stall = (!process.activity_watched()).then_some(stall_timeout);
 
     loop {
-        match timeout(stall_timeout, process.next_line()).await {
+        let next = match text_stall {
+            Some(limit) => timeout(limit, process.next_line()).await,
+            None => Ok(process.next_line().await),
+        };
+        match next {
             Ok(Some(line)) => {
                 if is_stream_json {
                     match runner::parse_claude_stream_line(&line) {
@@ -1753,6 +1771,7 @@ async fn run_multi_agent_debate(
             .flatten();
         let reviewer_preflight = preflight_workflow_launch(
             catalog_db,
+            work_dir,
             &reviewer_step,
             reviewer_connection,
             reviewer_model.as_deref(),
@@ -1827,6 +1846,7 @@ async fn run_multi_agent_debate(
         );
         let author_preflight = preflight_workflow_launch(
             catalog_db,
+            work_dir,
             &author_step,
             author_connection,
             author_model,
@@ -2628,6 +2648,32 @@ mod drive_agent_to_output_tests {
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
     use super::format_silent_exit_error;
     use super::{drive_agent_to_output, native_tool_calls_from_stderr};
+
+    /// An ACP run's own watchdog owns inactivity: a step waits through a long
+    /// text silence (tool work) instead of killing it, and a plain CLI is
+    /// still killed on the same silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_step_leaves_inactivity_to_an_acp_run_s_own_watchdog() {
+        use crate::agents::runner::ScriptedProcess;
+        let quiet = std::time::Duration::from_secs(5);
+        let stall = std::time::Duration::from_secs(1);
+        let watched = ScriptedProcess::raw(["built"])
+            .with_first_line_after(quiet)
+            .with_activity_watched();
+        let output =
+            drive_agent_to_output(watched, None, None, stall, &AgentType::OpenCode, "build")
+                .await
+                .expect("not killed on text silence");
+        assert_eq!(output.text, "built");
+
+        let plain = ScriptedProcess::raw(["built"]).with_first_line_after(quiet);
+        let error = drive_agent_to_output(plain, None, None, stall, &AgentType::Codex, "build")
+            .await
+            .expect_err("a text-only run is still timed by its text");
+        assert!(error
+            .to_string()
+            .contains("Agent stalled (no output for 1s)"));
+    }
     use crate::agents::runner::ScriptedProcess;
     use crate::models::AgentType;
     use std::time::Duration;

@@ -329,6 +329,21 @@ tokio::task_local! {
     static TEST_DISCOVERY_CALLS: std::cell::Cell<usize>;
 }
 
+/// Test-only: a launch routed to a fixture transport has no CLI to discover, so
+/// it resolves as a runtime without live discovery; an outer test scope wins.
+#[cfg(test)]
+pub(crate) async fn test_routed_discovery<F: std::future::Future>(
+    routed: bool,
+    future: F,
+) -> F::Output {
+    if !routed || TEST_DISCOVERY.try_with(|_| ()).is_ok() {
+        return future.await;
+    }
+    TEST_DISCOVERY
+        .scope(DiscoveryOutcome::Unsupported, future)
+        .await
+}
+
 async fn discover_inner(agent_type: &AgentType) -> DiscoveryOutcome {
     match agent_type {
         AgentType::OpenCode
