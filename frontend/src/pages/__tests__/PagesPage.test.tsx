@@ -476,9 +476,9 @@ describe('PagesPage', () => {
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
     expect(refreshMenu).toHaveAttribute('open');
     expect(refreshDetails).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Adobe cron' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Adobe cron' })).toHaveAttribute('href', '/workflows/wf-1');
     expect(screen.getByText('#page-1')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 
@@ -497,8 +497,47 @@ describe('PagesPage', () => {
     expect(screen.getByText('pages.refreshUnchanged')).toBeInTheDocument();
     expect(screen.getByText('pages.unchangedDataset:summary')).toBeInTheDocument();
 
-    fireEvent.click(screen.getAllByLabelText('pages.openRefreshRun:Adobe cron')[0]);
+    const runs = screen.getAllByRole('link', { name: 'pages.openRefreshRun:Adobe cron' });
+    expect(runs.map(run => run.getAttribute('href'))).toEqual([
+      '/workflows/wf-1/runs/run-3', '/workflows/wf-1/runs/run-2', '/workflows/wf-1/runs/run-1',
+    ]);
+    fireEvent.click(runs[0]);
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1', 'run-3');
+  });
+
+  it('links the related discussion, workflow and runs: a plain click stays in the app, a modified click is the browser\'s', async () => {
+    vi.mocked(pagesApi.discussions).mockResolvedValue([{
+      discussion_id: 'linked-disc', title: 'Linked discussion', relation: 'attached', archived: false,
+    }]);
+    const onNavigateDiscussion = vi.fn();
+    const onNavigateWorkflow = vi.fn();
+    render(<PagesPage onNavigateDiscussion={onNavigateDiscussion} onNavigateWorkflow={onNavigateWorkflow} />);
+    const discussion = await screen.findByRole('link', { name: 'Linked discussion' });
+    expect(discussion).toHaveAttribute('href', '/discussions/linked-disc');
+    expect(discussion).not.toHaveAttribute('target');
+
+    // A modified or middle click: the browser opens a new tab, this one stays.
+    for (const init of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ...init });
+      discussion.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(false);
+    }
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+
+    const plain = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    discussion.dispatchEvent(plain);
+    expect(plain.defaultPrevented).toBe(true);
+    expect(onNavigateDiscussion).toHaveBeenCalledExactlyOnceWith('linked-disc');
+
+    fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
+    const workflow = screen.getByRole('link', { name: 'Adobe cron' });
+    const run = screen.getAllByRole('link', { name: 'pages.openRefreshRun:Adobe cron' })[0];
+    for (const link of [workflow, run]) {
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+      link.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(false);
+    }
+    expect(onNavigateWorkflow).not.toHaveBeenCalled();
   });
 
   it('creates an immutable HTML revision from the Page editor', async () => {
@@ -1038,9 +1077,9 @@ describe('PagesPage — popover dismiss (KT-463)', () => {
     await screen.findByTestId('live-page-frame');
     fireEvent.click(screen.getByLabelText('pages.autoRefresh'));
 
-    fireEvent.mouseDown(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.mouseDown(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(screen.getByTestId('live-page-refresh-menu')).toHaveAttribute('open');
-    fireEvent.click(screen.getByRole('button', { name: 'Adobe cron' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Adobe cron' }));
     expect(onNavigateWorkflow).toHaveBeenCalledWith('wf-1');
   });
 

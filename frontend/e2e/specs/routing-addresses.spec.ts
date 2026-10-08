@@ -21,6 +21,8 @@ let qpId = '';
 const qpName = `Routing prompt ${stamp}`;
 let projectId = '';
 const projectName = `Routing project ${stamp}`;
+let artifactId = '';
+const artifactTitle = `Routing artifact ${stamp}`;
 
 async function created(request: APIRequestContext, path: string, data: unknown): Promise<{ id: string }> {
   const response = await request.post(path, { data });
@@ -40,6 +42,9 @@ test.beforeAll(async ({ request }) => {
   qpId = (await created(request, '/api/quick-prompts', {
     name: qpName, prompt_template: 'Say hello to {{name}}', agent: 'Codex',
   })).id;
+  // An Artifact with a related discussion: its links between resources.
+  artifactId = (await created(request, '/api/pages', { title: artifactTitle, html: '<h1>Routing</h1>', datasets: [] })).id;
+  await created(request, `/api/pages/${artifactId}/discussions`, { discussion_id: discB.id, relation: 'attached' });
   // A project needs a folder the backend may scan: only inside an owned
   // repositories directory (the sandbox launcher sets one).
   const reposBase = process.env.KRONN_REPOS_DIR ?? '';
@@ -149,6 +154,29 @@ test.describe('Routing — addresses', () => {
     // This tab never moved.
     expect(new URL(page.url()).pathname).toBe(`/discussions/${discA.id}`);
     await expect(page.locator('.disc-chat-header-title')).toContainText(discA.title);
+  });
+
+  test('an Artifact\'s related discussion is a link: a plain click follows it here, a modified or middle click opens it beside', async ({ page, context }) => {
+    await page.goto(`/pages/${artifactId}`);
+    const link = page.locator(`.live-pages-workflows a[href="/discussions/${discB.id}"]`);
+    await expect(link).toContainText(discB.title);
+
+    for (const options of [{ modifiers: ['ControlOrMeta'] as const }, { button: 'middle' as const }]) {
+      const [tab] = await Promise.all([context.waitForEvent('page'), link.click(options)]);
+      await tab.waitForLoadState();
+      expect(new URL(tab.url()).pathname).toBe(`/discussions/${discB.id}`);
+      await expect(tab.locator('.disc-chat-header-title')).toContainText(discB.title);
+      await tab.close();
+      // This tab never moved.
+      expect(new URL(page.url()).pathname).toBe(`/pages/${artifactId}`);
+    }
+
+    await link.click();
+    await page.waitForURL(new RegExp(`/discussions/${discB.id}$`));
+    await expect(page.locator('.disc-chat-header-title')).toContainText(discB.title);
+    await page.goBack();
+    await page.waitForURL(new RegExp(`/pages/${artifactId}$`));
+    await expect(link).toContainText(discB.title);
   });
 
   test('a planning task address opens its detail, and a reload keeps it', async ({ page }) => {

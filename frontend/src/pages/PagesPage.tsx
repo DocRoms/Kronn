@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { livePagePath } from '../lib/routes';
+import { discussionPath, livePagePath, workflowPath } from '../lib/routes';
 import {
   Activity, Archive, CheckCircle2, CheckSquare2, ChevronDown, ChevronRight,
   Braces, Clock3, Database, Download, ExternalLink, FileCode2, FileDown, GitCompare,
@@ -26,6 +26,7 @@ import { ArtifactImportDialog } from '../components/ArtifactImportDialog';
 import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
+import { AppLink } from '../components/AppLink';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
@@ -1052,9 +1053,13 @@ export function PagesPage({
                       <div><Workflow size={12} /><span>{t('pages.linkedWorkflows')}</span></div>
                       {linkedWorkflows.length > 0 ? linkedWorkflows.map(workflow => (
                         <span key={workflow.id} className="live-pages-linked-workflow">
-                          <button type="button" className="live-pages-linked-workflow-open" onClick={() => onNavigateWorkflow?.(workflow.id)} disabled={!onNavigateWorkflow}>
+                          <AppLink
+                            to={workflowPath(workflow.id)}
+                            className="live-pages-linked-workflow-open"
+                            onNavigate={onNavigateWorkflow ? () => onNavigateWorkflow(workflow.id) : undefined}
+                          >
                             {workflow.name}{workflow.enabled ? '' : ` ${t('pages.disabledSuffix')}`}
-                          </button>
+                          </AppLink>
                           <button
                             type="button"
                             className="live-pages-linked-workflow-run"
@@ -1148,22 +1153,22 @@ export function PagesPage({
                                 )}
                               </span>
                             </span>
-                            {workflowId && onNavigateWorkflow && <ChevronRight size={14} className="live-pages-refresh-open" />}
+                            {workflowId && <ChevronRight size={14} className="live-pages-refresh-open" />}
                           </>
                         );
-                        return workflowId && onNavigateWorkflow ? (
-                          <button
+                        // A publication by a workflow is a link to that run.
+                        return workflowId ? (
+                          <AppLink
                             key={publication.id}
-                            type="button"
+                            to={workflowPath(workflowId, publication.workflow_run_id)}
                             className="live-pages-refresh-row"
-                            onClick={() => onNavigateWorkflow(
-                              workflowId,
-                              publication.workflow_run_id ?? undefined,
-                            )}
+                            onNavigate={onNavigateWorkflow
+                              ? () => onNavigateWorkflow(workflowId, publication.workflow_run_id ?? undefined)
+                              : undefined}
                             aria-label={t('pages.openRefreshRun', workflowName)}
                           >
                             {content}
-                          </button>
+                          </AppLink>
                         ) : (
                           <div key={publication.id} className="live-pages-refresh-row">{content}</div>
                         );
@@ -1193,9 +1198,13 @@ export function PagesPage({
                     discussion.source_message_id ? <a key={discussion.discussion_id}
                       href={standaloneDiscussionMessageUrl(discussion.discussion_id, discussion.source_message_id)} target="_blank" rel="noopener noreferrer">
                       {discussion.title} · {t('pages.sourceMessage')} <ExternalLink size={12} />
-                    </a> : <button key={discussion.discussion_id} type="button" onClick={() => onNavigateDiscussion?.(discussion.discussion_id)} disabled={!onNavigateDiscussion}>
+                    </a> : <AppLink
+                      key={discussion.discussion_id}
+                      to={discussionPath(discussion.discussion_id)}
+                      onNavigate={onNavigateDiscussion ? () => onNavigateDiscussion(discussion.discussion_id) : undefined}
+                    >
                       {discussion.title}{discussion.relation === 'created_from' ? ` · ${t('pages.createdFrom')}` : ''}
-                    </button>
+                    </AppLink>
                   ))}
                 </div>
               )}

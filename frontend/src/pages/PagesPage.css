@@ -221,12 +221,14 @@
 .live-pages-refresh-workflows { display: flex; align-items: center; min-height: 34px; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--kr-border-subtle); overflow-x: auto; }
 .live-pages-refresh-workflows > div { display: flex; align-items: center; flex: 0 0 auto; gap: 5px; color: var(--kr-text-muted); font-size: 11px; }
 .live-pages-linked-workflow { display: inline-flex; align-items: stretch; flex: 0 0 auto; border: 1px solid var(--kr-border-medium); border-radius: 7px; background: var(--kr-bg-surface); overflow: hidden; }
-.live-pages-refresh-workflows .live-pages-linked-workflow button { border: 0; border-radius: 0; background: transparent; color: var(--kr-text-secondary); cursor: pointer; white-space: nowrap; }
+.live-pages-refresh-workflows .live-pages-linked-workflow button,
+.live-pages-refresh-workflows .live-pages-linked-workflow a { border: 0; border-radius: 0; background: transparent; color: var(--kr-text-secondary); cursor: pointer; white-space: nowrap; text-decoration: none; }
 .live-pages-linked-workflow-open { padding: 4px 7px; }
 .live-pages-refresh-workflows .live-pages-linked-workflow-run { display: grid; place-items: center; width: 26px; padding: 0; border-left: 1px solid var(--kr-border-medium); color: var(--kr-accent); }
 .live-pages-refresh-workflows .live-pages-linked-workflow-run[data-state='success'] { background: rgba(var(--kr-success-rgb), 0.1); color: var(--kr-success); }
 .live-pages-refresh-workflows .live-pages-linked-workflow-run[data-state='error'] { background: rgba(var(--kr-danger-rgb), 0.1); color: var(--kr-danger); }
-.live-pages-refresh-workflows .live-pages-linked-workflow button:hover:not(:disabled) { background: color-mix(in srgb, var(--kr-accent) 9%, transparent); color: var(--kr-accent); }
+.live-pages-refresh-workflows .live-pages-linked-workflow button:hover:not(:disabled),
+.live-pages-refresh-workflows .live-pages-linked-workflow a:hover { background: color-mix(in srgb, var(--kr-accent) 9%, transparent); color: var(--kr-accent); }
 .live-pages-refresh-workflows .live-pages-linked-workflow button:disabled { cursor: not-allowed; opacity: .5; }
 .live-pages-linked-workflow small { display: inline-flex; align-self: center; align-items: center; gap: 4px; padding: 0 7px; font-size: 10px; }
 .live-pages-linked-workflow small[data-kind="success"] { color: var(--kr-success); }
@@ -257,8 +259,8 @@
 .live-pages-dataset-viewer > pre { margin: 0; padding: 10px; overflow: auto; color: var(--kr-text-secondary); font: 11px/1.5 var(--kr-font-mono); }
 .live-pages-refresh-timeline { display: flex; flex-direction: column; padding: 4px 0; }
 .live-pages-refresh-row { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr) 16px; align-items: center; width: 100%; gap: 7px; padding: 8px 12px; border: 0; background: transparent; color: var(--kr-text-secondary); text-align: left; }
-button.live-pages-refresh-row { cursor: pointer; }
-button.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
+a.live-pages-refresh-row { cursor: pointer; text-decoration: none; }
+a.live-pages-refresh-row:hover { background: var(--kr-bg-hover); }
 .live-pages-refresh-marker { position: relative; z-index: 1; width: 9px; height: 9px; justify-self: center; border: 2px solid var(--kr-bg-raised); border-radius: 50%; background: var(--kr-text-muted); box-shadow: 0 0 0 1px var(--kr-border-medium); }
 .live-pages-refresh-marker[data-changed='true'] { background: var(--kr-success); box-shadow: 0 0 0 1px rgba(var(--kr-success-rgb), 0.5); }
 .live-pages-refresh-row:not(:last-child) .live-pages-refresh-marker::after { position: absolute; z-index: -1; top: 9px; left: 2px; width: 1px; height: 50px; background: var(--kr-border-medium); content: ''; }
