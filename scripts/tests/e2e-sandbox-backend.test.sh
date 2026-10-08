@@ -62,7 +62,7 @@ with open(os.path.join(os.environ["KRONN_DATA_DIR"], "env-seen.txt"), "w") as fh
     fh.write(os.environ.get("KRONN_HOST_HOME", "<unset>"))
 keys = ["OPENAI_API_KEY", "KRONN_AUTH_TOKEN", "KRONN_KEK", "KRONN_BACKUP_DIR",
         "KRONN_BACKUP_INTERVAL_HOURS", "KRONN_BACKEND_URL", "KRONN_USE_KEYCHAIN",
-        "KRONN_DOCS_SIDECAR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "PATH"]
+        "KRONN_DOCS_SIDECAR", "KRONN_DEV_UI_URL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR", "PATH"]
 with open(os.path.join(os.environ["KRONN_DATA_DIR"], "environment.json"), "w") as fh:
     json.dump({key: os.environ.get(key) for key in keys}, fh)
 
@@ -139,6 +139,13 @@ KRONN_E2E_HEALTH_TRIES=invalid \
     && ok "an invalid health budget creates nothing" \
     || bad "an invalid health budget creates nothing"
 
+KRONN_E2E_DEV_UI_PORT=80 \
+    refuses "dev UI port" "refuses a dev UI port below the unprivileged range" \
+        "$SCRIPT" "$WORK/invalid-dev-ui" "$(free_port)"
+KRONN_E2E_DEV_UI_PORT='5195 KRONN_KEK=x' \
+    refuses "dev UI port" "refuses a dev UI port that is not a bare number" \
+        "$SCRIPT" "$WORK/invalid-dev-ui-2" "$(free_port)"
+
 mkdir -p "$WORK/already-there"
 refuses "already exists" "refuses a data directory it does not own" \
     "$SCRIPT" "$WORK/already-there" "$(free_port)"
@@ -168,6 +175,7 @@ if PID="$(env OPENAI_API_KEY=synthetic-outside-key KRONN_AUTH_TOKEN=synthetic-ou
     KRONN_KEK=synthetic-outside-kek KRONN_BACKUP_DIR="$WORK/outside-backup" \
     KRONN_BACKUP_INTERVAL_HOURS=1 KRONN_BACKEND_URL=http://127.0.0.1:3140 \
     KRONN_USE_KEYCHAIN=1 KRONN_DOCS_SIDECAR="$WORK/outside-sidecar" \
+    KRONN_DEV_UI_URL=http://evil.example KRONN_E2E_DEV_UI_PORT=5195 \
     "$SCRIPT" "$DIR" "$PORT" 2>"$WORK/live.err")"; then
     echo "$PID" > "$WORK/live.pid"
     [[ "$PID" =~ ^[0-9]+$ ]] \
@@ -203,6 +211,8 @@ for key in ["OPENAI_API_KEY", "KRONN_AUTH_TOKEN", "KRONN_KEK"]:
 assert seen["KRONN_BACKEND_URL"] == f"http://127.0.0.1:{port}"
 assert seen["KRONN_USE_KEYCHAIN"] == "0"
 assert seen["KRONN_BACKUP_INTERVAL_HOURS"] == "0"
+# Only the dev UI the caller named, never an ambient one.
+assert seen["KRONN_DEV_UI_URL"] == "http://localhost:5195", seen["KRONN_DEV_UI_URL"]
 for key in ["KRONN_BACKUP_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TMPDIR"]:
     assert seen[key] and os.path.commonpath([root, seen[key]]) == root, key
 sidecar = seen["KRONN_DOCS_SIDECAR"]

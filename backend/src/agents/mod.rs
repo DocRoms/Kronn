@@ -22,6 +22,7 @@ async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     }
 }
 
+pub mod acp_start;
 pub mod activity;
 pub mod chat_codec;
 pub(crate) mod generation_settings;

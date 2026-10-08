@@ -53,7 +53,9 @@ test('exports a selection and imports it again through the Plugins UI', async ({
 
   const importDialog = page.getByRole('dialog', { name: 'Importer des plugins' });
   await importDialog.locator('input[type="file"]').setInputFiles(bundlePath!);
-  await expect(importDialog.getByText(label)).toBeVisible();
+  // The label shows in the bundle summary and again in the per-plugin review
+  // (0.14.3); the review is the one the import decision is made on.
+  await expect(importDialog.getByTestId('mcp-import-review').getByText(label)).toBeVisible();
   // Capture the durable id directly from the creation response. Previously it
   // was registered for teardown only after the scope modal closed. Any failure
   // between those points leaked a global fixture into the operator database;

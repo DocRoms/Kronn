@@ -11,7 +11,65 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-10-07
+
+### Upgrade notes
+
+- OpenCode, Vibe and GitHub Copilot now start only with full access. To keep
+  using them, tick their full-access box in Config › Agents › <agent> (the same
+  applies to Gemini CLI and Kiro).
+- P2P federation is now off by default and the upgrade never turns it on. If
+  you use it, enable "Accept P2P connections" in Settings › Identity, and add
+  the LAN or Tailscale names you open Kronn from to the frontend origins list
+  there, or their WebSocket is refused.
+- Imported workflows (`.kronn-workflow.json`, bundles, agent proposals) and
+  workflows an agent creates or changes arrive disabled. Review them in the
+  Automations banner and re-enable the ones you trust.
+- Migrations 220 to 223 run at startup and take about a second (220 to 222
+  measured at 1.2 s on an 11.5 GB database).
+- Secrets leave `config.toml` on the first start and move to the encrypted
+  database (see Changed and `docs/operations/key-management.md`).
+
+### Known limitations
+
+- OpenCode, Vibe, GitHub Copilot, Gemini CLI and Kiro require full access: no
+  restricted mode can be promised for them. A per-launch isolated runner is
+  planned for 0.15.
+- Inbound P2P is off by default. While it is on, a peer is identified only by
+  its invite code, so anyone who knows an accepted contact's code and can reach
+  the port could impersonate it; pairing secrets are planned for 0.15.
+- A workflow run already in flight can still load a Quick API or Prompt that
+  an agent changed during that run; revision pinning is planned (KT-1096).
+- A SubWorkflow foreach read can still be fooled by a process that mutates the
+  worktree while it runs (KT-1055).
+- With localhost trust on (auth off, or `auth_strict_localhost = false`), a
+  local process without a bridge token is indistinguishable from the user;
+  strict localhost is the mitigation until positive human authorization
+  (KT-1034).
+- P2P mirrors joined before 0.14.3 have no recorded host: join them again with
+  their code to resume syncing.
+- Agent text and tool metadata in transcripts, audit streams and run records
+  stay visible to the project's humans and to agents holding a bridge token
+  for that project; per-agent filtering is planned for 0.15.
+- On Windows, stopping a native ACP agent ends the agent's own process but not
+  the MCP servers or tools it started; owning the whole tree (a Job Object) is
+  planned for 0.15.
+- An allowed embed site can redirect to or frame another origin: Kronn checks
+  only the embed URL's starting origin; browser-enforced frame-src across
+  redirects is planned for 0.15 (KT-1115).
+- Removing an allowed site reaches an open tab at its next focus (KT-1115).
+
 ### Added
+
+- Live Pages can show third-party players (a Suno or video embed, for example): a Page writes
+  `<div data-kronn-embed="https://player.example.com/embed/x">` and Kronn draws the player itself,
+  only for sites listed under Configuration > Artifacts > External content. The Page's sandbox and
+  CSP are unchanged. Artifact bundles declare the sites they embed, and the import asks before
+  adding any. Adding a site, directly or during an import, needs local access or the API token even
+  when authentication is off. Works in Docker too: the gateway lists exactly the allowed sites in
+  the app's `frame-src` (an `http://` site only when its `https://` counterpart is allowed too), and
+  a newly allowed site plays after a page reload. Contributed by Barbé Rémi.
+
 - When a dangerous Exec step needs a manual fix, its warning now offers a ready prompt to copy and hand to an agent: it names the workflow, each step and value to fix, and the safe pattern (KT-1017).
 
 - Each project now decides whether its agents receive a GitHub token (KT-1006,
@@ -92,8 +150,9 @@ Release notes for 0.9.3 and earlier are available in the
   (Claude Code's `total_cost_usd`, OpenRouter's `usage.cost`), summed over the
   step's attempts, and the audit's total: exact when every step reported,
   "≥ x $" naming the unknown steps otherwise. A step whose agent reported no
-  cost reads "cost ?", never 0, and so does an HTTP step where any response
-  came without a cost, instead of showing a partial sum. Each run records the model its agent served,
+  cost shows Kronn's estimate where one can be made (see the token figure
+  below) and "cost ?" otherwise, never 0; an HTTP step where any response came
+  without a cost is never shown as a partial sum. Each run records the model its agent served,
   or the configured one labelled as such, and `step_done` carries the step's
   cost (KT-997).
 
@@ -205,6 +264,22 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A native ACP agent (OpenCode, Vibe, Copilot, Gemini CLI, Kiro) that stops
+  answering no longer leaves a discussion silent. Opening a session now waits
+  90 s, enough for OpenCode's 30 s per MCP server; the 30 s limit lost that
+  race to one slow project server, and the turn was deferred and retried
+  without a word. A startup phase that times out or returns an error stops the
+  agent, settles the turn as failed and posts a translated message naming the
+  phase, the error or the project servers it was starting; a stop during
+  startup is honoured at once. A native prompt now stops at the configured
+  inactivity delay, not 15 minutes, measured on every update the runtime sends
+  (tool calls, thoughts, Claude thinking and Codex reasoning, keepalives), not
+  on reply text: the discussion and
+  workflow timers leave an ACP run's inactivity to it, parallel tool calls
+  each keep their wider bound, and the delay applies as soon as the last one
+  ends. A project server named by a bare command found nowhere on PATH is no
+  longer declared to the session. A stop by Kronn's inactivity watchdog is no
+  longer headed by a wrong "Network error" hint.
 - The launch card's step details now show the model and efforts of the
   step's tier (economy or reasoning), not always those of the default tier
   (KT-1095).
@@ -442,6 +517,7 @@ Release notes for 0.9.3 and earlier are available in the
 - Native ACP agents (Gemini, Copilot, Kiro, Vibe, OpenCode) now receive their
   provider key configured in Kronn, a temporary directory beside the project,
   and their room and workflow-step contexts, like the other routes (KT-1013).
+  They start only with full access (next entry).
 - **Known limitation: OpenCode, Vibe, GitHub Copilot, Gemini CLI and Kiro run
   only with full access.** These native ACP runtimes load repository plugins,
   custom tools, hooks and MCP servers before any permission check, so no
@@ -613,8 +689,8 @@ Release notes for 0.9.3 and earlier are available in the
   Gemini, Copilot, Kiro, OpenCode or Vibe found only inside WSL is refused
   with a clear message instead of failing to start (KT-981).
 
-- An audit step that only calls tools, without a word of text, now shows its
-  last tool, its call count and its tokens while it works, for HTTP agents and
+- An audit step that only calls tools, without a word of text, now shows the
+  category of its last action, its call count and its tokens while it works, for HTTP agents and
   ACP agents alike, through one probe; the counters no longer wait for a text
   line. A silent audit stream sends keep-alive comments every 15 seconds,
   which hold the connection without passing for model activity (KT-950).
@@ -668,8 +744,6 @@ Release notes for 0.9.3 and earlier are available in the
   only carries legacy audit markers (KT-993): the status is computed in memory
   and the file is written by audits and validations only, atomically.
 
-
-
 - A validation no longer asks again about a TD already decided (KT-938): the
   decision a card writes on the TD sheet (confirmed, rejected, accepted
   decision) is read back, so the full validation after a resume asks only
@@ -679,14 +753,10 @@ Release notes for 0.9.3 and earlier are available in the
   report them as missed. A TD whose status sits only in its YAML front matter
   is read and updated too.
 
-
-
 - An audit of an already documented repository no longer fails on dead links
   in documents Kronn does not own (KT-1020): moved `docs/legacy/` documents and
   root instruction files with human content outside Kronn's block are
   reported, not blocking, and the repair step never rewrites them.
-
-
 
 - Audits no longer receive the `kronn-internal` and Memory MCP servers
   (KT-935): the `.mcp.json` filter and the ACP broker apply the same exclusion,
@@ -694,8 +764,6 @@ Release notes for 0.9.3 and earlier are available in the
   knowledge graph shared across projects, and the refusal is logged instead of
   appearing as a registry error. Discussions on the audited project keep
   their tools.
-
-
 
 - The documentation template and audit are more consistent (KT-934): a
   validation is refused while a document Kronn owns still carries a
@@ -706,8 +774,6 @@ Release notes for 0.9.3 and earlier are available in the
   comments included, because that is what the agent reads; the skeleton went
   from 892 raw words to under 800 by dropping comments that repeated visible
   guidance (KT-934).
-
-
 
 - A resumed audit keeps the tokens, duration and cost of the steps it inherits
   and names the run that spent them, refuses to start when it cannot record
@@ -758,14 +824,6 @@ Release notes for 0.9.3 and earlier are available in the
   concurrent runs on one project no longer drop each other's entries from the
   ownership ledger, and "Migrate to .agents/skills" no longer offers the
   catalogue copies Kronn synced itself as repository skills.
-- A tracker issue title or a step output can no longer run as code in an
-  Exec step (KT-1017). Saving a workflow now refuses a template placeholder
-  inside an interpreter's inline script (`bash -c`, `python3 -c`, `node -e`…),
-  where it would be parsed as code, and says how to write it safely: pass the
-  value as a later argument (`["-c", "echo \"$1\"", "_", "{{issue.title}}"]`),
-  or, in a shell script, use the new `{{value|sh}}` filter, which renders one
-  single-quoted word. `{{run.id}}` and `{{time.now…}}` stay allowed. Saved
-  workflows keep running unchanged until they are next edited.
 - The desktop app keeps its local port from one launch to the next, so the
   interface settings stored by the browser no longer reset at every launch or
   after "Allow connections from other devices" restarts it (KT-972). The port
@@ -814,8 +872,8 @@ Release notes for 0.9.3 and earlier are available in the
   Claude Code names it `total_cost_usd`, which Kronn did not read, and the
   default Claude route dropped it anyway; OpenRouter's `usage.cost` was never
   read. Both now reach the run's usage as integer micro-USD, summed per
-  response, and stay unknown (never zero) when not reported. Showing it per
-  audit step comes later.
+  response, and stay unknown (never zero) when not reported. The audit
+  timeline shows it per step.
 
 - A workflow run now keeps the project it was launched in (KT-1015). A global
   workflow launched from a project lost that project after a gate approval or a
@@ -847,7 +905,7 @@ Release notes for 0.9.3 and earlier are available in the
   worktrees under `.kronn/` in every project, leaving the user's other
   worktrees alone. A run still keeps a branch that holds commits no base has,
   whether it succeeded, failed or was cancelled.
-
+- A tracker issue title or a step output can no longer run as code in an
   Exec step (KT-1017). Saving a workflow now refuses any template value in an
   interpreter's inline code (`bash -c`, `python3 -c`, `node -e`…, attached
   forms like `-cCODE` or `--eval=CODE` included), except `{{run.id}}` and
@@ -891,7 +949,7 @@ Release notes for 0.9.3 and earlier are available in the
   `deno run`/`eval`) follow the same rule.
 - A run value can no longer reach a program Kronn does not model unless a
   human approved it (KT-1017). Every program is now either known to read
-  its arguments as plain data (`echo`, `cat`, `grep`, `jq`…), parsed by the
+  its arguments as plain data (`echo`, `printf`, `date`…), parsed by the
   classifier, or refused: an Exec step or Quick Exec that passes a template
   value to any other program is refused at save and at run time, with the
   program named. The step editor and the Quick Exec form show a checkbox for
@@ -899,10 +957,9 @@ Release notes for 0.9.3 and earlier are available in the
   its arguments as plain data"); only a human can tick it, an agent's save
   never sets it, and a bundle, an Artifact import or an import through an
   agent drops it.
-- A run value given to a data-only program that still reads options (`rm`,
-  `cp`, `mv`, `chmod`, `date`, `grep`…) is refused at run time when it renders
-  to an option (`rm {{x}}` as `-rf`), unless a literal `--` precedes it
-  (KT-1017).
+- A run value given to a data-only program that still reads options (`date`,
+  `seq`, `basename`…) is refused at run time when it renders to an option
+  (`date {{x}}` as `-s…`), unless a literal `--` precedes it (KT-1017).
 - A template value glued to an option (`-{{x}}`, `--{{x}}`, `-v{{x}}`) is
   refused unless the option before it is one the program reads a value from
   (`mysql -u{{user}}`, `git commit -m{{msg}}`, `--name={{value}}`) (KT-1017).
@@ -972,6 +1029,13 @@ Release notes for 0.9.3 and earlier are available in the
   `docker compose run`, `runuser`, `xargs` or `parallel` stays refused when
   approved.
 
+- Security: dependency advisories. Frontend overrides now pin `sharp` 0.35.5
+  (GHSA-wq5f-xc86-pv6w, librsvg), `source-map-js` 1.2.2 (GHSA-68fv-2mgg-jv7q,
+  denial of service), `dompurify` 3.4.16 (GHSA-p98j-92pf-mc4p,
+  GHSA-6688-9rhm-gjv2) and `global-agent` 4.1.3, which drops the `sprintf-js`
+  chain behind GHSA-hp3w-g68c-fv3c (no patched `sprintf-js` exists). Only
+  `onnxruntime-node`'s install script uses `global-agent`.
+
 ### Changed
 
 - Settings: in every agent card (agents, Ollama, external APIs) each tier's model picker now spans the card's full width, one tier per line, and its list opens taller. Model names share long provider prefixes such as "OpenCode Zen/…" and were unreadable in the narrow control.
@@ -1008,8 +1072,8 @@ Release notes for 0.9.3 and earlier are available in the
   its detail sheet only, behind its two-step confirmation (KT-833).
 - The release notes are now generated from the installers a release really
   carries (KT-1004): one direct download link per attached file, the version's
-  CHANGELOG section above the install table, and the AppImage advice only when
-  an AppImage is attached. A missing platform or CHANGELOG section fails the
+  CHANGELOG section above the install table, then the Linux and macOS install
+  notes. A missing platform or CHANGELOG section fails the
   release job instead of publishing a draft that names absent files.
 - A workflow launch card, in a discussion or on a Live Page, shows only the
   values you can fill as fields. The values Kronn resolves itself go into one

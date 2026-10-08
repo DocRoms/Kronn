@@ -89,8 +89,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             section = match.group("section")
             # Cold compilation/coverage need bounded room before suites/cache save.
             expected_timeout = {
-                "test-backend": 35,
-                "test-backend-coverage": 45,
+                "test-backend": 45,
+                "test-backend-coverage": 55,
                 "test-e2e": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 45 || 30 }}",
             }.get(job, 30)
@@ -123,7 +123,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             workflow,
             re.MULTILINE | re.DOTALL,
         ).group("section")
-        self.assertIn("timeout-minutes: 35", backend)
+        self.assertIn("timeout-minutes: 45", backend)
         self.assertIn("target/debug/.fingerprint", backend)
         self.assertIn("target/debug/build", backend)
         self.assertIn("target/debug/deps", backend)

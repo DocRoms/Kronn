@@ -504,18 +504,28 @@ mod tests {
         assert!(prompt.ends_with("migrate"));
     }
 
+    /// A server command that exists on this host: the registry leaves out
+    /// one it cannot find.
+    fn installed(project: &tempfile::TempDir, name: &str) -> String {
+        let path = project.path().join(name);
+        std::fs::write(&path, "").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn acp_mcp_registry_uses_only_command_entries_without_environment_values() {
         let project = tempfile::tempdir().unwrap();
+        let safe = installed(&project, "safe-server");
         std::fs::write(
             project.path().join(".mcp.json"),
-            r#"{
+            serde_json::json!({
                 "mcpServers": {
-                    "safe": {"command": "safe-server", "args": ["--project"]},
-                    "credentialed": {"command": "private-server", "env": {"API_KEY": "secret"}},
+                    "safe": {"command": safe, "args": ["--project"]},
+                    "credentialed": {"command": installed(&project, "private-server"), "env": {"API_KEY": "secret"}},
                     "remote": {"url": "https://example.invalid/mcp"}
                 }
-            }"#,
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -529,7 +539,7 @@ mod tests {
 
         assert_eq!(project_servers.len(), 1);
         assert_eq!(project_servers[0].id, "safe");
-        assert_eq!(project_servers[0].command, "safe-server");
+        assert_eq!(project_servers[0].command, safe);
         assert_eq!(project_servers[0].args, vec!["--project"]);
         assert!(project_servers[0].allowed_tools.is_empty());
     }
@@ -541,13 +551,14 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join(".mcp.json"),
-            r#"{
+            serde_json::json!({
                 "mcpServers": {
-                    "safe": {"command": "safe-server"},
-                    "credentialed": {"command": "private-server", "env": {"API_KEY": "secret"}},
-                    "leaky": {"command": "leaky-server", "args": ["--token", "secret"]}
+                    "safe": {"command": installed(&project, "safe-server")},
+                    "credentialed": {"command": installed(&project, "private-server"), "env": {"API_KEY": "secret"}},
+                    "leaky": {"command": installed(&project, "leaky-server"), "args": ["--token", "secret"]}
                 }
-            }"#,
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -568,12 +579,13 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join(".mcp.json"),
-            r#"{
+            serde_json::json!({
                 "mcpServers": {
-                    "safe": {"command": "safe-server", "args": ["--project"]},
-                    "leaky": {"command": "leaky-server", "args": ["--token", "sk-super-secret-do-not-leak"]}
+                    "safe": {"command": installed(&project, "safe-server"), "args": ["--project"]},
+                    "leaky": {"command": installed(&project, "leaky-server"), "args": ["--token", "sk-super-secret-do-not-leak"]}
                 }
-            }"#,
+            })
+            .to_string(),
         )
         .unwrap();
 
@@ -593,6 +605,37 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg.contains("sk-super-secret"))));
+    }
+
+    #[test]
+    fn acp_mcp_registry_leaves_out_only_a_bare_command_found_nowhere() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "present": {"command": installed(&project, "present-server")},
+                    "ghost": {"command": "kronn-test-no-such-mcp-command"},
+                    "relative": {"command": "./tools/project-mcp"},
+                    "absolute": {"command": project.path().join("built-later").to_string_lossy()},
+                    "on-path": {"command": "sh"}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let ids: Vec<String> = acp_project_mcp_servers(project.path().to_str().unwrap(), false)
+            .into_iter()
+            .map(|server| server.id)
+            .filter(|id| id != "kronn-internal")
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["absolute", "on-path", "present", "relative"],
+            "only the bare name found nowhere is left out; a path is the runtime's to resolve"
+        );
     }
 
     /// KT-543 — an ACP agent that cannot reach the bridge is mute in the room.
@@ -12487,12 +12530,11 @@ Suite de la réponse.";
 
     #[tokio::test]
     async fn ensure_kiro_cli_skips_install_when_present() {
-        // kiro-cli is available on this machine (mounted from host)
-        // ensure_kiro_cli_available should return Ok immediately
-        let result = super::super::ensure_kiro_cli_available().await;
-        // On CI/dev where kiro-cli may not exist, this is allowed to fail
-        // The important thing is it doesn't panic
-        let _ = result;
+        // Without kiro-cli the call would run the real network installer.
+        if crate::agents::find_binary("kiro-cli").is_none() {
+            return;
+        }
+        assert_eq!(super::super::ensure_kiro_cli_available().await, Ok(()));
     }
 
     // ─── agent_command: Codex sandbox behavior ──────────────────────────────────
@@ -13020,6 +13062,7 @@ Suite de la réponse.";
                 http_cancel: None,
                 pgid: Some(pgid),
                 token_fragments: false,
+                activity_watched: false,
                 bridge_token: None,
             };
             let exit = process.wait().await.expect("leader exits");
@@ -13147,6 +13190,7 @@ sleep 3600
             http_cancel: None,
             pgid,
             token_fragments: false,
+            activity_watched: false,
             bridge_token: None,
         };
 
@@ -13227,6 +13271,7 @@ sleep 3600
             http_cancel: None,
             pgid: None,
             token_fragments: false,
+            activity_watched: false,
             bridge_token: None,
         };
 

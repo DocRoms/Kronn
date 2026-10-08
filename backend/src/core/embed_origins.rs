@@ -217,12 +217,175 @@ pub fn apply_changes(
     if next.len() > MAX_EMBED_ORIGINS {
         return Err(format!("At most {MAX_EMBED_ORIGINS} sites can be allowed"));
     }
+    // Only an addition is refused, so a read or a removal never loses sites.
+    let frame_src_bytes = "'self'".len() + next.iter().map(|o| 1 + o.len()).sum::<usize>();
+    if !add.is_empty() && frame_src_bytes > MAX_FRAME_SRC_BYTES {
+        return Err(format!(
+            "The allowed sites exceed {MAX_FRAME_SRC_BYTES} bytes once listed; remove some first"
+        ));
+    }
     Ok(next)
+}
+
+/// Bound on the `frame-src` value the Docker gateway copies into a header;
+/// additions beyond it are refused, so an accepted list always fits.
+pub const MAX_FRAME_SRC_BYTES: usize = 16 * 1024;
+
+/// A normalized origin that is also a plain CSP host source: nothing that could
+/// end the directive (`;`, `,`, whitespace, quotes) or that CSP cannot express
+/// (`_`, IPv6 brackets).
+fn is_csp_host_source(origin: &str) -> bool {
+    let rest = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"));
+    rest.is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-.:".contains(&b))
+    })
+}
+
+/// The `frame-src` sources of the app document: `'self'` (what `default-src`
+/// already allowed) and exactly the allowed origins, each re-validated. The
+/// Docker gateway reads it per document request, so a list change applies at
+/// the next page load. CSP lets an `http://` source match its `https://`
+/// upgrade too, so one is listed only when that upgrade is allowed as well.
+pub fn frame_src_sources(allowed: &[String]) -> String {
+    let mut sources = String::from("'self'");
+    let origins = apply_changes(allowed, &[], &[]).unwrap_or_default();
+    let upgrade_allowed = |origin: &String| {
+        origin.strip_prefix("http://").is_none_or(|rest| {
+            normalize_origin(&format!("https://{rest}"))
+                .is_ok_and(|secure| origins.contains(&secure))
+        })
+    };
+    for origin in origins
+        .iter()
+        .filter(|origin| is_csp_host_source(origin) && upgrade_allowed(origin))
+    {
+        if sources.len() + 1 + origin.len() > MAX_FRAME_SRC_BYTES {
+            break;
+        }
+        sources.push(' ');
+        sources.push_str(origin);
+    }
+    sources
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_src_lists_exactly_the_allowed_origins() {
+        assert_eq!(frame_src_sources(&[]), "'self'");
+        let allowed = vec![
+            "https://Suno.com/".to_string(),
+            "http://localhost:3000".to_string(),
+            "https://suno.com".to_string(),
+            "https://player.example.com:8443".to_string(),
+        ];
+        assert_eq!(
+            frame_src_sources(&allowed),
+            "'self' https://suno.com https://player.example.com:8443"
+        );
+        assert!(!frame_src_sources(&allowed).contains('*'));
+    }
+
+    #[test]
+    fn an_http_source_needs_its_https_upgrade_allowed_too() {
+        let http_only = vec![
+            "http://localhost:3000".to_string(),
+            "http://a.example".to_string(),
+        ];
+        assert_eq!(frame_src_sources(&http_only), "'self'");
+        let both = vec![
+            "http://localhost:3000".to_string(),
+            "https://localhost:3000".to_string(),
+            "http://a.example".to_string(),
+            "https://a.example:443".to_string(),
+            "http://b.example:8080".to_string(),
+            "https://b.example".to_string(),
+        ];
+        assert_eq!(
+            frame_src_sources(&both),
+            "'self' http://localhost:3000 https://localhost:3000 http://a.example https://a.example https://b.example"
+        );
+    }
+
+    #[test]
+    fn frame_src_never_carries_a_wildcard_or_a_directive_break() {
+        let hostile = [
+            "*",
+            "https://*",
+            "https://*.example.com",
+            "https:",
+            "'unsafe-inline'",
+            "https://a.example; script-src *",
+            "https://a.example;report-uri",
+            "https://a.example,b.example",
+            "https://a.example 'unsafe-eval'",
+            "https://a\".example",
+            "https://a'.example",
+            "https://a_b.example",
+            "http://[::1]:8080",
+            "https://a.example\r\nX-Injected: 1",
+            "data:",
+            "blob:",
+        ];
+        for value in hostile {
+            let sources = frame_src_sources(&[value.to_string()]);
+            assert_eq!(sources, "'self'", "{value:?} reached frame-src");
+        }
+    }
+
+    #[test]
+    fn csp_host_source_check_holds_without_normalization() {
+        for value in [
+            "https://a.example;report-uri",
+            "https://a.example b",
+            "https://a.example'",
+            "https://a.example\"",
+            "https://a.example,b",
+            "https://A.example",
+            "https://*.example",
+            "https://",
+            "ftp://a.example",
+        ] {
+            assert!(!is_csp_host_source(value), "{value:?}");
+        }
+        assert!(is_csp_host_source("https://xn--bcher-kva.example:8443"));
+    }
+
+    #[test]
+    fn every_accepted_origin_fits_in_frame_src() {
+        let long: Vec<String> = (0..MAX_EMBED_ORIGINS)
+            .map(|i| format!("https://{}{i}.example", "a".repeat(60)))
+            .collect();
+        assert!(apply_changes(&[], &long, &[]).is_err());
+        let mut accepted = Vec::new();
+        for origin in &long {
+            match apply_changes(&accepted, std::slice::from_ref(origin), &[]) {
+                Ok(next) => accepted = next,
+                Err(_) => break,
+            }
+        }
+        let sources = frame_src_sources(&accepted);
+        assert!(sources.len() <= MAX_FRAME_SRC_BYTES);
+        assert_eq!(sources.split(' ').count(), accepted.len() + 1);
+        // A hand-edited list over the budget is still read and still shrinks.
+        assert_eq!(apply_changes(&long, &[], &[]).unwrap().len(), long.len());
+        assert!(apply_changes(&long, &[], &[long[0].clone()]).is_ok());
+        assert!(frame_src_sources(&long).len() <= MAX_FRAME_SRC_BYTES);
+        let typical: Vec<String> = (0..MAX_EMBED_ORIGINS)
+            .map(|i| format!("https://site{i}.example"))
+            .collect();
+        assert_eq!(
+            frame_src_sources(&typical).split(' ').count(),
+            MAX_EMBED_ORIGINS + 1
+        );
+    }
 
     #[test]
     fn origin_compares_scheme_host_and_port_exactly() {

@@ -685,6 +685,35 @@ fn model_stall_notice(stderr: &[String]) -> Option<String> {
         .map(|reason| format!("⚠️ **Agent interrupted by Kronn.** {reason}"))
 }
 
+/// The text-silence bound the stream consumer applies, or `None` when the run's
+/// own activity watchdog owns inactivity (the global deadline still holds).
+fn consumer_text_stall(activity_watched: bool, stall: Duration) -> Option<Duration> {
+    (!activity_watched).then_some(stall)
+}
+
+/// A native ACP prompt that never sent anything: said in the user's language,
+/// naming the agent and the delay, instead of the generic stall reason.
+fn silent_native_prompt_notice(
+    agent_type: &AgentType,
+    stderr: &[String],
+    response: &str,
+    limit: Duration,
+    language: &str,
+) -> Option<String> {
+    let native =
+        crate::acp::resolve_acp_route(agent_type) == crate::acp::AcpProductionRoute::NativeAcp;
+    let silent = stderr.iter().any(|line| {
+        crate::agents::idle_watchdog::is_stall_reason(line.trim())
+            && line.contains(crate::agents::idle_watchdog::NO_FIRST_TOKEN)
+    });
+    (native && silent && response.trim().is_empty()).then(|| {
+        format!(
+            "⚠️ {}",
+            crate::agents::acp_start::silent_prompt_message(agent_type, limit, language)
+        )
+    })
+}
+
 /// Whether a finished child run counts as a SUCCESS for batch accounting.
 ///
 /// A clean process exit with an EMPTY assistant reply is NOT a success — the
@@ -893,6 +922,7 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
         AgentType::LiteLlm | AgentType::Nvidia | AgentType::Ollama | AgentType::Custom
     ) || error.starts_with("Project path not found:")
         || error.starts_with("Copilot task worker cannot start:")
+        || error.starts_with(crate::agents::acp_start::ACP_START_FAILED)
         || non_retryable_http_status
         || deterministic_nul_byte
     {
@@ -3251,8 +3281,12 @@ async fn make_agent_stream_inner(
                 // below applies to every agent that does not emit stream-json:
                 // an ACP or HTTP model stays silent while its weights load and
                 // its prompt is read, and 5 minutes would cut a cold start.
+                // A native ACP runtime streams its frames, thoughts and tool
+                // calls included, so it gets the configured delay as is, like
+                // stream-json: the floor let a mute prompt sit for 15 minutes.
                 effective_stall_timeout(
-                    false,
+                    crate::acp::resolve_acp_route(&agent_type)
+                        == crate::acp::AcpProductionRoute::NativeAcp,
                     Duration::from_secs(
                         u64::from(if cfg.server.agent_stall_timeout_min > 0 {
                             cfg.server.agent_stall_timeout_min
@@ -3493,6 +3527,10 @@ async fn make_agent_stream_inner(
                     Duration::from_secs(stall_timeout_min as u64 * 60),
                     NON_STREAMING_STALL_TIMEOUT,
                 );
+                // An ACP run's own watchdog sees every update, tool calls and
+                // thoughts included, and ends a silent run itself: timing the
+                // text alone would kill a run busy with a tool.
+                let text_stall = consumer_text_stall(process.activity_watched(), stall_timeout);
                 let mut was_interrupted = false;
                 let mut timeout_reason: Option<AgentTimeoutReason> = None;
                 // Set when we break the loop because the agent emitted a
@@ -3545,7 +3583,10 @@ async fn make_agent_stream_inner(
                         None
                     }
                     _ = async {
-                        tokio::time::sleep(stall_timeout).await
+                        match text_stall {
+                            Some(limit) => tokio::time::sleep(limit).await,
+                            None => std::future::pending::<()>().await,
+                        }
                     } => {
                         tracing::warn!("Agent stream stall timeout ({:?}) — no output", stall_timeout);
                         was_interrupted = true;
@@ -3931,6 +3972,9 @@ async fn make_agent_stream_inner(
                 // stdout. Previously that exact case fell through to
                 // `exit code: None`, hiding that Kronn deliberately killed the
                 // process at its watchdog deadline.
+                // Kronn's own watchdog explains the stop: the error-pattern
+                // hint below would read its "timeout" as a network failure.
+                let mut stopped_by_watchdog = true;
                 if let Some(reason) = timeout_reason {
                     let notice = timeout_notice(reason);
                     if full_response.is_empty() {
@@ -3938,12 +3982,22 @@ async fn make_agent_stream_inner(
                     } else {
                         full_response.push_str(&format!("\n\n---\n{notice}"));
                     }
+                } else if let Some(notice) = silent_native_prompt_notice(
+                    &agent_type,
+                    &stderr_lines,
+                    &full_response,
+                    model_idle_timeout,
+                    &disc.language,
+                ) {
+                    full_response = notice;
                 } else if let Some(notice) = model_stall_notice(&stderr_lines) {
                     if full_response.is_empty() {
                         full_response = notice;
                     } else {
                         full_response.push_str(&format!("\n\n---\n{notice}"));
                     }
+                } else {
+                    stopped_by_watchdog = false;
                 }
                 if stopped_on_loop {
                     full_response.push_str(&format!(
@@ -4026,7 +4080,11 @@ async fn make_agent_stream_inner(
                 // Now the hint is the headline; the raw output folds into a
                 // collapsible "détails techniques" card (kronn:context marker,
                 // rendered by MessageBody). No recognised hint → raw as before.
-                if !success && !was_interrupted && !validation_redaction_failed {
+                if !success
+                    && !was_interrupted
+                    && !validation_redaction_failed
+                    && !stopped_by_watchdog
+                {
                     let all_output = format!("{}\n{}", full_response, stderr_text);
                     if let Some(hint) = detect_agent_error_hint(&all_output, &agent_type) {
                         let raw = full_response.trim();
@@ -4866,14 +4924,20 @@ async fn make_agent_stream_inner(
                 // A native agent without full access: said in the user's
                 // language, and settled, never deferred and retried.
                 let refused_full_access = e.starts_with(runner::NATIVE_FULL_ACCESS_REQUIRED);
+                let start_timeout = crate::agents::acp_start::AcpStartFailure::from_error(&e);
+                // Both are settled now, in the user's language: deferring them
+                // would only repeat the same refusal or wait.
+                let settled_now = refused_full_access || start_timeout.is_some();
                 let e = if refused_full_access {
                     runner::native_full_access_refusal_in(&agent_type, &disc.language)
+                } else if let Some(timeout) = start_timeout.as_ref() {
+                    format!("⚠️ {}", timeout.message(&agent_type, &disc.language))
                 } else {
                     e
                 };
 
                 let tracked_outcome = completion_tx.as_ref().map(|_| {
-                    if refused_full_access {
+                    if settled_now {
                         AgentExecutionOutcome::PreflightFailed {
                             diagnostic: e.clone(),
                         }
@@ -4946,15 +5010,18 @@ async fn make_agent_stream_inner(
                         }
                     }
                 }
-                let content = agent_start_error_content(
-                    &agent_type,
-                    attempted_model.as_deref(),
-                    disc_tier,
-                    &disc.language,
-                    &e,
-                    dispatch_job_id.as_deref(),
-                )
-                .unwrap_or_else(|| format!("Erreur: {e}"));
+                let content = match start_timeout {
+                    Some(_) => e.clone(),
+                    None => agent_start_error_content(
+                        &agent_type,
+                        attempted_model.as_deref(),
+                        disc_tier,
+                        &disc.language,
+                        &e,
+                        dispatch_job_id.as_deref(),
+                    )
+                    .unwrap_or_else(|| format!("Erreur: {e}")),
+                };
                 let err_msg = DiscussionMessage {
                     recovered_partial: false,
                     session_tokens_at_message: None,
@@ -7796,6 +7863,243 @@ mod connection_fallback_tests {
             crate::core::model_catalog::legacy_runtime_target_id(&db, &AgentType::Ollama)
                 .await
                 .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_acp_start_timeout_tests {
+    use super::{agent_start_failure_outcome, silent_native_prompt_notice, AgentExecutionOutcome};
+    use crate::agents::acp_start::{AcpStartFailure, AcpStartPhase};
+    use crate::models::{AgentType, MessageRole};
+    use std::time::Duration;
+
+    /// Never answers `session/new`; records its pid and its child's.
+    const MUTE_SESSION_AGENT: &str = r#"
+import json, os, subprocess, sys
+child = subprocess.Popen(["sleep", "3600"])
+open(os.environ["PIDS"], "w").write("%d %d" % (os.getpid(), child.pid))
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {
+            "protocolVersion": 1, "agentCapabilities": {"sessionCapabilities": {}}}}) + "\n")
+        sys.stdout.flush()
+"#;
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// A discussion whose native ACP agent never opens its session ends with a
+    /// message in the user's language, settled as failed, the agent killed.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial(acp_adapter_env_toggle)]
+    async fn a_session_that_never_opens_is_settled_with_a_message_and_killed() {
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_str().unwrap().to_owned();
+        let pids = project.path().join("pids");
+        let mut command = tokio::process::Command::new("python3");
+        command.args(["-c", MUTE_SESSION_AGENT]).env("PIDS", &pids);
+        let transport =
+            crate::acp::AcpJsonRpcTransport::spawn(crate::acp::AcpAgent::OpenCode, command, true)
+                .await
+                .unwrap()
+                .with_request_timeouts(crate::acp::AcpRequestTimeouts {
+                    control: Duration::from_secs(1),
+                    session_setup: Duration::from_secs(1),
+                    prompt: Duration::from_secs(60),
+                });
+        let work_dir =
+            crate::agents::runner::resolve_agent_work_dir(Some(&project_path), &project_path)
+                .unwrap();
+        let _route = crate::agents::runner::test_acp_routes::route(&work_dir, Arc::new(transport));
+
+        let mut config = crate::core::config::default_config();
+        config.agents.open_code.full_access = true;
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let project_row: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj", "name": "proj", "path": project_path,
+            "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
+            "created_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339()
+        }))
+        .unwrap();
+        db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &project_row)?;
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, project_id, created_at, updated_at, awaiting_agent)
+                 VALUES ('mute', 'mute', 'OpenCode', 'fr', 'proj', datetime('now'), datetime('now'), 1)",
+                [],
+            )?;
+            let user = crate::models::DiscussionMessage {
+                id: "u1".into(),
+                role: MessageRole::User,
+                channel: crate::models::MessageChannel::Main,
+                content: "bonjour".into(),
+                agent_type: None,
+                timestamp: chrono::Utc::now(),
+                tokens_used: 0,
+                session_tokens_at_message: None,
+                recovered_partial: false,
+                auth_mode: None,
+                model_tier: None,
+                model: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                author_cli_ordinal: None,
+                source_msg_id: None,
+                duration_ms: None,
+                lint_report: None,
+                target_agent: None,
+                reply_to_message_id: None,
+            };
+            crate::db::discussions::insert_message(conn, "mute", &user)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(config)),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        let started = std::time::Instant::now();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response =
+            super::make_agent_stream_inner(state, "mute".into(), None, None, None, None, Some(tx))
+                .await
+                .into_response();
+        let body = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                rx.await.unwrap(),
+                AgentExecutionOutcome::PreflightFailed { .. }
+            ),
+            "settled as failed, never deferred to be retried in silence"
+        );
+        assert!(started.elapsed() < Duration::from_secs(20));
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("OpenCode n'a pas ouvert sa session en 1 s"),
+            "{body}"
+        );
+
+        let messages = db
+            .with_read_conn(|conn| crate::db::discussions::list_messages(conn, "mute"))
+            .await
+            .unwrap();
+        let posted = messages.last().unwrap();
+        assert_eq!(posted.role, MessageRole::System);
+        assert!(
+            posted
+                .content
+                .starts_with("⚠️ OpenCode n'a pas ouvert sa session en 1 s."),
+            "{}",
+            posted.content
+        );
+
+        let recorded = std::fs::read_to_string(&pids).unwrap();
+        for pid in recorded.split_whitespace() {
+            let pid: i32 = pid.parse().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while alive(pid) && std::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(!alive(pid), "process {pid} outlived the failed start");
+        }
+    }
+
+    #[test]
+    fn a_start_timeout_is_settled_not_deferred() {
+        let error = AcpStartFailure::new(AcpStartPhase::Session, Duration::from_secs(90), vec![])
+            .to_error(&AgentType::OpenCode);
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, &error),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+        let refused = AcpStartFailure::failed(AcpStartPhase::Session, "JSON-RPC -32603: rejected")
+            .to_error(&AgentType::OpenCode);
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, &refused),
+            AgentExecutionOutcome::PreflightFailed { .. }
+        ));
+        assert!(matches!(
+            agent_start_failure_outcome(&AgentType::OpenCode, "OpenCode ACP spawn failed: x"),
+            AgentExecutionOutcome::RuntimeUnavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_native_prompt_that_never_answered_gets_its_own_message() {
+        let reason = crate::agents::idle_watchdog::stall_reason(
+            "OpenCode",
+            Duration::from_secs(300),
+            crate::agents::idle_watchdog::NO_FIRST_TOKEN,
+        );
+        let stderr = vec![reason.clone()];
+        let notice = silent_native_prompt_notice(
+            &AgentType::OpenCode,
+            &stderr,
+            "",
+            Duration::from_secs(300),
+            "fr",
+        )
+        .expect("a native silent prompt is explained");
+        assert!(
+            notice.starts_with("⚠️ OpenCode n'a rien renvoyé pendant 5 min"),
+            "{notice}"
+        );
+        assert!(
+            silent_native_prompt_notice(
+                &AgentType::OpenCode,
+                &stderr,
+                "partial",
+                Duration::from_secs(300),
+                "fr"
+            )
+            .is_none(),
+            "a reply that started keeps the generic stall notice"
+        );
+        assert!(
+            silent_native_prompt_notice(
+                &AgentType::Codex,
+                &stderr,
+                "",
+                Duration::from_secs(300),
+                "fr"
+            )
+            .is_none(),
+            "only native ACP runtimes"
+        );
+    }
+
+    #[test]
+    fn the_consumer_stands_down_when_the_run_watches_its_own_activity() {
+        let stall = Duration::from_secs(300);
+        assert_eq!(super::consumer_text_stall(false, stall), Some(stall));
+        assert_eq!(super::consumer_text_stall(true, stall), None);
+    }
+
+    #[test]
+    fn a_native_acp_runtime_gets_the_configured_stall_without_the_floor() {
+        let configured = Duration::from_secs(5 * 60);
+        let native = crate::acp::resolve_acp_route(&AgentType::OpenCode)
+            == crate::acp::AcpProductionRoute::NativeAcp;
+        assert!(native);
+        assert_eq!(
+            super::effective_stall_timeout(native, configured, super::NON_STREAMING_STALL_TIMEOUT),
+            configured
         );
     }
 }

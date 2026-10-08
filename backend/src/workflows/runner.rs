@@ -1528,16 +1528,18 @@ async fn execute_run_body(
                     crate::db::model_catalog::http_runtime_target_id(&connection.id)
                 });
                 let model = step_model_override(step, connection.as_ref());
-                if let Err(failure) = crate::core::model_catalog::preflight_resolve(
+                let resolution = crate::core::model_catalog::preflight_resolve(
                     &state.db,
                     runtime_target_id.as_deref(),
                     step.agent.clone(),
                     tier,
                     model.as_deref(),
                     Some(&agents_config.model_tiers),
-                )
-                .await
-                {
+                );
+                #[cfg(test)]
+                let resolution =
+                    crate::core::model_catalog::test_routed_discovery(routed, resolution);
+                if let Err(failure) = resolution.await {
                     catalog_failures.push((
                         step.name.clone(),
                         serde_json::to_value(failure).unwrap_or_default(),
@@ -6708,6 +6710,7 @@ mod tests {
             use crate::acp::AcpSessionEvent;
             let _ = events
                 .send(AcpSessionEvent::ToolCall {
+                    id: None,
                     name: "Bash".into(),
                 })
                 .await;

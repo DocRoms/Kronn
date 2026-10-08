@@ -478,6 +478,9 @@ pub enum AcpSessionEvent {
     NativeSessionId(String),
     TextDelta(String),
     ToolCall {
+        /// The runtime's call id, when it gives one: parallel calls are
+        /// tracked apart by it.
+        id: Option<String>,
         name: String,
     },
     /// The tool call most recently announced reached a terminal status
@@ -485,7 +488,9 @@ pub enum AcpSessionEvent {
     /// tool call's own, much wider bound on it rather than the model's own
     /// inactivity delay; this is what hands the clock back to the model the
     /// moment the tool is actually done.
-    ToolCallEnded,
+    ToolCallEnded {
+        id: Option<String>,
+    },
     /// A tool call's start or target for the live views, built from its
     /// structured fields only (`agents::activity`). Updates carrying the same
     /// call id refine one call; they never announce another.
@@ -574,6 +579,13 @@ pub trait AcpTransport: Send + Sync {
     }
 }
 
+/// Whether an adapter's stdout line is a JSON frame from the runtime, as
+/// opposed to blank or stray text: a frame is progress even when it carries
+/// nothing to show.
+pub(crate) fn is_runtime_frame(line: &str) -> bool {
+    serde_json::from_str::<Value>(line.trim()).is_ok_and(|value| value.is_object())
+}
+
 /// A sequential ND-JSON ACP client for native ACP CLIs. The wire is kept here
 /// rather than sharing the Claude stream parser: ACP messages are JSON-RPC
 /// request/response objects and notifications, not model output.
@@ -592,6 +604,7 @@ pub struct AcpJsonRpcTransport {
     launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
     /// The name this session declares Kronn's bridge under.
     bridge_id: String,
+    timeouts: AcpRequestTimeouts,
 }
 
 /// How long `shutdown` waits for the stdout dispatcher after the child is
@@ -599,10 +612,15 @@ pub struct AcpJsonRpcTransport {
 /// blocking shutdown on that is worse than abandoning the drain.
 const DISPATCHER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Budget for a control request — `initialize`, `session/new`, `session/cancel`.
-/// These are local handshakes; a runtime that has not answered in half a minute
-/// is not going to.
+/// Budget for a control request — `initialize`, `session/cancel`,
+/// `session/set_config_option`. These are local handshakes; a runtime that has
+/// not answered in half a minute is not going to.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Budget for `session/new` and `session/resume`, which start every declared
+/// MCP server before answering. OpenCode gives each server up to 30 s, so the
+/// control budget lost that race to a single slow or mute server.
+pub(crate) const SESSION_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Backstop for a prompt turn.
 ///
@@ -627,12 +645,33 @@ const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_REQUEST_TIMEOUT: Duration =
     Duration::from_secs((crate::models::MAX_AGENT_GLOBAL_TIMEOUT_MIN as u64 + 10) * 60);
 
-fn request_timeout(method: &str) -> Duration {
-    if method == "session/prompt" {
-        PROMPT_REQUEST_TIMEOUT
-    } else {
-        CONTROL_REQUEST_TIMEOUT
+/// The per-method budgets of one transport. Tests shorten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcpRequestTimeouts {
+    pub control: Duration,
+    pub session_setup: Duration,
+    pub prompt: Duration,
+}
+
+impl AcpRequestTimeouts {
+    pub(crate) const DEFAULT: Self = Self {
+        control: CONTROL_REQUEST_TIMEOUT,
+        session_setup: SESSION_SETUP_TIMEOUT,
+        prompt: PROMPT_REQUEST_TIMEOUT,
+    };
+
+    fn for_method(&self, method: &str) -> Duration {
+        match method {
+            "session/prompt" => self.prompt,
+            "session/new" | "session/resume" => self.session_setup,
+            _ => self.control,
+        }
     }
+}
+
+#[cfg(test)]
+fn request_timeout(method: &str) -> Duration {
+    AcpRequestTimeouts::DEFAULT.for_method(method)
 }
 
 /// Owns the stdout dispatcher and cancels it when dropped. A bare `JoinHandle`
@@ -967,7 +1006,14 @@ impl AcpJsonRpcTransport {
             broker,
             launch_mcp_servers: Mutex::new(None),
             bridge_id: "kronn-internal".into(),
+            timeouts: AcpRequestTimeouts::DEFAULT,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_request_timeouts(mut self, timeouts: AcpRequestTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
 
     /// Audit trail of every permission/fs/terminal decision the dispatcher
@@ -1068,19 +1114,22 @@ impl AcpJsonRpcTransport {
                 missing_session_id,
             },
         );
-        if let Err(error) = self
-            .send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .await
-        {
-            self.pending.lock().await.remove(&id);
-            return Err(error);
-        }
-        timeout(request_timeout(method), receiver)
-            .await
-            .map_err(|_| AcpError::Timeout(method.to_owned()))?
-            .map_err(|_| {
+        // One budget for the write and the answer: a runtime that stops
+        // reading its stdin must not block a large request for ever.
+        let exchange = async {
+            self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+                .await?;
+            receiver.await.map_err(|_| {
                 AcpError::Transport(format!("ACP dispatcher stopped before {method} completed"))
             })?
+        };
+        let outcome = timeout(self.timeouts.for_method(method), exchange)
+            .await
+            .unwrap_or_else(|_| Err(AcpError::Timeout(method.to_owned())));
+        if outcome.is_err() {
+            self.pending.lock().await.remove(&id);
+        }
+        outcome
     }
 
     async fn send(&self, frame: Value) -> Result<(), AcpError> {
@@ -1400,10 +1449,16 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
                 // the model, not restart the tool's own wider bound again.
                 let status = update.get("status").and_then(Value::as_str);
                 let terminal = matches!(status, Some("completed" | "failed" | "cancelled"));
+                let call_id = update
+                    .get("toolCallId")
+                    .or_else(|| update.pointer("/toolCall/toolCallId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 if terminal {
-                    events.push(AcpSessionEvent::ToolCallEnded);
+                    events.push(AcpSessionEvent::ToolCallEnded { id: call_id });
                 } else {
                     events.push(AcpSessionEvent::ToolCall {
+                        id: call_id,
                         name: update
                             .get("title")
                             .and_then(Value::as_str)
@@ -3041,6 +3096,7 @@ mod tests {
             events,
             vec![
                 AcpSessionEvent::ToolCall {
+                    id: Some("call-1".into()),
                     name: "read_file".into()
                 },
                 AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
@@ -3122,7 +3178,9 @@ mod tests {
             assert_eq!(
                 events,
                 vec![
-                    AcpSessionEvent::ToolCallEnded,
+                    AcpSessionEvent::ToolCallEnded {
+                        id: Some("call-1".into())
+                    },
                     AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
                         id: "call-1".into(),
                         name: None,
@@ -3147,6 +3205,7 @@ mod tests {
                 events,
                 vec![
                     AcpSessionEvent::ToolCall {
+                        id: Some("call-1".into()),
                         name: "read_file".into()
                     },
                     AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
@@ -3173,6 +3232,7 @@ mod tests {
             events,
             vec![
                 AcpSessionEvent::ToolCall {
+                    id: Some("call-1".into()),
                     name: "cargo test".into()
                 },
                 AcpSessionEvent::ToolTrace(crate::agents::tool_trace::ToolTraceUpdate {
@@ -3584,7 +3644,12 @@ for line in sys.stdin:
         // "ACP request timed out: session/prompt", while the CLI path grants
         // the same work fifteen minutes of silence and up to two hours overall.
         assert_eq!(request_timeout("initialize"), CONTROL_REQUEST_TIMEOUT);
-        assert_eq!(request_timeout("session/new"), CONTROL_REQUEST_TIMEOUT);
+        assert_eq!(request_timeout("session/new"), SESSION_SETUP_TIMEOUT);
+        assert_eq!(request_timeout("session/resume"), SESSION_SETUP_TIMEOUT);
+        assert_eq!(
+            request_timeout("session/set_config_option"),
+            CONTROL_REQUEST_TIMEOUT
+        );
         assert_eq!(request_timeout("session/cancel"), CONTROL_REQUEST_TIMEOUT);
 
         assert_eq!(request_timeout("session/prompt"), PROMPT_REQUEST_TIMEOUT);

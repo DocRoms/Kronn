@@ -108,5 +108,11 @@ test('OpenCode full-access panel describes ACP permission scope, not a fabricate
   const panel = configuration.locator('.set-agent-panel-access');
   await expect(panel).toBeVisible();
   await expect(panel.locator('code')).toHaveCount(0);
-  await expect(panel.getByRole('switch')).toBeVisible();
+  // Full access is required to run an ACP agent, and no CLI flag is involved.
+  await expect(panel).toContainText('Requis pour lancer cet agent');
+  await expect(panel).toContainText('aucun flag CLI');
+  // The switch lives on the agent card itself, not in the configuration
+  // panel (KT-975).
+  await expect(page.getByTestId('agent-full-access-OpenCode')).toHaveAttribute('role', 'switch');
+  await expect(page.getByTestId('agent-full-access-OpenCode')).toBeVisible();
 });

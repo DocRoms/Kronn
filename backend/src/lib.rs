@@ -627,7 +627,7 @@ impl Drop for CancelGuard {
 // ─── Auth Middleware ─────────────────────────────────────────────────────────
 
 /// Bearer token authentication middleware.
-/// - Skips auth for /api/health (Docker healthcheck)
+/// - Skips auth for /api/health (Docker healthcheck) and the gateway's frame-src read
 /// - Skips auth when no token is configured
 /// - Skips auth for localhost requests (self-hosted: the user is always on the same machine)
 /// - Requires Bearer token for remote requests (peers, external API calls)
@@ -638,7 +638,9 @@ async fn auth_middleware(
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
     // Skip auth for health endpoint (Docker healthcheck)
-    if request.uri().path() == "/api/health" {
+    if request.uri().path() == "/api/health"
+        || request.uri().path() == api::live_pages::EMBED_FRAME_SRC_PATH
+    {
         return Ok(next.run(request).await);
     }
 
@@ -1163,12 +1165,18 @@ const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/orchestration/provider-quotas/{provider}/rearm",
 ];
 
+/// POSTs that widen what this instance lets in: an allowed embed site, directly
+/// or chosen during a Page import. Gated like `DESTRUCTIVE_POSTS`; their GETs
+/// stay open.
+const PERMISSION_POSTS: &[&str] = &["/api/config/embed-origins", "/api/pages/import"];
+
 /// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
 /// exists in this API), the listed POSTs, and the parameterized
 /// `/api/mcps/custom/{id}/cleanup-orphan-env`.
 fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
     method == axum::http::Method::DELETE
         || DESTRUCTIVE_POSTS.contains(&path)
+        || (method == axum::http::Method::POST && PERMISSION_POSTS.contains(&path))
         || (method == axum::http::Method::POST
             && path.starts_with("/api/orchestration/provider-quotas/")
             && path.ends_with("/rearm"))
@@ -1500,6 +1508,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/config/embed-origins",
             get(api::live_pages::embed_origins).post(api::live_pages::change_embed_origins),
+        )
+        .route(
+            api::live_pages::EMBED_FRAME_SRC_PATH,
+            get(api::live_pages::embed_frame_src),
         )
         .route(
             "/api/config/recovery/reencrypt",
@@ -3435,6 +3447,34 @@ mod auth_tests {
                 "{p} allows local"
             );
         }
+    }
+
+    #[test]
+    fn permission_posts_are_gated_but_their_reads_stay_open() {
+        for p in ["/api/config/embed-origins", "/api/pages/import"] {
+            assert!(
+                !auth_allows(&Method::POST, p, false, true, false, false),
+                "{p} must deny remote+no-token even with auth off"
+            );
+            assert!(auth_allows(&Method::POST, p, false, true, true, false));
+            assert!(auth_allows(&Method::POST, p, false, true, false, true));
+        }
+        assert!(auth_allows(
+            &Method::GET,
+            "/api/config/embed-origins",
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(auth_allows(
+            &Method::POST,
+            "/api/pages/import/preview",
+            false,
+            true,
+            false,
+            false
+        ));
     }
 
     #[test]

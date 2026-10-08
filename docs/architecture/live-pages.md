@@ -476,6 +476,23 @@ same way and reads the list again at once.
 [src: file: frontend/src/components/settings/ExternalContentSection.tsx:24]
 [src: file: frontend/src/hooks/useEmbedAllowedOrigins.ts:95]
 
+Docker. The gateway's CSP applies to the app document, so its `frame-src` is
+`'self'` plus exactly the allowed sites. On every document request the gateway
+asks `GET /api/embed-origins/frame-src` through `auth_request` (open like
+`/api/health`: it carries no credentials and returns only what the document's
+CSP shows anyway) and copies `X-Kronn-Frame-Src` into its single CSP header.
+Each origin is re-checked as a plain CSP host source (no `;`, quote, space,
+wildcard, `_` or IPv6 literal). CSP lets an `http://` source also match its
+`https://` upgrade, so an `http://` site is listed only when that upgrade is
+allowed too. The value is bounded at 16 KiB: an addition that would exceed it
+is refused, so every accepted site is listed. Validators
+are dropped on the document, so a newly allowed site plays after a reload; if
+the backend does not answer, the document is served with `frame-src 'self'`.
+Assets and `/api` keep `frame-src 'self'`. Desktop (no CSP) and native mode are
+unaffected.
+[src: file: backend/src/core/embed_origins.rs:254]
+[src: file: .docker/nginx.conf:31]
+
 Bridge. The injected script finds every `[data-kronn-embed]` (including ones
 page scripts render or change later, via a MutationObserver), and posts one
 `{type:'kronn:page-embeds', version:1, channel_id, embeds:[{key, url, rect,

@@ -1861,4 +1861,77 @@ mod tests {
         // credential_store::tests::an_env_auth_token_is_stored_encrypted...).
         assert!(main.contains("take_env_auth_token()"));
     }
+
+    /// Each agent reads its own `[agents.<key>]` table and no other one.
+    #[test]
+    fn every_agent_reads_only_its_own_full_access_table() {
+        use crate::models::AgentType;
+        let agents = [
+            (AgentType::ClaudeCode, "claude_code"),
+            (AgentType::Codex, "codex"),
+            (AgentType::OpenCode, "open_code"),
+            (AgentType::GeminiCli, "gemini_cli"),
+            (AgentType::Kiro, "kiro"),
+            (AgentType::Vibe, "vibe"),
+            (AgentType::CopilotCli, "copilot_cli"),
+            (AgentType::Ollama, "ollama"),
+            (AgentType::LiteLlm, "lite_llm"),
+            (AgentType::Nvidia, "nvidia"),
+        ];
+        for (_, key) in &agents {
+            let content = format!("[agents.{key}]\nfull_access = true\n");
+            for (agent, other) in &agents {
+                assert_eq!(
+                    saved_full_access_in(&content, agent),
+                    key == other,
+                    "{agent:?} reading [agents.{key}]"
+                );
+            }
+            assert!(!saved_full_access_in(&content, &AgentType::Custom));
+        }
+    }
+
+    /// A real config.toml is rewritten with its settings and the retained key;
+    /// with no real config and no retained key, nothing is written.
+    #[test]
+    fn write_key_copy_now_keeps_a_real_config_and_never_writes_without_a_key() {
+        let dir = scratch_dir("key-copy");
+        let mut config = default_config_without_key();
+        config.server.port = 4242;
+        write_key_copy_now(&dir, &config).unwrap();
+        assert!(!dir.join(CONFIG_FILE).exists(), "nothing to write");
+
+        std::fs::write(dir.join(CONFIG_FILE), "[server]\nport = 3140\n").unwrap();
+        let key = crate::core::crypto::generate_secret();
+        retain_disk_key(&dir, &key);
+        write_key_copy_now(&dir, &config).unwrap();
+        assert_eq!(read_disk_key(&dir).unwrap().as_deref(), Some(key.as_str()));
+        let written: AppConfig =
+            toml::from_str(&std::fs::read_to_string(dir.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(written.server.port, 4242, "the settings in memory are kept");
+        release_disk_key(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a retained key, a reset removes config.toml, accepts an
+    /// already-missing file, and reports a file it cannot remove.
+    #[tokio::test]
+    #[serial]
+    async fn reset_without_a_retained_key_removes_the_config() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("reset-no-key");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+        std::fs::write(tmp.join(CONFIG_FILE), "[server]\nport = 3140\n").unwrap();
+        reset_to_key_only().await.unwrap();
+        assert!(!tmp.join(CONFIG_FILE).exists());
+        reset_to_key_only().await.unwrap();
+
+        std::fs::create_dir(tmp.join(CONFIG_FILE)).unwrap();
+        std::fs::write(tmp.join(CONFIG_FILE).join("marker"), "keep").unwrap();
+        let result = reset_to_key_only().await;
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        assert!(result.is_err(), "an unremovable config.toml is an error");
+        assert!(tmp.join(CONFIG_FILE).join("marker").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

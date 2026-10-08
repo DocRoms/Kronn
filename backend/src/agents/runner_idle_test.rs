@@ -611,9 +611,21 @@ def update(kind, text):
         "update": {"sessionUpdate": kind, "content": {"type": "text", "text": text}}}})
 
 mode = os.environ["FIXTURE_MODE"]
+if mode.startswith("mute_"):
+    # Holds the line from the start, like a runtime whose MCP servers are up.
+    subprocess.Popen(["sleep", "3600"], close_fds=False)
+    os.write(3, b"up")
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
+    if method == "initialize" and mode == "mute_initialize":
+        continue
+    if method == "session/new" and mode == "mute_session":
+        continue
+    if method == "session/new" and mode == "mute_error_session":
+        send({"jsonrpc": "2.0", "id": message["id"],
+              "error": {"code": -32603, "message": "MCP config rejected by the runtime"}})
+        continue
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": message["id"], "result": {
             "protocolVersion": 1,
@@ -634,6 +646,23 @@ for line in sys.stdin:
             subprocess.Popen(["sleep", "3600"], close_fds=False)
             os.write(3, b"up")
             time.sleep(3600)
+        elif mode == "tool_updates":
+            # Two overlapping tools, progress only, never a word of text
+            # until the answer: busy, not silent.
+            for index in range(8):
+                time.sleep(0.4)
+                for call in ("build", "tests"):
+                    send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                        "sessionId": "idle-session",
+                        "update": {"sessionUpdate": "tool_call_update", "toolCallId": call,
+                                   "title": call, "status": "in_progress"}}})
+            for call in ("build", "tests"):
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": "idle-session",
+                    "update": {"sessionUpdate": "tool_call_update", "toolCallId": call,
+                               "status": "completed"}}})
+            update("agent_message_chunk", "built and tested")
+            send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
         elif mode == "slow_alive":
             for index in range(5):
                 time.sleep(0.5)
@@ -740,10 +769,21 @@ struct AcpRun<'a> {
     line: Option<&'a AgentLine>,
     idle: Option<Duration>,
     cancel: Option<&'a tokio_util::sync::CancellationToken>,
+    timeouts: Option<crate::acp::AcpRequestTimeouts>,
 }
 
 #[cfg(unix)]
 async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentProcess {
+    try_start_acp_agent(run, project)
+        .await
+        .expect("the ACP run starts")
+}
+
+#[cfg(unix)]
+async fn try_start_acp_agent(
+    run: AcpRun<'_>,
+    project: &tempfile::TempDir,
+) -> Result<AgentProcess, String> {
     let mut command = tokio::process::Command::new("python3");
     command
         .args(["-c", ACP_AGENT])
@@ -767,11 +807,14 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
             });
         }
     }
-    let transport: Arc<dyn crate::acp::AcpTransport> = Arc::new(
+    let mut transport =
         crate::acp::AcpJsonRpcTransport::spawn(crate::acp::AcpAgent::OpenCode, command, false)
             .await
-            .expect("the stand-in agent starts"),
-    );
+            .expect("the stand-in agent starts");
+    if let Some(timeouts) = run.timeouts {
+        transport = transport.with_request_timeouts(timeouts);
+    }
+    let transport: Arc<dyn crate::acp::AcpTransport> = Arc::new(transport);
     if let Some(line) = run.line {
         line.release_write();
     }
@@ -796,7 +839,367 @@ async fn start_acp_agent(run: AcpRun<'_>, project: &tempfile::TempDir) -> AgentP
         )
     })
     .await
-    .expect("the ACP run starts")
+}
+
+/// Startup budgets a test can wait out.
+#[cfg(unix)]
+fn short_timeouts() -> crate::acp::AcpRequestTimeouts {
+    crate::acp::AcpRequestTimeouts {
+        control: Duration::from_secs(1),
+        session_setup: Duration::from_secs(2),
+        prompt: Duration::from_secs(60),
+    }
+}
+
+/// A runtime that never answers one startup phase: the start fails within
+/// that phase's bound, names it, and its whole process group is gone.
+#[cfg(unix)]
+async fn a_mute_startup_phase_fails_fast(mode: &str, phase: &str, bound: Duration) -> String {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers": {"Hang": {"command": "sh", "args": ["-c", "cat"]},
+            "Ghost": {"command": "kronn-test-no-such-mcp-command"}}}"#,
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let error = match try_start_acp_agent(
+        AcpRun {
+            mode,
+            line: Some(&line),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await
+    {
+        Ok(_) => panic!("{mode}: a runtime that never answers must not start"),
+        Err(error) => error,
+    };
+    let waited = started.elapsed();
+    assert!(
+        waited >= bound && waited < bound + Duration::from_secs(5),
+        "{mode}: failed on its own bound: {waited:?}"
+    );
+    let timeout = crate::agents::acp_start::AcpStartFailure::from_error(&error)
+        .unwrap_or_else(|| panic!("{mode}: a structured start timeout: {error}"));
+    assert_eq!(
+        serde_json::to_value(timeout.phase).unwrap(),
+        serde_json::json!(phase)
+    );
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await,
+        "{mode}: the runtime and what it started are killed"
+    );
+    error
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_runtime_that_never_answers_initialize_is_stopped_with_its_phase() {
+    let error =
+        a_mute_startup_phase_fails_fast("mute_initialize", "initialize", Duration::from_secs(1))
+            .await;
+    assert!(
+        error.contains("OpenCode did not answer initialization within 1 s"),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_runtime_that_never_opens_its_session_names_the_project_servers() {
+    let error =
+        a_mute_startup_phase_fails_fast("mute_session", "session", Duration::from_secs(2)).await;
+    let timeout = crate::agents::acp_start::AcpStartFailure::from_error(&error).unwrap();
+    assert_eq!(
+        timeout.servers,
+        vec!["Hang".to_string()],
+        "the project server is named; one whose command is missing was never declared"
+    );
+    assert!(
+        error.contains("OpenCode did not open its session within 2 s"),
+        "{error}"
+    );
+}
+
+/// A run busy with tool updates for longer than the delay, with no text at
+/// all until its answer, is not cut, and it tells consumers that its own
+/// watchdog owns inactivity, so their text timers stand down.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_run_busy_with_tool_updates_outlives_the_delay() {
+    let project = tempfile::tempdir().unwrap();
+    let mut running = start_acp_agent(
+        AcpRun {
+            mode: "tool_updates",
+            idle: Some(Duration::from_secs(1)),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await;
+    assert!(running.activity_watched());
+    let started = std::time::Instant::now();
+    let text = drain(&mut running).await;
+    assert!(
+        started.elapsed() > Duration::from_secs(3),
+        "busy past the 1 s delay"
+    );
+    assert_eq!(text, "built and tested");
+    assert!(running.child.wait().await.expect("lifeline").success());
+}
+
+/// A runtime that answers `session/new` with an error is settled with that
+/// error and its phase at once, never left to a silent retry.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_session_refused_by_the_runtime_is_a_settled_start_failure() {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let Err(error) = try_start_acp_agent(
+        AcpRun {
+            mode: "mute_error_session",
+            line: Some(&line),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await
+    else {
+        panic!("a refused session must not start");
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "no wait on a bound"
+    );
+    let failure = crate::agents::acp_start::AcpStartFailure::from_error(&error)
+        .unwrap_or_else(|| panic!("a structured start failure: {error}"));
+    assert_eq!(
+        failure.phase,
+        crate::agents::acp_start::AcpStartPhase::Session
+    );
+    assert!(
+        failure
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("MCP config rejected by the runtime")),
+        "{failure:?}"
+    );
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await
+    );
+}
+
+/// A stop during startup ends the start at once and kills the runtime.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stopper = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        stopper.cancel();
+    });
+    let started = std::time::Instant::now();
+    let Err(error) = try_start_acp_agent(
+        AcpRun {
+            mode: "mute_session",
+            line: Some(&line),
+            cancel: Some(&cancel),
+            timeouts: Some(crate::acp::AcpRequestTimeouts {
+                session_setup: Duration::from_secs(60),
+                ..short_timeouts()
+            }),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await
+    else {
+        panic!("a stopped start must not start");
+    };
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(error.contains("ACP start cancelled"), "{error}");
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await
+    );
+}
+
+/// The delay a reasoning-only turn must outlive. The fixtures beat every
+/// 0.5 s for 6 s: a 6× margin per gap holds on a loaded machine, and the
+/// turn still lasts twice the delay.
+#[cfg(unix)]
+const REASONING_DELAY: Duration = Duration::from_secs(3);
+
+/// An adapted turn that only reasons — thinking deltas, reasoning items —
+/// for longer than the delay is alive, not silent: it is not cut.
+#[cfg(unix)]
+async fn a_reasoning_only_adapted_turn_outlives_the_delay(
+    agent: &AgentType,
+    transport: Arc<dyn crate::acp::AcpTransport>,
+    project: &tempfile::TempDir,
+    answer: &str,
+) {
+    let started = std::time::Instant::now();
+    let mut running = run_acp_session(
+        AcpSessionRequest {
+            step_tools: None,
+            agent_type: agent,
+            work_dir: project.path(),
+            prompt: "think",
+            system_context: "",
+            project_path: "",
+            model_flag: None,
+            reasoning_effort: None,
+            parent_cancel: None,
+            discussion_id: None,
+            resume_id: None,
+            session_store: None,
+            fallback_prompt: None,
+            provenance: None,
+            activity: None,
+            idle_timeout: Some(REASONING_DELAY),
+        },
+        transport,
+    )
+    .await
+    .expect("the adapted turn starts");
+    let text = drain(&mut running).await;
+    // A cut ends the turn without its answer; the stall reason in stderr
+    // says after how many beats.
+    assert_eq!(text, answer, "{agent:?}: {}", stderr_of(&running));
+    assert!(
+        started.elapsed() > REASONING_DELAY + Duration::from_secs(2),
+        "{agent:?}: reasoned well past the delay, {:?}",
+        started.elapsed()
+    );
+    assert!(
+        running.child.wait().await.expect("lifeline").success(),
+        "{agent:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_claude_turn_that_only_thinks_is_not_cut() {
+    let project = tempfile::tempdir().unwrap();
+    let fixture = crate::acp::test_support::write_fixture_script(
+        project.path(),
+        r#"
+cat >/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 0.5
+  printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}'
+done
+printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thought it through"}}}'
+printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2}}'
+"#,
+    );
+    let adapter = crate::acp::ClaudeAcpAdapter::new(
+        None,
+        None,
+        false,
+        None,
+        crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
+    )
+    .with_program(&fixture);
+    a_reasoning_only_adapted_turn_outlives_the_delay(
+        &AgentType::ClaudeCode,
+        Arc::new(adapter),
+        &project,
+        "thought it through",
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_codex_turn_that_only_reasons_is_not_cut() {
+    let project = tempfile::tempdir().unwrap();
+    let fixture = crate::acp::test_support::write_fixture_script(
+        project.path(),
+        r#"
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"th-reasoning"}'
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 0.5
+  printf '%s\n' "{\"type\":\"item.updated\",\"item\":{\"id\":\"r1\",\"type\":\"reasoning\",\"text\":\"step $i\"}}"
+done
+printf '%s\n' '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"reasoned it out"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2}}'
+"#,
+    );
+    let adapter = crate::acp::CodexAcpAdapter::new(
+        None,
+        None,
+        false,
+        None,
+        None,
+        crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
+    )
+    .with_program(&fixture);
+    a_reasoning_only_adapted_turn_outlives_the_delay(
+        &AgentType::Codex,
+        Arc::new(adapter),
+        &project,
+        "reasoned it out",
+    )
+    .await;
+}
+
+/// The prompt half: a session that opens, then never says a word. The run
+/// fails on the configured delay with the no-first-token reason the discussion
+/// turns into its own message, and the process group is gone.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn an_acp_prompt_that_never_answers_fails_on_the_delay_and_is_killed() {
+    let line = AgentLine::open();
+    let project = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let mut running = start_acp_agent(
+        AcpRun {
+            mode: "mute_prompt",
+            line: Some(&line),
+            idle: Some(Duration::from_secs(1)),
+            timeouts: Some(short_timeouts()),
+            ..Default::default()
+        },
+        &project,
+    )
+    .await;
+    assert!(drain(&mut running).await.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(!running.child.wait().await.expect("lifeline").success());
+    let reason = running.captured_stderr_flushed().await.join("\n");
+    assert!(reason.contains(idle_watchdog::NO_FIRST_TOKEN), "{reason}");
+    assert!(
+        line.wait_for(LineState::Closed, Duration::from_secs(10))
+            .await,
+        "the silent runtime is killed with its process group"
+    );
 }
 
 /// DoD 3 for ACP, against the simulated Ollama — the agent is stopped with its
@@ -1095,11 +1498,17 @@ impl crate::acp::AcpTransport for ScriptedAcp {
             }
             Turn::ToolThenAnswer { name, busy } => {
                 events
-                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .send(AcpSessionEvent::ToolCall {
+                        id: None,
+                        name: name.into(),
+                    })
                     .await
                     .unwrap();
                 tokio::time::sleep(busy).await;
-                events.send(AcpSessionEvent::ToolCallEnded).await.unwrap();
+                events
+                    .send(AcpSessionEvent::ToolCallEnded { id: None })
+                    .await
+                    .unwrap();
                 events
                     .send(AcpSessionEvent::TextDelta("the answer".into()))
                     .await
@@ -1109,18 +1518,27 @@ impl crate::acp::AcpTransport for ScriptedAcp {
             }
             Turn::ToolNeverEnds { name } => {
                 events
-                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .send(AcpSessionEvent::ToolCall {
+                        id: None,
+                        name: name.into(),
+                    })
                     .await
                     .unwrap();
                 std::future::pending().await
             }
             Turn::ToolEndsThenModelGoesSilent { name } => {
                 events
-                    .send(AcpSessionEvent::ToolCall { name: name.into() })
+                    .send(AcpSessionEvent::ToolCall {
+                        id: None,
+                        name: name.into(),
+                    })
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                events.send(AcpSessionEvent::ToolCallEnded).await.unwrap();
+                events
+                    .send(AcpSessionEvent::ToolCallEnded { id: None })
+                    .await
+                    .unwrap();
                 std::future::pending().await
             }
         }
