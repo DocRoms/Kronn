@@ -36,10 +36,20 @@ export function SettingsRoute() {
   }, [onEmbedSettings, nav]);
   // `/config#<anchor>`: each arrival brings the anchor (a section, or a field
   // such as `#run-payload-retention`) into view once the page has settled, so
-  // the sections still loading above it do not push it away. Not when the
-  // page's own links set the address: the page has already scrolled there.
+  // the sections still loading above it do not push it away. Not the address
+  // the page's own link has just set: the page has already scrolled there.
+  // That is said for that one move only, and kept in memory, never in the
+  // history entry: a reload, Back and Forward to the entry are arrivals.
   const { hash, key: arrival } = location;
-  const scrolledByPage = (location.state as SettingsIntent | null)?.inPage === true;
+  const [inPageMove, setInPageMove] = useState<{ anchor: string; key: string | null } | null>(null);
+  if (inPageMove) {
+    if (inPageMove.key === null && hash === `#${encodeURIComponent(inPageMove.anchor)}`) {
+      setInPageMove({ ...inPageMove, key: arrival });
+    } else if (inPageMove.key !== null && inPageMove.key !== arrival) {
+      setInPageMove(null);
+    }
+  }
+  const scrolledByPage = inPageMove !== null && (inPageMove.key === null || inPageMove.key === arrival);
   let arrivalAnchor: string | null = null;
   if (!scrolledByPage) {
     try { arrivalAnchor = decodeURIComponent(hash.slice(1)) || null; } catch { arrivalAnchor = null; }
@@ -63,7 +73,10 @@ export function SettingsRoute() {
       onNavigateDiscussion={nav.toDiscussion}
       // A link to one of the page's own anchors moves the address in place:
       // a step inside one page is not a step Back has to walk through.
-      onAnchorFollowed={anchorId => nav.toSettingsSection(anchorId, { inPage: true }, { replace: true })}
+      onAnchorFollowed={anchorId => {
+        setInPageMove({ anchor: anchorId, key: null });
+        nav.toSettingsSection(anchorId, {}, { replace: true });
+      }}
       arrivalAnchor={arrivalAnchor}
       arrivalToken={arrival}
       toast={ctx.toast}

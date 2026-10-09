@@ -84,7 +84,7 @@ export interface ProjectListProps {
   /** What the address names inside the open project (its view, a file, a folder). */
   projectLocation?: ProjectLocation | null;
   /** Reports a view picked in the open project, so the address follows. */
-  onProjectLocationChange?: (location: ProjectLocation) => void;
+  onProjectLocationChange?: (location: ProjectLocation, options?: { replace?: boolean }) => void;
 }
 
 export function ProjectList({

@@ -39,7 +39,11 @@ Release notes for 0.9.3 and earlier are available in the
   discussions (`/discussions/compare/<run>`) and a Configuration section
   (`/config#<section>`). A file an agent cites, a just-validated audit or a
   just-improved Quick Prompt now opens at such an address, so Back, a reload
-  and a shared link land on the same view.
+  and a shared link land on the same view. A code view opened without a file
+  names the file it shows in its address, so Back to it reopens that file;
+  choosing a type's list from one of its Automation resources is a step Back
+  undoes; a reload, Back or Forward on a Configuration section brings it
+  into view again.
 - "Open the retention setting" on the run-retention banner (Automation and
   Configuration) lands on the setting, centred and focused, at its address
   `/config#run-payload-retention`; it used to stop short of it while the page

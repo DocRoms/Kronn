@@ -91,4 +91,24 @@ describe('Automation route — the last visit', () => {
     expect(window.history.length).toBe(depth);
     expect(openQuickPrompt()).toBeNull();
   });
+
+  it('makes choosing the type list from a Quick Prompt a step Back undoes', async () => {
+    await renderDashboard('/workflows/qp/qp-1');
+    await waitFor(() => expect(openQuickPrompt()).toHaveTextContent('Release notes'));
+    const depth = window.history.length;
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-tour-id="automation-filter-type"]')!);
+    await act(async () => { fireEvent.click(document.querySelector<HTMLElement>('[data-kind-option="quickPrompts"]')!); });
+    await waitFor(() => expect(window.location.pathname).toBe('/workflows/qp'));
+    expect(window.history.length).toBe(depth + 1);
+    expect(openQuickPrompt()).toBeNull();
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/workflows/qp/qp-1'));
+    await waitFor(() => expect(openQuickPrompt()).toHaveTextContent('Release notes'));
+
+    await act(async () => { window.history.forward(); });
+    await waitFor(() => expect(window.location.pathname).toBe('/workflows/qp'));
+    await waitFor(() => expect(openQuickPrompt()).toBeNull());
+  });
 });

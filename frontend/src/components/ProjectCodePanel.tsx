@@ -16,7 +16,7 @@ interface ProjectCodePanelProps {
   initialPath?: string | null;
   initialLine?: number | null;
   /** The reader opened another source file: see `SourceCodeViewer`. */
-  onPathChange?: (path: string) => void;
+  onPathChange?: (path: string, options?: { replace?: boolean }) => void;
 }
 
 interface SelectedDiff {

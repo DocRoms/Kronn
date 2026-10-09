@@ -7,10 +7,11 @@ import {
   quickApis as quickApisApi,
   quickExecs as quickExecsApi,
   quickPrompts as quickPromptsApi,
+  skills as skillsApi,
 } from '../../lib/api';
 import { WorkflowsPage } from '../WorkflowsPage';
 import { readAutomationLastVisit } from '../../lib/automationNavigation';
-import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
+import type { AgentsConfig, QuickApi, QuickExec, QuickPrompt, Skill, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
   list: vi.fn().mockResolvedValue([]),
@@ -1917,6 +1918,60 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
       [{ tab: 'quickPrompts', resourceId: 'qp-gone', runId: null }, 'restore'],
       [{ tab: 'quickPrompts', resourceId: null, runId: null }, 'restore'],
     ]);
+  });
+
+  // Review #227 — choosing a type from a resource's detail is the reader's
+  // step, even when it lands on the list of the same type: Back must bring
+  // the resource back, for every type.
+  it.each([
+    ['workflows', 'wf-lab', () => {
+      mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+      mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+      mockWorkflowsApi.listRuns.mockResolvedValue([]);
+      mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    }],
+    ['quickPrompts', 'qp-open', () => {
+      vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([{
+        id: 'qp-open', name: 'Prompt ouvert', icon: '✍️', prompt_template: 'Résume',
+        variables: [], agent: 'ClaudeCode', project_id: null, skill_ids: [], profile_ids: [],
+        directive_ids: [], tier: 'default', description: '', pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickPrompt]);
+    }],
+    ['quickApis', 'qa-open', () => {
+      vi.mocked(quickApisApi.list).mockResolvedValueOnce([{
+        id: 'qa-open', name: 'API ouverte', icon: '🔌', description: '', project_id: null,
+        api_plugin_slug: 'demo', api_config_id: 'cfg', api_endpoint_path: '/items',
+        variables: [], profile_ids: [], directive_ids: [], pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickApi]);
+    }],
+    ['quickExecs', 'qe-open', () => {
+      vi.mocked(quickExecsApi.list).mockResolvedValueOnce([{
+        id: 'qe-open', name: 'Exec ouvert', icon: '⌘', description: '', project_id: null,
+        command: 'git', args: ['status'], timeout_secs: 30, output_format: 'text',
+        variables: [], pinned: false,
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+      } satisfies QuickExec]);
+    }],
+    ['skills', 'skill-open', () => {
+      vi.mocked(skillsApi.list).mockResolvedValueOnce([{
+        id: 'skill-open', name: 'Skill ouvert', description: '', icon: '🧩', category: 'Domain',
+        content: '# Skill\n', is_builtin: false, token_estimate: 10,
+      } satisfies Skill]);
+    }],
+  ] as const)('reports choosing the %s type from one of its resources as the reader\'s step', async (tab, resourceId, mockList) => {
+    mockList();
+    const onSelectionChange = vi.fn();
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig}
+      onSelectionChange={onSelectionChange} selection={{ tab, resourceId, runId: null }} />);
+    expect(onSelectionChange).toHaveBeenCalledWith({ tab, resourceId, runId: null }, 'restore');
+
+    fireEvent.click(automationTypeChip());
+    await act(async () => { fireEvent.click(document.querySelector<HTMLElement>(`[data-kind-option="${tab}"]`)!); });
+
+    await waitFor(() => expect(onSelectionChange).toHaveBeenLastCalledWith({ tab, resourceId: null, runId: null }, 'change'));
+    expect(onSelectionChange.mock.calls.filter(([, reason]) => reason === 'restore')).toHaveLength(1);
   });
 
   it('keeps the full focused run when the compact page already contains its id', async () => {

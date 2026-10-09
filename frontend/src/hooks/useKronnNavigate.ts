@@ -90,7 +90,6 @@ export function useKronnNavigate(): KronnNavigate {
     toSettingsSection: (sectionId, intent = {}, options) => {
       const state: SettingsIntent = {};
       if (intent.modelTier) state.modelTier = intent.modelTier;
-      if (intent.inPage) state.inPage = true;
       void navigateRef.current(settingsSectionPath(sectionId), {
         replace: options?.replace,
         state: Object.keys(state).length > 0 ? state : null,

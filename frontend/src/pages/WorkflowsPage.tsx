@@ -539,11 +539,22 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       : { tab, resourceId, runId: tab === 'workflows' && resourceId ? focusRunId : null };
     // Letting go of a resource the loaded list does not know is the page's
     // own word, like its first: the address it corrects is replaced, so Back
-    // does not bounce the reader between the two.
+    // does not bounce the reader between the two. Only that: a resource the
+    // reader closes — choosing the list of its type — is a step Back undoes.
     const previous = currentSelectionRef.current;
     // Said once: the address only hears what changes.
     if (previous !== null && sameAutomationSelection(previous, current)) return;
-    const letGo = previous !== null && previous.tab === tab && previous.resourceId !== null && resourceId === null && !editor;
+    const unknownToItsList = tab === 'workflows'
+      ? invalidWorkflowSelection
+      : tab === 'quickPrompts'
+        ? invalidQuickPromptSelection
+        : tab === 'quickApis'
+          ? invalidQuickApiSelection
+          : tab === 'skills'
+            ? invalidSkillSelection
+            : invalidQuickExecSelection;
+    const letGo = previous !== null && previous.tab === tab && previous.resourceId !== null && resourceId === null
+      && !editor && unknownToItsList;
     const reason: SelectionReason = previous === null || letGo ? 'restore' : 'change';
     currentSelectionRef.current = current;
     onSelectionChange?.(current, reason);

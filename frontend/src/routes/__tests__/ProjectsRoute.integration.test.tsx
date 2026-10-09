@@ -87,6 +87,53 @@ describe('Projects route — the file open in the code view', () => {
     expect(selectedFile()).toBe('NOTES.md');
   });
 
+  it('names the file it opens on its own without a step of history; Back to it reopens it', async () => {
+    await renderDashboard('/projects/p1/code');
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    // The default file is written into the address in place: the bare
+    // address is the same page, not a step Back has to undo.
+    await waitFor(() => expect(address()).toBe('/projects/p1/code?file=README.md'));
+    const depth = window.history.length;
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'NOTES.md' })); });
+    expect(await screen.findByText('contents of NOTES.md')).toBeInTheDocument();
+    expect(address()).toBe('/projects/p1/code?file=NOTES.md');
+    expect(window.history.length).toBe(depth + 1);
+
+    await act(async () => { window.history.back(); });
+    await waitFor(() => expect(address()).toBe('/projects/p1/code?file=README.md'));
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('README.md');
+
+    await act(async () => { window.history.forward(); });
+    await waitFor(() => expect(address()).toBe('/projects/p1/code?file=NOTES.md'));
+    expect(await screen.findByText('contents of NOTES.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('NOTES.md');
+
+    // A reload of the bare address opens the default file again.
+    cleanup();
+    await renderDashboard('/projects/p1/code');
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('README.md');
+  });
+
+  it('opens the default file again when the address stops naming one, in the tree it has', async () => {
+    await renderDashboard('/projects/p1/code?file=NOTES.md');
+    expect(await screen.findByText('contents of NOTES.md')).toBeInTheDocument();
+    const treeRequests = vi.mocked(projectsApi.listSourceFiles).mock.calls.length;
+
+    // An address of the code view that names no file, reached without leaving
+    // the view: a link, an entry written before the default was named.
+    await act(async () => {
+      window.history.pushState(null, '', '/projects/p1/code');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('README.md');
+    await waitFor(() => expect(address()).toBe('/projects/p1/code?file=README.md'));
+    expect(vi.mocked(projectsApi.listSourceFiles).mock.calls).toHaveLength(treeRequests);
+  });
+
   it('keeps the tree it loaded when the address moves to another file', async () => {
     await renderDashboard('/projects/p1/code?file=README.md');
     expect(await screen.findByText('contents of README.md')).toBeInTheDocument();

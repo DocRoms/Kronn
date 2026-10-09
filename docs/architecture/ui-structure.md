@@ -57,7 +57,11 @@ the router cannot read; the same id in a direct address is handed to the
 page as it is, like any unknown id. Any other hash is left alone: it routes
 nowhere, and only Configuration reads it, as the anchor (a section or a
 setting) to bring into view. A hash is an in-page anchor, never a route.
-`[src: file: frontend/src/routes/SettingsRoute.tsx:36-49]`
+When one of Configuration's own links sets the anchor, the page has already
+scrolled: the route is told so in memory, for that one move only, never in
+the history entry, so a reload, Back or Forward to the entry is an arrival
+like any other.
+`[src: file: frontend/src/routes/SettingsRoute.tsx:37-60]`
 `[src: file: frontend/src/lib/revealWhenSettled.ts:1-93]`
 `[src: file: frontend/src/lib/legacyRoutes.ts:11-50]`
 `[src: file: frontend/src/App.tsx:159-162]`
@@ -100,7 +104,11 @@ setting) to bring into view. A hash is an in-page anchor, never a route.
   selection. A change callback says why (`SelectionReason`): `change` is the
   reader's, a step Back can undo; `restore` is the page's own word — its first,
   or a resource the loaded list does not know let go — and replaces the
-  address instead. The bare address of a page that remembers its last visit
+  address instead. What a view opens on its own while its address names
+  nothing (the default file of a project's code view) is written into the
+  address in place, so the entry names what it shows.
+  `[src: file: frontend/src/components/SourceCodeViewer.tsx:253-260]`
+  The bare address of a page that remembers its last visit
   is resolved by the route, never by the page. Nothing crosses pages through
   `sessionStorage`: a deep link is an address, plus an arrival intent for
   what it does once. The tab of the page already open is not a navigation.

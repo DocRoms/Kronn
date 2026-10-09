@@ -24,9 +24,11 @@ interface SourceCodeViewerProps {
    *  Absent when the host has no tab to open it in. */
   onOpenCommit?: (sha: string) => void;
   /** The reader opened another file — from the tree, or the next/previous
-   *  match — so the address can follow it. Not said for what the viewer
-   *  opens on its own: a deep link, the default file. */
-  onPathChange?: (path: string) => void;
+   *  match — so the address can follow it. The default file the viewer opens
+   *  on its own while the address names none is said with `replace`: the
+   *  address names it in place, without a step of history. A deep link is
+   *  not said: the address already names it. */
+  onPathChange?: (path: string, options?: { replace?: boolean }) => void;
 }
 
 export function SourceCodeViewer({ projectId, initialPath, initialLine, onOpenCommit, onPathChange }: SourceCodeViewerProps) {
@@ -115,13 +117,17 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
   // the way to it. What the reader just opened is already on screen. State
   // that follows a prop is adjusted during render, as React asks.
   const [followedPath, setFollowedPath] = useState(initialPath);
+  // The file an address that names none shows: the one the tree offers first.
+  const [defaultPath, setDefaultPath] = useState<string | null>(null);
   if (initialPath !== followedPath) {
     setFollowedPath(initialPath);
-    if (initialPath) {
-      setSelectedPath(initialPath);
-      if (!HTML_FILE_PATH.test(initialPath)) setContentView('code');
+    // An address that stops naming a file shows the default file again.
+    const shownPath = initialPath || defaultPath;
+    if (shownPath) {
+      setSelectedPath(shownPath);
+      if (!HTML_FILE_PATH.test(shownPath)) setContentView('code');
       setCurrentMatchIdx(0);
-      const onTheWay = ancestorDirs(initialPath);
+      const onTheWay = ancestorDirs(shownPath);
       if (onTheWay.length > 0) setExpandedDirs(previous => new Set([...previous, ...onTheWay]));
     }
   }
@@ -170,7 +176,9 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
         // rather than inherited: the first folder to come back with a file
         // offers it, and a choice already made — a deep link, or a click —
         // always wins.
-        setSelectedPath(previous => previous ?? findPreferredSourceFile(children)?.path ?? null);
+        const preferred = findPreferredSourceFile(children)?.path ?? null;
+        setSelectedPath(previous => previous ?? preferred);
+        setDefaultPath(previous => previous ?? preferred);
         setDirStatus(current => {
           const next = { ...current };
           // A folder that hit the answer's bound keeps a state, because it is
@@ -202,13 +210,15 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     if (root.truncated) setDirStatus(current => ({ ...current, [ROOT_KEY]: 'truncated' }));
     setExclusions(savedExclusions);
     const deepLinkPath = initialPathRef.current;
+    const preferred = findPreferredSourceFile(rootFiles)?.path ?? null;
     setSelectedPath(previous => {
       if (previous) return previous;
       // Only what is loaded can be preferred. A deep link names its own file,
       // and the folders on the way to it are fetched below.
       if (deepLinkPath) return deepLinkPath;
-      return findPreferredSourceFile(rootFiles)?.path ?? null;
+      return preferred;
     });
+    setDefaultPath(previous => previous ?? preferred);
     setTreeLoading(false);
 
     // The folders open on arrival, in parallel — they are siblings.
@@ -240,6 +250,14 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
       Promise.resolve(),
     );
   }, [followedPath, treeLoading, loadDirectory]);
+
+  // The default file on screen while the address names none: the address
+  // names it in place, so that Back to it opens it again. A file the reader
+  // picks is said by the gesture that picks it.
+  useEffect(() => {
+    if (followedPath || !selectedPath || selectedPath !== defaultPath) return;
+    onPathChange?.(selectedPath, { replace: true });
+  }, [followedPath, selectedPath, defaultPath, onPathChange]);
 
   const fetchTree = useCallback(() => {
     const generation = treeLoadRef.current + 1;

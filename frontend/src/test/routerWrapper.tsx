@@ -30,9 +30,12 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
-/** `shell` as the root route of the real dashboard route table, opened at `initialPath`. */
-export function withDashboardRoutes(shell: ReactElement, initialPath = '/'): ReactElement {
-  window.history.replaceState(null, '', initialPath);
+/**
+ * `shell` as the root route of the real dashboard route table, opened at
+ * `initialPath`. `historyState` is what the entry holds, as a reload keeps it.
+ */
+export function withDashboardRoutes(shell: ReactElement, initialPath = '/', historyState: unknown = null): ReactElement {
+  window.history.replaceState(historyState, '', initialPath);
   const router = createBrowserRouter([{ path: '/', element: shell, children: dashboardRoutes }]);
   liveRouters.push(router);
   // As in `main.tsx`: synchronous router state updates.

@@ -177,6 +177,25 @@ describe('SourceCodeViewer', () => {
     expect(onPathChange).toHaveBeenCalledTimes(1);
   });
 
+  it('names the default file it opens on its own in place, once, and never a deep link', async () => {
+    mockDirectories(() => [
+      { path: 'README.md', name: 'README.md', is_dir: false },
+      { path: 'NOTES.md', name: 'NOTES.md', is_dir: false },
+    ]);
+    vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `# ${path}` }));
+    const onPathChange = vi.fn();
+
+    const view = render(<SourceCodeViewer projectId="project-1" onPathChange={onPathChange} />);
+    expect(await screen.findByText('# README.md')).toBeInTheDocument();
+    expect(onPathChange).toHaveBeenCalledExactlyOnceWith('README.md', { replace: true });
+
+    // The address now names it: nothing more to say.
+    view.rerender(<SourceCodeViewer projectId="project-1" initialPath="README.md" onPathChange={onPathChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'NOTES.md' }));
+    expect(onPathChange).toHaveBeenLastCalledWith('NOTES.md');
+    expect(onPathChange).toHaveBeenCalledTimes(2);
+  });
+
   it('follows a new address in place: the tree and its open folders stay', async () => {
     vi.mocked(projects.readSourceFile).mockImplementation(async (_id, path) => ({ path, content: `// ${path}` }));
     const onPathChange = vi.fn();

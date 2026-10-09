@@ -102,7 +102,7 @@ export interface ProjectCardProps {
   location?: ProjectLocation | null;
   /** Reports a view the reader picks, and the code file they open in it, so
    * the address follows them. */
-  onLocationChange?: (location: ProjectLocation) => void;
+  onLocationChange?: (location: ProjectLocation, options?: { replace?: boolean }) => void;
 }
 
 export function ProjectCard({
@@ -165,11 +165,18 @@ export function ProjectCard({
     onLocationChange?.({ view: 'code', file: path, line });
   }, [onLocationChange]);
   // The reader opened another file in the code view: the address names it,
-  // without the line of the link that brought them here.
-  const followCodeFile = useCallback((path: string) => {
+  // without the line of the link that brought them here. The default file
+  // the view opened on its own is named in place, and only by an address of
+  // the code view: a bare project address stays as it is.
+  const addressedView = location?.view ?? null;
+  const followCodeFile = useCallback((path: string, options?: { replace?: boolean }) => {
+    if (options?.replace) {
+      if (addressedView === 'code') onLocationChange?.({ view: 'code', file: path, line: null }, { replace: true });
+      return;
+    }
     setOwnCodeFile({ path, line: null });
     onLocationChange?.({ view: 'code', file: path, line: null });
-  }, [onLocationChange]);
+  }, [addressedView, onLocationChange]);
   const reportDockerRunning = useCallback(
     (running: boolean) => onDockerRunningChange?.(proj.id, running),
     [onDockerRunningChange, proj.id],

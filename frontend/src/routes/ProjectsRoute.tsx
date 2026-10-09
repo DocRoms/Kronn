@@ -26,9 +26,10 @@ export function ProjectsRoute() {
     if (id) nav.toProject(id, { replace: addressed.current === null });
     else nav.toPage('projects');
   }, [nav]);
-  // Picking a view is a step Back can undo.
-  const followLocation = useCallback((next: ProjectLocation) => {
-    if (addressed.current) nav.toProject(addressed.current, next);
+  // Picking a view is a step Back can undo; naming what the view opened on
+  // its own is not.
+  const followLocation = useCallback((next: ProjectLocation, options?: { replace?: boolean }) => {
+    if (addressed.current) nav.toProject(addressed.current, { ...next, replace: options?.replace });
   }, [nav]);
   return (
     <ProjectList
