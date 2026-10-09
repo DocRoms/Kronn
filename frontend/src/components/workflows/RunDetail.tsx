@@ -710,6 +710,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             type="button"
             className="wf-run-provenance"
             disabled={!run.parent_workflow_id || !onNavigateToWorkflow}
+            {...newTabClickProps(run.parent_workflow_id && onNavigateToWorkflow ? workflowPath(run.parent_workflow_id) : null)}
             onClick={() => run.parent_workflow_id && onNavigateToWorkflow?.(run.parent_workflow_id)}
             title={t('wf.run.provenanceHint', run.parent_workflow_name)}
           >

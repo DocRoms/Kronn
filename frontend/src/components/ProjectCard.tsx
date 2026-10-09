@@ -42,7 +42,7 @@ import { invalidateCachedResource, projectGitCacheKey } from '../hooks/useCached
 import { ProjectAgentFilesSetting } from './ProjectAgentFilesSetting';
 import { ProjectRepositoryResourcesPanel } from './ProjectRepositoryResourcesPanel';
 import { rememberProjectRepositoryResourcesTab } from '../lib/projectRepositoryResourcesTab';
-import { PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
+import { PAGE_PATHS, PROJECT_VIEWS, discussionPath, projectPath, type ProjectLocation, type ProjectView } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 
 type ProjectDetailView = ProjectView;
@@ -1400,7 +1400,7 @@ export function ProjectCard({
             {!auditActive && proj.audit_status === 'Validated' ? (
               <span className="dash-badge-green"><ShieldCheck size={9} /> Validated</span>
             ) : !auditActive && validationInProgress ? (
-              <span className="dash-badge-orange cursor-pointer" onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
+              <span className="dash-badge-orange cursor-pointer" {...newTabClickProps(validationDisc ? discussionPath(validationDisc.id) : PAGE_PATHS.discussions)} onClick={(e) => { e.stopPropagation(); if (validationDisc) onOpenDiscussion(validationDisc.id); else onNavigate('discussions'); }}>
                 <Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> Validation
               </span>
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
@@ -2332,7 +2332,7 @@ export function ProjectCard({
                       💡 {t('audit.trackerHint')}
                     </span>
                     <div className="dash-tracker-hint-actions">
-                      <button className="dash-icon-btn" onClick={() => onNavigate('mcps')}>
+                      <button className="dash-icon-btn" {...newTabClickProps(PAGE_PATHS.mcps)} onClick={() => onNavigate('mcps')}>
                         <Plug size={12} /> {t('audit.trackerHintConfigure')}
                       </button>
                       <button

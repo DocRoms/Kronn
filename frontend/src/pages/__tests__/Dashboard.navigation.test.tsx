@@ -302,6 +302,33 @@ describe('Dashboard page addresses', () => {
     expect(window.location.pathname).toBe('/discussions');
   });
 
+  it('opens Discussions in a new tab from the running-agents badge on a Ctrl-click, and in place on a plain click', async () => {
+    // The shared API mock has no `getRunning`: give this test one, and take it back.
+    const api = discussionsApi as unknown as { getRunning?: () => Promise<string[]> };
+    api.getRunning = vi.fn().mockResolvedValue(['disc-running']);
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    try {
+      await renderDashboard('/projects');
+      const badge = await waitFor(() => {
+        const found = document.querySelector<HTMLElement>('.dash-running-badge');
+        if (!found) throw new Error('No running-agents badge yet');
+        return found;
+      });
+
+      fireEvent.click(badge, { ctrlKey: true });
+      expect(open).toHaveBeenCalledWith(`${window.location.origin}/discussions`, '_blank', 'noopener,noreferrer');
+      expect(screen.queryByTestId('discussion-page')).toBeNull();
+
+      await act(async () => { fireEvent.click(badge); });
+      expect(await screen.findByTestId('discussion-page')).toBeInTheDocument();
+      expect(window.location.pathname).toBe('/discussions');
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      open.mockRestore();
+      delete api.getRunning;
+    }
+  });
+
   it('lands on Projects from the bare address', async () => {
     await renderDashboard('/');
 

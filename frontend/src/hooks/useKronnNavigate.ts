@@ -29,8 +29,8 @@ export interface KronnNavigate {
   toAutomation: (selection: AutomationSelection, options?: KronnNavigateOptions & { intent?: AutomationIntent }) => void;
   /** The Automation page as it was left, and what to do on arrival. */
   toWorkflows: (intent?: AutomationIntent) => void;
-  /** Configuration, scrolled to one of its sections, and what to do there on arrival. */
-  toSettingsSection: (sectionId: string, intent?: SettingsIntent) => void;
+  /** Configuration, scrolled to one of its anchors (a section or a field), and what to do there on arrival. */
+  toSettingsSection: (sectionId: string, intent?: SettingsIntent, options?: KronnNavigateOptions) => void;
   /** The Plugins page with this config open. */
   toPlugin: (configId: string, options?: KronnNavigateOptions) => void;
   /** The Artifacts page with this Page open. */
@@ -87,8 +87,14 @@ export function useKronnNavigate(): KronnNavigate {
     toWorkflows: (intent = {}) => {
       void navigateRef.current(PAGE_PATHS.workflows, { state: intent.preset ? { preset: intent.preset } : null });
     },
-    toSettingsSection: (sectionId, intent) => {
-      void navigateRef.current(settingsSectionPath(sectionId), { state: intent?.modelTier ? { modelTier: intent.modelTier } : null });
+    toSettingsSection: (sectionId, intent = {}, options) => {
+      const state: SettingsIntent = {};
+      if (intent.modelTier) state.modelTier = intent.modelTier;
+      if (intent.inPage) state.inPage = true;
+      void navigateRef.current(settingsSectionPath(sectionId), {
+        replace: options?.replace,
+        state: Object.keys(state).length > 0 ? state : null,
+      });
     },
     toPlugin: (configId, options) => {
       void navigateRef.current(pluginPath(configId), { replace: options?.replace });

@@ -1473,3 +1473,79 @@ describe('NewDiscussionForm — native agents need full access', () => {
     expect(document.querySelector('.disc-create-btn')).not.toBeDisabled();
   });
 });
+
+describe('NewDiscussionForm — Configuration links open in a new tab', () => {
+  const renderWith = (agents: AgentDetection[], agentAccess: AgentsConfig | null) => {
+    const onClose = vi.fn();
+    const onNavigate = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={agents}
+        configLanguage="fr"
+        agentAccess={agentAccess}
+        onSubmit={vi.fn()}
+        onClose={onClose}
+        onNavigate={onNavigate}
+        t={(key: string) => key}
+      />,
+    );
+    return { onClose, onNavigate };
+  };
+
+  const expectConfigLink = (text: string, onClose: ReturnType<typeof vi.fn>, onNavigate: ReturnType<typeof vi.fn>) => {
+    const link = screen.getByText(text);
+    expect(link.tagName).toBe('A');
+    expect(link).toHaveAttribute('href', '/config');
+
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(link);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onNavigate).toHaveBeenCalledWith('settings');
+  };
+
+  it('the no-RTK warning links to /config', () => {
+    const { onClose, onNavigate } = renderWith([{ ...AGENT, rtk_available: false, rtk_hook_configured: false }], null);
+    expectConfigLink('disc.rtkWarnLink', onClose, onNavigate);
+  });
+
+  it('the full-access-required warning links to /config', () => {
+    const { onClose, onNavigate } = renderWith(
+      [OPENCODE_AGENT],
+      { open_code: { full_access: false } } as unknown as AgentsConfig,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: 'Lance OpenCode.' },
+    });
+    expectConfigLink('config.fullAccessRequiredLink', onClose, onNavigate);
+  });
+
+  it('the restricted-agent warning links to /config', () => {
+    const { onClose, onNavigate } = renderWith(
+      [{ ...AGENT, rtk_available: true, rtk_hook_configured: true }],
+      { claude_code: { full_access: false } } as unknown as AgentsConfig,
+    );
+    expectConfigLink('config.restrictedAgentLink', onClose, onNavigate);
+  });
+
+  it('a Ctrl-click on the collaboration settings button opens /config#settings-agent-handoffs in a new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const { onClose, onNavigate } = renderWith([AGENT, CODEX_AGENT], null);
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude répondez à cette question.' },
+    });
+
+    fireEvent.click(await screen.findByText('disc.multiAgentCollaborationSettings'), { ctrlKey: true });
+
+    expect(open).toHaveBeenCalledWith(
+      `${window.location.origin}/config#settings-agent-handoffs`, '_blank', 'noopener,noreferrer',
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onNavigate).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+});

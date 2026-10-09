@@ -97,6 +97,9 @@ export type ModelTierName = 'economy' | 'default' | 'reasoning';
 export interface SettingsIntent {
   /** Unfold this agent's card and point at this tier's model picker (a model error). */
   modelTier?: { agentType: string; tier: ModelTierName };
+  /** Set by Configuration's own links to one of its anchors: the page has
+   *  already scrolled there, the route must not do it again. */
+  inPage?: boolean;
 }
 
 /** Configuration scrolled to one of its sections (`settings-…`), named by the hash. */

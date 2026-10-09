@@ -421,6 +421,35 @@ describe('DiscussionsPage', () => {
     expect(document.querySelector('.disc-composer-textarea')).toBeDisabled();
   });
 
+  it('links the disabled-agent banner to /config, opening it in this tab only on a plain click', async () => {
+    vi.mocked(discussionsApi.nativeAgentMode).mockResolvedValue({ disabled: false });
+    const discussion = makeListDiscussion('d-agent-disabled-link', 0);
+    vi.mocked(discussionsApi.get).mockResolvedValue(discussion);
+    const onNavigate = vi.fn();
+    await wrap(
+      <DiscussionsPage
+        projects={[]} agents={[unavailableNative]} allDiscussions={[discussion]}
+        configLanguage="fr" agentAccess={null}
+        refetchDiscussions={noop} refetchProjects={noop} onNavigate={onNavigate}
+        toast={toastFn} initialActiveDiscussionId={discussion.id} {...liftedProps()}
+      />,
+    );
+    const link = await waitFor(() => {
+      const found = document.querySelector('.disc-agent-disabled-banner a');
+      expect(found).not.toBeNull();
+      return found as HTMLAnchorElement;
+    });
+    expect(link).toHaveAttribute('href', '/config');
+
+    const modified = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true });
+    link.dispatchEvent(modified);
+    expect(modified.defaultPrevented).toBe(false);
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    fireEvent.click(link);
+    expect(onNavigate).toHaveBeenCalledWith('settings');
+  });
+
   it('does not carry no_agent permission into another room before its mode has loaded', async () => {
     let resolveMode!: (mode: { disabled: boolean }) => void;
     const pending = new Promise<{ disabled: boolean }>(resolve => { resolveMode = resolve; });
@@ -4646,6 +4675,21 @@ describe('DiscussionsPage', () => {
     expect(btn).toBeTruthy();
     fireEvent.click(btn!);
     expect(onNav).toHaveBeenCalledWith('projects', { projectId: 'p8' });
+  });
+
+  it('unaudited banner: a Ctrl-click on the CTA opens /projects/<id> in a new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const proj = makeProject('p-1', 'NoTemplate');
+    const disc = makeProjectDisc('d-cta-new-tab', 'p-1');
+    const onNav = vi.fn();
+    await renderWithDisc(proj, disc, onNav);
+    const btn = Array.from(document.body.querySelectorAll('button.disc-cta-btn'))
+      .find(b => b.textContent?.includes('Faire le briefing'));
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn!, { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/projects/p-1`, '_blank', 'noopener,noreferrer');
+    expect(onNav).not.toHaveBeenCalled();
+    open.mockRestore();
   });
 
   it('validation CTA validates, records the Audit deep-link, refreshes, and opens the project', async () => {

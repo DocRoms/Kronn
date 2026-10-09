@@ -1,5 +1,5 @@
 import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
-import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
+import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
 import { automationPath, sameAutomationSelection, type AutomationSelection, type AutomationTab, type SelectionReason } from '../lib/routes';
 import { writeAutomationLastVisit, type AutomationLastVisit } from '../lib/automationNavigation';
 import { isUsableExternalConnection, unusableExternalAgentTargets } from '../lib/externalAgentIdentity';
@@ -326,6 +326,8 @@ interface WorkflowsPageProps {
   onNavigateMcp?: () => void;
   /** Switches Dashboard to Settings, where a skill is edited (KT-914). */
   onNavigateSettings?: () => void;
+  /** Configuration, at one of its anchors (a section or a setting). */
+  onNavigateSettingsAnchor?: (anchorId: string) => void;
 }
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -350,7 +352,7 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
 const RUN_FETCH_PAGE_SIZE = 10;
 const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
-export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings }: WorkflowsPageProps) {
+export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, selection, onSelectionChange, addressToken, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed, highlightQuickPromptId = null, onHighlightConsumed, onNavigatePage, onNavigateMcp, onNavigateSettings, onNavigateSettingsAnchor }: WorkflowsPageProps) {
   const { t } = useT();
   // The 380px workflow list plus the detail panel needs substantially more
   // room than a phone-only breakpoint. Switch to the existing single-pane
@@ -2709,9 +2711,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
       {!showCreate && !editingWorkflow && (
         <RunRetentionBanner
+          // The setting has an address: `/config#run-payload-retention`.
           onOpenSetting={() => {
-            try { sessionStorage.setItem(RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET); } catch { /* land on the page top */ }
-            onNavigateSettings?.();
+            if (onNavigateSettingsAnchor) onNavigateSettingsAnchor(RETENTION_FOCUS_TARGET);
+            else onNavigateSettings?.();
           }}
         />
       )}

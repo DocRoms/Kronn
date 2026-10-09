@@ -1199,3 +1199,50 @@ describe('MessageBubble — role exhaustiveness sanity', () => {
     expect(container.querySelector('.disc-msg-row')?.getAttribute('data-role')).toBe(expected);
   });
 });
+
+describe('MessageBubble — inline CTAs open their Configuration address in a new tab', () => {
+  const expectNewTab = (label: string, onNavigate: ReturnType<typeof vi.fn>, path: string) => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    fireEvent.click(screen.getByText(label), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}${path}`, '_blank', 'noopener,noreferrer');
+    expect(onNavigate).not.toHaveBeenCalled();
+    open.mockRestore();
+  };
+
+  it('the override-key CTA opens /config', () => {
+    const onNavigate = vi.fn();
+    renderBubble(
+      makeMessage({ role: 'Agent', content: 'Error: invalid API key, please authenticate.' }),
+      { onNavigate },
+    );
+    expectNewTab('disc.overrideKey', onNavigate, '/config');
+  });
+
+  it('the edit-timeout CTA opens /config#settings-server', () => {
+    const onNavigate = vi.fn();
+    renderBubble(
+      makeMessage({ role: 'Agent', content: "Réponse partielle — l'agent a été interrompu." }),
+      { onNavigate },
+    );
+    expectNewTab('disc.editTimeout', onNavigate, '/config#settings-server');
+  });
+
+  it('the model-error tier shortcut opens /config#settings-agent-config', () => {
+    const onNavigate = vi.fn();
+    const content = '[kronn:model-error]\n' + JSON.stringify({
+      kind: 'model_error',
+      status: 404,
+      summary: 'LiteLlm returned HTTP 404 for model-a.',
+      detail: 'LiteLLM error 404 Not Found',
+      tier: 'default',
+    });
+    renderBubble(makeMessage({
+      role: 'System',
+      content,
+      agent_type: 'LiteLlm',
+      model: 'model-a',
+      model_tier: 'default',
+    }), { onNavigate });
+    expectNewTab('disc.changeTierModel', onNavigate, '/config#settings-agent-config');
+  });
+});

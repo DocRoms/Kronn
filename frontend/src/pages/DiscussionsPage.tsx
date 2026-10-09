@@ -1,6 +1,8 @@
 import { Fragment, useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import { workflowExecLines } from '../lib/agentExecLines';
-import type { ProjectLocation, SettingsIntent } from '../lib/routes';
+import { PAGE_PATHS, projectPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
+import { AppLink } from '../components/AppLink';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
 import { DiscussionNote } from '../components/DiscussionNote';
@@ -4590,6 +4592,7 @@ export function DiscussionsPage({
                   <button
                     className="disc-cta-btn"
                     data-variant="warning"
+                    {...newTabClickProps(projectPath(projectId))}
                     onClick={() => onNavigate('projects', { projectId })}
                   >
                     {hasBriefing ? (
@@ -4776,7 +4779,7 @@ export function DiscussionsPage({
                       <p className="disc-cta-text" data-variant="warning">
                         <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.auditInProgress')}
                       </p>
-                      <button className="disc-cta-btn" data-variant="warning" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                      <button className="disc-cta-btn" data-variant="warning" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                         <Play size={12} /> {t('audit.goToProject')}
                       </button>
                     </div>
@@ -4789,7 +4792,7 @@ export function DiscussionsPage({
                     <p className="disc-cta-text" data-variant="info">
                       <Check size={14} /> {t('audit.briefingDone')}
                     </p>
-                    <button className="disc-cta-btn" data-variant="info" onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
+                    <button className="disc-cta-btn" data-variant="info" {...newTabClickProps(activeDiscussion.project_id ? projectPath(activeDiscussion.project_id) : null)} onClick={() => { if (activeDiscussion.project_id) onNavigate('projects', { projectId: activeDiscussion.project_id }); }}>
                       <Play size={12} /> {t('audit.goToProject')}
                     </button>
                   </div>
@@ -5246,7 +5249,7 @@ export function DiscussionsPage({
                           <Play size={12} /> {t('bootstrap.startDev')}
                         </button>
                       )}
-                      <button className="disc-cta-btn" data-variant="accent" onClick={() => {
+                      <button className="disc-cta-btn" data-variant="accent" {...newTabClickProps(proj ? projectPath(proj.id) : null)} onClick={() => {
                         if (proj) onNavigate('projects', { projectId: proj.id });
                       }}>
                         <Check size={12} /> {t('bootstrap.viewProject')}
@@ -5398,10 +5401,9 @@ export function DiscussionsPage({
                 <span className="disc-agent-disabled-text">
                   {t('disc.agentDisabled', AGENT_LABELS[activeDiscussion.agent] ?? activeDiscussion.agent)}
                   {' — '}
-                  <span
-                    style={{ cursor: 'pointer', textDecoration: 'underline' }}
-                    onClick={() => onNavigate('settings')}
-                  >{t('disc.agentDisabledLink')}</span>
+                  <AppLink className="kr-inline-link" to={PAGE_PATHS.settings} onNavigate={() => onNavigate('settings')}>
+                    {t('disc.agentDisabledLink')}
+                  </AppLink>
                 </span>
               </div>
             )}

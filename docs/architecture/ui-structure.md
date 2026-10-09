@@ -26,7 +26,7 @@ so back, forward and reload follow it. React Router 8 runs in Data mode.
 | Automatisation | `/workflows`, `/workflows/:workflowId`, `/workflows/:workflowId/runs/:runId`, the workflow wizard at `/workflows/new` (create) and `/workflows/:workflowId/edit`, and one segment per tab — `/workflows/qp/:qpId?`, `/workflows/qa/:qaId?`, `/workflows/qe/:qeId?`, `/workflows/skills/:skillId?`. A bare `/workflows` reopens where the previous visit left off (localStorage record, read by the route, which replaces the bare address with it); an explicit address, Back and Forward are what they say, and a preset arriving at the bare address opens the wizard on the workflows list instead. A remembered resource the loaded list no longer knows is let go in place of its address |
 | Pages (Artifacts) | `/pages`, `/pages/:pageId` for the open Page — redirects to `/projects` until the capability is activated. A bare `/pages` reopens where the previous visit left off (localStorage checkpoint), else the first Page |
 | Plugins | `/plugins`, `/plugins/:configId` for the config open in the detail panel — kept while the overview is still loading; a config the loaded overview does not know is let go in place of the address |
-| Config | `/config`, `/config#<section-id>` scrolled to one of its sections on arrival (waiting for one fed by a request); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
+| Config | `/config`, `/config#<anchor>` — a section (`#settings-server`) or a setting (`#run-payload-retention`) — brought into view on arrival once the page has settled: the anchor must exist, a setting must be enabled (its value loaded) and its position must hold still, then a section scrolls to the top and a setting to the centre with the focus; content still loading above it is followed for a short while, until the reader scrolls. The side menu's entries are links to these addresses: a click scrolls in the page and replaces the address, Ctrl/Cmd-click opens a new tab; the highlight of the visible section never writes the address, and after an arrival on an anchor it stays on that anchor's section until the reader scrolls (a setting at the bottom of the page ends the scroll where the highlight would otherwise name the last section); `/config/artifacts?origin=<site>` opens the allowed-sites section with a site typed in (never added) — an arrival, consumed into `/config` so a reload or a Back never replays it |
 
 `/` and any unknown address redirect to `/projects`, keeping the hash and the
 query. `[src: file: frontend/src/lib/routes.ts:21-29]`
@@ -55,8 +55,10 @@ on. `#discussion-<id>?message=…`, `#project-<id>`, `#page/<id>?…`,
 names nothing: the link lands on its page, bare, rather than on an address
 the router cannot read; the same id in a direct address is handed to the
 page as it is, like any unknown id. Any other hash is left alone: it routes
-nowhere, and only Configuration reads it, as the section to scroll to.
-`[src: file: frontend/src/routes/SettingsRoute.tsx:36-52]`
+nowhere, and only Configuration reads it, as the anchor (a section or a
+setting) to bring into view. A hash is an in-page anchor, never a route.
+`[src: file: frontend/src/routes/SettingsRoute.tsx:36-49]`
+`[src: file: frontend/src/lib/revealWhenSettled.ts:1-93]`
 `[src: file: frontend/src/lib/legacyRoutes.ts:11-50]`
 `[src: file: frontend/src/App.tsx:159-162]`
 
@@ -125,9 +127,14 @@ nowhere, and only Configuration reads it, as the section to scroll to.
   card or button keeps its element, and so its exact look: it spreads
   `newTabClickProps(path)`, which opens the modified clicks itself and leaves a
   click on a control nested in it (favourite, menu, checkbox) to that control.
-  `CollectionShell` does it for every list through `getItemPath`. Not covered:
-  a jump carried by an arrival intent (a batch group to focus), which a new tab
-  cannot receive, and rows in multi-selection, where a click ticks.
+  `CollectionShell` does it for every list through `getItemPath`. When a jump also
+  carries an arrival intent (the agent tier a model error names, the workspace
+  whose Git panel to open), the new tab gets the address alone: the intent
+  lives in this tab's history. Not covered: a jump that is only an intent (a
+  batch group to focus, on the bare Discussions address), rows in
+  multi-selection, where a click ticks, and actions that merely end on a page
+  (create a discussion, a bundle, a workflow). Inline text links to an address
+  are `AppLink`s with the shared `kr-inline-link` look.
   `[src: file: frontend/src/lib/newTabNavigation.ts:1-63]`
   `[src: file: frontend/src/components/CollectionShell.tsx:435-440]`
 - **Serving** — a reload on a deep address needs the server to answer it with

@@ -70,7 +70,10 @@ import { ContinualLearningSection } from '../components/settings/ContinualLearni
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DbUsageChart } from '../components/settings/DbUsageChart';
-import { RunRetentionBanner, RETENTION_FOCUS_KEY, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
+import { RunRetentionBanner, RETENTION_FOCUS_TARGET } from '../components/settings/RunRetentionBanner';
+import { AppLink } from '../components/AppLink';
+import { revealWhenSettled } from '../lib/revealWhenSettled';
+import { settingsSectionPath } from '../lib/routes';
 import { ContextHelp } from '../components/ContextHelp';
 import { DebugSection } from '../components/settings/DebugSection';
 import { ExternalContentSection, EXTERNAL_CONTENT_SECTION_ID, type EmbedOriginPrefill } from '../components/settings/ExternalContentSection';
@@ -163,6 +166,13 @@ interface SettingsPageProps {
   /** An agent tier to point at (from a model error), acknowledged via `onModelTierTargetConsumed`. */
   modelTierTarget?: SettingsIntent['modelTier'] | null;
   onModelTierTargetConsumed?: () => void;
+  /** One of the page's own anchor links was followed (the page has scrolled
+   *  there): the address names that anchor. */
+  onAnchorFollowed?: (anchorId: string) => void;
+  /** The anchor an arrival on `/config#<anchor>` brings into view (the route
+   *  scrolls to it), renewed by `arrivalToken` on every arrival. */
+  arrivalAnchor?: string | null;
+  arrivalToken?: unknown;
 }
 
 export function SettingsPage({
@@ -180,6 +190,9 @@ export function SettingsPage({
   hasConfiguredApi = false,
   embedOriginPrefill = null,
   modelTierTarget = null,
+  onAnchorFollowed,
+  arrivalAnchor = null,
+  arrivalToken,
   onModelTierTargetConsumed,
 }: SettingsPageProps) {
   const { t, locale, setLocale } = useT();
@@ -189,22 +202,6 @@ export function SettingsPage({
   // Shared failure path for settings mutations — pre-fix these catches were
   // console.warn-only, so a failed save/delete looked like a success (the
   // silent-error UX audit, 2026-07). Log for diagnostics + visible toast.
-  const focusRetentionSetting = useCallback(() => {
-    const el = document.getElementById(RETENTION_FOCUS_TARGET);
-    el?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-    el?.focus();
-  }, []);
-
-  // Another page can send the user straight to the retention setting.
-  useEffect(() => {
-    let pending: string | null = null;
-    try {
-      pending = sessionStorage.getItem(RETENTION_FOCUS_KEY);
-      sessionStorage.removeItem(RETENTION_FOCUS_KEY);
-    } catch { /* storage unavailable: land on the page top */ }
-    if (pending === RETENTION_FOCUS_TARGET) focusRetentionSetting();
-  }, [focusRetentionSetting]);
-
   const toastActionFailed = useCallback((err: unknown) => {
     console.warn('Settings action failed:', err);
     toast(t('common.actionFailed', userError(err)), 'error');
@@ -291,6 +288,48 @@ export function SettingsPage({
   const [newIgnorePattern, setNewIgnorePattern] = useState('');
   const [activeSettingsSection, setActiveSettingsSection] = useState('settings-identity');
   const scrollSpyPausedUntil = useRef(0);
+  // An anchor brought into view on purpose (an arrival, the retention banner)
+  // keeps its own section highlighted until the reader scrolls: a setting at
+  // the bottom of the page ends the scroll there, where the spy would
+  // otherwise name the last section instead.
+  const holdSectionOf = useCallback((anchorId: string) => {
+    let frame = 0;
+    const deadline = Date.now() + 3000;
+    const hold = () => {
+      const anchor = document.getElementById(anchorId);
+      const section = (SETTINGS_SECTION_IDS as readonly string[]).includes(anchorId)
+        ? anchorId
+        : anchor?.closest(SETTINGS_SECTION_IDS.map(id => `#${id}`).join(','))?.id;
+      if (section) {
+        setActiveSettingsSection(section);
+        scrollSpyPausedUntil.current = Number.POSITIVE_INFINITY;
+      } else if (Date.now() < deadline) {
+        frame = requestAnimationFrame(hold);
+      }
+    };
+    hold();
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  useEffect(() => {
+    const resume = () => {
+      if (scrollSpyPausedUntil.current === Number.POSITIVE_INFINITY) scrollSpyPausedUntil.current = 0;
+    };
+    const readerEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+    readerEvents.forEach(type => window.addEventListener(type, resume, { passive: true, capture: true }));
+    return () => readerEvents.forEach(type => window.removeEventListener(type, resume, { capture: true }));
+  }, []);
+  useEffect(() => {
+    if (!arrivalAnchor) return undefined;
+    return holdSectionOf(arrivalAnchor);
+  }, [arrivalAnchor, arrivalToken, holdSectionOf]);
+  // The retention banner on this page: the setting is centred and focused
+  // once ready, and the address names it (`/config#run-payload-retention`,
+  // the same address another page's banner links to).
+  const focusRetentionSetting = useCallback(() => {
+    revealWhenSettled(RETENTION_FOCUS_TARGET);
+    holdSectionOf(RETENTION_FOCUS_TARGET);
+    onAnchorFollowed?.(RETENTION_FOCUS_TARGET);
+  }, [holdSectionOf, onAnchorFollowed]);
   const [configAccordion, setConfigAccordion] = useState<Set<string>>(() => new Set());
   const [capabilityOriginFilter, setCapabilityOriginFilter] = useState<CapabilityOrigin | 'all'>('all');
   const [capabilityTypeFilter, setCapabilityTypeFilter] = useState<'all' | 'skill' | 'profile' | 'directive'>('all');
@@ -489,26 +528,30 @@ export function SettingsPage({
           {settingsSections.map(s => (
           <Fragment key={s.id}>
           {s.group && <div className="set-nav-group">{s.group}</div>}
-          <button
+          {/* A link to the section's address: Ctrl/Cmd-click opens it in a new
+              tab and "copy link address" works; a plain click scrolls here. */}
+          <AppLink
+            to={settingsSectionPath(s.id)}
             className="set-nav-btn"
             aria-current={activeSettingsSection === s.id ? 'location' : undefined}
             data-live={s.live ? 'true' : undefined}
-            onClick={() => {
+            onNavigate={() => {
               setActiveSettingsSection(s.id);
               const target = document.getElementById(s.id);
-              if (!target) return;
+              if (!target) { onAnchorFollowed?.(s.id); return; }
               const farAway = Math.abs(target.getBoundingClientRect().top) > window.innerHeight * 2;
               scrollSpyPausedUntil.current = Date.now() + (farAway ? 250 : 900);
               target.scrollIntoView?.({
                 behavior: farAway ? 'auto' : 'smooth',
                 block: farAway ? 'center' : 'start',
               });
+              onAnchorFollowed?.(s.id);
             }}
           >
             <span className="set-nav-icon">{s.icon}</span>
             {s.label}
             {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
-          </button>
+          </AppLink>
           </Fragment>
         ))}
           <div className="set-nav-version" data-testid="settings-nav-version">

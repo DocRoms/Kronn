@@ -1,4 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { AppLink } from './AppLink';
+import { PAGE_PATHS, settingsSectionPath } from '../lib/routes';
+import { newTabClickProps } from '../lib/newTabNavigation';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
 import { MediaGenerateForm } from './MediaGenerateForm';
@@ -1009,7 +1012,7 @@ export function NewDiscussionForm({
               <span className="disc-restricted-warn-text">
                 {t('disc.rtkWarn')}
                 {' — '}
-                <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('disc.rtkWarnLink')}</span>
+                <AppLink className="kr-inline-link" to={PAGE_PATHS.settings} onNavigate={() => { onClose(); onNavigate('settings'); }}>{t('disc.rtkWarnLink')}</AppLink>
               </span>
             </div>
           );
@@ -1193,6 +1196,7 @@ export function NewDiscussionForm({
                       {' '}
                       <button
                         type="button"
+                        {...newTabClickProps(settingsSectionPath('settings-agent-handoffs'))}
                         onClick={() => {
                           onClose();
                           onNavigate('settings', { scrollTo: 'settings-agent-handoffs' });
@@ -1217,12 +1221,11 @@ export function NewDiscussionForm({
                 fullAccessRequiredAgents.map(agent => AGENT_LABELS[agent] ?? agent).join(', '),
               )}
               {' — '}
-              <button
-                type="button"
-                className="disc-inline-link"
-                style={{ cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, color: 'inherit', font: 'inherit' }}
-                onClick={() => { onClose(); onNavigate('settings'); }}
-              >{t('config.fullAccessRequiredLink')}</button>
+              <AppLink
+                className="disc-inline-link kr-inline-link"
+                to={PAGE_PATHS.settings}
+                onNavigate={() => { onClose(); onNavigate('settings'); }}
+              >{t('config.fullAccessRequiredLink')}</AppLink>
             </span>
           </div>
         )}
@@ -1239,7 +1242,7 @@ export function NewDiscussionForm({
                   .join(', '),
               )}
               {' — '}
-              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
+              <AppLink className="kr-inline-link" to={PAGE_PATHS.settings} onNavigate={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</AppLink>
             </span>
           </div>
         )}

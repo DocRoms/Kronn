@@ -1183,6 +1183,22 @@ describe('RunDetail — sub-workflow provenance', () => {
     expect(onNav).toHaveBeenCalledWith('cron-wf');
   });
 
+  it('opens the parent workflow in a new tab on a Ctrl-click, without navigating in the app', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const onNav = vi.fn();
+    const run = mkRun({
+      run_type: 'subworkflow',
+      parent_run_id: 'parent-run-9',
+      parent_workflow_id: 'cron-wf',
+      parent_workflow_name: 'PR Review cron v2',
+    });
+    render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={onNav} />);
+    fireEvent.click(screen.getByText('PR Review cron v2'), { ctrlKey: true });
+    expect(open).toHaveBeenCalledWith(`${window.location.origin}/workflows/cron-wf`, '_blank', 'noopener,noreferrer');
+    expect(onNav).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('renders no provenance pill for a top-level run', () => {
     const run = mkRun({ run_type: 'linear' });
     render(<RunDetail run={run} onDelete={() => {}} onNavigateToWorkflow={() => {}} />);

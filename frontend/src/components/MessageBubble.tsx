@@ -1,5 +1,5 @@
 import { stripAcpToolMarkers } from '../lib/acpToolMarkers';
-import { projectPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
+import { PAGE_PATHS, projectPath, settingsSectionPath, type ProjectLocation, type SettingsIntent } from '../lib/routes';
 import { newTabClickProps } from '../lib/newTabNavigation';
 import { queueMarkdownUpgrade } from '../lib/markdownUpgradeQueue';
 import {
@@ -1195,7 +1195,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {!modelError && RE_AUTH_ERROR.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} onClick={() => onNavigate('settings')}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px' }} {...newTabClickProps(PAGE_PATHS.settings)} onClick={() => onNavigate('settings')}>
               <Key size={11} /> {t('disc.overrideKey')}
             </button>
             <span className="disc-auth-error-hint">{t('disc.orCheckAgent')}</span>
@@ -1203,7 +1203,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {RE_PARTIAL_RESPONSE.test(msg.content) && (
           <div className="disc-auth-error-cta">
-            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
+            <button className="disc-scan-btn" style={{ fontSize: 11, padding: '5px 12px', borderColor: 'rgba(var(--kr-warning-amber-rgb), 0.3)', background: 'rgba(var(--kr-warning-amber-rgb), 0.08)', color: 'var(--kr-warning-amber)' }} {...newTabClickProps(settingsSectionPath('settings-server'))} onClick={() => onNavigate('settings', { scrollTo: 'settings-server' })}>
               <Settings size={11} /> {t('disc.editTimeout')}
             </button>
           </div>
@@ -1227,6 +1227,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             <button
               className="disc-scan-btn"
               style={{ fontSize: 11, padding: '5px 12px' }}
+              // A new tab gets the section's address; the tier to point at is
+              // an arrival intent, which only this tab can carry.
+              {...newTabClickProps(settingsSectionPath('settings-agent-config'))}
               onClick={() => {
                 // The agent and tier travel with the navigation: Configuration
                 // unfolds that agent's card and points at the tier's picker.

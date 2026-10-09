@@ -40,6 +40,12 @@ Release notes for 0.9.3 and earlier are available in the
   (`/config#<section>`). A file an agent cites, a just-validated audit or a
   just-improved Quick Prompt now opens at such an address, so Back, a reload
   and a shared link land on the same view.
+- "Open the retention setting" on the run-retention banner (Automation and
+  Configuration) lands on the setting, centred and focused, at its address
+  `/config#run-payload-retention`; it used to stop short of it while the page
+  was still loading. Every Configuration anchor (`/config#<section>`) waits
+  for the page to settle the same way, and the sections in Configuration's
+  side menu are links: Ctrl/Cmd-click opens one in a new tab.
 
 
 ## [0.14.3] - 2026-10-07

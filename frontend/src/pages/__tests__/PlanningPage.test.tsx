@@ -464,6 +464,53 @@ describe('PlanningPage', () => {
     open.mockRestore();
   });
 
+  it('opens the parent, a subtask, a blocker and a workspace of a task in a new tab on a Ctrl-click, without moving in the app', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const child = detail(summary({
+      parent_id: 'task-parent',
+      parent_reference: 'KT-0',
+      parent_title: 'Platform upgrade',
+    }));
+    child.subtasks = [summary({ id: 'task-sub', reference: 'KT-5', title: 'Bump composer' })];
+    child.blockers = [summary({ id: 'task-blocker', reference: 'KT-9', title: 'Dependency' })];
+    child.workspaces = [{
+      id: 'workspace-3',
+      disc_id: 'disc-3',
+      branch: 'feature/kt-141',
+      state: 'attached',
+      ownership: 'external',
+      session_agent_type: 'Codex',
+    }];
+    mocks.get.mockResolvedValue(child);
+    const onNavigateDiscussion = vi.fn();
+    const { container } = render(
+      <PlanningPage
+        initialSelectedTaskId="task-1"
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />,
+    );
+    const workspace = (await screen.findByText('feature/kt-141')).closest('button') as HTMLElement;
+    const loads = mocks.get.mock.calls.length;
+
+    fireEvent.click(container.querySelector('.planning-parent-link') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(screen.getByText('Bump composer').closest('button') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(container.querySelector('.planning-blocker-row button') as HTMLElement, { ctrlKey: true });
+    fireEvent.click(workspace, { ctrlKey: true });
+
+    expect(open.mock.calls).toEqual([
+      [`${window.location.origin}/planning/task-parent`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/planning/task-sub`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/planning/task-blocker`, '_blank', 'noopener,noreferrer'],
+      [`${window.location.origin}/discussions/disc-3`, '_blank', 'noopener,noreferrer'],
+    ]);
+    expect(mocks.get).toHaveBeenCalledTimes(loads);
+    expect(onNavigateDiscussion).not.toHaveBeenCalled();
+    open.mockRestore();
+  });
+
   it('opens a directly linked task detail on mount', async () => {
     render(
       <PlanningPage

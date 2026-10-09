@@ -73,6 +73,7 @@ export function WorkflowsRoute() {
       onNavigatePage={nav.toLivePage}
       onNavigateMcp={() => nav.toPage('mcps')}
       onNavigateSettings={() => nav.toPage('settings')}
+      onNavigateSettingsAnchor={anchorId => nav.toSettingsSection(anchorId)}
       onBatchLaunched={(discussionIds, batchRunId, mode = 'batch') => {
         ctx.markBatchSending(discussionIds);
         // Land on the first child and focus its batch group in the sidebar:

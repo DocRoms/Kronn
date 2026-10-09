@@ -807,6 +807,7 @@ function PlanningDetailForm({
         <button
           type="button"
           className="planning-parent-link"
+          {...newTabClickProps(planningTaskPath(task.parent_id))}
           onClick={() => onOpenTask(task.parent_id as string)}
         >
           <ChevronRight size={12} />
@@ -867,6 +868,7 @@ function PlanningDetailForm({
             <button
               type="button"
               key={workspace.id}
+              {...newTabClickProps(discussionPath(workspace.disc_id))}
               onClick={() => {
                 onNavigateDiscussion(workspace.disc_id, { gitWorkspaceId: workspace.id });
               }}
@@ -1006,7 +1008,7 @@ function PlanningDetailForm({
       <section className="planning-detail-subtasks">
         <h3>{t('planning.subtasks')} · {task.completed_subtasks}/{task.total_subtasks}</h3>
         {task.subtasks.map(subtask => (
-          <button type="button" key={subtask.id} onClick={() => onOpenTask(subtask.id)}>
+          <button type="button" key={subtask.id} {...newTabClickProps(planningTaskPath(subtask.id))} onClick={() => onOpenTask(subtask.id)}>
             {subtask.status === 'done' ? <Check size={13} /> : <Circle size={13} />}
             <span data-done={subtask.status === 'done'}>{subtask.title}</span>
             <small>{subtask.reference}</small>
@@ -1066,7 +1068,7 @@ function PlanningDetailForm({
         <h3>{t('planning.blockers')}</h3>
         {task.blockers.map(blocker => (
           <div className="planning-blocker-row" key={blocker.id}>
-            <button type="button" onClick={() => onOpenTask(blocker.id)}>
+            <button type="button" {...newTabClickProps(planningTaskPath(blocker.id))} onClick={() => onOpenTask(blocker.id)}>
               <Circle size={12} /> {blocker.reference} · {blocker.title}
               <ChevronRight size={12} />
             </button>

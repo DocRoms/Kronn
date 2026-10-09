@@ -1,5 +1,5 @@
 import './Dashboard.css';
-import { isPlainLeftClick } from '../lib/newTabNavigation';
+import { isPlainLeftClick, newTabClickProps } from '../lib/newTabNavigation';
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Outlet, useLocation } from 'react-router';
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, pages as pagesApi, config as configApi, skills as skillsApi } from '../lib/api';
@@ -871,6 +871,7 @@ export function Dashboard({ onReset }: DashboardProps) {
             type="button"
             className="dash-running-badge"
             title={t('nav.agentsRunningHint')}
+            {...newTabClickProps(PAGE_PATHS.discussions)}
             onClick={() => nav.toPage('discussions')}
           >
             <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />

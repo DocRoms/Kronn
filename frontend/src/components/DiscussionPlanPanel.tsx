@@ -1144,6 +1144,7 @@ export function DiscussionPlanPanel({
                   <button
                     type="button"
                     key={workspace.id}
+                    {...newTabClickProps(discussionPath(workspace.disc_id))}
                     onClick={() => {
                       onNavigateDiscussion?.(workspace.disc_id, { gitWorkspaceId: workspace.id });
                     }}
