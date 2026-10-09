@@ -134,6 +134,41 @@ describe('Projects route — the file open in the code view', () => {
     expect(vi.mocked(projectsApi.listSourceFiles).mock.calls).toHaveLength(treeRequests);
   });
 
+  it('applies the address of the moment to a tree that arrives late: no file named, the default file', async () => {
+    let deliverTree!: () => void;
+    vi.mocked(projectsApi.listSourceFiles).mockImplementationOnce(() => new Promise(resolve => {
+      deliverTree = () => resolve({
+        entries: [
+          { path: 'README.md', name: 'README.md', is_dir: false },
+          { path: 'NOTES.md', name: 'NOTES.md', is_dir: false },
+        ],
+        truncated: false,
+      });
+    }));
+    await renderDashboard('/projects/p1/code?file=NOTES.md');
+
+    // The Code tab, while the tree is on its way: the address names no file.
+    await act(async () => {
+      fireEvent.click(screen.getAllByRole('button').find(button => button.closest('nav.project-detail-tabs') && button.textContent?.trim() === 'Code')!);
+    });
+    await waitFor(() => expect(address()).toBe('/projects/p1/code'));
+    const depth = window.history.length;
+
+    await act(async () => { deliverTree(); });
+
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('README.md');
+    // Named in place: the canonical address is not a step of history.
+    await waitFor(() => expect(address()).toBe('/projects/p1/code?file=README.md'));
+    expect(window.history.length).toBe(depth);
+
+    // A reload of that address shows the same file.
+    cleanup();
+    await renderDashboard('/projects/p1/code?file=README.md');
+    expect(await screen.findByText('contents of README.md')).toBeInTheDocument();
+    expect(selectedFile()).toBe('README.md');
+  });
+
   it('keeps the tree it loaded when the address moves to another file', async () => {
     await renderDashboard('/projects/p1/code?file=README.md');
     expect(await screen.findByText('contents of README.md')).toBeInTheDocument();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ChevronDown, ChevronRight, ChevronUp, Code2, FileCode2, Folder, FolderX, GitBranch,
@@ -109,9 +109,11 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const treeLoadRef = useRef(0);
-  /// The file the address named on arrival: the tree load opens it. A later
-  /// address is followed below, without loading the tree again.
-  const initialPathRef = useRef(initialPath);
+  /// The file the address names now — or none: a tree that arrives opens it,
+  /// whatever the address named when it was asked for. A later address is
+  /// followed below, without loading the tree again.
+  const addressPathRef = useRef(initialPath);
+  useLayoutEffect(() => { addressPathRef.current = initialPath; }, [initialPath]);
   // The address moved under the viewer — Back, Forward, a link from another
   // view: the file it names opens in the tree as it is, with the folders on
   // the way to it. What the reader just opened is already on screen. State
@@ -129,6 +131,10 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
       setCurrentMatchIdx(0);
       const onTheWay = ancestorDirs(shownPath);
       if (onTheWay.length > 0) setExpandedDirs(previous => new Set([...previous, ...onTheWay]));
+    } else {
+      // No file named and no default known yet (the tree is on its way): the
+      // file the address named before is let go, the tree opens the default.
+      setSelectedPath(null);
     }
   }
   /// Folders already asked for, and the request that asked. A second expand
@@ -209,7 +215,7 @@ function SourceCodeViewerProject({ projectId, initialPath, initialLine, onOpenCo
     setTree(rootFiles);
     if (root.truncated) setDirStatus(current => ({ ...current, [ROOT_KEY]: 'truncated' }));
     setExclusions(savedExclusions);
-    const deepLinkPath = initialPathRef.current;
+    const deepLinkPath = addressPathRef.current;
     const preferred = findPreferredSourceFile(rootFiles)?.path ?? null;
     setSelectedPath(previous => {
       if (previous) return previous;

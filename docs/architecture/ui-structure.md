@@ -106,8 +106,9 @@ like any other.
   or a resource the loaded list does not know let go — and replaces the
   address instead. What a view opens on its own while its address names
   nothing (the default file of a project's code view) is written into the
-  address in place, so the entry names what it shows.
-  `[src: file: frontend/src/components/SourceCodeViewer.tsx:253-260]`
+  address in place, so the entry names what it shows; content that arrives
+  late follows the address of the moment, not the one it was asked for.
+  `[src: file: frontend/src/components/SourceCodeViewer.tsx:260-266]`
   The bare address of a page that remembers its last visit
   is resolved by the route, never by the page. Nothing crosses pages through
   `sessionStorage`: a deep link is an address, plus an arrival intent for
