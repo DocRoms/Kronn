@@ -240,12 +240,15 @@ async fn start_trusted_run(
     launch: LaunchContext,
 ) -> Result<crate::models::WorkflowRun, String> {
     let launch_id = action.id.clone();
-    let admission: crate::api::workflows::RunAdmission = Box::new(move |conn, snapshot| {
-        Ok(
-            crate::db::live_page_action_trusts::admit_run(conn, &launch_id, snapshot)?
+    let admission: crate::api::workflows::RunAdmission =
+        Box::new(move |conn, snapshot, profiles| {
+            Ok(
+                crate::db::live_page_action_trusts::admit_run(
+                    conn, &launch_id, snapshot, profiles,
+                )?
                 .map_err(|refusal| refusal.to_string()),
-        )
-    });
+            )
+        });
     let (workflow, run) = crate::api::workflows::create_manual_run_admitted(
         state,
         &action.target_id,
@@ -523,15 +526,64 @@ async fn execute_claimed_action(
     }
 }
 
+/// The repository profiles the workflow actions of a Page (or one action)
+/// read, resolved before the connection that compares them (KT-920).
+async fn action_profiles(
+    state: &AppState,
+    page_id: Option<String>,
+    action_id: Option<String>,
+) -> anyhow::Result<crate::core::project_profile::ProfileSnapshots> {
+    let targets = state
+        .db
+        .with_read_conn(move |conn| {
+            let actions = match (page_id, action_id) {
+                (Some(page), _) => crate::db::live_page_actions::list_for_live_page(conn, &page)?,
+                (None, Some(id)) => crate::db::live_page_actions::declaration(conn, &id)?
+                    .into_iter()
+                    .collect(),
+                (None, None) => Vec::new(),
+            };
+            let mut targets = Vec::new();
+            for action in actions {
+                if action.kind != DiscussionActionKind::Workflow {
+                    continue;
+                }
+                if let Some(workflow) = crate::db::workflows::get_workflow(conn, &action.target_id)?
+                {
+                    targets.push((workflow, action.project_id.clone()));
+                }
+            }
+            Ok(targets)
+        })
+        .await?;
+    crate::core::project_profile::resolve_for(&state.db, targets).await
+}
+
 /// Every current offer of a Page with its eligibility and human approval.
-/// On the writer: an approval found out of date is invalidated as it is read.
+/// On the writer: an approval found out of date is invalidated as it is read,
+/// against the repository profiles as they are now.
 pub async fn trusts_for_live_page(
     State(state): State<AppState>,
     Path(page_id): Path<String>,
 ) -> Json<ApiResponse<Vec<LivePageActionTrustState>>> {
+    let profiles = match action_profiles(&state, Some(page_id.clone()), None).await {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("Unable to read the repository profiles: {error}"),
+            ))
+        }
+    };
     let result = state
         .db
-        .with_conn(move |conn| crate::db::live_page_action_trusts::list_for_page(conn, &page_id))
+        .with_conn(move |conn| {
+            crate::db::live_page_action_trusts::list_for_page_in(
+                conn,
+                &page_id,
+                crate::db::live_page_action_trusts::ProfileView::Fresh(&profiles),
+            )
+        })
         .await;
     match result {
         Ok(states) => Json(ApiResponse::ok(states)),
@@ -561,10 +613,24 @@ pub async fn trust(
             "Only a human can approve a Page action to run without confirmation",
         ));
     }
+    let profiles = match action_profiles(&state, None, Some(action_id.clone())).await {
+        Ok(profiles) => profiles,
+        Err(error) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("Unable to read the repository profiles: {error}"),
+            ))
+        }
+    };
     let result = state
         .db
         .with_conn(move |conn| {
-            crate::db::live_page_action_trusts::approve(conn, &action_id, &request.fingerprint)
+            crate::db::live_page_action_trusts::approve_with_profiles(
+                conn,
+                &action_id,
+                &request.fingerprint,
+                &profiles,
+            )
         })
         .await;
     match result {

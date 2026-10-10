@@ -14,7 +14,19 @@ use super::discussion_actions::{
     DiscussionActionKind, DiscussionActionState, DiscussionActionValueProvenance,
 };
 use super::live_page_actions::LivePageAction;
+use crate::core::project_profile::ProfileSnapshots;
 use crate::models::{StepType, Workflow, WorkflowStep};
+
+/// Which repository profiles a fingerprint covers (KT-920).
+#[derive(Debug, Clone, Copy)]
+pub enum ProfileView<'a> {
+    /// Snapshots read from git just before, outside the connection: what an
+    /// approval, the panel and a run's admission compare.
+    Fresh(&'a ProfileSnapshots),
+    /// The snapshots the approval was made with: for checks inside a write
+    /// transaction, which cannot read git. The admission re-checks fresh ones.
+    Approved,
+}
 
 /// Minimum spacing between two trusted launches of the same row.
 pub const ROW_MIN_INTERVAL_SECS: i64 = 2;
@@ -257,7 +269,31 @@ pub fn evaluate(
     conn: &Connection,
     action: &LivePageAction,
 ) -> Result<std::result::Result<String, LivePageActionTrustRefusal>> {
-    Ok(evaluate_with(conn, action, None)?.map(|(fingerprint, _)| fingerprint))
+    evaluate_in(conn, action, ProfileView::Approved)
+}
+
+/// [`evaluate`] covering the repository profiles `profiles` says.
+pub fn evaluate_in(
+    conn: &Connection,
+    action: &LivePageAction,
+    profiles: ProfileView<'_>,
+) -> Result<std::result::Result<String, LivePageActionTrustRefusal>> {
+    Ok(evaluate_with(conn, action, None, profiles)?.map(|(fingerprint, _)| fingerprint))
+}
+
+/// The profile snapshots `action_id` was approved with; none before any.
+fn approved_profiles(conn: &Connection, action_id: &str) -> Result<ProfileSnapshots> {
+    let stored: Option<Option<String>> = conn
+        .query_row(
+            "SELECT profile_snapshots_json FROM live_page_action_trusts WHERE action_id = ?1",
+            [action_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored.flatten() {
+        Some(json) => Ok(serde_json::from_str(&json)?),
+        None => Ok(ProfileSnapshots::new()),
+    }
 }
 
 /// A fingerprint and the stored resources it depends on.
@@ -269,6 +305,7 @@ fn evaluate_with(
     conn: &Connection,
     action: &LivePageAction,
     snapshot: Option<&Workflow>,
+    profiles: ProfileView<'_>,
 ) -> Result<std::result::Result<Evaluated, LivePageActionTrustRefusal>> {
     use LivePageActionTrustRefusal as Refusal;
     if action.kind != DiscussionActionKind::Workflow {
@@ -322,6 +359,10 @@ fn evaluate_with(
     if !workflow.enabled {
         return Ok(Err(Refusal::WorkflowDisabled));
     }
+    let profile_snapshots = match profiles {
+        ProfileView::Fresh(fresh) => fresh.clone(),
+        ProfileView::Approved => approved_profiles(conn, &action.id)?,
+    };
     let approved = serde_json::json!({
         "live_page_id": action.live_page_id,
         "action_ref": action.action_ref,
@@ -333,10 +374,12 @@ fn evaluate_with(
             "values": action.values,
         },
         // `enabled` is outside it and checked live: only a human turns it back on.
-        "workflow_revision": crate::workflows::run_pins::revision_fingerprint(
+        // The profile values an Exec step may read are part of the revision.
+        "workflow_revision": crate::workflows::run_pins::revision_fingerprint_with_profiles(
             conn,
             workflow,
             action.project_id.as_deref(),
+            &profile_snapshots,
         )?,
     });
     let digest = Sha256::digest(serde_json::to_vec(&canonical(approved))?);
@@ -418,13 +461,30 @@ pub fn approve(
     action_id: &str,
     expected_fingerprint: &str,
 ) -> Result<LivePageActionTrust> {
+    approve_with_profiles(
+        conn,
+        action_id,
+        expected_fingerprint,
+        &ProfileSnapshots::new(),
+    )
+}
+
+/// [`approve`] against the repository profiles read just before; they are
+/// stored with the approval and are what the run it admits will pin.
+pub fn approve_with_profiles(
+    conn: &Connection,
+    action_id: &str,
+    expected_fingerprint: &str,
+    profiles: &ProfileSnapshots,
+) -> Result<LivePageActionTrust> {
     // Immediate: two approvals of one row serialize instead of deadlocking.
     let transaction =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let Some(action) = crate::db::live_page_actions::declaration(&transaction, action_id)? else {
         anyhow::bail!("Action not found");
     };
-    let (fingerprint, dependencies) = evaluate_with(&transaction, &action, None)??;
+    let (fingerprint, dependencies) =
+        evaluate_with(&transaction, &action, None, ProfileView::Fresh(profiles))??;
     if fingerprint != expected_fingerprint {
         return Err(LivePageActionTrustRefusal::Changed.into());
     }
@@ -432,8 +492,9 @@ pub fn approve(
     transaction.execute(
         "INSERT INTO live_page_action_trusts (
              action_id, live_page_id, action_ref, project_id, target_id,
-             fingerprint, approval_id, approved_at, invalidated_at, invalidated_reason
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,NULL)
+             fingerprint, approval_id, approved_at, invalidated_at, invalidated_reason,
+             profile_snapshots_json
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,NULL,?9)
          ON CONFLICT(action_id) DO UPDATE SET
              project_id = excluded.project_id,
              target_id = excluded.target_id,
@@ -441,7 +502,8 @@ pub fn approve(
              approval_id = excluded.approval_id,
              approved_at = excluded.approved_at,
              invalidated_at = NULL,
-             invalidated_reason = NULL",
+             invalidated_reason = NULL,
+             profile_snapshots_json = excluded.profile_snapshots_json",
         params![
             action.id,
             action.live_page_id,
@@ -451,6 +513,7 @@ pub fn approve(
             fingerprint,
             uuid::Uuid::new_v4().to_string(),
             now,
+            serde_json::to_string(profiles)?,
         ],
     )?;
     // What the write triggers watch: any later write to one invalidates this.
@@ -485,10 +548,20 @@ pub fn list_for_page(
     conn: &Connection,
     live_page_id: &str,
 ) -> Result<Vec<LivePageActionTrustState>> {
+    list_for_page_in(conn, live_page_id, ProfileView::Approved)
+}
+
+/// [`list_for_page`] against the repository profiles `profiles` says: the
+/// panel passes fresh ones, so a changed profile invalidates an approval.
+pub fn list_for_page_in(
+    conn: &Connection,
+    live_page_id: &str,
+    profiles: ProfileView<'_>,
+) -> Result<Vec<LivePageActionTrustState>> {
     let actions = crate::db::live_page_actions::list_for_live_page(conn, live_page_id)?;
     let mut states = Vec::with_capacity(actions.len());
     for action in actions {
-        let current = evaluate(conn, &action)?;
+        let current = evaluate_in(conn, &action, profiles)?;
         let mut trust = get(conn, &action.id)?;
         let active = match trust.as_mut() {
             Some(trust) => revalidate(conn, &action, trust, current.as_ref().map_err(|r| *r))?,
@@ -569,12 +642,14 @@ pub fn admit_launch(
 }
 
 /// The admission of a trusted launch's run, inside the transaction that then
-/// inserts and pins it: `snapshot` is the definition that will execute. It runs
+/// inserts and pins it: `snapshot` is the definition that will execute and
+/// `profiles` the repository profiles it will pin. It runs
 /// only under the very approval its launch was claimed with, still matching.
 pub fn admit_run(
     conn: &Connection,
     launch_id: &str,
     snapshot: &Workflow,
+    profiles: &ProfileSnapshots,
 ) -> Result<std::result::Result<(), LivePageActionTrustRefusal>> {
     use LivePageActionTrustRefusal as Refusal;
     type Claimed = (
@@ -637,7 +712,8 @@ pub fn admit_run(
     if !same_offer {
         return Ok(Err(Refusal::Changed));
     }
-    let current = evaluate_with(conn, &action, Some(snapshot))?;
+    // `profiles` are the snapshots the run is about to pin, read just before.
+    let current = evaluate_with(conn, &action, Some(snapshot), ProfileView::Fresh(profiles))?;
     if revalidate(
         conn,
         &action,

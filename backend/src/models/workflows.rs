@@ -808,6 +808,64 @@ pub struct WorkflowStep {
     /// the existing launch policy. Paths are validated again before launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_repos: Vec<String>,
+    /// KT-909 — `DelegateSubtasks` steps only. The step's `agent` and
+    /// `agent_settings` are the reviewer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub delegate_subtasks: Option<DelegateSubtasksConfig>,
+}
+
+/// KT-909 — what a `DelegateSubtasks` step delegates and how.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DelegateSubtasksConfig {
+    /// Parent task reference or id; templated (`{{steps.guard.data.taskId}}`).
+    pub parent_task: String,
+    /// `worker:<key>` subtask tag → worker. The first tag found here wins.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(
+        as = "Option<std::collections::BTreeMap<String, DelegateWorker>>",
+        optional
+    )]
+    pub worker_map: std::collections::BTreeMap<String, DelegateWorker>,
+    /// Worker for a subtask whose tags match no `worker_map` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_worker: Option<DelegateWorker>,
+    /// Executions in flight at once. Default 1, maximum 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub concurrency: Option<u32>,
+    /// Review rounds per subtask before it escalates. Default 3, maximum 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_review_rounds: Option<u32>,
+    /// Commands run on each approved candidate before it is integrated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crate::models::ValidationSpec>>", optional)]
+    pub validations: Vec<crate::models::ValidationSpec>,
+    /// Integration branch; templated. Default: the branch checked out in the
+    /// run's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_branch: Option<String>,
+    /// Bound on the whole step. Default 6 h. Executions survive it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// A native worker identity for delegated subtasks (CLI sessions excluded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DelegateWorker {
+    pub agent: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<ModelTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see
@@ -1070,6 +1128,10 @@ pub enum StepType {
     /// from `sub_workflow_variables`, its own concurrency limit) and records
     /// this run as `triggered_by_run_id`; cycles between workflows are allowed.
     TriggerWorkflow,
+    /// KT-909 — run a parent task's subtasks as task executions without an
+    /// orchestrator agent: launch, wait mechanically, and call the step's
+    /// agent once per delivery, only to review it. Config: `delegate_subtasks`.
+    DelegateSubtasks,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

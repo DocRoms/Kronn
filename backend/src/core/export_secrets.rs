@@ -63,7 +63,7 @@ const SECRET_KEY_PREFIXES: &[&str] = &[
 
 /// Whether a parameter, header or flag name designates a credential. Names are
 /// compared word by word so `max_tokens` or `tokenizer` stay ordinary.
-fn secret_name(name: &str) -> bool {
+pub(crate) fn secret_name(name: &str) -> bool {
     let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut previous_lower = false;

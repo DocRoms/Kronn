@@ -16,6 +16,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::project_profile::{project_key, ProfileSnapshot, ProfileSnapshots};
 use crate::db::workflow_run_pins as rows;
 use crate::models::{
     AgentProfile, Directive, QuickApi, QuickPrompt, Skill, StepType, Workflow, WorkflowRun,
@@ -28,6 +29,8 @@ pub const SKILL: &str = "skill";
 pub const DIRECTIVE: &str = "directive";
 pub const PROFILE: &str = "profile";
 pub const RESOLUTION: &str = "resolution";
+/// The repository profile a run read (KT-920), keyed by its project id.
+pub const PROJECT_PROFILE: &str = "project_profile";
 
 #[derive(Serialize, Deserialize)]
 struct RunHeader {
@@ -48,6 +51,19 @@ pub fn pin_or_load(
     workflow: &Workflow,
     run: &WorkflowRun,
 ) -> Result<std::result::Result<Workflow, String>> {
+    pin_or_load_with_profiles(conn, workflow, run, &ProfileSnapshots::new())
+}
+
+/// [`pin_or_load`] that also pins the repository profiles `profiles` holds
+/// (resolved beforehand, outside any connection) and covers them in the
+/// pinned fingerprint. A child records its own on the root run, first writer
+/// wins, so every run of a tree reads one snapshot per project.
+pub fn pin_or_load_with_profiles(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+    profiles: &ProfileSnapshots,
+) -> Result<std::result::Result<Workflow, String>> {
     if let Some(header) = header(conn, &run.id)? {
         return Ok(Ok(header.workflow.unwrap_or_else(|| workflow.clone())));
     }
@@ -64,7 +80,7 @@ pub fn pin_or_load(
         return Ok(Ok(workflow.clone()));
     }
     let tx = conn.unchecked_transaction()?;
-    let pinned = pin_fresh(&tx, workflow, run)?;
+    let pinned = pin_fresh(&tx, workflow, run, profiles)?;
     if pinned.is_ok() {
         tx.commit()?;
     }
@@ -78,13 +94,25 @@ pub fn pin_within(
     workflow: &Workflow,
     run: &WorkflowRun,
 ) -> Result<std::result::Result<Workflow, String>> {
-    pin_fresh(conn, workflow, run)
+    pin_fresh(conn, workflow, run, &ProfileSnapshots::new())
+}
+
+/// [`pin_within`] that also pins the repository profiles the caller resolved
+/// (and, for an admission, verified) before its transaction.
+pub fn pin_within_with_profiles(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+    profiles: &ProfileSnapshots,
+) -> Result<std::result::Result<Workflow, String>> {
+    pin_fresh(conn, workflow, run, profiles)
 }
 
 fn pin_fresh(
     tx: &Connection,
     workflow: &Workflow,
     run: &WorkflowRun,
+    profiles: &ProfileSnapshots,
 ) -> Result<std::result::Result<Workflow, String>> {
     let inherited = match run.parent_run_id.as_deref() {
         Some(parent) if rows::has_pin(tx, parent)? => {
@@ -101,7 +129,28 @@ fn pin_fresh(
         let project_id = run.project_id.as_deref().or(workflow.project_id.as_deref());
         let deps = Deps::gather(tx, workflow, project_id)?;
         deps.store(tx, &run.id)?;
-        fingerprint = Some(fingerprint_of(workflow, &deps)?);
+        let covered = deps.profiles_of(profiles);
+        for (key, snapshot) in &covered {
+            rows::insert(
+                tx,
+                &run.id,
+                PROJECT_PROFILE,
+                key,
+                &serde_json::to_string(snapshot)?,
+            )?;
+        }
+        fingerprint = Some(fingerprint_of(workflow, &deps, &covered)?);
+    } else {
+        let owner = pin_owner(tx, run.parent_run_id.as_deref().unwrap_or_default())?;
+        for (key, snapshot) in profiles {
+            rows::insert(
+                tx,
+                &owner,
+                PROJECT_PROFILE,
+                key,
+                &serde_json::to_string(snapshot)?,
+            )?;
+        }
     }
     let header = RunHeader {
         pinned_at: Utc::now(),
@@ -152,6 +201,105 @@ fn resolution(conn: &Connection, run_id: &str, workflow_id: &str) -> Result<Opti
         Some(json) => Ok(Some(serde_json::from_str(&json)?)),
         None => Ok(None),
     }
+}
+
+/// The root of `run_id`'s pinned run tree: the farthest pinned ancestor.
+/// Profiles are shared there, so two children never read different ones.
+fn pin_owner(conn: &Connection, run_id: &str) -> Result<String> {
+    let mut owner = run_id.to_string();
+    for _ in 0..64 {
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_run_id FROM workflow_runs WHERE id = ?1",
+                params![owner],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        match parent {
+            Some(parent) if rows::has_pin(conn, &parent)? => owner = parent,
+            _ => break,
+        }
+    }
+    Ok(owner)
+}
+
+/// The repository profile pinned for `project_id` in `run_id`'s tree: the
+/// run's own row, else its root's.
+pub fn pinned_project_profile(
+    conn: &Connection,
+    run_id: &str,
+    project_id: Option<&str>,
+) -> Result<Option<ProfileSnapshot>> {
+    let key = project_key(project_id);
+    for holder in [run_id.to_string(), pin_owner(conn, run_id)?] {
+        if let Some(json) = rows::get(conn, &holder, PROJECT_PROFILE, &key)? {
+            return Ok(Some(serde_json::from_str(&json)?));
+        }
+    }
+    Ok(None)
+}
+
+/// Records a profile read after the pin on the tree's root, first writer
+/// wins, and returns what the tree holds. An unpinned run keeps `read`.
+pub fn record_project_profile(
+    conn: &Connection,
+    run_id: &str,
+    project_id: Option<&str>,
+    read: ProfileSnapshot,
+) -> Result<ProfileSnapshot> {
+    if !rows::has_pin(conn, run_id)? {
+        return Ok(read);
+    }
+    let owner = pin_owner(conn, run_id)?;
+    rows::insert(
+        conn,
+        &owner,
+        PROJECT_PROFILE,
+        &project_key(project_id),
+        &serde_json::to_string(&read)?,
+    )?;
+    Ok(pinned_project_profile(conn, run_id, project_id)?.unwrap_or(read))
+}
+
+/// Every project `workflow` (and its sub-workflows) executes in when run for
+/// `project_id`, as profile keys.
+pub fn profile_projects(
+    conn: &Connection,
+    workflow: &Workflow,
+    project_id: Option<&str>,
+) -> Result<BTreeSet<String>> {
+    let mut deps = Deps::default();
+    collect(conn, workflow, project_id, &mut deps)?;
+    Ok(deps.projects)
+}
+
+/// The projects whose repository profile the run of `workflow` (and of its
+/// sub-workflows) for `project_id` will read, minus those `parent_run_id`'s
+/// tree already pinned: what to resolve before [`pin_or_load_with_profiles`].
+pub fn profile_projects_to_resolve(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> Result<BTreeSet<String>> {
+    if rows::has_pin(conn, &run.id)? {
+        return Ok(BTreeSet::new());
+    }
+    let project_id = run.project_id.as_deref().or(workflow.project_id.as_deref());
+    let mut wanted = profile_projects(conn, workflow, project_id)?;
+    if let Some(parent) = run.parent_run_id.as_deref().filter(|p| !p.is_empty()) {
+        if rows::has_pin(conn, parent)? {
+            let mut pinned = BTreeSet::new();
+            for key in &wanted {
+                let id = (!key.is_empty()).then_some(key.as_str());
+                if pinned_project_profile(conn, parent, id)?.is_some() {
+                    pinned.insert(key.clone());
+                }
+            }
+            wanted.retain(|key| !pinned.contains(key));
+        }
+    }
+    Ok(wanted)
 }
 
 /// The [`revision_fingerprint`] a top-level run pinned when it started.
@@ -284,17 +432,38 @@ pub fn seed_resource_snapshots_as(conn: &Connection, run_id: &str, key: &str) ->
 /// directives and profiles. Any change to one of them changes the
 /// fingerprint; enabling, pinning and timestamps do not. An approval tied to
 /// this value (a run's pin, a Live Page action) must not outlive it.
+///
+/// It does not cover the repository profiles (`kronn/project.toml`) the run
+/// reads, which can change what an Exec step runs. A caller that needs an
+/// approval-grade identity resolves the profiles first, outside any
+/// connection ([`profile_projects_to_resolve`], then
+/// `core::project_profile::snapshot` per project), and calls
+/// [`revision_fingerprint_with_profiles`]; the run pin does the same.
 pub fn revision_fingerprint(
     conn: &Connection,
     workflow: &Workflow,
     project_id: Option<&str>,
 ) -> Result<String> {
-    fingerprint_of(workflow, &Deps::gather(conn, workflow, project_id)?)
+    revision_fingerprint_with_profiles(conn, workflow, project_id, &ProfileSnapshots::new())
+}
+
+/// [`revision_fingerprint`] that also covers the repository profiles of the
+/// projects the run tree reads, from snapshots resolved beforehand. Pass the
+/// same snapshots the run pins so the approval and the run agree.
+pub fn revision_fingerprint_with_profiles(
+    conn: &Connection,
+    workflow: &Workflow,
+    project_id: Option<&str>,
+    profiles: &ProfileSnapshots,
+) -> Result<String> {
+    let deps = Deps::gather(conn, workflow, project_id)?;
+    let covered = deps.profiles_of(profiles);
+    fingerprint_of(workflow, &deps, &covered)
 }
 
 /// Hashes exactly the closure `deps` materialised, never a second read.
-fn fingerprint_of(workflow: &Workflow, deps: &Deps) -> Result<String> {
-    let identity = serde_json::json!({
+fn fingerprint_of(workflow: &Workflow, deps: &Deps, profiles: &ProfileSnapshots) -> Result<String> {
+    let mut identity = serde_json::json!({
         "workflow": revision_content(workflow)?,
         "quick_prompts": deps.prompts.values().map(revision_content).collect::<Result<Vec<_>>>()?,
         "quick_apis": deps.apis.values().map(revision_content).collect::<Result<Vec<_>>>()?,
@@ -304,6 +473,14 @@ fn fingerprint_of(workflow: &Workflow, deps: &Deps) -> Result<String> {
         "directives": deps.directives.values().collect::<Vec<_>>(),
         "profiles": deps.profiles.values().collect::<Vec<_>>(),
     });
+    // Absent when no profile was resolved, so older fingerprints stay equal.
+    if !profiles.is_empty() {
+        identity["project_profiles"] = profiles
+            .iter()
+            .map(|(key, snapshot)| (key.clone(), snapshot.identity()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
     let canonical = serde_json::to_vec(&canonical(identity))?;
     Ok(crate::core::repository_resources::sha256(&canonical))
 }
@@ -434,6 +611,8 @@ struct Deps {
     skills: BTreeMap<String, Skill>,
     directives: BTreeMap<String, Directive>,
     profiles: BTreeMap<String, AgentProfile>,
+    /// Projects the run tree executes in (`""` for none), for their profiles.
+    projects: BTreeSet<String>,
 }
 
 impl Deps {
@@ -469,6 +648,15 @@ impl Deps {
             }
         }
         Ok(deps)
+    }
+
+    /// The snapshots of `profiles` for projects this closure executes in.
+    fn profiles_of(&self, profiles: &ProfileSnapshots) -> ProfileSnapshots {
+        profiles
+            .iter()
+            .filter(|(key, _)| self.projects.contains(*key))
+            .map(|(key, snapshot)| (key.clone(), snapshot.clone()))
+            .collect()
     }
 
     fn bindings(
@@ -520,6 +708,7 @@ fn collect(
     project_id: Option<&str>,
     deps: &mut Deps,
 ) -> Result<()> {
+    deps.projects.insert(project_key(project_id));
     let structured =
         crate::core::resource_refs::structured_reference_map(conn, workflow, project_id)?;
     let mut resolved = workflow.clone();
@@ -1003,7 +1192,7 @@ mod tests {
                 let mut parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
                 parent.steps[0].skill_ids = vec![pinned_skill.clone()];
                 let deps = Deps::gather(conn, &parent, None)?;
-                let before = fingerprint_of(&parent, &deps)?;
+                let before = fingerprint_of(&parent, &deps, &ProfileSnapshots::new())?;
                 // The barrier: the catalog changes after the gathering.
                 crate::core::skills::update_custom_skill(
                     &pinned_skill,
@@ -1018,7 +1207,7 @@ mod tests {
                 )
                 .map_err(anyhow::Error::msg)?;
                 deps.store(conn, "run-1")?;
-                let after = fingerprint_of(&parent, &deps)?;
+                let after = fingerprint_of(&parent, &deps, &ProfileSnapshots::new())?;
                 let stored = rows::get(conn, "run-1", SKILL, &pinned_skill)?.unwrap();
                 Ok((before, after, stored))
             })
@@ -1190,6 +1379,74 @@ mod tests {
             .expect("the repository skill is pinned");
         assert!(stored.contains("COMMITTED-BODY"), "{stored}");
         assert!(!stored.contains("CHECKOUT-BODY"), "{stored}");
+    }
+
+    fn lint_profile(command: &str, commit: &str) -> ProfileSnapshots {
+        let snapshot = ProfileSnapshot {
+            git_ref: Some("refs/heads/main".into()),
+            commit: Some(commit.into()),
+            state: crate::core::project_profile::SnapshotState::Loaded,
+            error: None,
+            values: BTreeMap::from([(
+                "project.validation.targets.lint.command".to_string(),
+                command.to_string(),
+            )]),
+        };
+        BTreeMap::from([(String::new(), snapshot)])
+    }
+
+    async fn fingerprint_with(db: &Database, profiles: ProfileSnapshots) -> String {
+        db.with_conn(move |conn| {
+            let parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+            revision_fingerprint_with_profiles(conn, &parent, None, &profiles)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_fingerprint_covers_the_repository_profile_the_run_reads() {
+        let db = seeded().await;
+        let lint = fingerprint_with(&db, lint_profile("make lint", "c1")).await;
+        assert_eq!(
+            fingerprint_with(&db, lint_profile("make lint", "c2")).await,
+            lint,
+            "an unchanged profile keeps the fingerprint, whatever its commit"
+        );
+        assert_ne!(
+            fingerprint_with(&db, lint_profile("make lint && curl evil", "c3")).await,
+            lint,
+            "a changed command changes it"
+        );
+        let plain = db
+            .with_conn(|conn| {
+                let parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+                revision_fingerprint(conn, &parent, None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(fingerprint_with(&db, ProfileSnapshots::new()).await, plain);
+        assert_ne!(lint, plain);
+
+        // The run pin hashes and stores the same snapshot.
+        let pinned = db
+            .with_conn(|conn| {
+                let parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+                let run = crate::db::workflows::get_run(conn, "run-1")?.unwrap();
+                pin_or_load_with_profiles(conn, &parent, &run, &lint_profile("make lint", "c1"))?
+                    .map_err(anyhow::Error::msg)?;
+                Ok((
+                    pinned_fingerprint(conn, "run-1")?,
+                    pinned_project_profile(conn, "run-1", None)?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(pinned.0.as_deref(), Some(lint.as_str()));
+        assert_eq!(
+            pinned.1.unwrap().values["project.validation.targets.lint.command"],
+            "make lint"
+        );
     }
 
     #[tokio::test]

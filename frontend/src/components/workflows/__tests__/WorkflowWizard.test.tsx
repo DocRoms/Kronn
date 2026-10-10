@@ -845,6 +845,49 @@ describe('WorkflowWizard — save handler', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
   });
 
+  it('saves a DelegateSubtasks step without review guidance and shows its config read-only (KT-909)', async () => {
+    const delegate = mkStep({
+      step_type: { type: 'DelegateSubtasks' },
+      prompt_template: '',
+      output_format: { type: 'FreeText' },
+      delegate_subtasks: {
+        parent_task: '{{steps.guard.data.taskId}}',
+        worker_map: { haiku: { agent: 'ClaudeCode', tier: 'economy' } },
+        concurrency: 2,
+      },
+    });
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [delegate, mkStep({ name: 'beta' })] }) });
+    const saveBtn = screen.getByText('wiz.save').closest('button') as HTMLButtonElement;
+    expect(saveBtn).not.toBeDisabled();
+
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    const summary = screen.getByTestId('delegate-subtasks-summary');
+    expect(summary).toHaveTextContent('{{steps.guard.data.taskId}}');
+    expect(summary).toHaveTextContent('worker:haiku → ClaudeCode · economy');
+    const card = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    expect(card.querySelector('.wf-step-type-current')).toHaveTextContent('wiz.stepTypeDelegateSubtasks');
+    expect(screen.queryByText(/wiz\.errorNoPrompt/)).toBeNull();
+
+    fireEvent.click(saveBtn);
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0].delegate_subtasks.parent_task).toBe('{{steps.guard.data.taskId}}');
+  });
+
+  it('blocks saving a DelegateSubtasks step with no worker', () => {
+    const delegate = mkStep({
+      step_type: { type: 'DelegateSubtasks' },
+      prompt_template: '',
+      delegate_subtasks: { parent_task: 'KT-1' },
+    });
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [delegate] }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    const saveBtn = screen.getByText('wiz.save').closest('button') as HTMLButtonElement;
+    expect(saveBtn).toBeDisabled();
+    expect(screen.getByText(/wiz\.errorDelegateSubtasksConfig/)).toBeInTheDocument();
+  });
+
   it('surfaces a save error banner when create rejects (and does not call onDone)', async () => {
     const onDone = vi.fn();
     createMock.mockRejectedValueOnce(new Error('backend boom'));

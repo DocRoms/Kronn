@@ -1,0 +1,15 @@
+.skill-group-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-radius-pill);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.skill-group-badge[data-badge='project'] { border-color: rgba(var(--kr-info-rgb), 0.4); color: var(--kr-info); }
+.skill-group-badge[data-badge='repository'] { border-color: rgba(var(--kr-success-rgb), 0.4); color: var(--kr-success); }
+.skill-group-badge[data-badge='unsynced'] { border-color: rgba(var(--kr-warning-rgb), 0.4); color: var(--kr-warning); }

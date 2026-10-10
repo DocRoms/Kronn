@@ -59,6 +59,7 @@ pub mod operator_secret;
 pub mod power_guard;
 pub mod pricing;
 pub mod profiles;
+pub mod project_profile;
 pub mod quick_exec;
 pub mod quick_exec_templates;
 pub mod recovery;

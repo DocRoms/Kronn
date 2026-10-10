@@ -2,10 +2,12 @@ import { useState } from 'react';
 import { ExternalLink, Pencil, Settings, Star } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projectsUsingSkill, skillOrigin, type RepositorySkillOrigin } from '../lib/automationSkills';
-import type { Project, Skill } from '../types/generated';
+import { catalogSkillTraits } from '../lib/skillGroups';
+import type { Project, ProjectRepositoryResourceStatus, Skill } from '../types/generated';
 import { ConfirmDeleteButton } from './ConfirmDeleteButton';
 import { CopyIdPill } from './CopyIdPill';
 import { FileText } from './RepositoryResourceContent';
+import { SkillGroupBadges } from './SkillGroupBadges';
 import './RepositoryResourceSheets.css';
 import './SkillSheet.css';
 import { SkillVariablesBadge } from './SkillVariablesBadge';
@@ -68,12 +70,14 @@ interface CardProps extends FavoriteProps {
   projectCount: number;
   /** Set for a skill only a repository holds. */
   repository?: Pick<RepositorySkillOrigin, 'root'>;
+  /** Its sync state on each project using it. */
+  syncStates?: readonly ProjectRepositoryResourceStatus[];
   onOpen: () => void;
 }
 
 /** A skill in the main column while none is open: same card as the other
  *  types, opening its sheet. */
-export function SkillCard({ skill, pinned, onTogglePinned, projectCount, repository, onOpen }: CardProps) {
+export function SkillCard({ skill, pinned, onTogglePinned, projectCount, repository, syncStates, onOpen }: CardProps) {
   const { t } = useT();
   return (
     <div className="qp-card skill-card" data-kind="skill">
@@ -95,6 +99,7 @@ export function SkillCard({ skill, pinned, onTogglePinned, projectCount, reposit
       {skill.description && <p className="qp-card-desc">{skill.description}</p>}
       <div className="qp-card-meta">
         <SkillBadges skill={skill} repository={repository} />
+        <SkillGroupBadges traits={catalogSkillTraits(skill, repository, syncStates)} />
         <span className="skill-card-projects">{t('automation.skill.projectCount', projectCount)}</span>
       </div>
     </div>

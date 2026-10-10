@@ -199,6 +199,33 @@ parent `node_modules`, Python's site-packages) are not covered
 [src: file: backend/src/core/approved_scripts.rs:1]
 [src: file: backend/src/workflows/exec_step.rs:102].
 
+**Implementation note (KT-920, 0.15.0).** Templated step fields read the
+target project's profile as `{{project.<path>}}` (`project.*` is reserved).
+The runner reads `kronn/project.toml` once, before the first step, with git,
+at the commit of the selected ref of the main checkout: the branch
+`origin/HEAD` names, else `main`, else `master`, as the local branch when it
+exists, else `origin/<name>`; never `HEAD` nor a working tree. That ref's
+name proves nothing about review; what is guaranteed is that the run's
+worktree or branch cannot change it. What was read (ref, commit, values, or
+the absence of a profile) is resolved before the pin, outside any connection,
+for every project the run tree executes in, and pinned with the run
+(`workflow_run_pins`, kind `project_profile`); a child in another project
+records its read on the root run, first writer wins. Resumes and children
+never read the repository again, and the pinned fingerprint covers the
+values (`revision_fingerprint_with_profiles`). A trusted Page action's
+approval (KT-1029) covers them too: the approval and the admission read the
+profiles fresh, and the admitted run pins the snapshot its admission
+compared.
+The schema refuses unknown keys, placeholders and secret-looking keys or
+values, and its refusals never quote the file. A step reading a key without
+`??` fails the run before it starts when the profile is absent, invalid or
+lacks the key; a workflow that reads none is unaffected. A completed Full
+audit drafts a starter profile and stores it with the audit run, shown
+read-only with a Copy button in the audit view; it never writes into the
+checkout, and only a human publishes it
+[src: file: backend/src/core/project_profile.rs:1]
+[src: file: docs/guides/project-profile.md:1].
+
 ### Other resources
 
 QA, artifacts, directives and profiles live in `kronn/` with the same identity,
@@ -389,7 +416,10 @@ Branch `archive/feat-0.13.0-portable-prototype-20260830`.
 6. Plugin declarations: accesses and CLI prerequisites in `plugins.toml`,
    shared with the Plugins page health probes (KT-829).
 7. Repository profile `project.toml`, proposed by the audit and consumed by
-   task_exec validations and generic workflows.
+   task_exec validations and generic workflows. **Status (KT-920, 0.15.0):**
+   schema v1, `{{project.<path>}}` in workflows and the audit proposal are
+   done (see the implementation note in §Workflows); task_exec validations,
+   the `INDEX.md` line and moving the autoCode onto the profile remain.
 8. Workflows shared across projects, project resolved at trigger time
    (KT-851, see §Workflows).
 9. Later: portable workflows (N1 runbooks), prompt promotion to native skills,

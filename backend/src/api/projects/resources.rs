@@ -1178,6 +1178,37 @@ fn align_skill(
     Ok(AlignedSkill { rendered, view })
 }
 
+/// A Kronn skill's sync state as the project card shows it: aligned against its
+/// `kronn.lock` entry, else, for a skill the project links, whether a file
+/// already sits at its publication path. `None`: the card shows none.
+pub(super) fn skill_sync_status(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    project_key: &str,
+    skill_id: &str,
+    linked: bool,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+) -> anyhow::Result<Option<ProjectRepositoryResourceStatus>> {
+    let slug = crate::core::native_files::slug(skill_id);
+    let entry = lock.and_then(|lock| {
+        lock.resources
+            .iter()
+            .find(|entry| entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == slug)
+    });
+    Ok(match entry {
+        Some(entry) => Some(
+            align_skill(conn, root, project_key, skill_id, &slug, entry)?
+                .view
+                .status,
+        ),
+        None if linked => Some(attached_skill_status(
+            root,
+            &crate::core::repository_resources::skill_path(&slug),
+        )),
+        None => None,
+    })
+}
+
 /// A Kronn-side automation or artifact placed against `kronn.lock` and the
 /// baseline of its last alignment.
 struct ResolvedResource {

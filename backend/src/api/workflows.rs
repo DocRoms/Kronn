@@ -170,8 +170,73 @@ fn validate_on_failure_steps(steps: &[WorkflowStep]) -> Result<(), String> {
                 s.name
             ));
         }
+        if matches!(s.step_type, StepType::DelegateSubtasks) {
+            return Err(format!(
+                "Rollback step « {} » : type DelegateSubtasks interdit dans la chaîne on_failure (une compensation ne lance pas de nouveau travail).",
+                s.name
+            ));
+        }
     }
     Ok(())
+}
+
+/// KT-909 — what a `DelegateSubtasks` step must declare before it can run.
+fn validate_delegate_subtasks(s: &WorkflowStep) -> Result<(), String> {
+    use crate::workflows::delegate_subtasks_step::{MAX_CONCURRENCY, MAX_REVIEW_ROUNDS};
+    let Some(config) = s.delegate_subtasks.as_ref() else {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `delegate_subtasks` est obligatoire.",
+            s.name
+        ));
+    };
+    if config.parent_task.trim().is_empty() {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `delegate_subtasks.parent_task` est obligatoire (référence ou gabarit, ex. `{{{{steps.garde.data.tacheId}}}}`).",
+            s.name
+        ));
+    }
+    if config.worker_map.is_empty() && config.default_worker.is_none() {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : déclare `worker_map` ou `default_worker`.",
+            s.name
+        ));
+    }
+    if config.worker_map.keys().any(|key| key.trim().is_empty()) {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : une clé de `worker_map` est vide.",
+            s.name
+        ));
+    }
+    if config
+        .concurrency
+        .is_some_and(|value| value == 0 || value > MAX_CONCURRENCY)
+    {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `concurrency` doit être entre 1 et {MAX_CONCURRENCY}.",
+            s.name
+        ));
+    }
+    if config
+        .max_review_rounds
+        .is_some_and(|value| value == 0 || value > MAX_REVIEW_ROUNDS)
+    {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `max_review_rounds` doit être entre 1 et {MAX_REVIEW_ROUNDS}.",
+            s.name
+        ));
+    }
+    if config.timeout_secs == Some(0) {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `timeout_secs` doit être > 0.",
+            s.name
+        ));
+    }
+    crate::api::orchestration::validate_new_validation_specs(&config.validations).map_err(|error| {
+        format!(
+            "Step DelegateSubtasks « {} » : validations : {error}",
+            s.name
+        )
+    })
 }
 
 /// 0.7.0 Phase 5 — validate the per-workflow Exec allowlist.
@@ -774,6 +839,7 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                     .map_err(|e| format!("Step SubWorkflow « {} » : {e}", s.name))?;
             }
         }
+        StepType::DelegateSubtasks => validate_delegate_subtasks(s)?,
         StepType::TriggerWorkflow => {
             if s.sub_workflow_id
                 .as_deref()
@@ -4028,8 +4094,16 @@ pub(crate) async fn create_manual_run_with_id(
 
 /// A last check run in the transaction that inserts and pins the run, against
 /// the workflow as read for it (before project resolution): what will execute.
-pub(crate) type RunAdmission =
-    Box<dyn FnOnce(&rusqlite::Connection, &Workflow) -> anyhow::Result<Result<(), String>> + Send>;
+/// The third argument is the repository profiles the run will pin (KT-920),
+/// read before the transaction: the admission compares those very snapshots.
+pub(crate) type RunAdmission = Box<
+    dyn FnOnce(
+            &rusqlite::Connection,
+            &Workflow,
+            &crate::core::project_profile::ProfileSnapshots,
+        ) -> anyhow::Result<Result<(), String>>
+        + Send,
+>;
 
 /// [`create_manual_run_with_id`] with an admission: when given, the check, the
 /// insert and the KT-1096 pin of that exact definition commit together (KT-1029).
@@ -4169,6 +4243,22 @@ pub(crate) async fn create_manual_run_admitted(
     };
     let persisted = run.clone();
     let admitted_workflow = wf.clone();
+    // KT-920 — an admitted run's profiles are read once, before the
+    // transaction: the admission compares them and the pin stores them.
+    let profiles = if admission.is_some() {
+        let mut targets = vec![(wf.clone(), run.project_id.clone())];
+        for project in [
+            launch.requested_project_id.clone(),
+            as_read.project_id.clone(),
+        ] {
+            targets.push((as_read.clone(), project));
+        }
+        crate::core::project_profile::resolve_for(&state.db, targets)
+            .await
+            .map_err(|error| format!("Repository profile unavailable: {error}"))?
+    } else {
+        Default::default()
+    };
     state
         .db
         .with_conn(move |conn| {
@@ -4180,7 +4270,7 @@ pub(crate) async fn create_manual_run_admitted(
                 );
             };
             let tx = conn.unchecked_transaction()?;
-            if let Err(reason) = admission(&tx, &as_read)? {
+            if let Err(reason) = admission(&tx, &as_read, &profiles)? {
                 // Keep what the check recorded (an invalidation); no run exists.
                 tx.commit()?;
                 return Ok(Err(reason));
@@ -4192,9 +4282,12 @@ pub(crate) async fn create_manual_run_admitted(
             )? {
                 return Ok(Err(reason));
             }
-            if let Err(reason) =
-                crate::workflows::run_pins::pin_within(&tx, &admitted_workflow, &persisted)?
-            {
+            if let Err(reason) = crate::workflows::run_pins::pin_within_with_profiles(
+                &tx,
+                &admitted_workflow,
+                &persisted,
+                &profiles,
+            )? {
                 return Ok(Err(reason));
             }
             tx.commit()?;
@@ -6301,6 +6394,7 @@ pub async fn suggestions(
                     multi_agent_review: None,
                     room_id: None,
                     read_only_repos: vec![],
+                    delegate_subtasks: None,
                     exec_script_files: vec![],
                     exec_unmodelled_args_approved: None,
                     exec_agent_written: None,
@@ -7247,6 +7341,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

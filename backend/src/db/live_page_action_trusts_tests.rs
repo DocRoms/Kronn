@@ -350,10 +350,13 @@ fn a_revocation_or_edit_after_the_claim_stops_the_run() {
 
     let first = claimed(claim_trusted_launch(&conn, ACTION, &row("T-1")));
     let snapshot = stored_workflow(&conn, "wf-move");
-    assert_eq!(admit_run(&conn, &first.id, &snapshot).unwrap(), Ok(()));
+    assert_eq!(
+        admit_run(&conn, &first.id, &snapshot, &Default::default()).unwrap(),
+        Ok(())
+    );
     revoke(&conn, ACTION).unwrap();
     assert_eq!(
-        admit_run(&conn, &first.id, &snapshot).unwrap(),
+        admit_run(&conn, &first.id, &snapshot, &Default::default()).unwrap(),
         Err(LivePageActionTrustRefusal::NotTrusted)
     );
 
@@ -362,13 +365,19 @@ fn a_revocation_or_edit_after_the_claim_stops_the_run() {
     workflow.steps[0].json_data_payload = Some(serde_json::json!({"column":"done"}));
     crate::db::workflows::update_workflow(&conn, &workflow).unwrap();
     assert_eq!(
-        admit_run(&conn, &second.id, &stored_workflow(&conn, "wf-move")).unwrap(),
+        admit_run(
+            &conn,
+            &second.id,
+            &stored_workflow(&conn, "wf-move"),
+            &Default::default()
+        )
+        .unwrap(),
         Err(LivePageActionTrustRefusal::Changed)
     );
     // A card launch never passes for a trusted one.
     let card = claimed(claim_launch(&conn, ACTION, &HashMap::new(), &row("T-3")));
     assert_eq!(
-        admit_run(&conn, &card.id, &snapshot).unwrap(),
+        admit_run(&conn, &card.id, &snapshot, &Default::default()).unwrap(),
         Err(LivePageActionTrustRefusal::NotTrusted)
     );
 }
@@ -382,12 +391,14 @@ fn a_snapshot_other_than_the_approved_definition_is_never_admitted() {
     let mut unapproved = stored_workflow(&conn, "wf-move");
     unapproved.steps[0].json_data_payload = Some(serde_json::json!({"column":"done"}));
     assert_eq!(
-        admit_run(&conn, &launch.id, &unapproved).unwrap(),
+        admit_run(&conn, &launch.id, &unapproved, &Default::default()).unwrap(),
         Err(LivePageActionTrustRefusal::Changed)
     );
     let mut agent = stored_workflow(&conn, "wf-move");
     agent.steps[0].step_type = StepType::Agent;
-    assert!(admit_run(&conn, &launch.id, &agent).unwrap().is_err());
+    assert!(admit_run(&conn, &launch.id, &agent, &Default::default())
+        .unwrap()
+        .is_err());
 }
 
 /// Codex r1 P1-b: one action_ref, two harmless targets A then B.
@@ -412,7 +423,11 @@ fn a_claim_under_an_older_approval_never_runs_under_a_newer_one() {
         stored_workflow(&conn, "wf-move"),
         stored_workflow(&conn, "wf-other"),
     ] {
-        assert!(admit_run(&conn, &claim_a.id, &snapshot).unwrap().is_err());
+        assert!(
+            admit_run(&conn, &claim_a.id, &snapshot, &Default::default())
+                .unwrap()
+                .is_err()
+        );
     }
 
     // Revoke then re-approve the same content: the old claim stays dead.
@@ -420,13 +435,25 @@ fn a_claim_under_an_older_approval_never_runs_under_a_newer_one() {
     revoke(&conn, ACTION).unwrap();
     approve_current(&conn, ACTION);
     assert_eq!(
-        admit_run(&conn, &claim_b.id, &stored_workflow(&conn, "wf-other")).unwrap(),
+        admit_run(
+            &conn,
+            &claim_b.id,
+            &stored_workflow(&conn, "wf-other"),
+            &Default::default()
+        )
+        .unwrap(),
         Err(LivePageActionTrustRefusal::NotTrusted)
     );
     // A new click under the new approval does run.
     let claim_c = claimed(claim_trusted_launch(&conn, ACTION, &row("T-3")));
     assert_eq!(
-        admit_run(&conn, &claim_c.id, &stored_workflow(&conn, "wf-other")).unwrap(),
+        admit_run(
+            &conn,
+            &claim_c.id,
+            &stored_workflow(&conn, "wf-other"),
+            &Default::default()
+        )
+        .unwrap(),
         Ok(())
     );
 }
@@ -872,7 +899,13 @@ fn an_unchanged_literal_suggestion_is_admitted() {
         "the claim stores no runtime value"
     );
     assert_eq!(
-        admit_run(&conn, &launch.id, &stored_workflow(&conn, "wf-move")).unwrap(),
+        admit_run(
+            &conn,
+            &launch.id,
+            &stored_workflow(&conn, "wf-move"),
+            &Default::default()
+        )
+        .unwrap(),
         Ok(())
     );
 }
@@ -902,4 +935,94 @@ fn step_types_are_refused_unless_known_to_run_no_agent() {
         step.quick_prompt_id = None;
         assert!(!step_needs_agent(&step), "{name}");
     }
+}
+
+// ─── KT-920 — the repository profile is part of what was approved ────────
+
+fn lint_profile(command: &str, commit: &str) -> ProfileSnapshots {
+    BTreeMap::from([(
+        String::new(),
+        crate::core::project_profile::ProfileSnapshot {
+            git_ref: Some("refs/heads/main".into()),
+            commit: Some(commit.into()),
+            state: crate::core::project_profile::SnapshotState::Loaded,
+            error: None,
+            values: BTreeMap::from([(
+                "project.validation.targets.lint.command".to_string(),
+                command.to_string(),
+            )]),
+        },
+    )])
+}
+
+fn state_with(conn: &Connection, profiles: &ProfileSnapshots) -> LivePageActionTrustState {
+    list_for_page_in(conn, PAGE, ProfileView::Fresh(profiles))
+        .unwrap()
+        .into_iter()
+        .find(|state| state.action_id == ACTION)
+        .expect("the offer is listed")
+}
+
+fn approve_with(conn: &Connection, profiles: &ProfileSnapshots) -> LivePageActionTrust {
+    let fingerprint = state_with(conn, profiles).fingerprint.expect("eligible");
+    approve_with_profiles(conn, ACTION, &fingerprint, profiles).unwrap()
+}
+
+#[test]
+fn a_changed_profile_command_invalidates_the_approval_and_a_new_commit_does_not() {
+    let conn = connection();
+    setup(&conn, &workflow(), None, &block("todo-move", BOUND));
+    approve_with(&conn, &lint_profile("make lint", "c1"));
+
+    // A revalidation inside a write transaction compares the approved snapshot.
+    revalidate_page(&conn, PAGE).unwrap();
+    assert!(get(&conn, ACTION)
+        .unwrap()
+        .unwrap()
+        .invalidated_at
+        .is_none());
+    assert!(state_with(&conn, &lint_profile("make lint", "c2")).active);
+
+    let changed = state_with(&conn, &lint_profile("make lint && curl evil", "c3"));
+    assert!(!changed.active);
+    assert_eq!(
+        changed.trust.unwrap().invalidated_reason,
+        Some(LivePageActionTrustRefusal::Changed)
+    );
+    assert!(
+        !state_with(&conn, &lint_profile("make lint", "c4")).active,
+        "invalidated for good"
+    );
+}
+
+#[test]
+fn a_run_is_admitted_only_with_the_profile_its_approval_saw() {
+    let conn = connection();
+    setup(&conn, &workflow(), None, &block("todo-move", BOUND));
+    approve_with(&conn, &lint_profile("make lint", "c1"));
+    let snapshot = stored_workflow(&conn, "wf-move");
+
+    let launch = claimed(claim_trusted_launch(&conn, ACTION, &row("T-1")));
+    assert_eq!(
+        admit_run(
+            &conn,
+            &launch.id,
+            &snapshot,
+            &lint_profile("make lint", "c2")
+        )
+        .unwrap(),
+        Ok(()),
+        "same values on a new commit"
+    );
+    let launch = claimed(claim_trusted_launch(&conn, ACTION, &row("T-2")));
+    assert_eq!(
+        admit_run(
+            &conn,
+            &launch.id,
+            &snapshot,
+            &lint_profile("make lint && curl evil", "c3")
+        )
+        .unwrap(),
+        Err(LivePageActionTrustRefusal::Changed)
+    );
 }

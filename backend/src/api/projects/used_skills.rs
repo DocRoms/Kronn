@@ -3,9 +3,9 @@
 //! skills `kronn.lock` lists because Kronn published them.
 //!
 //! The Automation page reads all projects at once, so this is the light
-//! sibling of `repository_resources`: two small reads per project (the
-//! references table and the lock file), no rendering, no comparison, no scan of
-//! the repository's skill folders.
+//! sibling of `repository_resources`: small reads per project (the references
+//! table and the lock file), no scan of the repository's skill folders. Only
+//! the Kronn skills it lists are rendered, for the sync state the card shows.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,20 +18,105 @@ use axum::{
 use super::resources::{read_repository_file, side_text};
 use crate::db::project_skill_references::SkillReference;
 use crate::models::{
-    ApiErrorCode, ApiResponse, ProjectRepositoryResourceKind, ProjectSkillFile, ProjectUsedSkill,
-    Skill, SkillCategory,
+    ApiErrorCode, ApiResponse, ProjectRepositoryResourceKind, ProjectRepositoryResourceStatus,
+    ProjectSkillFile, ProjectUsedSkill, Skill, SkillCategory,
 };
 use crate::AppState;
 
 /// Catalog skill id by the slug Kronn writes it under: how a published skill
 /// is told from one only the repository holds.
 fn catalog_ids_by_slug() -> BTreeMap<String, String> {
+    catalog_ids_by_slug_of(&crate::core::skills::list_all_skills())
+}
+
+fn catalog_ids_by_slug_of(skills: &[Skill]) -> BTreeMap<String, String> {
     let mut ids = BTreeMap::new();
-    for skill in crate::core::skills::list_all_skills() {
+    for skill in skills {
         ids.entry(crate::core::native_files::slug(&skill.id))
-            .or_insert(skill.id);
+            .or_insert_with(|| skill.id.clone());
     }
     ids
+}
+
+/// `used` with each Kronn skill's sync state, the project card's own (KT-1140),
+/// plus the skills the project links that the repository already holds a file
+/// for: the card can call those out of sync too. A state that cannot be
+/// computed is logged and left out rather than failing the whole listing.
+fn with_sync_states(
+    conn: &rusqlite::Connection,
+    project: &crate::models::Project,
+    catalog: &[Skill],
+    mut used: Vec<ProjectUsedSkill>,
+) -> anyhow::Result<Vec<ProjectUsedSkill>> {
+    let root = Path::new(&project.path);
+    let project_key = crate::db::resource_identities::project_key(conn, Some(&project.id))?;
+    let lock = crate::core::repository_resources::load_lock(root)
+        .ok()
+        .flatten();
+    let mut linked: Vec<&str> = project
+        .default_skill_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    linked.extend(
+        catalog
+            .iter()
+            .filter(|skill| skill.project_id.as_deref() == Some(project.id.as_str()))
+            .map(|skill| skill.id.as_str()),
+    );
+    let status_of = |skill_id: &str, is_linked: bool| {
+        super::resources::skill_sync_status(
+            conn,
+            root,
+            &project_key,
+            skill_id,
+            is_linked,
+            lock.as_ref(),
+        )
+        .inspect_err(|error| {
+            tracing::debug!(project_id = %project.id, skill_id, %error, "used skills: sync state unknown")
+        })
+        .ok()
+        .flatten()
+    };
+    for skill in &mut used {
+        if let Some(skill_id) = skill.skill_id.as_deref() {
+            skill.sync_status = status_of(skill_id, linked.contains(&skill_id));
+        }
+    }
+    for skill_id in linked {
+        if used
+            .iter()
+            .any(|skill| skill.skill_id.as_deref() == Some(skill_id))
+        {
+            continue;
+        }
+        let status = status_of(skill_id, true);
+        if matches!(
+            status,
+            None | Some(ProjectRepositoryResourceStatus::KronnOnly)
+        ) {
+            continue;
+        }
+        let slug = crate::core::native_files::slug(skill_id);
+        let relative_path = crate::core::repository_resources::skill_path(&slug);
+        let name = catalog
+            .iter()
+            .find(|skill| skill.id == skill_id)
+            .map_or_else(|| skill_id.to_string(), |skill| skill.name.clone());
+        used.push(ProjectUsedSkill {
+            project_id: project.id.clone(),
+            skill_id: Some(skill_id.to_string()),
+            slug,
+            name,
+            root: skill_root(&relative_path),
+            relative_path,
+            referenced: false,
+            published: false,
+            sync_status: status,
+        });
+    }
+    Ok(used)
 }
 
 /// `.agents/skills` out of `.agents/skills/<slug>/SKILL.md`.
@@ -65,6 +150,7 @@ pub(super) fn project_used_skills(
             relative_path: reference.relative_path.clone(),
             referenced: true,
             published: false,
+            sync_status: None,
         })
         .collect();
 
@@ -104,6 +190,7 @@ pub(super) fn project_used_skills(
                 relative_path: relative_path.clone(),
                 referenced: false,
                 published: true,
+                sync_status: None,
             }),
         }
     }
@@ -128,18 +215,19 @@ pub async fn used_skills(
                     .or_default()
                     .push(reference);
             }
-            let catalog = catalog_ids_by_slug();
-            Ok(projects
-                .iter()
-                .flat_map(|project| {
-                    project_used_skills(
-                        &project.id,
-                        Path::new(&project.path),
-                        references.get(&project.id).map_or(&[], Vec::as_slice),
-                        &catalog,
-                    )
-                })
-                .collect::<Vec<_>>())
+            let skills = crate::core::skills::list_all_skills();
+            let catalog = catalog_ids_by_slug_of(&skills);
+            let mut listed = Vec::new();
+            for project in &projects {
+                let used = project_used_skills(
+                    &project.id,
+                    Path::new(&project.path),
+                    references.get(&project.id).map_or(&[], Vec::as_slice),
+                    &catalog,
+                );
+                listed.extend(with_sync_states(conn, project, &skills, used)?);
+            }
+            Ok(listed)
         })
         .await;
     match result {
@@ -646,6 +734,7 @@ mod tests {
                 relative_path: ".agents/skills/block-migration/SKILL.md".into(),
                 referenced: true,
                 published: false,
+                sync_status: None,
             }]
         );
     }
@@ -722,6 +811,10 @@ mod tests {
     }
 
     async fn state_with_project(root: &Path) -> AppState {
+        state_with_project_attaching(root, &[]).await
+    }
+
+    async fn state_with_project_attaching(root: &Path, default_skill_ids: &[&str]) -> AppState {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::core::config::default_config(),
@@ -745,7 +838,7 @@ mod tests {
             path_exists: true,
             write_access: None,
             mcp_sync_report: None,
-            default_skill_ids: vec![],
+            default_skill_ids: default_skill_ids.iter().map(|id| (*id).into()).collect(),
             default_profile_id: None,
             briefing_notes: None,
             linked_repos: vec![],
@@ -812,6 +905,69 @@ mod tests {
         .expect("the file is served");
         assert!(file.content.contains("Move the block."));
         assert!(!file.truncated);
+    }
+
+    #[tokio::test]
+    async fn the_route_reports_each_kronn_skill_sync_state_as_the_project_card_does() {
+        let root = tempfile::tempdir().unwrap();
+        // Published, then edited in the repository with no baseline: a conflict.
+        write_skill(
+            root.path(),
+            ".agents/skills",
+            "rust",
+            "Rust",
+            "Edited here.",
+        );
+        write_lock(
+            root.path(),
+            &[("rust", "Rust", &[".agents/skills/rust/SKILL.md"])],
+        );
+        // Attached, never published, yet the repository holds its file.
+        write_skill(root.path(), ".agents/skills", "typescript", "TS", "Theirs.");
+        let state = state_with_project_attaching(root.path(), &["typescript", "python"]).await;
+
+        let listed = used_skills(State(state.clone()))
+            .await
+            .0
+            .data
+            .expect("listing succeeds");
+        let status_of = |id: &str| {
+            listed
+                .iter()
+                .find(|skill| skill.skill_id.as_deref() == Some(id))
+                .map(|skill| skill.sync_status)
+        };
+        assert_eq!(
+            status_of("rust"),
+            Some(Some(ProjectRepositoryResourceStatus::Conflict))
+        );
+        assert_eq!(
+            status_of("typescript"),
+            Some(Some(ProjectRepositoryResourceStatus::RepositoryNewer))
+        );
+        // Attached with nothing in the repository: nothing to report.
+        assert_eq!(status_of("python"), None);
+
+        let card = super::super::resources::repository_resources(
+            State(state.clone()),
+            AxumPath("p1".into()),
+        )
+        .await
+        .0
+        .data
+        .expect("the card's listing succeeds");
+        for id in ["rust", "typescript"] {
+            let on_card = card
+                .skills_present
+                .iter()
+                .find(|skill| skill.id == id)
+                .map(|skill| skill.status);
+            assert_eq!(
+                on_card,
+                status_of(id).flatten(),
+                "{id}: card and Automation agree"
+            );
+        }
     }
 
     #[tokio::test]

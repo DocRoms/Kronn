@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
-import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
+import { buildBlankStep, isDelegateSubtasksIncomplete, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
+import { DelegateSubtasksSummary } from './DelegateSubtasksSummary';
 import { useT } from '../../lib/I18nContext';
 import { offeredToProject, pickedButNotOffered, repositorySkillsOf } from '../../lib/automationSkills';
 import { workflows as workflowsApi, projects as projectsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
@@ -36,7 +37,7 @@ import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Layers, Send,
-  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network,
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
@@ -132,6 +133,14 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
   },
 ];
 
+// Shown for an existing step, never offered in the catalogue: it has no editor form (KT-909).
+const DELEGATE_SUBTASKS_OPTION: StepTypeOption = {
+  type: 'DelegateSubtasks',
+  dataType: 'delegate-subtasks',
+  labelKey: 'wiz.stepTypeDelegateSubtasks',
+  hintKey: 'wiz.stepTypeDelegateSubtasksHint',
+};
+
 // Safe, dependency-free starter used by the quick Page flow. It consumes the
 // same postMessage contract as richer agent-generated templates, so replacing
 // this HTML later never changes the workflow/dataset wiring.
@@ -153,6 +162,7 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'TransformData') return <Shuffle size={size} />;
   if (type === 'PublishPageData') return <FileText size={size} />;
   if (type === 'TriggerWorkflow') return <Play size={size} />;
+  if (type === 'DelegateSubtasks') return <Network size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -200,6 +210,9 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   }
   if (step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow') {
     return !step.sub_workflow_id?.trim();
+  }
+  if (step.step_type?.type === 'DelegateSubtasks') {
+    return isDelegateSubtasksIncomplete(step) || (step.on_result ?? []).some(rule => !rule.contains);
   }
   if (!step.prompt_template && !step.quick_prompt_id) return true;
   return (step.on_result ?? []).some(rule => !rule.contains);
@@ -2041,8 +2054,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id || step.read_only_repos?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
-            const activeTypeOption = STEP_TYPE_GROUPS
-              .flatMap(group => group.options)
+            const activeTypeOption = [...STEP_TYPE_GROUPS.flatMap(group => group.options), DELEGATE_SUBTASKS_OPTION]
               .find(option => option.type === activeStepType)
               ?? STEP_TYPE_GROUPS[0].options[0];
             const typePickerOpen = expandedStepTypePicker === i;
@@ -3711,7 +3723,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       )}
                     </div>
                   );
-                })() : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
+                })() : step.step_type?.type === 'DelegateSubtasks' ? (
+                  <DelegateSubtasksSummary step={step} />
+                ) : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
                   // Phase 1c — pick the workflow to run as a nested child run.
                   // Self is excluded (the most obvious cycle); deeper cycles +
                   // "no Gate inside" + depth are enforced server-side at save.
@@ -5202,6 +5216,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'PublishPageData' ? 'PAGE'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
               : typeKind === 'TriggerWorkflow' ? 'TRIGGER'
+              : typeKind === 'DelegateSubtasks' ? 'DELEGATE'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
@@ -5215,6 +5230,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'PublishPageData' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
               : typeKind === 'TriggerWorkflow' ? 'trigger-workflow'
+              : typeKind === 'DelegateSubtasks' ? 'delegate-subtasks'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
@@ -5448,6 +5464,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             // sentinel resolved at save when shipped as a decomposed preset).
             if (!s.sub_workflow_id || !s.sub_workflow_id.trim()) {
               errors.push(t('wiz.errorSubWorkflowNoTarget').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'DelegateSubtasks') {
+            if (isDelegateSubtasksIncomplete(s)) {
+              errors.push(t('wiz.errorDelegateSubtasksConfig').replace('{0}', label));
             }
           } else if (!s.prompt_template && !s.quick_prompt_id) {
             // Agent step needs SOIT un prompt_template, SOIT une référence

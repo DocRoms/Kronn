@@ -76,3 +76,8 @@
 /* "Voir les skills disponibles" under the cards of the skills a project uses (KT-921). */
 .skill-available { display: flex; flex-direction: column; gap: var(--kr-sp-4); }
 .skill-available > .automation-group-header { padding-inline: 0; }
+
+/* Kronn's skills, then the user's (KT-1140). */
+.skill-group { display: flex; flex-direction: column; gap: var(--kr-sp-4); }
+.skill-group-title { margin: 0; color: var(--kr-text-muted); font-size: var(--kr-fs-sm); font-weight: 600; }
+.skill-group-title > span { color: var(--kr-text-faint); font-weight: 400; }
