@@ -49,6 +49,11 @@ on:
         required: false
         default: ""
         type: string
+      e2e_shards:
+        description: "Playwright shards (empty: repository variable or 2)"
+        required: false
+        default: ""
+        type: string
       sccache:
         description: "Route the instrumented build through sccache (measurement; default: repository variable CI_SCCACHE, else off)"
         required: false
@@ -79,6 +84,7 @@ env:
   # Measurement knobs (KT-1118): a manual run's input, else the repository
   # variable, else the default. Pull-request runs read the variables.
   BACKEND_TEST_PARTITIONS: ${{ inputs.backend_partitions || vars.CI_BACKEND_PARTITIONS || '2' }}
+  E2E_SHARDS: ${{ inputs.e2e_shards || vars.CI_E2E_SHARDS || '2' }}
   CI_SCCACHE: ${{ inputs.sccache != 'default' && inputs.sccache || vars.CI_SCCACHE || 'off' }}
   CI_CARGO_CACHE_FALLBACK: ${{ inputs.cargo_cache_fallback != 'default' && inputs.cargo_cache_fallback || vars.CI_CARGO_CACHE_FALLBACK || 'off' }}
 
@@ -695,14 +701,69 @@ jobs:
         # with any future coverage push.
         run: pnpm test:coverage
 
-  test-e2e:
-    # Playwright E2E tests — drive a real Chromium against Vite + a live
-    # backend. Catches UI regressions that vitest unit tests miss (the
-    # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
-    # tab buttons leak" were all UI-only bugs that pure-JS tests can't
-    # see).
+  # Playwright E2E tests — drive a real Chromium against Vite + a live
+  # backend. Catches UI regressions that vitest unit tests miss (the
+  # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
+  # tab buttons leak" were all UI-only bugs that pure-JS tests can't
+  # see). One job builds the backend once; E2E_SHARDS jobs each serve it to
+  # a share of the specs (Playwright `--shard`); `test-e2e` keeps the check.
+  #
+  # The dev profile `make dev-backend` serves locally (dependencies at
+  # opt-level 1): 69 s for the crate at 4 jobs where `release` took 576 s
+  # at 18. ci-build.yml builds the real release profile. Built on the host
+  # release the Playwright image is based on (noble), so the binary runs in it.
+  build-e2e-backend:
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      shards: ${{ steps.plan.outputs.matrix }}
+      shard_count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Plan the E2E shards
+        id: plan
+        run: python3 backend/scripts/ci/backend_partitions.py plan --count "$E2E_SHARDS" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Do not wrap this build in sccache: E2E reliability must not depend on
+      # downloading an optional compiler-cache executable.
+      - name: Cache cargo registry and the e2e backend dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug/.fingerprint
+            target/debug/build
+            target/debug/deps
+          key: e2e-dev-v2-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+
+      - name: Build backend (dev profile)
+        working-directory: backend
+        run: cargo build --locked --bin kronn
+
+      - name: Upload the e2e backend
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-backend
+          path: target/debug/kronn
+          if-no-files-found: error
+          retention-days: 1
+
+  test-e2e-shard:
+    needs: build-e2e-backend
     if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build-e2e-backend.outputs.shards) }}
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
     # INTO this image. That eliminates the `pnpm exec playwright install`
@@ -714,15 +775,16 @@ jobs:
     # from mcr.microsoft.com (fast, reliable, layer-cached by the runner).
     #
     # Image tag MUST match the resolved `@playwright/test` version in
-    # frontend/pnpm-lock.yaml (currently 1.59.1) — a mismatch makes the
-    # runner think the baked-in browser is the wrong build and re-trigger
-    # the very download we're avoiding. Bump both in lockstep.
+    # frontend/pnpm-lock.yaml — a mismatch makes the runner think the
+    # baked-in browser is the wrong build and re-trigger the very download
+    # we're avoiding. Bump both in lockstep.
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble
       options: --user root
-    # A cold release build took ~17 min and the suite ~8-12 min on the runner:
-    # 30 min cancelled a green suite partway through.
-    timeout-minutes: 45
+    timeout-minutes: 30
+    env:
+      SHARD: ${{ matrix.shard }}
+      SHARD_COUNT: ${{ needs.build-e2e-backend.outputs.shard_count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -734,20 +796,6 @@ jobs:
         # banner, etc.) don't abort.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Install C toolchain + Rust
-        # The Playwright image ships Node + browsers + browser OS deps but
-        # NOT a C compiler or Rust. The backend needs cc/cmake (rusqlite
-        # bundled SQLite, ring) and cargo (via rustup).
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev cmake curl
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      # Do not wrap this release build in sccache: E2E reliability must not
-      # depend on downloading an optional compiler-cache executable.
       - name: Enable corepack (provides pnpm pinned by package.json)
         run: corepack enable
 
@@ -759,23 +807,14 @@ jobs:
       # container image at /ms-playwright (PLAYWRIGHT_BROWSERS_PATH is set
       # by the image). `playwright test` finds them with zero download.
 
-      # The dev profile `make dev-backend` serves locally (dependencies at
-      # opt-level 1): 69 s for the crate at 4 jobs where `release` took 576 s
-      # at 18. ci-build.yml builds the real release profile.
-      - name: Cache cargo registry and the e2e backend dependencies
-        uses: actions/cache@v4
+      - name: Download the e2e backend
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/debug/.fingerprint
-            target/debug/build
-            target/debug/deps
-          key: e2e-dev-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          name: e2e-backend
+          path: target/debug
 
-      - name: Build backend (dev profile)
-        working-directory: backend
-        run: cargo build --locked --bin kronn
+      - name: Ensure curl for the readiness probe
+        run: command -v curl >/dev/null || { apt-get update && apt-get install -y --no-install-recommends curl; }
 
       - name: Start backend in background
         # KRONN_DATA_DIR points at a fresh tmp dir so each CI run starts
@@ -783,6 +822,7 @@ jobs:
         # config seeding. Container jobs run steps with /bin/sh, so keep this
         # loop POSIX (Bash brace expansion would make only one attempt).
         run: |
+          chmod +x ./target/debug/kronn
           KRONN_DATA_DIR=$(mktemp -d)
           export KRONN_DATA_DIR
           # The WebSocket upgrade accepts only exact origins (KT-1033): name
@@ -833,7 +873,7 @@ jobs:
           echo "$STATUS" | grep -q '"is_first_run":false' || { echo "Setup bypass did not take effect"; exit 1; }
           echo "$STATUS" | grep -q '"current_step":"Complete"' || { echo "Setup current_step is not Complete"; exit 1; }
 
-      - name: Run E2E tests
+      - name: Run this shard of the E2E tests
         working-directory: frontend
         # Two specs (`project-scan-mcp-sync`, `audit-launch-smoke`) call
         # `mkdtempSync(join(KRONN_REPOS_DIR ?? ~/Repositories, '_kronn_pw_…'))`
@@ -844,7 +884,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/kronn-repos"
           export KRONN_REPOS_DIR="$RUNNER_TEMP/kronn-repos"
-          pnpm test:e2e
+          pnpm test:e2e --shard="$SHARD/$SHARD_COUNT"
         env:
           CI: "true"
 
@@ -855,19 +895,21 @@ jobs:
             kill "$(cat /tmp/backend.pid)" 2>/dev/null || true
           fi
 
-      - name: Upload Playwright report on failure
-        if: failure()
+      # `test-e2e` merges these into one HTML report when a shard fails.
+      - name: Upload the shard's blob report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
-          path: frontend/playwright-report/
+          name: playwright-blob-${{ matrix.shard }}
+          path: frontend/blob-report/
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: Upload test artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: frontend/test-results/
           retention-days: 7
 
@@ -875,9 +917,63 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-logs
+          name: backend-logs-${{ matrix.shard }}
           path: /tmp/backend.log
           retention-days: 7
+
+  # Keeps the `test-e2e` check name: green only when the build and every
+  # shard succeeded. A failure merges the shards' reports into one.
+  test-e2e:
+    needs: [build-e2e-backend, test-e2e-shard]
+    if: always() && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BUILD_RESULT: ${{ needs.build-e2e-backend.result }}
+      SHARDS_RESULT: ${{ needs.test-e2e-shard.result }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.SHARDS_RESULT == 'failure'
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        if: env.SHARDS_RESULT == 'failure'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm
+        if: env.SHARDS_RESULT == 'failure'
+        uses: pnpm/action-setup@v4
+
+      - name: Download the shards' blob reports
+        if: env.SHARDS_RESULT == 'failure'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: playwright-blob-*
+          path: frontend/all-blob-reports
+          merge-multiple: true
+
+      - name: Merge the shards' reports
+        if: env.SHARDS_RESULT == 'failure'
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright merge-reports --reporter html ./all-blob-reports
+
+      - name: Upload the merged Playwright report
+        if: env.SHARDS_RESULT == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
+      - name: Require the build and every shard
+        run: |
+          echo "build: $BUILD_RESULT, shards: $SHARDS_RESULT"
+          [ "$BUILD_RESULT" = success ] && [ "$SHARDS_RESULT" = success ]
 
   test-shell:
     if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
@@ -962,6 +1058,8 @@ jobs:
       - diff-hygiene
       - test-python
       - test-frontend
+      - build-e2e-backend
+      - test-e2e-shard
       - test-e2e
       - test-shell
       - security-scan

@@ -95,7 +95,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             CI_WORKFLOW: (
                 "require-ci-label", "build-backend-tests", "test-backend-partition",
                 "test-backend", "test-backend-types", "test-backend-quality",
-                "duplication-check", "test-python", "test-frontend", "test-e2e",
+                "duplication-check", "test-python", "test-frontend",
+                "build-e2e-backend", "test-e2e-shard", "test-e2e",
                 "test-shell", "security-scan", "ci-quality-gates",
                 "backend-ci-performance",
             ),
@@ -117,7 +118,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             expected_timeout = {
                 "build-backend-tests": 40,
                 "test-backend-types": 20,
-                "test-e2e": 45,
+                "test-e2e": 15,
                 # The aggregates may wait for an earlier run's verdict.
                 "ci-quality-gates": 60,
                 "ci-build-gates": 60,
@@ -136,8 +137,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         for gate in (
             "build-backend-tests", "test-backend-partition", "test-backend",
             "test-backend-types", "test-backend-quality", "duplication-check",
-            "test-python", "test-frontend", "test-e2e", "test-shell",
-            "security-scan",
+            "test-python", "test-frontend", "build-e2e-backend",
+            "test-e2e-shard", "test-e2e", "test-shell", "security-scan",
         ):
             self.assertIn(f"      - {gate}", workflow)
         build = BUILD_WORKFLOW.read_text()
@@ -320,15 +321,28 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         self.assertIn("      - build-release", build)
 
     def test_e2e_serves_the_dev_build_and_ci_build_the_release(self):
-        e2e = re.search(
-            r"^  test-e2e:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
-            CI_WORKFLOW.read_text(),
-            re.MULTILINE | re.DOTALL,
-        ).group("section")
-        self.assertIn("run: cargo build --locked --bin kronn", e2e)
-        self.assertIn("./target/debug/kronn", e2e)
-        self.assertNotIn("--release", e2e)
-        self.assertIn("target/debug/deps", e2e)
+        workflow = CI_WORKFLOW.read_text()
+        sections = {
+            name: re.search(
+                rf"^  {name}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+                re.MULTILINE | re.DOTALL,
+            ).group("section")
+            for name in ("build-e2e-backend", "test-e2e-shard", "test-e2e")
+        }
+        build, shard = sections["build-e2e-backend"], sections["test-e2e-shard"]
+        self.assertIn("run: cargo build --locked --bin kronn", build)
+        self.assertNotIn("--release", build)
+        self.assertIn("target/debug/deps", build)
+        # Built on the release the Playwright image is based on.
+        self.assertIn("runs-on: ubuntu-24.04", build)
+        self.assertIn("playwright:v", shard)
+        self.assertIn("-noble", shard)
+        self.assertIn("./target/debug/kronn", shard)
+        self.assertNotIn("cargo build", shard)
+        self.assertIn('--shard="$SHARD/$SHARD_COUNT"', shard)
+        self.assertIn("if: always()", sections["test-e2e"])
+        self.assertIn("playwright merge-reports", sections["test-e2e"])
         release = re.search(
             r"^  build-release:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
             BUILD_WORKFLOW.read_text(),
