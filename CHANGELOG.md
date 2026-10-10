@@ -11,6 +11,8 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-10
+
 ### Upgrade notes
 
 - Workflow Security settings saved before this version now apply as stored
