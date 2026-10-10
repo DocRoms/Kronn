@@ -754,6 +754,46 @@ path: string,
 format?: string | null, };
 
 /**
+ * What a discussion is created for when it is an assistant conversation:
+ * the link is written in the discussion's own transaction, and `secrets`
+ * are masked out of its title and first message before anything is stored.
+ */
+export type AssistantContext = { kind: AssistantKind, target_id?: string | null, target_step?: string | null, plugin_id?: string | null, target_label?: string, secrets?: Array<string>, };
+
+/**
+ * One kept assistant conversation, with the discussion fields the lists show.
+ */
+export type AssistantConversation = { discussion_id: string, kind: AssistantKind,
+/**
+ * Custom API server id, or the workflow / Quick API owning the step.
+ * `None` while the configured object is not saved yet.
+ */
+target_id: string | null,
+/**
+ * ApiCall step name; `None` for a plugin.
+ */
+target_step: string | null,
+/**
+ * The API plugin the conversation is about, when known.
+ */
+plugin_id: string | null, target_label: string,
+/**
+ * Signature of the last proposal the assistant made, if any.
+ */
+last_proposal_signature: string | null,
+/**
+ * Signature of the last proposal the user applied, if any.
+ */
+last_applied_signature: string | null, last_applied_at: string | null, created_at: string, title: string, agent: AgentType, archived: boolean, message_count: number, updated_at: string, };
+
+/**
+ * A link as stored, for the logical export.
+ */
+export type AssistantConversationLink = { discussion_id: string, kind: AssistantKind, target_id: string | null, target_step: string | null, plugin_id: string | null, target_label: string, last_proposal_signature: string | null, last_applied_signature: string | null, last_applied_at: string | null, created_at: string, };
+
+export type AssistantKind = "custom_api" | "api_call_step";
+
+/**
  * One tool call: its category and when it started, nothing else.
  */
 export type AuditActivityEntry = { category: ActivityCategory, at: string, };
@@ -1883,7 +1923,12 @@ launch_variables?: { [key in string]: string },
  * F9 — create a "human-only" disc: the agent runner never spawns on
  * `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
  */
-no_agent?: boolean, };
+no_agent?: boolean,
+/**
+ * KT-1111 — a configuration assistant's conversation: linked in the
+ * creation transaction, its secrets masked before the first insert.
+ */
+assistant?: AssistantContext, };
 
 export type CreateLivePageDataset = { name: string, kind: LivePageDatasetKind,
 /**
@@ -2065,6 +2110,11 @@ quick_prompt_versions: Array<QuickPromptVersion>,
  * v5 (passe D) — anti-repetition rejection counters for learnings.
  */
 learning_rejections: Array<LearningRejection>,
+/**
+ * v7 (KT-1111) — what makes a discussion an assistant conversation.
+ * Older archives have none: their discussions import as ordinary ones.
+ */
+assistant_conversations: Array<AssistantConversationLink>,
 /**
  * KT-1017 — a MAC, under this instance's key, over the workflows and
  * Quick Execs: a restore keeps their approvals only when it verifies.
@@ -7168,7 +7218,12 @@ publication_proof?: string | null,
  * runner for this HTTP/SSE request. Used by the durable composer outbox:
  * the scheduler starts it only after the discussion's current run ends.
  */
-defer_dispatch?: boolean, reply_to_message_id?: string | null, };
+defer_dispatch?: boolean, reply_to_message_id?: string | null,
+/**
+ * KT-1111 — values to mask out of `content` before it is stored or
+ * sent to a model. Used for this request only, never stored.
+ */
+assistant_secrets?: Array<string>, };
 
 export type ServerConfig = { host: string, port: number,
 /**
@@ -8659,6 +8714,8 @@ reason: string, suggested_args: Array<string> | null, manual_fix: string | null,
  * An agent wrote the line: it waits for a human's approval.
  */
 agent_written: boolean, };
+
+export type UpdateAssistantConversationRequest = { target_id?: string | null, target_step?: string | null, target_label?: string | null, last_proposal_signature?: string | null, last_applied_signature?: string | null, };
 
 export type UpdateBatchCompareManualScoreRequest = {
 /**

@@ -269,6 +269,86 @@ pub struct PreservedBranch {
 #[derive(Debug, Clone, Default)]
 pub struct CleanupOutcome {
     pub preserved: Option<PreservedBranch>,
+    /// Set when the checkout held work and was left in place (KT-1096).
+    pub kept: Option<KeptCheckout>,
+}
+
+/// A checkout a stopped run left in place, with its branch, because it held
+/// work: found again through the run's `workspace_path`.
+#[derive(Debug, Clone)]
+pub struct KeptCheckout {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// Why a checkout, or a worktree registered inside it, must not be removed
+/// (uncommitted work, a detached HEAD or a state git cannot read), or `None`
+/// when the whole set is clean. Kronn's own `.kronn/` files are not work.
+pub async fn work_to_keep(repo_path: &Path, worktree: &Path) -> Option<String> {
+    if let Err(error) = crate::core::worktree::ensure_local_git_exclude(repo_path, ".kronn/") {
+        tracing::warn!(path = %repo_path.display(), "cannot exclude .kronn/: {error}");
+    }
+    let mut checkouts = nested_worktrees(repo_path, worktree).await;
+    checkouts.push(worktree.to_path_buf());
+    for checkout in checkouts {
+        let found = match inspect_interrupted_checkout(&checkout).await {
+            Ok(InterruptedCheckout::Removable { .. }) => continue,
+            Ok(InterruptedCheckout::Dirty { entries }) => {
+                format!("{entries} uncommitted change(s)")
+            }
+            Ok(InterruptedCheckout::Detached) => "a detached HEAD".into(),
+            Err(error) => format!("a state git cannot read ({error})"),
+        };
+        return Some(if checkout == worktree {
+            found
+        } else {
+            format!("{found} in its nested worktree `{}`", checkout.display())
+        });
+    }
+    None
+}
+
+async fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
+    let (repo, parent) = (repo_path.to_path_buf(), parent.to_path_buf());
+    tokio::task::spawn_blocking(move || crate::core::worktree::nested_worktrees(&repo, &parent))
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs where a refused removal used to be forced: lets a test write work
+    /// after the last inspection.
+    pub(crate) static AFTER_REFUSAL: std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+}
+
+/// Removes a checkout found clean, nested worktrees first, never with
+/// `--force`: no re-read can exclude a write landing just before a forced
+/// removal, so any refusal (late work, a submodule, a lock) keeps the set and
+/// says why (`Ok(Some(reason))`).
+pub(crate) async fn remove_inspected_checkout(
+    repo_path: &Path,
+    worktree: &Path,
+) -> Result<Option<String>> {
+    let mut targets = nested_worktrees(repo_path, worktree).await;
+    targets.push(worktree.to_path_buf());
+    for target in targets {
+        if !target.exists() {
+            continue;
+        }
+        let Err(refusal) = remove_clean_checkout(repo_path, &target).await else {
+            continue;
+        };
+        #[cfg(test)]
+        let _ = AFTER_REFUSAL.try_with(|hook| hook(&target));
+        let which = if target == worktree {
+            String::new()
+        } else {
+            format!(" (nested worktree `{}`)", target.display())
+        };
+        return Ok(Some(format!("{refusal}{which}; kept")));
+    }
+    Ok(None)
 }
 
 /// Sanitize a workflow name for use in branch names and directory paths.
@@ -806,6 +886,29 @@ impl Workspace {
     /// Failures: best-effort. If the preserve check itself errors out, we
     /// default to preserving the branch (safer than silently dropping work).
     pub async fn cleanup(self) -> Result<CleanupOutcome> {
+        self.cleanup_with(false).await
+    }
+
+    /// `cleanup` for a run that did not succeed: a checkout (nested worktrees
+    /// included) holding work is left in place with its branch and reported in
+    /// `kept`; a clean one is removed without `--force`.
+    pub async fn cleanup_keeping_work(self) -> Result<CleanupOutcome> {
+        self.cleanup_with(true).await
+    }
+
+    async fn cleanup_with(self, keep_work: bool) -> Result<CleanupOutcome> {
+        let kept = |reason: String| CleanupOutcome {
+            preserved: None,
+            kept: Some(KeptCheckout {
+                path: self.path.clone(),
+                reason,
+            }),
+        };
+        if keep_work && self.path.exists() {
+            if let Some(reason) = work_to_keep(&self.repo_path, &self.path).await {
+                return Ok(kept(reason));
+            }
+        }
         // A failing or hung teardown hook must not leave the checkout behind.
         if let Err(error) = self.run_hook("before_remove").await {
             tracing::warn!(
@@ -818,27 +921,12 @@ impl Workspace {
         // the worktree path is gone and `git -C <worktree>` calls fail.
         let preserve = check_branch_for_preservation(&self.path, &self.branch).await;
 
-        remove_nested_worktrees(&self.repo_path, &self.path).await;
-
-        // Remove the worktree
-        let output = crate::core::cmd::async_git_cmd()
-            .args(["worktree", "remove", "--force"])
-            .arg(&self.path)
-            .current_dir(&self.repo_path)
-            .output()
-            .await
-            .context("Failed to execute git worktree remove")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "git worktree remove failed (will try manual cleanup): {}",
-                stderr
-            );
-            // Fallback: remove directory manually
-            if self.path.exists() {
-                let _ = std::fs::remove_dir_all(&self.path);
+        if keep_work {
+            if let Some(reason) = remove_inspected_checkout(&self.repo_path, &self.path).await? {
+                return Ok(kept(reason));
             }
+        } else {
+            self.force_remove().await?;
         }
         prune_kronn_worktrees(&self.repo_path).await;
 
@@ -852,6 +940,7 @@ impl Workspace {
             );
                 CleanupOutcome {
                     preserved: Some(info),
+                    kept: None,
                 }
             } else {
                 // Fully synced — safe to drop the branch ref.
@@ -867,25 +956,52 @@ impl Workspace {
         Ok(outcome)
     }
 
+    async fn force_remove(&self) -> Result<()> {
+        remove_nested_worktrees(&self.repo_path, &self.path).await;
+        let output = crate::core::cmd::async_git_cmd()
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to execute git worktree remove")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                "git worktree remove failed (will try manual cleanup): {}",
+                stderr
+            );
+            // Fallback: remove directory manually
+            if self.path.exists() {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        }
+        Ok(())
+    }
+
     /// Purge a worktree left behind by an already-terminal run after a crash.
     /// Unlike `cleanup`, this never runs user hooks and never deletes the
     /// branch ref: the original runner may already have persisted/pushed it,
     /// and boot recovery must remove discoverable checkout data only.
-    pub async fn purge_terminal_checkout(repo_path: &Path, worktree_path: &Path) -> Result<()> {
-        remove_nested_worktrees(repo_path, worktree_path).await;
-        let output = crate::core::cmd::async_git_cmd()
-            .args(["worktree", "remove", "--force"])
-            .arg(worktree_path)
-            .current_dir(repo_path)
-            .output()
-            .await
-            .context("Failed to purge terminal workflow worktree")?;
-        prune_kronn_worktrees(repo_path).await;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git worktree remove failed: {}", stderr.trim());
+    /// `Ok(false)`: the checkout holds work and is kept (KT-1096).
+    pub async fn purge_terminal_checkout(repo_path: &Path, worktree_path: &Path) -> Result<bool> {
+        if let Some(reason) = work_to_keep(repo_path, worktree_path).await {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                "terminal workflow worktree kept with its branch: it holds {reason}"
+            );
+            return Ok(false);
         }
-        Ok(())
+        let kept = remove_inspected_checkout(repo_path, worktree_path).await;
+        prune_kronn_worktrees(repo_path).await;
+        if let Some(reason) = kept? {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                "terminal workflow worktree kept with its branch: it holds {reason}"
+            );
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Execute a lifecycle hook shell command in the workspace directory.
@@ -1632,6 +1748,218 @@ mod tests {
         assert!(!nested.exists());
         assert!(!listed.contains("prunable"), "{listed}");
         assert!(!listed.contains("pr-1995"), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn the_boot_purge_keeps_a_terminal_checkout_holding_uncommitted_work() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "boot-keep", "11223344-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        drop(ws);
+        std::fs::write(path.join("wip.txt"), "work\n").unwrap();
+
+        let removed = Workspace::purge_terminal_checkout(&repo, &path)
+            .await
+            .expect("purge");
+        assert!(!removed);
+        assert!(path.join("wip.txt").exists());
+
+        std::fs::remove_file(path.join("wip.txt")).unwrap();
+        let removed = Workspace::purge_terminal_checkout(&repo, &path)
+            .await
+            .expect("purge");
+        assert!(removed, "once clean, a later boot removes it");
+        assert!(!path.exists());
+    }
+
+    /// A nested worktree with a modified tracked file and an untracked one.
+    async fn dirty_nested(run_worktree: &std::path::Path) -> std::path::PathBuf {
+        let nested = add_nested_pr_worktree(run_worktree).await;
+        std::fs::write(nested.join("README.md"), "changed\n").unwrap();
+        std::fs::write(nested.join("wip.txt"), "work\n").unwrap();
+        nested
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_keeps_a_dirty_nested_worktree_and_its_parent() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "nested-keep", "aa11bb22-run", None, None)
+            .await
+            .expect("create worktree");
+        let parent = ws.path.clone();
+        let nested = dirty_nested(&parent).await;
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+        let kept = outcome.kept.expect("kept");
+        assert!(kept.reason.contains("nested worktree"), "{}", kept.reason);
+        assert!(nested.join("wip.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(nested.join("README.md")).unwrap(),
+            "changed\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_boot_purge_keeps_a_dirty_nested_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "nested-boot", "cc33dd44-run", None, None)
+            .await
+            .expect("create worktree");
+        let parent = ws.path.clone();
+        drop(ws);
+        let nested = dirty_nested(&parent).await;
+        let removed = Workspace::purge_terminal_checkout(&repo, &parent)
+            .await
+            .expect("purge");
+        assert!(!removed);
+        assert!(nested.join("wip.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_still_removes_a_clean_nested_worktree() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "nested-clean", "ee55ff66-run", None, None)
+            .await
+            .expect("create worktree");
+        let parent = ws.path.clone();
+        let nested = add_nested_pr_worktree(&parent).await;
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+        assert!(outcome.kept.is_none());
+        assert!(!nested.exists() && !parent.exists());
+        let listed = porcelain(&repo).await;
+        assert!(!listed.contains("pr-1995"), "{listed}");
+    }
+
+    /// Work written between the inspection and the removal is never forced
+    /// away: git refuses, the fresh inspection sees it, the set is kept.
+    #[tokio::test]
+    async fn work_written_after_the_inspection_is_kept() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "barrier", "77889900-run", None, None)
+            .await
+            .expect("create worktree");
+        let parent = ws.path.clone();
+        let nested = add_nested_pr_worktree(&parent).await;
+        drop(ws);
+        assert_eq!(work_to_keep(&repo, &parent).await, None);
+        // The barrier: written after the inspection said clean.
+        std::fs::write(nested.join("late.txt"), "late\n").unwrap();
+        std::fs::write(parent.join("late.txt"), "late\n").unwrap();
+        let kept = remove_inspected_checkout(&repo, &parent)
+            .await
+            .expect("removal");
+        assert!(kept.is_some());
+        assert!(nested.join("late.txt").exists());
+        assert!(parent.join("late.txt").exists());
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "protocol.file.allow=always"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A worktree with an initialised submodule, which `git worktree remove`
+    /// refuses without `--force` even when nothing in it changed.
+    async fn worktree_with_submodule(
+        repo: &std::path::Path,
+        run_id: &str,
+    ) -> (Workspace, tempfile::TempDir) {
+        let source = tempfile::TempDir::new().unwrap();
+        git(source.path(), &["init", "-q", "-b", "main"]);
+        git(source.path(), &["config", "user.email", "t@kronn.local"]);
+        git(source.path(), &["config", "user.name", "t"]);
+        std::fs::write(source.path().join("lib.txt"), "lib\n").unwrap();
+        git(source.path(), &["add", "."]);
+        git(source.path(), &["commit", "-q", "-m", "lib"]);
+        git(
+            repo,
+            &[
+                "submodule",
+                "add",
+                "-q",
+                &source.path().to_string_lossy(),
+                "deps/lib",
+            ],
+        );
+        git(repo, &["commit", "-q", "-m", "submodule"]);
+        let ws = Workspace::create(repo, "submodule", run_id, None, None)
+            .await
+            .expect("create worktree");
+        git(&ws.path, &["submodule", "update", "-q", "--init"]);
+        (ws, source)
+    }
+
+    /// The window a forced fallback left open: work written after the last
+    /// inspection, where `--force` used to run after a submodule refusal.
+    #[tokio::test]
+    async fn a_refused_removal_is_never_forced_over_late_work() {
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "5b5b5b5b-run").await;
+        let path = ws.path.clone();
+        drop(ws);
+        assert_eq!(
+            work_to_keep(&repo, &path).await,
+            None,
+            "clean before removal"
+        );
+        let late = path.join("late-user-work.txt");
+        let hook_late = late.clone();
+        let kept = AFTER_REFUSAL
+            .scope(
+                std::sync::Arc::new(move |_: &std::path::Path| {
+                    std::fs::write(&hook_late, "late\n").unwrap();
+                }),
+                remove_inspected_checkout(&repo, &path),
+            )
+            .await
+            .expect("removal");
+        let reason = kept.expect("kept");
+        assert!(
+            reason.contains("refused") && reason.contains("kept"),
+            "{reason}"
+        );
+        assert!(late.exists(), "the late work survives");
+
+        // The boot purge keeps it as well.
+        assert!(!Workspace::purge_terminal_checkout(&repo, &path)
+            .await
+            .expect("purge"));
+        assert!(late.exists());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_keeps_a_clean_checkout_git_refuses_to_remove() {
+        let (_dir, repo) = make_test_repo().await;
+        let (ws, _source) = worktree_with_submodule(&repo, "6c6c6c6c-run").await;
+        let path = ws.path.clone();
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+        let kept = outcome.kept.expect("kept, never forced");
+        assert!(kept.reason.contains("submodule"), "{}", kept.reason);
+        assert!(path.join("deps/lib/lib.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn kronn_files_are_not_work_a_stopped_run_keeps() {
+        let (_dir, repo) = make_test_repo().await;
+        let ws = Workspace::create(&repo, "artifacts", "55667788-run", None, None)
+            .await
+            .expect("create worktree");
+        let path = ws.path.clone();
+        std::fs::create_dir_all(path.join(".kronn")).unwrap();
+        std::fs::write(path.join(".kronn/plan.md"), "plan\n").unwrap();
+        let outcome = ws.cleanup_keeping_work().await.expect("cleanup");
+        assert!(outcome.kept.is_none());
+        assert!(!path.exists());
     }
 
     #[tokio::test]

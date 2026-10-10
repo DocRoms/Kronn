@@ -329,15 +329,19 @@ pub async fn execute_sub_workflow_step(
     }
 
     // Load the child workflow definition.
-    let target_for_db = target.clone();
+    let target_for_db = target.to_string();
+    let pinned_parent = parent_run_id.to_string();
+    // The parent's pinned revision of the child (KT-1096).
     let child_wf = match state
         .db
-        .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
+        .with_conn(move |c| {
+            crate::workflows::run_pins::sub_workflow_for(c, &pinned_parent, &target_for_db)
+        })
         .await
     {
-        // A disabled child (an agent changed it, or it was never enabled) is
-        // not run under the parent's activation (KT-1037).
-        Ok(Some(w)) if !w.enabled => {
+        // A child disabled when its parent pinned it, or switched off by a
+        // human since, is not run under the parent's activation (KT-1037).
+        Ok(Ok(Some(w))) if !w.enabled => {
             return fail(
                 step,
                 start,
@@ -348,8 +352,9 @@ pub async fn execute_sub_workflow_step(
                 ),
             )
         }
-        Ok(Some(w)) => w,
-        Ok(None) => {
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => {
             return fail(
                 step,
                 start,
@@ -853,14 +858,18 @@ async fn execute_foreach(
 
     // Load the child workflow once (same definition for every item).
     let target_for_db = target.to_string();
+    let pinned_parent = parent_run_id.to_string();
+    // The parent's pinned revision of the child (KT-1096).
     let child_wf = match state
         .db
-        .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
+        .with_conn(move |c| {
+            crate::workflows::run_pins::sub_workflow_for(c, &pinned_parent, &target_for_db)
+        })
         .await
     {
-        // A disabled child (an agent changed it, or it was never enabled) is
-        // not run under the parent's activation (KT-1037).
-        Ok(Some(w)) if !w.enabled => {
+        // A child disabled when its parent pinned it, or switched off by a
+        // human since, is not run under the parent's activation (KT-1037).
+        Ok(Ok(Some(w))) if !w.enabled => {
             return fail(
                 step,
                 start,
@@ -871,8 +880,9 @@ async fn execute_foreach(
                 ),
             )
         }
-        Ok(Some(w)) => w,
-        Ok(None) => {
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => {
             return fail(
                 step,
                 start,

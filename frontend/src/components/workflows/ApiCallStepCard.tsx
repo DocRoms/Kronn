@@ -42,6 +42,10 @@ interface ApiCallStepCardProps {
   availableQuickApis?: QuickApi[];
   /** Workflow steps only: a saved Quick API has no `api_response` to keep it. */
   allowBinaryResponse?: boolean;
+  /** Saved workflow / Quick API owning the step, for the assistant's kept conversations. */
+  assistantOwnerId?: string | null;
+  /** A conversation started while the owner is not saved yet, to attach later. */
+  onAssistantConversationStarted?: (discussionId: string, stepName: string) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -62,6 +66,8 @@ export function ApiCallStepCard({
   configLanguage,
   availableQuickApis,
   allowBinaryResponse = false,
+  assistantOwnerId = null,
+  onAssistantConversationStarted,
   t,
 }: ApiCallStepCardProps) {
   const [testing, setTesting] = useState(false);
@@ -232,6 +238,8 @@ export function ApiCallStepCard({
             lastTestResponse={response}
             lastTestError={responseError}
             configLanguage={configLanguage}
+            ownerId={assistantOwnerId}
+            onConversationStarted={onAssistantConversationStarted}
             t={t}
           />
         )}

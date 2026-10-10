@@ -23,6 +23,11 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn().mockResolvedValue(undefined),
     stop: vi.fn(),
   },
+  assistantConversations: {
+    list: vi.fn().mockResolvedValue([]),
+    link: vi.fn().mockResolvedValue(null),
+    update: vi.fn().mockResolvedValue(null),
+  },
 }));
 
 import {
@@ -284,6 +289,26 @@ describe('buildContextBlock', () => {
     expect(block).toContain('  - Notion-Version: 2025-09-03');
     expect(block).not.toContain('half-typed row');
     expect(block).not.toContain('mcp.custom.helper.ctx.noHeaders');
+  });
+
+  it('never sends a literal header value that may be a credential (KT-1041)', () => {
+    const block = buildContextBlock(
+      {
+        name: 'Svc', base_url: 'https://x.test', description: '', docs_url: '', fields: [], endpoints: [],
+        default_headers: [
+          { name: 'X-Api-Key', value: 'literal-key-123456' },
+          { name: 'X-Tenant', value: 'acme-secret-tenant' },
+          { name: 'X-Ref', value: '${ENV.SVC_KEY}' },
+          { name: 'Accept', value: 'application/json' },
+        ],
+      },
+      t,
+    );
+    expect(block).not.toContain('literal-key-123456');
+    expect(block).not.toContain('acme-secret-tenant');
+    expect(block).toContain('  - X-Api-Key ✓');
+    expect(block).toContain('  - X-Ref: ${ENV.SVC_KEY}');
+    expect(block).toContain('  - Accept: application/json');
   });
 
   it('lists the current fields with ✓ when filled', () => {

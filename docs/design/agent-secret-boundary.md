@@ -820,11 +820,30 @@ short summary; migration 223) and listed on the Automations page for review;
 `GET /api/workflows/auto-disabled` and `POST /api/workflows/reenable` are
 human-only (a bridge token is refused), and a human enable clears the record.
 
-*Known residuals.* Invalidation acts on the stored workflow, for future
-runs: a run already in flight, a human-resumed one included, can still load a
-Quick API or Prompt an agent changed during that run (rollback and fan-out
-included). The planned fix is revision pinning, the approved workflow and its
-dependencies frozen at approval, a 0.15 priority. An endpoint that
+Invalidation acts on the stored workflow, for future runs; a run in flight
+is covered by revision pinning (KT-1096, migration 227,
+`workflows/run_pins.rs`). A run's first execution freezes its workflow and
+every Quick Prompt, Quick API, sub-workflow, skill, directive and profile it
+can load, sub-workflows' own dependencies included, in `workflow_run_pins`.
+Gate and quota resumes, restarts, rollback steps, sub-workflow children and
+BatchQuickPrompt fan-out (chain prompts, and each child's skills, directives
+and profiles included) read those rows, never the live definitions. A pinned
+run gets its skills and profiles inline in its prompt, not through the shared
+native files (`.claude/skills/…`) a project sync can rewrite during its turn. The pin also records how the run resolved its structured `ref:`
+fields and its `{{ref:…}}` template values, so a resume never resolves them
+again; a pinned dependency deleted meanwhile fails its step with a
+clear message, and one absent from the pin is refused. A run whose workflow
+an agent's change disabled between launch and first execution is not pinned
+and does not start. `run_pins::revision_fingerprint` is the one identity of a
+workflow and what it executes, resolutions included; the pin stores and
+hashes the same closure, gathered once.
+
+*Known residuals.* A run started before 0.15 is pinned at its next
+execution, unless an agent's change disabled its workflow after it started.
+Quick Exec sources keep their own approval rule (KT-1017), a TriggerWorkflow
+target pins its own revision when its run starts, and a skill, directive or
+profile a step inherits from its project is pinned in memory at first use
+only. An endpoint that
 transforms what it echoes (another encoding, a split, a cipher) defeats any
 finite list of forms, and a secret under 8 characters glued inside another
 token is not masked. With localhost

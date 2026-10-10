@@ -54,6 +54,15 @@ impl<T: Clone> RunSnapshotCache<T> {
         Some(pinned.clone())
     }
 
+    /// Pins `value` for `(run_id, id)` unless the run already holds one: a
+    /// resumed run starts from the revision it recorded (KT-1096).
+    pub fn pin(&self, run_id: &str, id: &str, value: T) {
+        let mut entries = self.store().lock().unwrap_or_else(|p| p.into_inner());
+        entries
+            .entry((run_id.to_string(), id.to_string()))
+            .or_insert(value);
+    }
+
     /// Drops every entry pinned to `run_id`. Call once that run has
     /// finished so its snapshot doesn't stay pinned in memory forever.
     pub fn release(&self, run_id: &str) {

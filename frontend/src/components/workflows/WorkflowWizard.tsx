@@ -8,6 +8,7 @@ import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templa
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
+import { AssistantDraftStore, savedStepKey } from '../assistantConversation';
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
@@ -300,6 +301,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     />
   );
   const isEdit = !!editWorkflow;
+  // KT-1111 — assistant conversations started before the workflow exists.
+  const [assistantDrafts] = useState(() => new AssistantDraftStore());
+  const trackAssistantConversation = useCallback((discussionId: string, stepName: string) => {
+    assistantDrafts.track(discussionId, stepName);
+  }, [assistantDrafts]);
+  // A draft conversation follows its step's name until the workflow exists;
+  // a saved step is followed by its durable id instead.
+  const followStepRename = (from: string, to: string) => assistantDrafts.renameStep(from, to);
   // Detect if an existing workflow needs advanced mode (multi-step, cron, hooks, etc.)
   const needsAdvanced = isEdit && (
     !!initialStepId || focusedStepOnly ||
@@ -858,6 +867,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   };
 
   const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
+    if (patch.name !== undefined && steps[idx]) followStepRename(steps[idx].name, patch.name);
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
   };
 
@@ -1250,11 +1260,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           variables: wfVariables,
           project_scope: projectScope ?? undefined,
         };
+        let created: Workflow | null = null;
+        let createdId: string;
         if (pendingChildWorkflows.length > 0) {
           // Decomposed preset: create children first (they inherit the
           // parent's project_id server-side), then the parent whose
           // `sub_workflow_id: "@bundle:<id>"` is substituted. Atomic.
-          await workflowsApi.createHumanBundle({
+          const bundle = await workflowsApi.createHumanBundle({
             quick_prompts: [],
             quick_apis: [],
             custom_apis: [],
@@ -1269,8 +1281,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             })),
             workflow: req,
           });
+          createdId = bundle.workflow.id;
         } else {
-          await workflowsApi.create(req);
+          created = await workflowsApi.create(req);
+          createdId = created.id;
+        }
+        if (assistantDrafts.size > 0) {
+          // A saved step is known by its durable id, which survives renames.
+          const saved = created ?? await workflowsApi.get(createdId).catch(() => null);
+          // Without the saved step's id the conversation stays owed, never filed
+          // under its name: the step lists it and resuming it there attaches it.
+          await assistantDrafts.attach(createdId, undefined, savedStepKey(saved))
+            .catch(e => console.warn('Assistant conversations not attached:', e));
         }
       }
       onDone();
@@ -2488,6 +2510,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     nextStepType={steps[i + 1]?.step_type}
                     installedAgents={installedAgentTypes}
                     configLanguage={configLanguage}
+                    assistantOwnerId={editWorkflow?.id ?? null}
+                    onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                     availableQuickApis={availableQuickApis}
                     allowBinaryResponse
                     t={t}
@@ -2887,6 +2911,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      assistantOwnerId={editWorkflow?.id ?? null}
+                      onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                       allowBinaryResponse
                       t={t}
                     />
@@ -4687,8 +4713,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 Gate is explicitly excluded (deadlock — validated server-side). */}
             {onFailureSteps.map((rb, idx) => {
               const rbKind = rb.step_type?.type ?? 'Notify';
-              const updateRb = (patch: Partial<WorkflowStep>) =>
+              const updateRb = (patch: Partial<WorkflowStep>) => {
+                if (patch.name !== undefined) followStepRename(rb.name, patch.name);
                 setOnFailureSteps(prev => prev.map((s, i) => i === idx ? { ...s, ...patch } : s));
+              };
               return (
                 <div key={idx} className="wf-rollback-step mb-3">
                   <div className="flex-row gap-2 mb-2 flex-wrap">
@@ -4792,6 +4820,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      assistantOwnerId={editWorkflow?.id ?? null}
+                      onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                       availableQuickApis={availableQuickApis}
                       t={t}
                     />

@@ -430,6 +430,25 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
+- **A stopped run never destroys uncommitted work (KT-1096).** At the end of
+  every run except a fully successful one (Partial, Failed, Cancelled,
+  StoppedByGuard, an engine error, a Gate rejection), and in the boot purge of
+  terminal runs, a worktree with uncommitted or untracked (non-ignored) files,
+  a detached HEAD or a state git cannot read, in itself or in a worktree
+  registered inside it (`<run>/.kronn/pr-N`), is kept with its branch and its
+  nested worktrees, without running `before_remove`
+  (`Workspace::cleanup_keeping_work`, `workspace::work_to_keep`, the same
+  check as the Interrupted reclaim). The run keeps its `workspace_path`; its
+  last step says where the work is (the log does, after an engine error, a
+  Gate rejection or at boot), and a later boot removes the checkout
+  once it is clean. A clean set is removed without `--force`, nested
+  worktrees first, and never forced: whenever git refuses (work written after
+  the inspection, a submodule, a lock) the set is kept and the run says why,
+  since no fresh look can exclude a write landing before a forced removal.
+  Kronn's own `.kronn/` files are not work: `.kronn/` is added to the
+  repository's local `info/exclude`. The one exception is a Success run: its
+  cleanup is unchanged and forced, because what it left uncommitted is its
+  own scratch once every step finished, and is discarded.
 - **A provider quota pauses the run, it does not fail it (KT-811).** When an
   Agent step of a top-level run is refused for a quota or session limit
   (`You've hit your session limit · resets 9:40pm (Europe/Paris)`, a 429 with

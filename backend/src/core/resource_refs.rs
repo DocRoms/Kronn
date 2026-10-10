@@ -265,6 +265,57 @@ pub fn resolve_run_structured_references(
     Ok(())
 }
 
+/// What [`resolve_run_structured_references`] would rewrite in `workflow`:
+/// each structured `ref:` that resolves in `project_id` now, with its id.
+pub fn structured_reference_map(
+    conn: &Connection,
+    workflow: &Workflow,
+    project_id: Option<&str>,
+) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut copy = workflow.clone();
+    for step in copy.steps.iter_mut().chain(copy.on_failure.iter_mut()) {
+        for (field_kind, value) in structured_fields(step) {
+            let Some((kind, slug)) = parse_reference(value) else {
+                continue;
+            };
+            if kind != field_kind || map.contains_key(value.as_str()) {
+                continue;
+            }
+            match resolve_symbolic_reference(conn, &format!("{kind}:{slug}"), project_id) {
+                Ok(Some(id)) => {
+                    map.insert(value.clone(), id);
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(reference = %value, "not resolved: {error}"),
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Rewrites the structured `ref:`s found in `map` (a run's recorded
+/// resolutions); any other stays symbolic, as an unresolved one does.
+pub fn apply_structured_reference_map(
+    workflow: &mut Workflow,
+    map: &std::collections::BTreeMap<String, String>,
+) {
+    for step in workflow
+        .steps
+        .iter_mut()
+        .chain(workflow.on_failure.iter_mut())
+    {
+        for (field_kind, value) in structured_fields(step) {
+            if !matches!(parse_reference(value), Some((kind, _)) if kind == field_kind) {
+                continue;
+            }
+            if let Some(id) = map.get(value.as_str()) {
+                *value = id.clone();
+            }
+        }
+    }
+}
+
 /// Whether `workflow` names the Quick Prompt (`kind` "prompt") or Quick API
 /// ("qa") `id` anywhere (steps and rollback; direct, batch, chained or
 /// collection fields), by its literal id or by a `ref:` of that kind whose

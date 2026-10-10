@@ -34,7 +34,7 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
     addMcpGlobal, setAddMcpGlobal, addMcpProjectIds, setAddMcpProjectIds,
     addMcpIncludeGeneral, setAddMcpIncludeGeneral,
     handleAddMcpFromRegistry, resetAddMcp, setAddMcpSelected,
-    installedAgentTypes, configLanguage, projects,
+    installedAgentTypes, configLanguage, projects, trackAssistantConversation,
   } = state;
   // KT-831 — "Général" (discussions sans projet) can only be toggled once
   // the config exists: creation always starts it at the backend default
@@ -467,6 +467,8 @@ export function CustomApiForm({ state }: { state: McpPageState }) {
             starters). */}
         {installedAgentTypes && installedAgentTypes.length > 0 && (
           <CustomApiAiHelper
+            targetId={editingCustomServerId}
+            onConversationStarted={trackAssistantConversation}
             formSnapshot={{
               name: customName,
               base_url: customBaseUrl,

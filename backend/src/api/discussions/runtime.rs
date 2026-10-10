@@ -541,6 +541,8 @@ pub(crate) async fn stream_claimed_dispatch_job(
                 .unwrap_or_else(|_| AgentExecutionOutcome::RuntimeUnavailable {
                     reason: "agent_completion_channel_dropped".to_string(),
                 });
+        // KT-1111 — this dispatch's reply is written: its turn values go.
+        state.db.assistant_guard().end_turn(&job.id);
         let status_id = job.id.clone();
         let cancelled = state
             .db
@@ -838,13 +840,20 @@ async fn finish_dispatch_turn(
 
     if let Some(qp_id) = job.chain_prompt_ids.get(job.next_chain_index) {
         let lookup_id = qp_id.clone();
+        let discussion_id = job.discussion_id.clone();
         let qp = state
             .db
-            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup_id))
+            .with_conn(move |conn| {
+                crate::workflows::run_pins::chain_prompt_for(conn, &discussion_id, &lookup_id)
+            })
             .await;
         let qp = match qp {
-            Ok(Some(qp)) => qp,
-            Ok(None) => {
+            Ok(Err(reason)) => {
+                fail_dispatch_job(state, &job, &format!("chain QP '{qp_id}': {reason}")).await;
+                return;
+            }
+            Ok(Ok(Some(qp))) => qp,
+            Ok(Ok(None)) => {
                 fail_dispatch_job(state, &job, &format!("chain QP '{qp_id}' not found")).await;
                 return;
             }

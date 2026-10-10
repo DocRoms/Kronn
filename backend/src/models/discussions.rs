@@ -497,6 +497,11 @@ pub struct CreateDiscussionRequest {
     /// `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
     #[serde(default)]
     pub no_agent: bool,
+    /// KT-1111 — a configuration assistant's conversation: linked in the
+    /// creation transaction, its secrets masked before the first insert.
+    #[serde(default)]
+    #[ts(optional)]
+    pub assistant: Option<crate::db::assistant_conversations::AssistantContext>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -695,6 +700,11 @@ pub struct SendMessageRequest {
     pub defer_dispatch: bool,
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
+    /// KT-1111 — values to mask out of `content` before it is stored or
+    /// sent to a model. Used for this request only, never stored.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub assistant_secrets: crate::db::assistant_conversations::TransientSecrets,
 }
 
 /// Atomic edit/resend request. `expected_revision` is the opaque timestamp

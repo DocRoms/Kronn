@@ -514,6 +514,11 @@ pub fn get_skills_snapshot(run_id: &str, ids: &[String]) -> Vec<Skill> {
         .collect()
 }
 
+/// Seeds `run_id`'s snapshot with the revision its run recorded.
+pub fn pin_skill_snapshot(run_id: &str, id: &str, skill: Skill) {
+    SKILL_SNAPSHOTS.pin(run_id, id, skill);
+}
+
 /// Drop every skill snapshot pinned to `run_id`. Call once that run has
 /// finished so its resources don't stay pinned in memory.
 pub fn release_skills_snapshot(run_id: &str) {

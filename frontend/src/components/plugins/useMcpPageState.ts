@@ -80,6 +80,7 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setCustomName, setCustomBaseUrl, setCustomDescription, setCustomDocsUrl,
     setCustomFields, setCustomEndpoints, setCustomHeaders, setCustomTestEndpoint, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
+    assistantDrafts,
   } = customForm;
 
   const resetAddMcp = useCallback(() => {
@@ -105,8 +106,10 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
     setEditingCustomOriginalScope(null);
     setCustomAuth('None');
     setReplacingFields(new Set());
+    // An abandoned draft's conversations stay listed as unattached.
+    assistantDrafts.clear();
   }, [
-    setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal, setAddMcpProjectIds,
+    assistantDrafts, setShowAddMcp, setAddMcpSelected, setAddMcpLabel, setAddMcpEnv, setAddMcpGlobal, setAddMcpProjectIds,
     setAddMcpIncludeGeneral, setAddMcpHostSync, setAddMcpSearch, setCustomName, setCustomBaseUrl, setCustomDescription,
     setCustomDocsUrl, setCustomFields, setCustomEndpoints, setCustomHeaders, setCustomTestEndpoint, setEditingCustomServerId,
     setEditingCustomConfigId, setEditingCustomOriginalScope, setCustomAuth, setReplacingFields,
@@ -338,6 +341,14 @@ export function useMcpPageState({ projects, mcpOverview, mcpRegistry, refetchMcp
             test_endpoint: effectiveTestEndpoint(customEndpoints, customTestEndpoint) ?? undefined,
           },
         });
+        // Kept tracked until attached: a failed create above leaves them for
+        // the next Save.
+        try {
+          await assistantDrafts.attach(display.server_id, customName.trim());
+        } catch (attachErr) {
+          console.warn('Assistant conversations not attached:', attachErr);
+          toast(t('aiHelper.conversations.attachFailed'), 'warning');
+        }
         resetAddMcp();
         pendingSelectConfigIdRef.current = display.id;
         refetchMcps();

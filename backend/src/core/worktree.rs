@@ -672,7 +672,7 @@ fn worktree_base_dir(repo_path: &Path) -> PathBuf {
 /// Ignore Kronn's machine-owned checkout directory without editing the user's
 /// tracked `.gitignore`. Provisioning must not make the target dirty itself — a
 /// dirty target is (correctly) refused later by the integration preflight.
-fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
+pub(crate) fn ensure_local_git_exclude(repo_path: &Path, pattern: &str) -> Result<(), String> {
     let output = crate::core::cmd::git_cmd()
         .args(["rev-parse", "--git-path", "info/exclude"])
         .current_dir(repo_path)
@@ -956,6 +956,14 @@ fn force_remove_worktree(repo_path: &Path, path: &Path) -> bool {
 /// step may add one under its run's worktree (`<run>/.kronn/pr-N`); deleting
 /// the run's directory alone would leave its admin entry behind as prunable.
 pub fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
+    nested_worktrees(repo_path, parent)
+        .iter()
+        .filter(|path| force_remove_worktree(repo_path, path))
+        .count()
+}
+
+/// The worktrees registered inside `parent`, deepest first.
+pub fn nested_worktrees(repo_path: &Path, parent: &Path) -> Vec<PathBuf> {
     let mut nested: Vec<PathBuf> = worktree_entries(repo_path)
         .into_iter()
         .map(|entry| entry.path)
@@ -963,9 +971,6 @@ pub fn remove_nested_worktrees(repo_path: &Path, parent: &Path) -> usize {
         .collect();
     nested.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     nested
-        .iter()
-        .filter(|path| force_remove_worktree(repo_path, path))
-        .count()
 }
 
 /// Drops the admin entries of Kronn's worktrees whose checkout is gone. Scoped

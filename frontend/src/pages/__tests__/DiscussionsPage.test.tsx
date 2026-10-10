@@ -28,6 +28,8 @@ class MockUtterance {
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
+  // KT-1111 — the sidebar files assistant conversations apart.
+  assistantConversations: { list: vi.fn().mockResolvedValue([]) },
   // KT-1107 — a multi-agent start checks its agents first.
   agents: { readiness: vi.fn().mockResolvedValue([]) },
   // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().

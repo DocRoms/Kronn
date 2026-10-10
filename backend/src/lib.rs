@@ -485,10 +485,11 @@ impl AppState {
     ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
         // Nothing else holds the fresh config yet.
-        let p2p_enabled = config
+        let (p2p_enabled, key) = config
             .try_read()
-            .map(|config| config.server.p2p_enabled)
-            .unwrap_or(false);
+            .map(|config| (config.server.p2p_enabled, config.encryption_secret.clone()))
+            .unwrap_or((false, None));
+        db.assistant_guard().set_key(key);
         Self {
             p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
@@ -1472,6 +1473,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/ui-preferences",
             get(api::ui_preferences::get).put(api::ui_preferences::put),
+        )
+        .route(
+            "/api/assistant-conversations",
+            get(api::assistant_conversations::list),
+        )
+        .route(
+            "/api/assistant-conversations/{discussion_id}",
+            patch(api::assistant_conversations::update),
         )
         .route(
             "/api/config/global-context",

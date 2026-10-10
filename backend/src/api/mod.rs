@@ -7,6 +7,7 @@ pub mod agents;
 pub mod ai_docs;
 pub mod api_call_logs;
 pub mod artifact_portability;
+pub mod assistant_conversations;
 pub mod audit;
 pub mod bundle;
 pub mod cli_telemetry;

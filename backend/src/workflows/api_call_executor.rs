@@ -46,6 +46,9 @@ pub struct ApiCallLogContext {
     pub run_id: Option<String>,
     pub disc_id: Option<String>,
     pub agent: Option<String>,
+    /// The run whose pinned Quick API revision a workflow step loads
+    /// (KT-1096). An agent's own call attributed to a run is not pinned.
+    pub pinned_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,6 +67,16 @@ impl ApiCallLogContext {
         Self {
             source: ApiCallLogSource::Workflow,
             run_id: Some(run_id.into()),
+            ..Self::default()
+        }
+    }
+    /// A step of `run_id` itself: logged for the run, and pinned to it.
+    pub fn workflow_step(run_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
+        Self {
+            source: ApiCallLogSource::Workflow,
+            run_id: Some(run_id.clone()),
+            pinned_run_id: Some(run_id),
             ..Self::default()
         }
     }
@@ -607,7 +620,15 @@ pub async fn execute_api_call_step_with_db_as(
     policy: SecurityPolicy,
     log_ctx: ApiCallLogContext,
 ) -> StepOutcome {
-    let outcome = execute_api_call_step_with_db_inner(step, project_id, state, ctx, policy).await;
+    let outcome = execute_api_call_step_with_db_inner(
+        step,
+        project_id,
+        state,
+        ctx,
+        policy,
+        log_ctx.pinned_run_id.as_deref(),
+    )
+    .await;
     record_api_call_log(state, step, project_id, &outcome, &log_ctx).await;
     outcome
 }
@@ -618,6 +639,7 @@ async fn execute_api_call_step_with_db_inner(
     state: &crate::AppState,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
+    pinned_run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -627,9 +649,12 @@ async fn execute_api_call_step_with_db_inner(
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    if let Err(e) =
-        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step_owned, &state.db)
-            .await
+    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+        &mut step_owned,
+        &state.db,
+        pinned_run_id,
+    )
+    .await
     {
         return fail(step, start, e);
     }

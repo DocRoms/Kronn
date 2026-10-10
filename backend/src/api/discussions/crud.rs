@@ -402,6 +402,22 @@ pub async fn create(
         req.project_id = req.project_id.or(qp.project_id.clone());
         launch_qp = Some((qp, qp_version));
     }
+    // KT-1111 — an assistant conversation is masked before anything is
+    // stored, and linked in the same transaction as its discussion.
+    let assistant_link = match req.assistant.take() {
+        Some(context) => match crate::api::assistant_conversations::prepare_creation(
+            &state,
+            context,
+            &mut req.title,
+            &mut req.initial_prompt,
+        )
+        .await
+        {
+            Ok(link) => Some(link),
+            Err(error) => return Json(ApiResponse::err(error)),
+        },
+        None => None,
+    };
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
         return Json(ApiResponse::err(format!(
@@ -621,6 +637,12 @@ pub async fn create(
             // F9 — mark the disc human-only so the runner never spawns.
             if want_no_agent {
                 crate::db::discussions::set_disc_no_agent_within_tx(&tx, &disc.id, true)?;
+            }
+            if let Some(mut link) = assistant_link {
+                link.discussion_id = disc.id.clone();
+                if !crate::db::assistant_conversations::link(conn, &link)? {
+                    anyhow::bail!("assistant conversation could not be linked");
+                }
             }
             tx.commit()?;
             Ok(disc)

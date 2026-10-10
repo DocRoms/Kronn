@@ -5,6 +5,7 @@ import {
   stripManagedHeaders,
   stripManagedQuery,
 } from './apiCallAuth';
+import { maskSensitiveValues, sensitiveValues } from '../../lib/assistantSecrets';
 
 type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -49,6 +50,11 @@ export function applyToStep(
   return updates;
 }
 
+/** Credential values typed in the step that must never reach the kept conversation. */
+export function apiCallStepSecrets(step: WorkflowStep): string[] {
+  return [...sensitiveValues(step.api_query), ...sensitiveValues(step.api_headers)];
+}
+
 function truncateJson(value: unknown, max = 1500): string {
   const serialized = JSON.stringify(value, null, 2);
   if (serialized == null) return '(null)';
@@ -70,8 +76,8 @@ export function buildContextBlock(
     `- API : ${server?.name ?? translate('wf.apicall.helper.sys.noPlugin')} (${server?.api_spec?.base_url ?? translate('wf.apicall.helper.sys.unknown')})`,
     `- endpoint : ${step.api_endpoint_path ?? translate('wf.apicall.helper.sys.none')}`,
     `- method   : ${step.api_method ?? translate('wf.apicall.helper.sys.default')}`,
-    `- query    : ${step.api_query ? JSON.stringify(step.api_query) : translate('wf.apicall.helper.sys.empty')}`,
-    `- headers  : ${step.api_headers ? JSON.stringify(step.api_headers) : translate('wf.apicall.helper.sys.none')}`,
+    `- query    : ${step.api_query ? JSON.stringify(maskSensitiveValues(step.api_query)) : translate('wf.apicall.helper.sys.empty')}`,
+    `- headers  : ${step.api_headers ? JSON.stringify(maskSensitiveValues(step.api_headers)) : translate('wf.apicall.helper.sys.none')}`,
     `- body     : ${step.api_body || translate('wf.apicall.helper.sys.none')}`,
     `- extract  : ${step.api_extract?.path ?? translate('wf.apicall.helper.sys.none')}`,
   ];

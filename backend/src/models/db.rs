@@ -77,7 +77,7 @@ pub struct DbCompaction {
 /// Current export schema version. Bump when a new table/field is added to
 /// `DbExport` so import can WARN when restoring an older backup (whose missing
 /// tables must NOT wipe newer data — see `do_import_db`'s selective clear).
-pub const CURRENT_EXPORT_VERSION: u32 = 6;
+pub const CURRENT_EXPORT_VERSION: u32 = 7;
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -121,6 +121,10 @@ pub struct DbExport {
     /// v5 (passe D) — anti-repetition rejection counters for learnings.
     #[serde(default)]
     pub learning_rejections: Vec<LearningRejection>,
+    /// v7 (KT-1111) — what makes a discussion an assistant conversation.
+    /// Older archives have none: their discussions import as ordinary ones.
+    #[serde(default)]
+    pub assistant_conversations: Vec<crate::db::assistant_conversations::AssistantConversationLink>,
     /// KT-1017 — a MAC, under this instance's key, over the workflows and
     /// Quick Execs: a restore keeps their approvals only when it verifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]

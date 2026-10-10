@@ -109,8 +109,12 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
     // partager la même règle de per-field override entre BatchApiCall et
     // ApiCall single (cf. quick_api_hydrate.rs).
     let mut step = step.clone();
-    if let Err(e) =
-        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step, &state.db).await
+    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+        &mut step,
+        &state.db,
+        log_ctx.pinned_run_id.as_deref(),
+    )
+    .await
     {
         return fail(&step, start, e);
     }

@@ -1632,7 +1632,7 @@ pub async fn db_compact(State(state): State<AppState>) -> Json<ApiResponse<DbCom
 }
 
 /// Build the DbExport from current state
-async fn build_export(state: &AppState) -> Result<DbExport, String> {
+pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
     // ADR-001 O2 — the export walks EVERY table; read connection.
     let projects = state
         .db
@@ -1692,6 +1692,11 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .with_read_conn(crate::db::learnings::list_rejections)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
+    let assistant_conversations = state
+        .db
+        .with_read_conn(crate::db::assistant_conversations::list_links)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter()
@@ -1732,6 +1737,7 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         learnings,
         quick_prompt_versions,
         learning_rejections,
+        assistant_conversations,
     })
 }
 
@@ -2168,6 +2174,7 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let quick_apis = data.quick_apis.clone();
     let learnings = data.learnings.clone();
     let learning_rejections = data.learning_rejections.clone();
+    let assistant_conversations = data.assistant_conversations.clone();
     let (pruned, dropped_github) = state
         .db
         .with_conn(move |conn| {
@@ -2191,6 +2198,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                     if let Err(e) = crate::db::discussions::insert_message(&tx, &d.id, m) {
                         tracing::warn!("Import discussion message error: {e}");
                     }
+                }
+            }
+            for link in &assistant_conversations {
+                if let Err(e) = crate::db::assistant_conversations::insert_link_row(&tx, link) {
+                    tracing::warn!("Import assistant conversation error: {e}");
                 }
             }
             for srv in &mcp_servers {
@@ -3803,6 +3815,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_round_trips_assistant_conversations_and_reads_older_archives() {
+        use crate::db::assistant_conversations as assistant;
+        let mk_state = || async {
+            let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+            let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            ));
+            crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+        };
+        let source = mk_state().await;
+        source
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at)
+                     VALUES ('d-help', 'helper', ?1, ?1)",
+                    rusqlite::params![now],
+                )?;
+                assistant::link(
+                    conn,
+                    &assistant::NewLink {
+                        discussion_id: "d-help".into(),
+                        kind: Some(assistant::AssistantKind::ApiCallStep),
+                        target_id: Some("wf-1".into()),
+                        target_step: Some("fetch".into()),
+                        plugin_id: Some("srv".into()),
+                        target_label: "Svc · fetch".into(),
+                    },
+                )?;
+                assistant::update(
+                    conn,
+                    "d-help",
+                    &assistant::LinkPatch {
+                        last_proposal_signature: Some("sig".into()),
+                        last_applied_signature: Some("sig".into()),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let export = build_export(&source).await.expect("export");
+        assert_eq!(export.assistant_conversations.len(), 1);
+        let target = mk_state().await;
+        do_import_db(&target, &export).await.expect("import");
+        let found = target
+            .db
+            .with_conn(|conn| {
+                assistant::list(
+                    conn,
+                    &assistant::ListFilter {
+                        kind: Some(assistant::AssistantKind::ApiCallStep),
+                        target_id: Some("wf-1".into()),
+                        target_step: Some("fetch".into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            found.len(),
+            1,
+            "still found from its step after the restore"
+        );
+        assert_eq!(found[0].discussion_id, "d-help");
+        assert_eq!(found[0].last_applied_signature.as_deref(), Some("sig"));
+        assert!(target
+            .db
+            .with_conn(|conn| crate::db::discussions::get_discussion(conn, "d-help"))
+            .await
+            .unwrap()
+            .is_some());
+
+        // An archive written before v7 has no such field and still imports.
+        let mut older = serde_json::to_value(&export).unwrap();
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("assistant_conversations");
+        older["version"] = serde_json::json!(6);
+        let older: DbExport = serde_json::from_value(older).expect("older archive reads");
+        assert!(older.assistant_conversations.is_empty());
+        let restored = mk_state().await;
+        do_import_db(&restored, &older).await.expect("older import");
+    }
+
+    #[tokio::test]
     async fn v4_import_preserves_local_lineage_and_prunes_orphans() {
         // Codex review (export v5): a v4 archive carries quick_prompts but no
         // versions — importing it must NOT wipe the local lineage of QPs it
@@ -3887,6 +3990,7 @@ mod tests {
             learnings: vec![],
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            assistant_conversations: vec![],
             trust_seal: None,
         }
     }
@@ -4082,6 +4186,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            assistant_conversations: vec![],
             trust_seal: None,
             projects: vec![],
             discussions: vec![],
@@ -4734,6 +4839,7 @@ mod tests {
             exported_at: Utc::now(),
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
+            assistant_conversations: vec![],
             trust_seal: None,
             projects: vec![],
             discussions: vec![],
