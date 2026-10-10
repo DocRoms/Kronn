@@ -1871,6 +1871,24 @@ cost_usd: number | null,
  */
 is_byok: boolean, };
 
+export type Correspondence = {
+/**
+ * Repo-relative source path.
+ */
+source: string,
+/**
+ * Heading of the section; `None` for a preamble or a whole file.
+ */
+section: string | null,
+/**
+ * 1-based inclusive line range in the source (0..0 for non-prose files).
+ */
+start_line: number, end_line: number,
+/**
+ * Repo-relative v2 file the section belongs to.
+ */
+target: string | null, action: MappingAction, };
+
 /**
  * Cost aggregated across one or more token-cost observations. Never
  * fabricates a price and never collapses distinct provenances into one
@@ -4604,6 +4622,8 @@ export type ManifestFile = { path: string, kind: FileChangeKind, };
  */
 export type ManifestTest = { name: string, status: TestStatus, evidence: string | null, };
 
+export type MappingAction = "extracted" | "target_exists" | "unmapped" | "not_prose" | "kronn_managed";
+
 /**
  * A configured instance of an MCP server — with label, env secrets, etc.
  * Multiple projects can share the same config (deduplication by config_hash).
@@ -5003,6 +5023,14 @@ reference_asset_ids?: Array<string>,
  * before a generation could start from several pictures.
  */
 reference_asset_id?: string | null, reference_mode?: MediaReferenceMode | null, };
+
+export type MergeBase = "local" | "remote";
+
+export type MergeFileDiff = { path: string,
+/**
+ * `None` on a read-only plan.
+ */
+outcome: WriteOutcome | null, imported_sections: number, diff: string, };
 
 /**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -8742,6 +8770,22 @@ attributed: number,
  */
 attributed_without_counters: number, };
 
+export type TemplateMergeAccepted = { branch: string, commit: string, committed: Array<string>, };
+
+export type TemplateMergeAcceptRequest = {
+/**
+ * Repo-relative files to commit; the others stay uncommitted in the worktree.
+ */
+paths: Array<string>, };
+
+export type TemplateMergeRequest = { base?: MergeBase, };
+
+export type TemplateMergeView = { docs_dir: string, base: MergeBase, base_ref: string, worktree_path: string | null, branch: string | null, resumed: boolean, correspondence: Array<Correspondence>, files: Array<MergeFileDiff>, existing_targets: Array<string>,
+/**
+ * Docs that only exist untracked in the checkout: a worktree cannot see them.
+ */
+untracked_in_checkout: Array<string>, table_markdown: string, };
+
 export type TestApiCallRequest = {
 /**
  * The (partial) step configuration the user is building in the wizard.
@@ -10354,6 +10398,8 @@ base_ref?: string | null, };
 export type WorkspaceHistoryLease = { id: string, disc_id: string, session_pk: number, session_agent_type: string, session_id: string | null, canonical_path: string, branch: string, backup_ref: string, head_sha: string, acquired_at: string, expires_at: string, };
 
 export type WorkspaceHooks = { after_create?: string | null, before_run?: string | null, after_run?: string | null, before_remove?: string | null, };
+
+export type WriteOutcome = "created" | "already_present";
 
 /**
  * Tri-state write-liveness. Never inferred `false` from silence — `Unknown`

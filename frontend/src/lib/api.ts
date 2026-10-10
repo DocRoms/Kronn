@@ -1,5 +1,6 @@
 import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
+import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   AssistantConversation,
@@ -1040,6 +1041,19 @@ export const projects = {
   migrateDocs: (id: string, req: { create_symlink?: boolean }) =>
     api<MigrateDocsResponse>('POST', `/projects/${id}/migrate-docs`, req),
   delete: (id: string, hard?: boolean) => api<void>('DELETE', `/projects/${id}${hard ? '?hard=true' : ''}`),
+  /** Template v2 merge into an already-documented repo (KT-1172): the
+   *  read-only correspondence table, computed on the checkout. */
+  templateMergePlan: (id: string) =>
+    api<TemplateMergeView>('GET', `/projects/${encodeURIComponent(id)}/template-merge/plan`),
+  /** Apply the merge in its worktree; a second call resumes the same worktree. */
+  templateMergeStart: (id: string, base: MergeBase) =>
+    api<TemplateMergeView>('POST', `/projects/${encodeURIComponent(id)}/template-merge`, { base } satisfies TemplateMergeRequest),
+  /** Commit only these proposed files on the merge branch. */
+  templateMergeAccept: (id: string, paths: string[]) =>
+    api<TemplateMergeAccepted>('POST', `/projects/${encodeURIComponent(id)}/template-merge/accept`, { paths } satisfies TemplateMergeAcceptRequest),
+  /** Drop the merge worktree; the checkout is untouched. */
+  templateMergeDiscard: (id: string) =>
+    api<void>('DELETE', `/projects/${encodeURIComponent(id)}/template-merge`),
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),

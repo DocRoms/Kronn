@@ -13,13 +13,15 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::core::docs_merge::{self, Correspondence, MergePlan, WriteOutcome};
 use crate::core::scanner;
 use crate::models::ApiResponse;
 use crate::AppState;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeBase {
     /// The checkout's current commit.
@@ -29,19 +31,22 @@ pub enum MergeBase {
     Remote,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
 pub struct TemplateMergeRequest {
     #[serde(default)]
     pub base: MergeBase,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
 pub struct TemplateMergeAcceptRequest {
     /// Repo-relative files to commit; the others stay uncommitted in the worktree.
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct MergeFileDiff {
     pub path: String,
     /// `None` on a read-only plan.
@@ -50,7 +55,8 @@ pub struct MergeFileDiff {
     pub diff: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct TemplateMergeView {
     pub docs_dir: String,
     pub base: MergeBase,
@@ -66,7 +72,8 @@ pub struct TemplateMergeView {
     pub table_markdown: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct TemplateMergeAccepted {
     pub branch: String,
     pub commit: String,

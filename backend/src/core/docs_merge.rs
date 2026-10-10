@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use ts_rs::TS;
 
 /// Slug of the merge worktree; its branch is `kronn/<slug>`.
 pub const MERGE_SLUG: &str = "template-v2-merge";
@@ -30,7 +31,8 @@ const PROSE_EXTENSIONS: &[&str] = &["md", "markdown", "mdx", "txt", "rst", "adoc
 const IMPORT_START: &str = "<!-- kronn:imported-start -->";
 const IMPORT_END: &str = "<!-- kronn:imported-end -->";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum MappingAction {
     /// Copied verbatim into a v2 file that this merge creates.
@@ -45,7 +47,8 @@ pub enum MappingAction {
     KronnManaged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct Correspondence {
     /// Repo-relative source path.
     pub source: String,
@@ -794,7 +797,8 @@ pub fn fingerprint(root: &Path, paths: &[String]) -> BTreeMap<String, String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteOutcome {
     Created,
