@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterRuns, runMatchesSearch, runMatchesStatusFilter, RUN_PAGE_SIZE, groupRunsByParent } from '../runFilters';
+import { filterRuns, runMatchesSearch, runMatchesStatusFilter, RUN_PAGE_SIZE, groupRunsByParent, foldNoOpRuns } from '../runFilters';
 import type { WorkflowRun } from '../../types/generated';
 
 const mk = (over: Partial<WorkflowRun>): WorkflowRun => ({
@@ -79,5 +79,36 @@ describe('groupRunsByParent', () => {
 
   it('returns an empty array for no runs', () => {
     expect(groupRunsByParent([])).toEqual([]);
+  });
+});
+
+describe('runFilters — runs without changes (KT-1100)', () => {
+  const at = (id: string, minute: number, extra: Partial<WorkflowRun> = {}) =>
+    mk({ id, started_at: `2026-10-09T08:${String(minute).padStart(2, '0')}:00Z`, ...extra });
+
+  it('folds a streak of two or more and keeps its oldest start', () => {
+    const runs = [
+      at('a', 9, { outcome: 'no_op' }),
+      at('b', 8, { outcome: 'no_op' }),
+      at('c', 7, { outcome: 'changed' }),
+      at('d', 6, { outcome: 'no_op' }),
+    ];
+    const items = foldNoOpRuns(groupRunsByParent(runs));
+    expect(items.map(i => i.kind)).toEqual(['noop', 'group', 'group']);
+    const fold = items[0];
+    expect(fold.kind === 'noop' && fold.runs.map(r => r.id)).toEqual(['a', 'b']);
+    expect(fold.kind === 'noop' && fold.since).toBe('2026-10-09T08:08:00Z');
+  });
+
+  it('never folds sub-runs of a parent tick or unclassified runs', () => {
+    const runs = [
+      at('child-1', 9, { outcome: 'no_op', parent_run_id: 'p' }),
+      at('child-2', 8, { outcome: 'no_op', parent_run_id: 'p' }),
+      at('legacy-1', 7),
+      at('legacy-2', 6),
+    ];
+    const items = foldNoOpRuns(groupRunsByParent(runs));
+    expect(items.every(i => i.kind === 'group')).toBe(true);
+    expect(items).toHaveLength(3);
   });
 });

@@ -2058,6 +2058,11 @@ fn import_document(
             // agent's and waits for a human in the editor (KT-1017).
             crate::api::workflows::drop_foreign_fields(&mut resource.steps);
             crate::api::workflows::drop_foreign_fields(&mut resource.on_failure);
+            // Retention is human-only on a stored workflow (KT-1100): the purge
+            // would apply the file's at once, so the stored one stays.
+            if let Some(stored) = stored.as_ref() {
+                resource.retention = stored.retention;
+            }
             let (stored_steps, stored_failure) = stored
                 .map(|stored| (stored.steps, stored.on_failure))
                 .unwrap_or_default();
@@ -3579,6 +3584,64 @@ mod tests {
         assert!(exec.unwrap_err().contains("{{ticket}}"));
         same.expect("an unchanged stored line stays importable");
         assert!(changed.unwrap_err().contains("script inline"));
+    }
+
+    /// KT-1100 — a `kronn/` file is agent-writable: it sets the retention of a
+    /// new workflow, never the one a human gave a stored workflow.
+    #[tokio::test]
+    async fn a_kronn_reimport_keeps_the_stored_retention() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let steps = serde_json::json!([
+            {"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}
+        ]);
+        let short = crate::models::WorkflowRetention {
+            no_op_hours: Some(1),
+            success_days: Some(1),
+            failure_days: Some(1),
+        };
+        let doc = |slug: &str| {
+            let mut document = workflow_document(slug, steps.clone());
+            document.resource["retention"] = serde_json::to_value(short).unwrap();
+            document
+        };
+        let (fresh_doc, kept_doc) = (doc("fresh"), doc("kept"));
+        let (fresh, stored) = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let fresh = import_document(conn, "project-1", &key, &fresh_doc)?;
+                let mut kept = sample_workflow_json("wf-kept", "kept", "project-1", steps.clone());
+                kept.retention = Some(crate::models::WorkflowRetention::KEEP_ALL);
+                crate::db::workflows::insert_workflow(conn, &kept)?;
+                crate::db::resource_identities::upsert(
+                    conn,
+                    &key,
+                    ProjectRepositoryResourceKind::Workflow.identity_kind(),
+                    "kept",
+                    "wf-kept",
+                )?;
+                let stored = import_document(conn, "project-1", &key, &kept_doc)?;
+                let read = |id: &str| -> anyhow::Result<Option<crate::models::WorkflowRetention>> {
+                    Ok(crate::db::workflows::get_workflow(conn, id)?
+                        .ok_or_else(|| anyhow::anyhow!("workflow {id} missing"))?
+                        .retention)
+                };
+                Ok::<_, anyhow::Error>((read(&fresh)?, read(&stored)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh,
+            Some(short),
+            "a new workflow takes the file's retention"
+        );
+        assert_eq!(
+            stored,
+            Some(crate::models::WorkflowRetention::KEEP_ALL),
+            "a stored workflow keeps the human's retention"
+        );
     }
 
     /// R6-03: a `kronn/` file is something an agent can write, so a new or

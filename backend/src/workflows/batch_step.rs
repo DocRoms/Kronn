@@ -1875,6 +1875,7 @@ mod tests {
         use chrono::Utc;
         let wf_id = "wf-e2e".to_string();
         let workflow = Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: wf_id.clone(),
@@ -1903,6 +1904,7 @@ mod tests {
         };
         let run_id = "run-parent-e2e".to_string();
         let parent_run = WorkflowRun {
+            outcome: None,
             id: run_id.clone(),
             workflow_id: wf_id.clone(),
             status: RunStatus::Running,

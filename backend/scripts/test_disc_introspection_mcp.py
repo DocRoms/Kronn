@@ -130,6 +130,94 @@ class WriteNoticeTests(unittest.TestCase):
         self.assertEqual(self.mod._unwrap({"success": True, "data": {"id": "w"}}), {"id": "w"})
 
 
+class WorkflowReadinessTests(unittest.TestCase):
+    """KT-1138: the backend's ready/blockers verdict reaches the agent intact."""
+
+    READINESS = {
+        "workflow_id": "wf1", "workflow_name": "WF1", "enabled": True, "ready": False,
+        "blockers": [
+            {"workflow_id": "wf2", "workflow_name": "WF2", "step": "release",
+             "on_failure": True, "kind": "human_approval", "phase": "stdin",
+             "reason": "unmodelled_program", "message": "m", "action": "a",
+             "human_only": True},
+        ],
+        "human_approval_count": 1, "checked_workflow_ids": ["wf1", "wf2"],
+        "summary": "NOT READY: 1 blocker(s)",
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._current_project_id = lambda: None
+
+    def _envelope(self, data, **extra):
+        return {"success": True, "data": data, **extra}
+
+    def test_the_verdict_comes_first_and_the_notice_is_kept(self):
+        out = self.mod._unwrap(self._envelope(
+            {"id": "wf1"}, notice="approve release", readiness=self.READINESS))
+        self.assertEqual(next(iter(out)), "kronn_readiness")
+        self.assertEqual(out["kronn_readiness"], self.READINESS)
+        self.assertEqual(out["kronn_notice"], "approve release")
+        self.assertEqual(out["id"], "wf1")
+
+    def test_create_update_and_get_surface_the_verdict(self):
+        envelope = self._envelope({"id": "wf1", "enabled": False}, readiness=self.READINESS)
+        self.mod._http = mock.Mock(return_value=envelope)
+        drafted = self.mod.call_workflow_create_draft(
+            {"name": "WF1", "trigger": {"type": "Manual"}, "steps": [{"name": "s"}]})
+        updated = self.mod.call_workflow_update({"workflow_id": "wf1", "name": "WF1"})
+        fetched = self.mod.call_workflow_get({"workflow_id": "wf1"})
+        for out in (drafted, updated, fetched):
+            self.assertFalse(out["kronn_readiness"]["ready"])
+            self.assertTrue(out["kronn_readiness"]["blockers"][0]["human_only"])
+
+    def test_workflow_validate_reads_the_backend_verdict_without_writing(self):
+        self.mod._http = mock.Mock(return_value=self._envelope(self.READINESS))
+        out = self.mod.call_workflow_validate({"workflow_id": "wf1"})
+        self.mod._http.assert_called_once_with("GET", "/api/workflows/wf1/readiness")
+        self.assertEqual(out, self.READINESS)
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_validate({})
+
+    def test_workflow_list_keeps_every_counter_including_zero(self):
+        summary = {
+            "id": "wf1", "name": "WF1", "enabled": True, "step_count": 3,
+            "misconfigured_step_count": 0, "unsafe_step_count": 4,
+            "blocker_count": 30, "human_approval_count": 30, "last_run": None,
+        }
+        self.mod._http = mock.Mock(return_value=self._envelope([summary]))
+        out = self.mod.call_workflow_list({})[0]
+        self.assertEqual(out["misconfigured_step_count"], 0)
+        self.assertEqual(out["unsafe_step_count"], 4)
+        self.assertEqual(out["blocker_count"], 30)
+        self.assertEqual(out["human_approval_count"], 30)
+
+    def test_workflow_list_reads_an_older_backend_without_inventing_zeros(self):
+        legacy = {"id": "wf1", "name": "WF1", "enabled": True, "step_count": 3,
+                  "misconfigured_step_count": 1}
+        self.mod._http = mock.Mock(return_value=self._envelope([legacy]))
+        out = self.mod.call_workflow_list({})[0]
+        self.assertEqual(out["misconfigured_step_count"], 1)
+        for absent in ("unsafe_step_count", "blocker_count", "human_approval_count"):
+            self.assertNotIn(absent, out)
+
+    def test_no_tool_offers_an_approval(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertIn("workflow_validate", names)
+        self.assertFalse([n for n in names if "approv" in n])
+        validate = next(t for t in self.mod.TOOLS if t["name"] == "workflow_validate")
+        self.assertIn("cannot approve", validate["description"])
+
+    def test_the_manual_separates_save_enable_preflight_and_run(self):
+        manual = self.mod.TOOL_MANUALS["workflow_create_draft"]
+        for phrase in ("saved", "enabled", "kronn_readiness", "workflow_run_get",
+                       "never approve", "human_only"):
+            self.assertIn(phrase, manual)
+        self.assertIn("authorization to run", manual)
+        self.assertIn("configuration diagnosis", manual)
+        self.assertNotIn("schedules only", manual)
+
+
 class DeclaredStepToolsTests(unittest.TestCase):
     """KT-908: a workflow step's `--step-tools=` list is the whole surface."""
 
@@ -8371,8 +8459,14 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             return result
         with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=recording_mkstemp):
             self.assertFalse(self.mod._perform_scheduled_bridge_reload())
-        self.assertEqual(len(created), 1)
-        self.assertFalse(os.path.exists(created[0]))
+        # KT-1139: the size is checked before any file exists; the reload waits.
+        self.assertEqual(created, [])
+        self.assertNotIn(self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV, os.environ)
+        self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 91)
+        if self.mod._BRIDGE_ARTIFACT_FD is not None:
+            os.close(self.mod._BRIDGE_ARTIFACT_FD)
+            self.mod._BRIDGE_ARTIFACT_FD = None
 
     def test_central_guard_blocks_principal_and_worker_mutations(self):
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
@@ -12558,6 +12652,439 @@ class OpenAiWireSchemaTests(unittest.TestCase):
                     "OpenAI wire, and it refuses the whole request — express the rule in the "
                     "field descriptions instead",
                 )
+
+
+
+def _request_line(rid, name="workflow_update", arguments=None, id_last=False):
+    """One JSON-RPC tools/call line, bytes, without its newline."""
+    message = {"jsonrpc": "2.0", "method": "tools/call",
+               "params": {"name": name, "arguments": arguments or {}}}
+    if id_last:
+        message["id"] = rid
+    else:
+        message = {"id": rid, **message}
+    return json.dumps(message, ensure_ascii=False).encode("utf-8")
+
+
+def _padded_line(rid, size, filler="é"):
+    """A tools/call line of exactly `size` UTF-8 bytes."""
+    base = _request_line(rid, arguments={"workflow_id": "wf-1", "name": ""})
+    room = size - len(base)
+    unit = len(filler.encode("utf-8"))
+    text = filler * (room // unit) + "x" * (room % unit)
+    line = _request_line(rid, arguments={"workflow_id": "wf-1", "name": text})
+    assert len(line) == size, (len(line), size)
+    return line
+
+
+def _large_workflow_arguments(target_bytes=1_100_000):
+    """A workflow_update shaped like WF3: twenty Agent steps, >1 MiB, Unicode."""
+    prompt = ("Révise le ticket 🎫 « {{ticket}} » — vérifie chaque étape.\n" * 400)
+    steps = []
+    while len(json.dumps(steps, ensure_ascii=False).encode()) < target_bytes:
+        steps.append({"name": f"étape-{len(steps)}", "step_type": "Agent",
+                      "agent": "ClaudeCode", "prompt_template": prompt})
+    return {"workflow_id": "wf-big", "steps": steps}
+
+
+class TransportSizeContractTests(unittest.TestCase):
+    """KT-1139: the stdio transport accepts every line within the documented
+    contract, refuses longer ones explicitly, and keeps serving."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def drain_queue(self):
+        items = []
+        while True:
+            try:
+                items.append(self.mod._REQUEST_QUEUE.get_nowait())
+            except Exception:
+                return items
+
+    def feed(self, data, chunk=65536):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for start in range(0, len(data), chunk):
+                self.mod._consume_stdin_chunk(data[start:start + chunk])
+        return err.getvalue()
+
+    def test_a_workflow_update_over_one_mib_arrives_whole_in_fragments(self):
+        arguments = _large_workflow_arguments()
+        line = _request_line(41, arguments=arguments)
+        self.assertGreater(len(line), 1024 * 1024)
+        # 4093 is odd so multi-byte characters straddle fragment boundaries.
+        self.feed(line + b"\n", chunk=4093)
+        queued = self.drain_queue()
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["id"], 41)
+        self.assertEqual(queued[0]["params"]["arguments"], arguments)
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), b"")
+
+    def test_unicode_split_at_every_byte_survives(self):
+        line = _request_line(42, arguments={"name": "é🎉中 "})
+        for split in range(1, len(line)):
+            self.feed(line[:split])
+            self.feed(line[split:] + b"\n")
+            queued = self.drain_queue()
+            self.assertEqual(len(queued), 1, split)
+            self.assertEqual(queued[0]["params"]["arguments"]["name"], "é🎉中 ")
+
+    def test_exact_limit_is_accepted_and_one_byte_more_refused_complete_frame(self):
+        limit = self.mod._BRIDGE_REQUEST_MAX_BYTES
+        at_limit = _padded_line(43, limit)
+        self.feed(at_limit + b"\n", chunk=len(at_limit) + 1)
+        queued = self.drain_queue()
+        self.assertEqual([item["id"] for item in queued], [43])
+        self.assertEqual(queued[0]["method"], "tools/call")
+
+        over = _padded_line(44, limit + 1, filler="x")
+        self.feed(over + b"\n", chunk=len(over) + 1)
+        queued = self.drain_queue()
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["method"], self.mod._REQUEST_TOO_LARGE_METHOD)
+        self.assertEqual(queued[0]["id"], 44)
+        self.assertEqual(queued[0]["params"]["received_bytes"], limit + 1)
+
+    def test_exact_limit_is_accepted_and_one_byte_more_refused_fragmented(self):
+        limit = self.mod._BRIDGE_REQUEST_MAX_BYTES
+        at_limit = _padded_line(45, limit)
+        self.feed(at_limit + b"\n", chunk=65521)
+        self.assertEqual([item["id"] for item in self.drain_queue()], [45])
+        over = _padded_line(46, limit + 1)
+        # The newline arrives alone, after the limit was crossed mid-stream.
+        self.feed(over, chunk=65521)
+        self.assertEqual(self.drain_queue(), [])
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), b"", "an oversized line is never kept")
+        self.feed(b"\n")
+        queued = self.drain_queue()
+        self.assertEqual(queued[0]["id"], 46)
+        self.assertEqual(queued[0]["method"], self.mod._REQUEST_TOO_LARGE_METHOD)
+
+    def test_several_frames_in_one_read_and_a_partial_tail(self):
+        lines = [_request_line(rid, name="agent_list") for rid in (51, 52, 53)]
+        tail = _request_line(54, name="agent_list")
+        self.feed(b"\n".join(lines) + b"\n" + tail[:10], chunk=1 << 20)
+        self.assertEqual([item["id"] for item in self.drain_queue()], [51, 52, 53])
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), tail[:10])
+        self.feed(tail[10:] + b"\n")
+        self.assertEqual([item["id"] for item in self.drain_queue()], [54])
+
+    def test_an_overflow_then_a_valid_call_on_the_same_read(self):
+        secret = "SECRET-PAYLOAD-7f3a"
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 4096):
+            big = _request_line(61, arguments={"steps": [{"prompt_template": secret * 400}]},
+                                id_last=True)
+            ping = json.dumps({"jsonrpc": "2.0", "id": 62, "method": "ping"}).encode()
+            stderr = self.feed(big + b"\n" + ping + b"\n", chunk=1000)
+            queued = self.drain_queue()
+            self.assertEqual([item["id"] for item in queued], [61, 62])
+            refusal = self.mod._handle(queued[0])
+        self.assertEqual(refusal["id"], 61)
+        self.assertTrue(refusal["result"]["isError"])
+        payload = json.loads(refusal["result"]["content"][0]["text"])
+        self.assertEqual(payload["error_code"], "request_too_large")
+        self.assertFalse(payload["mutation_applied"])
+        self.assertEqual(payload["limit_bytes"], 4096)
+        self.assertEqual(payload["received_bytes"], len(big))
+        self.assertIn("workflow_update_step", payload["action"])
+        self.assertEqual(self.mod._handle(queued[1]), {"jsonrpc": "2.0", "id": 62, "result": {}})
+        for text in (json.dumps(refusal), stderr):
+            self.assertNotIn(secret, text, "no payload excerpt in any diagnostic")
+            self.assertNotIn("prompt_template", text)
+
+    def test_the_top_level_id_wins_over_a_nested_one(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 256):
+            line = json.dumps({
+                "method": "tools/call", "jsonrpc": "2.0",
+                "params": {"arguments": {"id": "nested", "s": "\\\"}{[" + "y" * 400}},
+                "id": "top-7",
+            }).encode()
+            self.feed(line + b"\n", chunk=7)
+        queued = self.drain_queue()
+        self.assertEqual(queued[0]["id"], "top-7")
+        self.assertEqual(queued[0]["params"]["request_method"], "tools/call")
+
+    def test_an_oversized_notification_gets_no_response(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 128):
+            line = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress",
+                               "params": {"x": "z" * 400}}).encode()
+            self.feed(line + b"\n")
+        self.assertEqual(self.drain_queue(), [])
+
+    def test_an_unreadable_oversized_line_is_refused_with_a_null_id(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 128):
+            self.feed(b"{\"id\": 3, \"method\": \"ping\", \"broken" + b"q" * 400 + b"\n")
+            queued = self.drain_queue()
+            self.assertEqual(len(queued), 1)
+            response = self.mod._handle(queued[0])
+        self.assertIsNone(response["id"])
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertEqual(response["error"]["data"]["error_code"], "request_too_large")
+
+    def test_the_reader_survives_an_overflow_and_serves_the_next_line(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 512):
+            big = _request_line(71, arguments={"s": "w" * 2000}).decode() + "\n"
+            ping = json.dumps({"jsonrpc": "2.0", "id": 72, "method": "ping"}) + "\n"
+            with mock.patch.object(self.mod.sys, "stdin", iter([big[:300], big[300:], ping])), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.mod._stdin_reader()
+        queued = self.drain_queue()
+        self.assertEqual([item and item["id"] for item in queued], [71, 72, None])
+        self.assertFalse(self.mod._READER_FAILED.is_set())
+
+    def test_a_malformed_line_is_dropped_without_stopping_the_reader(self):
+        bad = json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                          "params": ["not", "an", "object"]}) + "\n"
+        ping = json.dumps({"jsonrpc": "2.0", "id": 73, "method": "ping"}) + "\n"
+        with mock.patch.object(self.mod.sys, "stdin", iter([bad, ping])), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.mod._stdin_reader()
+        self.assertEqual([item and item["id"] for item in self.drain_queue()], [73, None])
+
+    def test_a_dead_reader_ends_the_process_visibly(self):
+        with mock.patch.object(self.mod, "_read_stdin", side_effect=OSError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.mod._stdin_reader()
+        self.assertTrue(self.mod._READER_FAILED.is_set())
+        self.assertIn("stdin reader failed (OSError)", err.getvalue())
+        self.assertNotIn("boom", err.getvalue())
+        with mock.patch.object(self.mod.threading, "Thread"):
+            self.assertEqual(self.mod.main(), 1, "main exits non-zero instead of hanging")
+
+    def test_reload_waits_for_an_unfinished_line_too_long_to_hand_over(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        try:
+            partial = _request_line(81, arguments={"s": "v" * (300 * 1024)})
+            self.feed(partial[:-5])
+            self.assertGreater(len(self.mod._STDIN_PENDING),
+                               self.mod._BRIDGE_HANDOFF_PENDING_MAX_BYTES)
+            with mock.patch.object(self.mod.os, "execv") as execv:
+                self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+            execv.assert_not_called()
+            self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+            self.assertFalse(self.mod._STDIN_READ_LOCK.locked())
+            self.feed(partial[-5:] + b"\n")
+            self.assertEqual([item["id"] for item in self.drain_queue()], [81])
+
+            with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 1024):
+                self.feed(b"{\"id\": 82, " + b"u" * 4096)
+                self.assertIsNotNone(self.mod._STDIN_OVERSIZED)
+                with mock.patch.object(self.mod.os, "execv") as execv:
+                    self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+                execv.assert_not_called()
+                self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+        finally:
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_reload_waits_while_queued_requests_exceed_the_handoff(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        try:
+            self.feed(_request_line(91, arguments=_large_workflow_arguments()) + b"\n")
+            self.feed(json.dumps({"jsonrpc": "2.0", "id": 92, "method": "ping"}).encode() + b"\n")
+            with mock.patch.object(self.mod.os, "execv") as execv:
+                self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+            execv.assert_not_called()
+            self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+            self.assertFalse(self.mod._STDIN_READ_LOCK.locked())
+            self.assertEqual([item["id"] for item in self.drain_queue()], [91, 92],
+                             "deferred requests keep their order")
+        finally:
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_the_contract_is_published_to_clients(self):
+        response = self.mod._handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                     "params": {}})
+        capabilities = response["result"]["capabilities"]
+        self.assertTrue(capabilities["tools"]["listChanged"])
+        contract = capabilities["experimental"]["kronnTransport"]
+        self.assertEqual(contract["request_max_bytes"], self.mod._BRIDGE_REQUEST_MAX_BYTES)
+        self.assertGreater(contract["request_max_bytes"], contract["reload_handoff_max_bytes"])
+        self.assertEqual(self.mod.call_bridge_info({})["transport"], contract)
+
+
+class WorkflowUpdateStepTests(unittest.TestCase):
+    """KT-1139: the targeted write sends one step to the backend's merge route."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_sends_only_the_step_fields_to_the_patch_route(self):
+        http = mock.Mock(return_value={"success": True, "data": {"id": "wf 1"}})
+        with mock.patch.object(self.mod, "_http", http):
+            out = self.mod.call_workflow_update_step({
+                "workflow_id": "wf 1", "step_index": 2, "on_failure": False,
+                "fields": {"step_type": "Exec", "exec_args": ["plan"]},
+            })
+        self.assertEqual(out, {"id": "wf 1"})
+        http.assert_called_once_with("PATCH", "/api/workflows/wf%201/step", {
+            "fields": {"step_type": {"type": "Exec"}, "exec_args": ["plan"]},
+            "step_index": 2, "on_failure": False,
+        })
+
+    def test_refuses_before_any_call_without_fields(self):
+        for args in ({"workflow_id": "w"}, {"workflow_id": "w", "fields": {}},
+                     {"fields": {"a": 1}}):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_workflow_update_step(args)
+
+    def test_workflow_get_reads_one_step_by_name_or_position(self):
+        workflow = {"id": "wf", "name": "big", "enabled": False,
+                    "steps": [{"name": "a"}, {"name": "b", "prompt_template": "p"}],
+                    "on_failure": [{"name": "undo"}]}
+        envelope = {"success": True, "data": workflow}
+        with mock.patch.object(self.mod, "_http", return_value=envelope):
+            self.assertEqual(self.mod.call_workflow_get({"workflow_id": "wf"}), workflow)
+            by_name = self.mod.call_workflow_get({"workflow_id": "wf", "step_name": "b"})
+            by_index = self.mod.call_workflow_get({"workflow_id": "wf", "step_index": 2})
+            rollback = self.mod.call_workflow_get(
+                {"workflow_id": "wf", "step_index": 1, "on_failure": True})
+            for bad in ({"step_name": "zz"}, {"step_index": 3}, {"step_index": 0},
+                        {"step_name": "a", "step_index": 1}):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.mod.call_workflow_get({"workflow_id": "wf", **bad})
+                self.assertIn("step", str(raised.exception))
+        self.assertEqual(by_name, by_index)
+        self.assertEqual(by_name["step"], {"name": "b", "prompt_template": "p"})
+        self.assertEqual((by_name["step_index"], by_name["step_count"]), (2, 2))
+        self.assertEqual(rollback["step"], {"name": "undo"})
+
+    def test_a_one_step_read_keeps_the_readiness_verdict_first(self):
+        envelope = {"success": True, "readiness": {"ready": False, "blockers": [1]},
+                    "notice": "approve plan",
+                    "data": {"id": "wf", "steps": [{"name": "a"}]}}
+        with mock.patch.object(self.mod, "_http", return_value=envelope):
+            one = self.mod.call_workflow_get({"workflow_id": "wf", "step_index": 1})
+            updated = self.mod.call_workflow_update_step(
+                {"workflow_id": "wf", "step_index": 1, "fields": {"description": "d"}})
+        for out in (one, updated):
+            self.assertEqual(next(iter(out)), "kronn_readiness")
+            self.assertEqual(out["kronn_readiness"]["ready"], False)
+            self.assertEqual(out["kronn_notice"], "approve plan")
+
+    def test_is_declared_and_dispatched(self):
+        self.assertIn("workflow_update_step", self.mod.DISPATCH)
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "workflow_update_step")
+        self.assertEqual(tool["inputSchema"]["required"], ["workflow_id", "fields"])
+
+
+class _StubBackend:
+    """A loopback HTTP stub standing in for Kronn: records each request and
+    answers with an ApiResponse envelope. No real Kronn is involved."""
+
+    def __init__(self):
+        import http.server
+        import threading
+        calls = self.calls = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                calls.append((self.command, self.path, body))
+                data = json.dumps({"success": True, "data": {"id": "wf-1", "saved": len(body)}})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data.encode())
+
+            do_GET = do_POST = do_PUT = do_PATCH = _answer
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class RealStdioSizeContractTests(unittest.TestCase):
+    """KT-1139 end to end: a real bridge process on real pipes."""
+
+    def test_big_call_then_overflow_then_small_call_on_one_connection(self):
+        backend = _StubBackend()
+        self.addCleanup(backend.close)
+        env = {key: value for key, value in os.environ.items() if key not in {
+            "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+            "KRONN_BRIDGE_TOKEN", "KRONN_SESSION_ID",
+        }}
+        env["KRONN_BACKEND_URL"] = backend.url
+        with tempfile.TemporaryDirectory() as home:
+            env["HOME"] = home
+            process = subprocess.Popen(
+                [sys.executable, str(_SCRIPT)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            )
+            try:
+                def send(payload, chunk=65536):
+                    for start in range(0, len(payload), chunk):
+                        process.stdin.write(payload[start:start + chunk])
+                        process.stdin.flush()
+
+                def receive(timeout=30):
+                    ready, _, _ = select.select([process.stdout], [], [], timeout)
+                    self.assertTrue(ready, "the bridge stopped answering")
+                    return json.loads(process.stdout.readline())
+
+                send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                 "params": {"clientInfo": {"name": "codex-cli"}}}).encode()
+                     + b"\n")
+                self.assertEqual(receive()["id"], 1)
+
+                arguments = _large_workflow_arguments()
+                big = _request_line(2, arguments=arguments, id_last=True)
+                self.assertGreater(len(big), 1024 * 1024)
+                send(big + b"\n", chunk=4093)
+                saved = receive()
+                self.assertEqual(saved["id"], 2)
+                self.assertNotIn("isError", saved["result"])
+                puts = [call for call in backend.calls if call[0] == "PUT"]
+                self.assertEqual(len(puts), 1)
+                self.assertEqual(puts[0][1], "/api/workflows/wf-big")
+                self.assertEqual(len(json.loads(puts[0][2])["steps"]), len(arguments["steps"]))
+                calls_before = len(backend.calls)
+
+                secret = "SECRET-WORKFLOW-CONTENT"
+                limit = 8 * 1024 * 1024
+                over = _request_line(3, arguments={
+                    "workflow_id": "wf-big", "name": secret + "z" * limit})
+                send(over + b"\n", chunk=1 << 20)
+                refused = receive()
+                self.assertEqual(refused["id"], 3)
+                payload = json.loads(refused["result"]["content"][0]["text"])
+                self.assertEqual(payload["error_code"], "request_too_large")
+                self.assertEqual(payload["limit_bytes"], limit)
+                self.assertEqual(len(backend.calls), calls_before, "nothing was executed")
+
+                small = _request_line(4, name="workflow_update_step", arguments={
+                    "workflow_id": "wf-big", "step_name": "étape-0",
+                    "fields": {"prompt_template": "Nouvelle consigne"}})
+                send(small + b"\n")
+                patched = receive()
+                self.assertEqual(patched["id"], 4)
+                self.assertNotIn("isError", patched["result"])
+                method, path, body = backend.calls[-1]
+                self.assertEqual((method, path), ("PATCH", "/api/workflows/wf-big/step"))
+                self.assertEqual(json.loads(body)["fields"],
+                                 {"prompt_template": "Nouvelle consigne"})
+                self.assertIsNone(process.poll(), "the process is alive and serving")
+            finally:
+                process.stdin.close()
+                process.wait(timeout=10)
+                stderr = process.stderr.read().decode("utf-8", errors="replace")
+                process.stdout.close()
+                process.stderr.close()
+        self.assertEqual(process.returncode, 0)
+        self.assertNotIn(secret, stderr)
 
 
 if __name__ == "__main__":

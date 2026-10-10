@@ -1905,6 +1905,29 @@ body"#;
         );
     }
 
+    /// KT-1138: the architect reads the readiness verdict before declaring
+    /// success, fixes what it can, and never approves for the human.
+    #[test]
+    fn workflow_architect_skill_reads_the_verdict_and_never_self_approves() {
+        let skills = list_all_skills();
+        let arch = skills
+            .iter()
+            .find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+        for needle in [
+            "kronn_readiness",
+            "workflow_validate",
+            "Before you declare success",
+            "Never self-approve",
+            "human_only: false",
+            "Tell the human exactly what to approve",
+            "Never write \"ready to run\" while `ready` is false",
+        ] {
+            assert!(c.contains(needle), "skill must say: {needle}");
+        }
+    }
+
     /// Guard test: the workflow-architect skill MUST teach the new
     /// step types (ApiCall, Notify, BatchQuickPrompt) and the
     /// désagentification rule. Locked in 0.6.0 after the skill was found

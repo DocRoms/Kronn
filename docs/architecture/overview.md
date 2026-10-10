@@ -821,7 +821,20 @@ WorkflowRunner (per run)
   → cleanup workspace (git worktree remove)
   → run workspace hooks: before_remove
   → emit SSE events throughout for real-time UI updates
+  → on Success (top-level linear run): classify the outcome (no_op | changed)
 ```
+
+**Runs without changes (KT-1100).** A successful top-level run whose steps
+all declared or proved that they changed nothing is stored with
+`outcome: no_op` (`workflows/run_effect.rs`, fail-closed: anything unknown is
+`changed`). An Exec step declares it with a `KRONN_NOOP` line, an Agent step
+with `"no_change": true` in its envelope; an identical Page publish, a GET
+call and the pure data steps are inferred. The run list hides these runs by
+default and folds a streak of them into one row; they are purged after 24 h,
+and `Workflow.retention` overrides each window per workflow (human-only on a
+stored workflow: an agent's update is refused, a `kronn/` re-import keeps it). Rules and purge:
+[`operations/db-backup.md`](../operations/db-backup.md#runs-without-changes-kt-1100).
+`[src: file: backend/src/workflows/run_effect.rs:1]`
 
 **Agents chosen at launch (KT-1025).** A manual launch (`POST
 /api/workflows/{id}/trigger`, a discussion or Live Page action launch, MCP

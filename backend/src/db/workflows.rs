@@ -145,7 +145,7 @@ pub const BATCH_WORKFLOW_PREFIX: &str = "qp:";
 const WORKFLOW_COLUMNS: &str = "id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
-                pinned, concurrency_key, project_scope_json";
+                pinned, concurrency_key, project_scope_json, retention_json";
 
 /// Records why Kronn disabled `id` on its own; no-op if it is enabled.
 pub fn mark_auto_disabled(
@@ -640,6 +640,7 @@ pub(crate) fn create_batch_run_with_launch_settings(
         .flatten();
 
     let run = WorkflowRun {
+        outcome: None,
         id: run_id.clone(),
         // Batch runs are not tied to a saved Workflow — reuse the QP id as the
         // virtual workflow id so the existing list_runs(workflow_id) query still
@@ -1046,8 +1047,8 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     let on_failure = steps_with_durable_ids(&wf.on_failure, None, &mut used_step_ids);
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned, concurrency_key, project_scope_json, retention_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             wf.id,
             wf.name,
@@ -1073,6 +1074,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             wf.pinned as i32,
             wf.concurrency_key,
             wf.project_scope.as_ref().map(serde_json::to_string).transpose()?,
+            wf.retention.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
@@ -1088,8 +1090,62 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
 /// An agent's write: whatever `wf.enabled` says, a stored `false` stays
 /// `false`, decided in the UPDATE itself so a concurrent disable (a
 /// dependency edited meanwhile) cannot be undone by a stale read (KT-1037).
+/// The stored retention stays as well: it is human-only (KT-1100).
 pub fn update_workflow_as_agent(conn: &Connection, wf: &Workflow) -> Result<bool> {
     write_workflow(conn, wf, true)
+}
+
+/// The full-definition write; every column it sets is in `WRITTEN_COLUMNS`.
+pub(crate) const UPDATE_WORKFLOW_SQL: &str =
+    "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
+         actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
+         concurrency_limit = ?9, enabled = CASE WHEN ?20 THEN MIN(enabled, ?10) ELSE ?10 END,
+         updated_at = ?11, guards = ?12, artifacts = ?13,
+         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
+         concurrency_key = ?18, project_scope_json = ?19,
+         retention_json = CASE WHEN ?20 THEN retention_json ELSE ?21 END
+         WHERE id = ?1";
+
+/// Every column `UPDATE_WORKFLOW_SQL` writes (a test keeps the two in sync).
+pub(crate) const WRITTEN_COLUMNS: &[&str] = &[
+    "name",
+    "project_id",
+    "trigger_json",
+    "steps_json",
+    "actions_json",
+    "safety_json",
+    "workspace_config_json",
+    "concurrency_limit",
+    "enabled",
+    "updated_at",
+    "guards",
+    "artifacts",
+    "on_failure",
+    "exec_allowlist",
+    "variables",
+    "pinned",
+    "concurrency_key",
+    "project_scope_json",
+    "retention_json",
+];
+
+/// The raw stored values of every written column, unparsed, so any change to
+/// any of them (even one a lenient parse would hide) compares unequal.
+pub fn written_revision(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<Vec<rusqlite::types::Value>>> {
+    let sql = format!(
+        "SELECT {} FROM workflows WHERE id = ?1",
+        WRITTEN_COLUMNS.join(", ")
+    );
+    Ok(conn
+        .query_row(&sql, params![id], |row| {
+            (0..WRITTEN_COLUMNS.len())
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .optional()?)
 }
 
 fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Result<bool> {
@@ -1108,13 +1164,7 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
         &mut used_step_ids,
     );
     let n = conn.execute(
-        "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
-         actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
-         concurrency_limit = ?9, enabled = CASE WHEN ?20 THEN MIN(enabled, ?10) ELSE ?10 END,
-         updated_at = ?11, guards = ?12, artifacts = ?13,
-         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17,
-         concurrency_key = ?18, project_scope_json = ?19
-         WHERE id = ?1",
+        UPDATE_WORKFLOW_SQL,
         params![
             wf.id,
             wf.name,
@@ -1158,6 +1208,10 @@ fn write_workflow(conn: &Connection, wf: &Workflow, keep_disabled: bool) -> Resu
                 .map(serde_json::to_string)
                 .transpose()?,
             keep_disabled,
+            wf.retention
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
         ],
     )?;
     Ok(n > 0)
@@ -1185,12 +1239,29 @@ pub fn runs_blocking_workflow_delete(conn: &Connection, workflow_id: &str) -> Re
 // ─── Workflow Runs CRUD ─────────────────────────────────────────────────────
 
 pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
+    count_runs_filtered(conn, workflow_id, false)
+}
+
+/// [`count_runs`], without the runs that changed nothing when `hide_no_op`.
+pub fn count_runs_filtered(conn: &Connection, workflow_id: &str, hide_no_op: bool) -> Result<u32> {
     let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1",
+        &format!(
+            "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1{}",
+            no_op_clause(hide_no_op)
+        ),
         params![workflow_id],
         |row| row.get(0),
     )?;
     Ok(count)
+}
+
+/// KT-1100 — the run list hides runs that changed nothing unless asked.
+fn no_op_clause(hide_no_op: bool) -> &'static str {
+    if hide_no_op {
+        " AND outcome IS NOT 'no_op'"
+    } else {
+        ""
+    }
 }
 
 /// Safety cap for the unpaginated `list_runs` — a workflow with thousands of
@@ -1466,7 +1537,7 @@ pub fn list_runs_paginated(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<Vec<WorkflowRun>> {
-    list_runs_paginated_visible(conn, workflow_id, limit, offset, None)
+    list_runs_paginated_visible(conn, workflow_id, limit, offset, None, false)
 }
 
 pub fn list_runs_paginated_visible(
@@ -1475,12 +1546,14 @@ pub fn list_runs_paginated_visible(
     limit: Option<u32>,
     offset: Option<u32>,
     visibility: Option<&RunVisibility>,
+    hide_no_op: bool,
 ) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
-        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1{}
+        "SELECT {} FROM workflow_runs WHERE workflow_id = ?1{}{}
          ORDER BY started_at DESC{}",
         workflow_run_cols_without_outputs(),
         visible_clause(visibility, 2),
+        no_op_clause(hide_no_op),
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
@@ -1588,7 +1661,7 @@ pub fn list_runs_page_complete_group(
     minimum: u32,
     offset: u32,
 ) -> Result<Vec<WorkflowRun>> {
-    list_runs_page_complete_group_visible(conn, workflow_id, minimum, offset, None)
+    list_runs_page_complete_group_visible(conn, workflow_id, minimum, offset, None, false)
 }
 
 pub fn list_runs_page_complete_group_visible(
@@ -1597,9 +1670,16 @@ pub fn list_runs_page_complete_group_visible(
     minimum: u32,
     offset: u32,
     visibility: Option<&RunVisibility>,
+    hide_no_op: bool,
 ) -> Result<Vec<WorkflowRun>> {
-    let mut runs =
-        list_runs_paginated_visible(conn, workflow_id, Some(minimum), Some(offset), visibility)?;
+    let mut runs = list_runs_paginated_visible(
+        conn,
+        workflow_id,
+        Some(minimum),
+        Some(offset),
+        visibility,
+        hide_no_op,
+    )?;
     let Some(boundary) = runs.last() else {
         return Ok(runs);
     };
@@ -2616,6 +2696,19 @@ pub fn mark_issue_processed(conn: &Connection, workflow_id: &str, issue_id: &str
 
 // ─── Row mappers ────────────────────────────────────────────────────────────
 
+/// A retention that does not parse keeps every run: an unreadable setting must
+/// never widen what the purge deletes.
+pub(crate) fn retention_from_column(id: &str, raw: Option<String>) -> Option<WorkflowRetention> {
+    let raw = raw?;
+    match serde_json::from_str(&raw) {
+        Ok(retention) => Some(retention),
+        Err(error) => {
+            tracing::error!(workflow_id = %id, %error, "corrupt retention_json — keeping every run");
+            Some(WorkflowRetention::KEEP_ALL)
+        }
+    }
+}
+
 fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let id: String = row.get(0).unwrap_or_default();
     let trigger_str: String = row.get(3).unwrap_or_default();
@@ -2629,6 +2722,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let on_failure_str: Option<String> = row.get(14).unwrap_or(None);
     let exec_allowlist_str: Option<String> = row.get(15).unwrap_or(None);
     let variables_str: Option<String> = row.get(16).unwrap_or(None);
+    let retention = retention_from_column(&id, row.get(20).unwrap_or(None));
 
     // These two fallbacks keep a workflow with corrupt JSON loadable (booting
     // matters), but they MUST be loud: a silently-Manual trigger kills a cron
@@ -2672,6 +2766,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
             .get::<_, Option<String>>(19)
             .unwrap_or(None)
             .and_then(|s| serde_json::from_str(&s).ok()),
+        retention,
         // Defensive: a corrupt JSON blob in `guards` should NOT silently
         // disable the safety net — fall back to the column being absent
         // (= backend defaults applied) so the runner still kills runaway
@@ -2741,6 +2836,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
     let concurrency_key: Option<String> = row.get(18).unwrap_or(None);
     let triggered_by_run_id: Option<String> = row.get(19).unwrap_or(None);
     let project_id: Option<String> = row.get(20).unwrap_or(None);
+    let outcome: Option<String> = row.get(21).unwrap_or(None);
 
     WorkflowRun {
         id: row.get(0).unwrap_or_default(),
@@ -2775,6 +2871,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         concurrency_key,
         triggered_by_run_id,
         project_id,
+        outcome: outcome.as_deref().and_then(WorkflowRunOutcome::from_db_str),
         // Derived, filled by enrich_parent_provenance (never from a column).
         parent_workflow_id: None,
         parent_workflow_name: None,
@@ -2787,7 +2884,7 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
 const WORKFLOW_RUN_COLS: &str = "id, workflow_id, status, trigger_context, step_results_json, \
     tokens_used, workspace_path, started_at, finished_at, \
     run_type, batch_total, batch_completed, batch_failed, batch_name, parent_run_id, state, \
-    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id";
+    produced_branches, batch_no_response, concurrency_key, triggered_by_run_id, project_id, outcome";
 
 /// Blanks every step's `output` inside SQLite, leaving names, statuses and
 /// timings intact. `output` is the entire weight of the column — measured at

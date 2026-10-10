@@ -265,6 +265,109 @@ pub async fn execute_exec_step_for_project(
     .await
 }
 
+/// The refusals of an Exec step's saved configuration, checked before any
+/// value is rendered; the readiness diagnostic reads the same rules (KT-1138).
+pub fn exec_config_refusal(step: &WorkflowStep, workflow_allowlist: &[String]) -> Option<String> {
+    let raw_command = match step.exec_command.as_deref().map(str::trim) {
+        Some(c) if !c.is_empty() => c,
+        _ => return Some("Exec step missing `exec_command`.".to_string()),
+    };
+    if workflow_allowlist.is_empty() {
+        return Some(format!(
+            "Exec step `{}`: workflow's `exec_allowlist` is empty — Exec disabled.",
+            step.name
+        ));
+    }
+    if !workflow_allowlist.iter().any(|a| a == raw_command) {
+        return Some(format!(
+            "Exec step `{}`: binary `{}` not in allowlist [{}].",
+            step.name,
+            raw_command,
+            workflow_allowlist.join(", ")
+        ));
+    }
+    // Defence in depth: a JSON-edited workflow may have bypassed the API.
+    if raw_command.contains('/') || raw_command.contains('\\') {
+        return Some(format!(
+            "Exec step `{}`: binary `{}` contains path separator (rejected).",
+            step.name, raw_command
+        ));
+    }
+    None
+}
+
+/// The setup line's allowlist and path rules, the same as the main command's.
+pub fn setup_config_refusal(step: &str, setup_cmd: &str, allowlist: &[String]) -> Option<String> {
+    if !allowlist.iter().any(|a| a == setup_cmd) {
+        return Some(format!(
+            "Exec step `{step}`: setup binary `{setup_cmd}` not in allowlist [{}].",
+            allowlist.join(", ")
+        ));
+    }
+    if setup_cmd.contains('/') || setup_cmd.contains('\\') {
+        return Some(format!(
+            "Exec step `{step}`: setup binary `{setup_cmd}` contains path separator (rejected)."
+        ));
+    }
+    None
+}
+
+/// The refusal of an irreversible invocation, on the rendered arguments.
+pub fn destructive_refusal(step: &str, cmd: &str, args: &[String], setup: bool) -> Option<String> {
+    let reason = destructive_reason(cmd, args)?;
+    Some(if setup {
+        format!(
+            "Exec step `{step}`: refused setup `{cmd} {}` — {reason}.",
+            args.join(" ")
+        )
+    } else {
+        format!(
+            "Exec step `{step}`: refused `{cmd} {}` — {reason}. Reformule l'étape sans cette opération destructive.",
+            args.join(" ")
+        )
+    })
+}
+
+/// Every refusal the executor would give before spawning that does not depend
+/// on a run value, as (phase, message). A line with a template is left to the
+/// run, which checks it once rendered (KT-1138).
+pub fn static_refusals(step: &WorkflowStep, allowlist: &[String]) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    if let Some(refusal) = exec_config_refusal(step, allowlist) {
+        found.push(("main".to_string(), refusal));
+    }
+    let literal = |args: &[String]| !args.iter().any(|a| a.contains("{{"));
+    if let Some(cmd) = step
+        .exec_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        if literal(&step.exec_args) {
+            if let Some(refusal) = destructive_refusal(&step.name, cmd, &step.exec_args, false) {
+                found.push(("main".to_string(), refusal));
+            }
+        }
+    }
+    if let Some(setup) = step
+        .exec_setup_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        if let Some(refusal) = setup_config_refusal(&step.name, setup, allowlist) {
+            found.push(("setup".to_string(), refusal));
+        } else if literal(&step.exec_setup_args) {
+            if let Some(refusal) =
+                destructive_refusal(&step.name, setup, &step.exec_setup_args, true)
+            {
+                found.push(("setup".to_string(), refusal));
+            }
+        }
+    }
+    found
+}
+
 fn needs_gh_hint(raw_command: &str, success: bool, github_env: &[(String, String)]) -> bool {
     !success && raw_command == "gh" && github_env.is_empty()
 }
@@ -288,45 +391,14 @@ async fn execute_exec_step_inner(
     }
 
     // ── Validate config (also enforced at save time, but stale workflows happen) ──
-    let raw_command = match step.exec_command.as_deref().map(str::trim) {
-        Some(c) if !c.is_empty() => c,
-        _ => return fail(step, start, "Exec step missing `exec_command`."),
-    };
-    if workflow_allowlist.is_empty() {
-        return fail(
-            step,
-            start,
-            format!(
-                "Exec step `{}`: workflow's `exec_allowlist` is empty — Exec disabled.",
-                step.name
-            ),
-        );
+    if let Some(refusal) = exec_config_refusal(step, workflow_allowlist) {
+        return fail(step, start, refusal);
     }
-    if !workflow_allowlist.iter().any(|a| a == raw_command) {
-        return fail(
-            step,
-            start,
-            format!(
-                "Exec step `{}`: binary `{}` not in allowlist [{}].",
-                step.name,
-                raw_command,
-                workflow_allowlist.join(", ")
-            ),
-        );
-    }
-    // Defence in depth: reject path-separator-bearing commands at run
-    // time too. The save-time validator already does this — this catch
-    // protects against a JSON-edited workflow that bypassed the API.
-    if raw_command.contains('/') || raw_command.contains('\\') {
-        return fail(
-            step,
-            start,
-            format!(
-                "Exec step `{}`: binary `{}` contains path separator (rejected).",
-                step.name, raw_command
-            ),
-        );
-    }
+    let raw_command = step
+        .exec_command
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
     // A saved step that interpolates a value into inline code never runs,
     // whatever triggered the run (KT-1017); the editor offers the rewrite.
     if let Some(refusal) = crate::core::inline_code::runtime_refusal(step) {
@@ -429,11 +501,8 @@ async fn execute_exec_step_inner(
     // history; rm -rf is unrecoverable) AFTER templating, so a `{{var}}` that
     // renders into `--force` can't sneak past. This is NOT a sandbox — just a
     // guardrail against the obvious irreversible ones.
-    if let Some(reason) = destructive_reason(raw_command, &rendered_args) {
-        return fail(step, start, format!(
-            "Exec step `{}`: refused `{} {}` — {reason}. Reformule l'étape sans cette opération destructive.",
-            step.name, raw_command, rendered_args.join(" ")
-        ));
+    if let Some(refusal) = destructive_refusal(&step.name, raw_command, &rendered_args, false) {
+        return fail(step, start, refusal);
     }
 
     let timeout_secs = step
@@ -456,27 +525,8 @@ async fn execute_exec_step_inner(
         .filter(|c| !c.is_empty())
     {
         // Allowlist + path-separator check, same as the main command.
-        if !workflow_allowlist.iter().any(|a| a == setup_cmd) {
-            return fail(
-                step,
-                start,
-                format!(
-                    "Exec step `{}`: setup binary `{}` not in allowlist [{}].",
-                    step.name,
-                    setup_cmd,
-                    workflow_allowlist.join(", ")
-                ),
-            );
-        }
-        if setup_cmd.contains('/') || setup_cmd.contains('\\') {
-            return fail(
-                step,
-                start,
-                format!(
-                    "Exec step `{}`: setup binary `{}` contains path separator (rejected).",
-                    step.name, setup_cmd
-                ),
-            );
+        if let Some(refusal) = setup_config_refusal(&step.name, setup_cmd, workflow_allowlist) {
+            return fail(step, start, refusal);
         }
         // Render setup args.
         let mut setup_args: Vec<String> = Vec::with_capacity(step.exec_setup_args.len());
@@ -505,17 +555,8 @@ async fn execute_exec_step_inner(
             return fail(step, start, format!("{refusal} (setup)"));
         }
         // Same destructive-arg guard as the main command (2026-06-11).
-        if let Some(reason) = destructive_reason(setup_cmd, &setup_args) {
-            return fail(
-                step,
-                start,
-                format!(
-                    "Exec step `{}`: refused setup `{} {}` — {reason}.",
-                    step.name,
-                    setup_cmd,
-                    setup_args.join(" ")
-                ),
-            );
+        if let Some(refusal) = destructive_refusal(&step.name, setup_cmd, &setup_args, true) {
+            return fail(step, start, refusal);
         }
         tracing::info!(
             target: "kronn::workflow_exec",
@@ -1352,6 +1393,44 @@ mod tests {
         assert!(!needs_gh_hint("gh", true, &[]));
         assert!(!needs_gh_hint("gh", false, &token));
         assert!(!needs_gh_hint("git", false, &[]));
+    }
+
+    /// KT-1138: the readiness verdict reports exactly the refusal the
+    /// executor gives before spawning, on the main and the setup line.
+    #[tokio::test]
+    async fn readiness_reports_the_executor_s_static_refusals() {
+        let allow = vec!["git".to_string(), "echo".to_string()];
+        let mut main = exec_step(
+            "push",
+            Some("git"),
+            vec!["push", "--force-with-lease"],
+            None,
+        );
+        let mut setup = exec_step("prep", Some("echo"), vec!["ok"], None);
+        setup.exec_setup_command = Some("git".into());
+        setup.exec_setup_args = vec!["push".into(), "-f".into()];
+        let mut templated = exec_step("later", Some("git"), vec!["push", "{{mode}}"], None);
+        templated.exec_unmodelled_args_approved = Some(true);
+        for (step, phase) in [(&mut main, "main"), (&mut setup, "setup")] {
+            let outcome = execute_exec_step(step, &allow, "/tmp", &TemplateContext::new()).await;
+            assert_eq!(outcome.result.status, RunStatus::Failed);
+            let mut wf: Workflow = serde_json::from_value(serde_json::json!({
+                "id": "w", "name": "w", "project_id": null, "trigger": {"type": "Manual"},
+                "steps": [], "actions": [],
+                "safety": {"sandbox": false, "max_files": null, "max_lines": null, "require_approval": false},
+                "enabled": true, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap();
+            wf.exec_allowlist = allow.clone();
+            wf.steps = vec![step.clone()];
+            let verdict = crate::workflows::readiness::assess(&wf, &Default::default());
+            assert!(!verdict.ready, "{phase}");
+            let blocker = &verdict.blockers[0];
+            assert_eq!(blocker.phase.as_deref(), Some(phase));
+            assert_eq!(blocker.message, outcome.result.output, "{phase}");
+        }
+        // A template is decided by the run once rendered, not guessed here.
+        assert!(static_refusals(&templated, &allow).is_empty());
     }
 
     #[tokio::test]

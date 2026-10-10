@@ -156,6 +156,28 @@ fn validate_guards(g: &WorkflowGuards) -> Result<(), String> {
     Ok(())
 }
 
+/// KT-1100 — bounded windows; `0` (keep forever) is valid for every class.
+fn validate_retention(retention: &WorkflowRetention) -> Result<(), String> {
+    const MAX_HOURS: u32 = 24 * 366;
+    const MAX_DAYS: u32 = 3660;
+    if retention.no_op_hours.is_some_and(|hours| hours > MAX_HOURS) {
+        return Err(format!(
+            "Retention: no-op runs are kept at most {MAX_HOURS} hours (0 keeps them forever)."
+        ));
+    }
+    for days in [retention.success_days, retention.failure_days]
+        .into_iter()
+        .flatten()
+    {
+        if days > MAX_DAYS {
+            return Err(format!(
+                "Retention: runs are kept at most {MAX_DAYS} days (0 keeps them forever)."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 0.7.0 Phase 7 — reject rollback chains that mix in a `Gate` step.
 /// A Gate inside `on_failure` would deadlock the run on a `Failed`
 /// status that no resume path serves: `decide_run` only accepts runs
@@ -688,7 +710,7 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// between what blocks a save and what the card flags). Exec/JsonData are
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
-fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
     if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
         if !matches!(s.step_type, StepType::Agent) {
             return Err(format!(
@@ -1828,9 +1850,16 @@ pub(crate) async fn list_with_visibility(
             let project_names = crate::db::projects::get_project_names(conn)?;
             let mut watch_statuses = crate::db::workflow_watch_state::list_statuses(conn)?;
 
+            let by_id: std::collections::HashMap<String, Workflow> = workflows
+                .iter()
+                .map(|wf| (wf.id.clone(), wf.clone()))
+                .collect();
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
+                    let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
+                        &crate::workflows::readiness::assess(&wf, &by_id),
+                    );
                     let last_run = last_runs.remove(&wf.id);
 
                     let project_name = wf
@@ -1855,12 +1884,15 @@ pub(crate) async fn list_with_visibility(
                         project_name,
                         trigger_type,
                         step_count: wf.steps.len() as u32,
-                        misconfigured_step_count: count_misconfigured_steps(&wf.steps),
+                        misconfigured_step_count: count_misconfigured_steps(&wf.steps)
+                            + count_misconfigured_steps(&wf.on_failure),
                         unsafe_step_count: crate::core::inline_code::classify_workflow(
                             &wf.steps,
                             &wf.on_failure,
                         )
                         .len() as u32,
+                        blocker_count: Some(blocker_count),
+                        human_approval_count: Some(human_approval_count),
                         enabled: wf.enabled,
                         pinned: wf.pinned,
                         last_run,
@@ -1889,12 +1921,51 @@ pub async fn get(
         .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
         .await
     {
-        Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
+        Ok(Some(wf)) => {
+            let readiness = workflow_readiness(&state, &wf).await;
+            Json(ApiResponse::ok(wf).with_readiness(Some(readiness)))
+        }
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
         )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/workflows/{id}/readiness — whether the saved workflow can start:
+/// every known refusal of it, its sub-workflows and rollback chains (KT-1138).
+pub async fn readiness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<WorkflowReadiness>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+        .await
+    {
+        Ok(Some(wf)) => Json(ApiResponse::ok(workflow_readiness(&state, &wf).await)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// The readiness of a saved workflow against every workflow it may call; a
+/// failed load is reported as such, never as ready.
+pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
+    match state
+        .db
+        .with_read_conn(crate::db::workflows::list_workflows)
+        .await
+    {
+        Ok(all) => crate::workflows::readiness::assess(
+            wf,
+            &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
+        ),
+        Err(e) => crate::workflows::readiness::collection_failure(wf, &format!("DB error: {e}")),
     }
 }
 
@@ -2167,9 +2238,18 @@ pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
     })
 }
 
-fn with_awaiting_notice(response: ApiResponse<Workflow>) -> ApiResponse<Workflow> {
+/// A write's response with what it leaves to a human and whether the saved
+/// workflow can start: a successful save is not readiness (KT-1138).
+async fn with_awaiting_notice(
+    state: &AppState,
+    response: ApiResponse<Workflow>,
+) -> ApiResponse<Workflow> {
     let notice = response.data.as_ref().and_then(awaiting_approval_notice);
-    response.with_notice(notice)
+    let readiness = match response.data.as_ref() {
+        Some(wf) => Some(workflow_readiness(state, wf).await),
+        None => None,
+    };
+    response.with_notice(notice).with_readiness(readiness)
 }
 
 /// An approval no line of its step needs any more is dropped, so it never
@@ -2345,6 +2425,38 @@ pub(crate) async fn reenable_as_human(
 pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
      be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
 
+/// Lets a test run another write between an update's read and its write.
+#[cfg(test)]
+pub(crate) mod before_write_hook {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    type Pause = (String, Arc<Notify>, Arc<Notify>);
+    static PAUSES: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+
+    /// The next update of `workflow_id` signals `reached`, then waits for `resume`.
+    pub(crate) fn arm(workflow_id: &str) -> (Arc<Notify>, Arc<Notify>) {
+        let (reached, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        PAUSES
+            .lock()
+            .unwrap()
+            .push((workflow_id.to_string(), reached.clone(), resume.clone()));
+        (reached, resume)
+    }
+
+    pub(super) async fn pause(workflow_id: &str) {
+        let armed = {
+            let mut pauses = PAUSES.lock().unwrap();
+            let at = pauses.iter().position(|(id, _, _)| id == workflow_id);
+            at.map(|at| pauses.remove(at))
+        };
+        if let Some((_, reached, resume)) = armed {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+}
+
 /// Everything that decides what a workflow runs, where and when.
 fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
     serde_json::json!({
@@ -2364,6 +2476,12 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
         "project_scope": wf.project_scope,
     })
 }
+
+/// Why an agent cannot change a workflow's retention (KT-1100): the purge
+/// applies it at once, enabled or not, so only a human may set what it deletes.
+pub(crate) const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
+     agent cannot change it on an existing workflow. Ask the user to set it in Kronn \
+     (workflow editor, \"Run retention\").";
 
 /// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
 /// Tracker trigger would then run its content with no human in the loop.
@@ -2401,7 +2519,7 @@ pub(crate) async fn create_as_labeled(
             .await;
         }
     }
-    Json(with_awaiting_notice(response))
+    Json(with_awaiting_notice(&state, response).await)
 }
 
 async fn create_written(
@@ -2465,6 +2583,11 @@ async fn create_written(
 
     if let Some(ref guards) = req.guards {
         if let Err(e) = validate_guards(guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(ref retention) = req.retention {
+        if let Err(e) = validate_retention(retention) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -2570,6 +2693,7 @@ async fn create_written(
         return Json(ApiResponse::err(e));
     }
     let wf = Workflow {
+        retention: req.retention,
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -2745,9 +2869,155 @@ pub(crate) async fn update_as_labeled(
     writer: WorkflowWriter,
     label: Option<String>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = update_written(state, id, req, writer, label).await;
-    Json(with_awaiting_notice(response))
+    let Json(response) = update_written(state.clone(), id, req, writer, label, None).await;
+    Json(with_awaiting_notice(&state, response).await)
 }
+
+/// Body of `PATCH /api/workflows/:id/step` (KT-1139): one step, named or by
+/// 1-based position, and the fields to set on it (`null` clears one).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateWorkflowStepRequest {
+    #[serde(default)]
+    pub step_name: Option<String>,
+    #[serde(default)]
+    pub step_index: Option<usize>,
+    /// Target the rollback chain instead of the main steps.
+    #[serde(default)]
+    pub on_failure: bool,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The step list with one step's fields replaced, or why it cannot be.
+pub(crate) fn patch_step(
+    mut steps: Vec<WorkflowStep>,
+    req: &UpdateWorkflowStepRequest,
+) -> Result<Vec<WorkflowStep>, String> {
+    let at = match (&req.step_name, req.step_index) {
+        (Some(name), None) => steps.iter().position(|s| &s.name == name).ok_or_else(|| {
+            let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+            format!("No step named `{name}`. Steps: {}", names.join(", "))
+        })?,
+        (None, Some(index)) if (1..=steps.len()).contains(&index) => index - 1,
+        (None, Some(index)) => {
+            return Err(format!(
+                "step_index {index} is out of range: 1 to {}",
+                steps.len()
+            ))
+        }
+        _ => return Err("Name the step with exactly one of step_name or step_index.".into()),
+    };
+    if req.fields.is_empty() {
+        return Err("No step field to change.".into());
+    }
+    let known = step_field_names();
+    if let Some(key) = req.fields.keys().find(|key| !known.contains(&key.as_str())) {
+        return Err(format!("Unknown step field `{key}`."));
+    }
+    let mut merged = match serde_json::to_value(&steps[at]) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err("The stored step could not be read.".into()),
+    };
+    for (key, value) in &req.fields {
+        if value.is_null() {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    let step: WorkflowStep = serde_json::from_value(serde_json::Value::Object(merged))
+        .map_err(|e| format!("Invalid step field: {e}"))?;
+    steps[at] = step;
+    Ok(steps)
+}
+
+/// Every field name `WorkflowStep` deserializes, read from serde's own list so
+/// it can never drift from the struct.
+pub(crate) fn step_field_names() -> &'static [&'static str] {
+    use serde::de::{Error, Visitor};
+    struct Probe<'a>(&'a mut &'static [&'static str]);
+    impl<'de> serde::Deserializer<'de> for Probe<'_> {
+        type Error = serde::de::value::Error;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(Error::custom("not a struct"))
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(Error::custom("probed"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+    static NAMES: std::sync::OnceLock<&'static [&'static str]> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut fields: &'static [&'static str] = &[];
+        let _ = <WorkflowStep as serde::Deserialize>::deserialize(Probe(&mut fields));
+        fields
+    })
+}
+
+/// PATCH /api/workflows/:id/step — saves the whole list through the same
+/// path as `PUT`, so authorship, enablement and approval rules all apply.
+pub async fn update_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<UpdateWorkflowStepRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    let wf_id = id.clone();
+    // The definition and the raw revision of every written column, read
+    // together: the write is refused if any of those columns changed since.
+    let (existing, base) = match state
+        .db
+        .with_conn(move |conn| {
+            let wf = crate::db::workflows::get_workflow(conn, &wf_id)?;
+            let revision = crate::db::workflows::written_revision(conn, &wf_id)?;
+            Ok(wf.zip(revision))
+        })
+        .await
+    {
+        Ok(Some(read)) => read,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+    #[cfg(test)]
+    before_write_hook::pause(&format!("{id}#step-read")).await;
+    let (list, key) = if req.on_failure {
+        (existing.on_failure, "on_failure")
+    } else {
+        (existing.steps, "steps")
+    };
+    let steps = match patch_step(list, &req) {
+        Ok(steps) => steps,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let update: UpdateWorkflowRequest =
+        match serde_json::from_value(serde_json::json!({ key: steps })) {
+            Ok(update) => update,
+            Err(e) => return Json(ApiResponse::err(format!("Invalid step: {e}"))),
+        };
+    let label = agent_label(&state, &bridge).await;
+    let writer = WorkflowWriter::from_bridge(&bridge);
+    let Json(response) = update_written(state.clone(), id, update, writer, label, Some(base)).await;
+    Json(with_awaiting_notice(&state, response).await)
+}
+
+#[cfg(test)]
+#[path = "workflow_step_patch_tests.rs"]
+mod step_patch_tests;
 
 async fn update_written(
     state: AppState,
@@ -2755,6 +3025,8 @@ async fn update_written(
     mut req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
     label: Option<String>,
+    // A step PATCH's base: the save is refused if any written column changed.
+    expected_revision: Option<Vec<rusqlite::types::Value>>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -2773,6 +3045,13 @@ async fn update_written(
     };
     if writer == WorkflowWriter::Agent && req.enabled == Some(true) && !existing.enabled {
         return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    if writer == WorkflowWriter::Agent
+        && req
+            .retention
+            .is_some_and(|retention| retention != existing.retention)
+    {
+        return Json(ApiResponse::err(AGENT_RETENTION_REFUSAL));
     }
     // An agent's change to what an enabled workflow executes would run under
     // the human's earlier activation: compared below, it disables the workflow.
@@ -2879,6 +3158,11 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
+    if let Some(Some(ref retention)) = req.retention {
+        if let Err(e) = validate_retention(retention) {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     if let Some(ref new_artifacts) = req.artifacts {
         if let Err(e) = validate_artifact_specs(new_artifacts) {
@@ -2968,6 +3252,7 @@ async fn update_written(
     }
 
     let mut updated = Workflow {
+        retention: req.retention.unwrap_or(existing.retention),
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -3062,6 +3347,8 @@ async fn update_written(
         return Json(ApiResponse::err(e));
     }
 
+    #[cfg(test)]
+    before_write_hook::pause(&updated.id).await;
     let w = updated.clone();
     // A human turning it on has reviewed it: the record of why Kronn turned
     // it off goes.
@@ -3070,6 +3357,15 @@ async fn update_written(
     match state
         .db
         .with_conn(move |conn| {
+            // Checked on the write connection right before the UPDATE, so no
+            // other save can land between the comparison and the write.
+            if let Some(expected) = expected_revision {
+                match crate::db::workflows::written_revision(conn, &w.id)? {
+                    None => return Ok(Some(false)),
+                    Some(current) if current != expected => return Ok(None),
+                    Some(_) => {}
+                }
+            }
             let saved = if by_agent {
                 crate::db::workflows::update_workflow_as_agent(conn, &w)?
             } else {
@@ -3078,12 +3374,18 @@ async fn update_written(
             if saved && clear_record {
                 crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
             }
-            Ok(saved)
+            Ok(Some(saved))
         })
         .await
     {
-        Ok(true) => {
-            // The stored flag may have stayed off (see `update_workflow_as_agent`).
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "The workflow changed since this edit read it; nothing was saved. \
+             Read the step again and retry.",
+        )),
+        Ok(Some(true)) => {
+            // The stored flag and retention may differ from this read (see
+            // `update_workflow_as_agent`).
             let mut updated = updated;
             if by_agent {
                 let id = updated.id.clone();
@@ -3093,6 +3395,7 @@ async fn update_written(
                     .await
                 {
                     updated.enabled = stored.enabled;
+                    updated.retention = stored.retention;
                 }
             }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
@@ -3109,7 +3412,7 @@ async fn update_written(
         }
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
-        Ok(false) => Json(ApiResponse::err_coded(
+        Ok(Some(false)) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
         )),
@@ -3541,6 +3844,9 @@ pub(crate) fn validate_workflow_for_import_keeping(
     if let Some(ref guards) = wf.guards {
         validate_guards(guards)?;
     }
+    if let Some(ref retention) = wf.retention {
+        validate_retention(retention)?;
+    }
     validate_artifact_specs(&wf.artifacts)?;
     validate_on_failure_steps(&wf.on_failure)?;
     validate_exec_allowlist(&wf.exec_allowlist)?;
@@ -3728,8 +4034,8 @@ pub async fn import_workflow(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<ImportWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = import_workflow_written(state, bridge, req).await;
-    Json(with_awaiting_notice(response))
+    let Json(response) = import_workflow_written(state.clone(), bridge, req).await;
+    Json(with_awaiting_notice(&state, response).await)
 }
 
 async fn import_workflow_written(
@@ -4282,6 +4588,7 @@ pub(crate) async fn create_manual_run_admitted(
     }
     let now = Utc::now();
     let run = WorkflowRun {
+        outcome: None,
         id: run_id,
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
@@ -5077,6 +5384,9 @@ pub struct ListRunsQuery {
     state_key: Option<String>,
     /// …with exactly this value, when given.
     state_value: Option<String>,
+    /// KT-1100 — leave out the runs that changed nothing.
+    #[serde(default)]
+    hide_no_op: bool,
 }
 
 /// The runs a bridge caller may see (its project's, or its own run); `None`
@@ -5131,6 +5441,7 @@ pub async fn list_runs(
                         limit,
                         params.offset.unwrap_or(0),
                         visibility.as_ref(),
+                        params.hide_no_op,
                     )
                 } else {
                     crate::db::workflows::list_runs_paginated_visible(
@@ -5139,6 +5450,7 @@ pub async fn list_runs(
                         Some(limit),
                         params.offset,
                         visibility.as_ref(),
+                        params.hide_no_op,
                     )
                 }
             } else {
@@ -5148,6 +5460,7 @@ pub async fn list_runs(
                     Some(crate::db::workflows::MAX_RUNS_UNPAGINATED),
                     None,
                     visibility.as_ref(),
+                    params.hide_no_op,
                 )
             }
         })
@@ -5158,14 +5471,24 @@ pub async fn list_runs(
     }
 }
 
+/// `GET /api/workflows/:id/runs/count[?hide_no_op=true]`.
+#[derive(Debug, Default, Deserialize)]
+pub struct CountRunsQuery {
+    #[serde(default)]
+    hide_no_op: bool,
+}
+
 /// GET /api/workflows/:id/runs/count
 pub async fn count_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<CountRunsQuery>,
 ) -> Json<ApiResponse<u32>> {
     match state
         .db
-        .with_read_conn(move |conn| crate::db::workflows::count_runs(conn, &id))
+        .with_read_conn(move |conn| {
+            crate::db::workflows::count_runs_filtered(conn, &id, params.hide_no_op)
+        })
         .await
     {
         Ok(count) => Json(ApiResponse::ok(count)),
@@ -6791,6 +7114,10 @@ pub async fn test_api_call(
         error,
     }))
 }
+
+#[cfg(test)]
+#[path = "workflow_readiness_tests.rs"]
+mod readiness_tests;
 
 #[cfg(test)]
 mod tests {
@@ -8676,6 +9003,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
@@ -9102,6 +9430,321 @@ mod tests {
         )
         .await;
         assert!(!enable.success, "only a human turns it back on");
+    }
+
+    /// KT-1100: a human sets and clears a workflow's retention; an agent
+    /// cannot change it, but may send it back unchanged.
+    #[tokio::test]
+    async fn retention_is_editable_by_a_human_only() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "polling", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}],
+            "retention": {"no_op_hours": 2}
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.unwrap();
+        assert!(created.enabled);
+        assert_eq!(
+            created.retention,
+            Some(WorkflowRetention {
+                no_op_hours: Some(2),
+                ..Default::default()
+            })
+        );
+
+        let update = |body: serde_json::Value| -> UpdateWorkflowRequest {
+            serde_json::from_value(body).unwrap()
+        };
+        let Json(too_long) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": {"failure_days": 100_000}})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert!(!too_long.success, "an unbounded window is refused");
+
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": {"success_days": 7, "failure_days": 0}})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        let human = human.data.unwrap();
+        assert!(human.enabled, "a human edit keeps the workflow on");
+        assert_eq!(human.retention.unwrap().failure_days, Some(0));
+
+        let Json(untouched) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"name": "polling (renamed)"})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let untouched = untouched.data.unwrap();
+        assert!(
+            untouched.enabled,
+            "an omitted retention is kept and changes nothing"
+        );
+        assert_eq!(untouched.retention, human.retention);
+
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": null})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+        let Json(echoed) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": human.retention})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let echoed = echoed.data.unwrap();
+        assert!(echoed.enabled, "an unchanged retention is no change");
+        assert_eq!(echoed.retention, human.retention);
+
+        let Json(cleared) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": null})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        let cleared = cleared.data.unwrap();
+        assert_eq!(
+            cleared.retention, None,
+            "null returns to the global retention"
+        );
+        assert!(cleared.enabled);
+        assert!(auto_disabled(&state).await.is_empty());
+    }
+
+    // KT-1100 — what the real purge deletes after each kind of retention write.
+
+    /// The KT-984 global windows of these tests: shorter than a human's keep-all.
+    const SHORT_GLOBAL: crate::core::run_retention::RetentionDays =
+        crate::core::run_retention::RetentionDays {
+            payload: 0,
+            delete: 30,
+            no_op_hours: 24,
+        };
+    const NO_GLOBAL: crate::core::run_retention::RetentionDays =
+        crate::core::run_retention::RetentionDays {
+            payload: 0,
+            delete: 0,
+            no_op_hours: 0,
+        };
+    const ONE_DAY: WorkflowRetention = WorkflowRetention {
+        no_op_hours: Some(1),
+        success_days: Some(1),
+        failure_days: Some(1),
+    };
+
+    /// A human-saved Cron workflow with `retention` and four runs finished 40
+    /// days ago: one per class, plus a witness that still owns a worktree.
+    async fn retained_workflow(state: &AppState, retention: WorkflowRetention) -> Workflow {
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "polling", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}],
+            "retention": retention
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.unwrap();
+        let workflow_id = created.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let finished = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+                for (id, status, outcome, workspace) in [
+                    ("noop", "Success", Some("no_op"), None),
+                    ("success", "Success", Some("changed"), None),
+                    ("failed", "Failed", None, None),
+                    (
+                        "witness",
+                        "Success",
+                        Some("changed"),
+                        Some("/repo/.kronn/worktrees/w"),
+                    ),
+                ] {
+                    conn.execute(
+                        "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json,
+                             started_at, finished_at, run_type, outcome, workspace_path)
+                         VALUES (?1, ?2, ?3, '[]', ?4, ?4, 'linear', ?5, ?6)",
+                        rusqlite::params![id, workflow_id, status, finished, outcome, workspace],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        created
+    }
+
+    async fn purge_then_list(
+        state: &AppState,
+        global: crate::core::run_retention::RetentionDays,
+    ) -> Vec<String> {
+        crate::core::run_retention::run_pass(&state.db, global, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                Ok(conn
+                    .prepare("SELECT id FROM workflow_runs ORDER BY id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    fn retention_patch(retention: serde_json::Value) -> UpdateWorkflowRequest {
+        serde_json::from_value(serde_json::json!({ "retention": retention })).unwrap()
+    }
+
+    /// An agent shortening the retention deletes nothing more; the same
+    /// windows saved by a human apply at the next pass.
+    #[tokio::test]
+    async fn an_agent_retention_never_reaches_the_purge_until_a_human_saves_it() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(
+            purge_then_list(&state, SHORT_GLOBAL).await,
+            ["failed", "noop", "success", "witness"],
+            "the human's keep-all still holds"
+        );
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert_eq!(human.data.unwrap().retention, Some(ONE_DAY));
+        assert_eq!(purge_then_list(&state, NO_GLOBAL).await, ["witness"]);
+    }
+
+    /// An agent's `null` would fall back to a shorter global window: refused,
+    /// the human's keep-all still holds.
+    #[tokio::test]
+    async fn an_agent_null_retention_never_falls_back_to_a_shorter_global_window() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::Value::Null),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(
+            purge_then_list(&state, SHORT_GLOBAL).await,
+            ["failed", "noop", "success", "witness"]
+        );
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+    }
+
+    /// A human's retention saved between an agent's read and its write
+    /// survives, whether the agent omitted it or sent back what it read.
+    #[tokio::test]
+    async fn a_human_retention_saved_during_an_agent_write_survives_it() {
+        for agent_patch in [
+            serde_json::json!({"name": "renamed by the agent"}),
+            serde_json::json!({"name": "renamed by the agent", "retention": ONE_DAY}),
+        ] {
+            let state = agent_state();
+            let wf = retained_workflow(&state, ONE_DAY).await;
+            let (reached, resume) = before_write_hook::arm(&wf.id);
+            let agent = tokio::spawn(update_as_labeled(
+                state.clone(),
+                wf.id.clone(),
+                serde_json::from_value(agent_patch.clone()).unwrap(),
+                WorkflowWriter::Agent,
+                Some("Codex".into()),
+            ));
+            reached.notified().await;
+            let Json(human) = update_as_labeled(
+                state.clone(),
+                wf.id.clone(),
+                retention_patch(serde_json::to_value(WorkflowRetention::KEEP_ALL).unwrap()),
+                WorkflowWriter::Human,
+                None,
+            )
+            .await;
+            assert!(human.success, "{agent_patch}");
+            resume.notify_one();
+            let Json(agent) = agent.await.unwrap();
+            assert_eq!(
+                purge_then_list(&state, SHORT_GLOBAL).await,
+                ["failed", "noop", "success", "witness"],
+                "{agent_patch}"
+            );
+            let agent = agent.data.unwrap();
+            assert_eq!(agent.name, "renamed by the agent");
+            assert_eq!(
+                agent.retention,
+                Some(WorkflowRetention::KEEP_ALL),
+                "the response carries the stored retention"
+            );
+        }
+
+        // Control: a human edit still applies.
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert_eq!(human.data.unwrap().retention, Some(ONE_DAY));
+        assert_eq!(purge_then_list(&state, SHORT_GLOBAL).await, ["witness"]);
+    }
+
+    /// A workflow its user turned off keeps being cleaned by its own retention.
+    #[tokio::test]
+    async fn a_user_disabled_workflow_is_still_cleaned_by_its_human_retention() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, ONE_DAY).await;
+        let Json(disabled) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            serde_json::from_value(serde_json::json!({"enabled": false})).unwrap(),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert!(!disabled.data.unwrap().enabled);
+        assert_eq!(purge_then_list(&state, NO_GLOBAL).await, ["witness"]);
     }
 
     /// KT-1037: every automatic disable records why; a human re-enable

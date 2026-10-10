@@ -1528,6 +1528,7 @@ mod chain_render_tests {
             crate::db::workflows::insert_run(
                 conn,
                 &crate::models::WorkflowRun {
+                    outcome: None,
                     id: "batch-atomic".into(),
                     workflow_id: "qp:qp-atomic".into(),
                     status: crate::models::RunStatus::Running,

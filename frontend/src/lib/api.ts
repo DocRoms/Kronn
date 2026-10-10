@@ -121,6 +121,7 @@ import type {
   WorkflowStep,
   WorkflowSummary,
   UnsafeExecStep,
+  WorkflowReadiness,
   AutoDisabledWorkflow,
   ExecLineCheck,
   ExecLineCheckRequest,
@@ -2475,6 +2476,8 @@ export const workflows = {
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
   /** KT-1017 — Exec command lines refused at run time, with suggested rewrites. */
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
+  /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
+  readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */
@@ -2577,13 +2580,19 @@ export const workflows = {
     }
   },
 
-  listRuns: (id: string, limit?: number, offset?: number, completeGroup = false) => {
-    const query = limit == null
-      ? ''
-      : `?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset ?? 0)}${completeGroup ? '&complete_group=true' : ''}`;
+  listRuns: (id: string, limit?: number, offset?: number, completeGroup = false, hideNoOp = false) => {
+    const params: string[] = [];
+    if (limit != null) {
+      params.push(`limit=${encodeURIComponent(limit)}`, `offset=${encodeURIComponent(offset ?? 0)}`);
+      if (completeGroup) params.push('complete_group=true');
+    }
+    if (hideNoOp) params.push('hide_no_op=true');
+    const query = params.length > 0 ? `?${params.join('&')}` : '';
     return api<WorkflowRun[]>('GET', `/workflows/${id}/runs${query}`);
   },
-  countRuns: (id: string) => api<number>('GET', `/workflows/${id}/runs/count`),
+  /** KT-1100 — `hideNoOp` leaves out the runs that changed nothing. */
+  countRuns: (id: string, hideNoOp = false) =>
+    api<number>('GET', `/workflows/${id}/runs/count${hideNoOp ? '?hide_no_op=true' : ''}`),
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),

@@ -2024,15 +2024,35 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
     await waitFor(() => expect(screen.getByText('Runs (60)')).toBeInTheDocument());
-    expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(1, 'wf-lab', 10, 0, true);
+    expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(1, 'wf-lab', 10, 0, true, true);
 
     fireEvent.change(screen.getByLabelText(/Nombre d’exécutions à charger/i), {
       target: { value: '50' },
     });
     await act(async () => { fireEvent.click(screen.getByText('Afficher')); });
     await waitFor(() => {
-      expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(2, 'wf-lab', 50, 10, true);
+      expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(2, 'wf-lab', 50, 10, true, true);
     });
+  });
+
+  it('masque les runs sans changement puis les affiche à la demande (KT-1100)', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockReset();
+    mockWorkflowsApi.countRuns.mockReset();
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    // Visible runs, then every run: 1 440 runs without changes are hidden.
+    mockWorkflowsApi.countRuns.mockImplementation((_id: string, hideNoOp?: boolean) =>
+      Promise.resolve(hideNoOp ? 0 : 1440));
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Ouvrir PR Review LAB' })); });
+    const show = await screen.findByRole('button', { name: 'Afficher les runs sans changement (1440)' });
+    expect(mockWorkflowsApi.listRuns).toHaveBeenLastCalledWith('wf-lab', 10, 0, true, true);
+
+    await act(async () => { fireEvent.click(show); });
+    await waitFor(() => expect(mockWorkflowsApi.listRuns).toHaveBeenLastCalledWith('wf-lab', 10, 0, true, false));
+    expect(screen.getByRole('button', { name: 'Masquer les runs sans changement' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('conserve le scroll de la liste et remonte le détail lors de la sélection', async () => {

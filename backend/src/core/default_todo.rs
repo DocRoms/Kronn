@@ -210,6 +210,7 @@ fn workflow(
         exec_allowlist: vec![],
         variables,
         enabled: true,
+        retention: None,
         pinned: false,
         created_at: now,
         updated_at: now,

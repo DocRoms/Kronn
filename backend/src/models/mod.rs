@@ -194,6 +194,10 @@ pub struct ApiResponse<T: Serialize> {
     /// agent wrote that wait for an approval). Omitted when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Whether the workflow a write or read returns can start (KT-1138).
+    /// Omitted for every other response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<WorkflowReadiness>,
 }
 
 impl<T: Serialize> ApiResponse<T> {
@@ -204,6 +208,7 @@ impl<T: Serialize> ApiResponse<T> {
             error: None,
             error_code: None,
             notice: None,
+            readiness: None,
         }
     }
 
@@ -214,6 +219,7 @@ impl<T: Serialize> ApiResponse<T> {
             error: Some(msg.into()),
             error_code: None,
             notice: None,
+            readiness: None,
         }
     }
 
@@ -226,12 +232,19 @@ impl<T: Serialize> ApiResponse<T> {
             error: Some(msg.into()),
             error_code: Some(code.as_str().to_string()),
             notice: None,
+            readiness: None,
         }
     }
 
     /// The same response with a notice for whoever made the write.
     pub fn with_notice(mut self, notice: Option<String>) -> Self {
         self.notice = notice;
+        self
+    }
+
+    /// The same response with the readiness of the workflow it carries.
+    pub fn with_readiness(mut self, readiness: Option<WorkflowReadiness>) -> Self {
+        self.readiness = readiness;
         self
     }
 }

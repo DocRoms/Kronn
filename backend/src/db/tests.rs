@@ -1891,6 +1891,7 @@ fn mcp_config_hash_changes_on_args_override() {
 pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
+        retention: None,
         project_scope: None,
         pinned: false,
         id: id.into(),
@@ -2069,6 +2070,7 @@ fn workflows_pinned_roundtrip() {
 pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
+        outcome: None,
         id: id.into(),
         workflow_id: workflow_id.into(),
         status: RunStatus::Running,
@@ -3551,6 +3553,7 @@ fn workflow_runs_delete_all() {
 fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
+        outcome: None,
         id: id.into(),
         workflow_id: format!("qp:{}", qp_id),
         status: RunStatus::Running,
@@ -5481,6 +5484,7 @@ fn workflow_multi_step_roundtrip() {
     let conn = test_db();
     let now = Utc::now();
     let wf = Workflow {
+        retention: None,
         project_scope: None,
         pinned: false,
         id: "wm1".into(),

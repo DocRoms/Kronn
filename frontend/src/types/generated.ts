@@ -1375,7 +1375,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1467,7 +1467,12 @@ child_workflows: Array<BundleCreated>,
  * The workflow doesn't have a `bundle_id` (only one per bundle);
  * the frontend uses `id` + `name` to navigate to it.
  */
-workflow: BundleWorkflowCreated, };
+workflow: BundleWorkflowCreated,
+/**
+ * Whether the created chain can start (KT-1138): every blocker of the
+ * workflow, its child workflows and rollback chains.
+ */
+readiness: WorkflowReadiness, };
 
 /**
  * One line about a task: enough to recognise it, not enough to re-read it.
@@ -2033,7 +2038,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -9075,7 +9080,11 @@ pinned?: boolean | null,
 /**
  * `null` makes the workflow single-project again; omitted keeps it.
  */
-project_scope?: WorkflowProjectScope | null, };
+project_scope?: WorkflowProjectScope | null,
+/**
+ * `null` returns to the global retention; omitted keeps it.
+ */
+retention?: WorkflowRetention | null, };
 
 /**
  * Response after uploading a context file.
@@ -9439,7 +9448,12 @@ pinned: boolean,
  * (its home project, whose repository carries it). `None` keeps the
  * single-project behaviour; the project is then resolved at trigger time.
  */
-project_scope?: WorkflowProjectScope, created_at: string, updated_at: string, };
+project_scope?: WorkflowProjectScope,
+/**
+ * KT-1100 — how long this workflow's finished runs are kept, overriding
+ * the global retention. `None` inherits it.
+ */
+retention?: WorkflowRetention, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -9517,6 +9531,36 @@ export type WorkflowAgentProvenance = { attempts: Array<WorkflowAgentAttempt>,
  * attempt produced a retained output, including preflight failures.
  */
 selected_attempt: number | null, };
+
+/**
+ * One known refusal, with where it is and what lifts it.
+ */
+export type WorkflowBlocker = { workflow_id: string, workflow_name: string,
+/**
+ * The step, or `None` for a workflow-level blocker.
+ */
+step: string | null,
+/**
+ * The step belongs to the `on_failure` (rollback) chain.
+ */
+on_failure: boolean, kind: WorkflowBlockerKind,
+/**
+ * `main`, `setup`, `stdin`, `source` or `script` for an Exec line.
+ */
+phase?: string,
+/**
+ * The runtime validator's own reason code, e.g. `unmodelled_program`.
+ */
+reason?: string, message: string, action: string,
+/**
+ * Only a human can lift it: an agent must report it, never work around it.
+ */
+human_only: boolean, };
+
+/**
+ * What keeps a run from starting (KT-1138).
+ */
+export type WorkflowBlockerKind = "validation_error" | "misconfigured_step" | "human_approval" | "unsafe_interpolation" | "missing_child" | "child_cycle" | "collection_error";
 
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
@@ -9612,6 +9656,43 @@ loop_detection_max_revisits?: number | null, };
  */
 export type WorkflowProjectScope = { "type": "All" } | { "type": "Projects", project_ids: Array<string>, };
 
+/**
+ * Whether a saved workflow can start, as far as Kronn can tell before a run
+ * (KT-1138). Saving and enabling are separate facts, not proof of readiness.
+ */
+export type WorkflowReadiness = { workflow_id: string, workflow_name: string, enabled: boolean,
+/**
+ * No known blocker in the workflow, its sub-workflows and rollback
+ * chains. The run can still fail on what only a run reveals.
+ */
+ready: boolean, blockers: Array<WorkflowBlocker>, human_approval_count: number,
+/**
+ * The workflows checked: this one, then its sub-workflows.
+ */
+checked_workflow_ids: Array<string>,
+/**
+ * One line for an agent or a human to read first.
+ */
+summary: string, };
+
+/**
+ * Per-workflow run retention (KT-1100). Each window overrides the global one
+ * for its class of run; `None` inherits it and `0` keeps those runs forever.
+ */
+export type WorkflowRetention = {
+/**
+ * Successful runs that changed nothing. Inherited default: 24 hours.
+ */
+no_op_hours?: number,
+/**
+ * Successful runs with an effect (or not classified).
+ */
+success_days?: number,
+/**
+ * Failed, partial, cancelled and guard-stopped runs.
+ */
+failure_days?: number, };
+
 export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**
  * Linear workflow run vs batch fan-out. Default "linear" for backward
@@ -9681,6 +9762,10 @@ triggered_by_run_id?: string | null,
  */
 project_id?: string | null,
 /**
+ * KT-1100 — set once a top-level run succeeds; `None` otherwise.
+ */
+outcome?: WorkflowRunOutcome,
+/**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
  * workflow id + name + tick time so the UI can render
@@ -9689,6 +9774,12 @@ project_id?: string | null,
  * `None` on insert, on top-level runs, and when the parent was deleted.
  */
 parent_workflow_id?: string | null, parent_workflow_name?: string | null, parent_run_started_at?: string | null, };
+
+/**
+ * What a finished run did (KT-1100). Only top-level successful runs are
+ * classified; every other run has no outcome.
+ */
+export type WorkflowRunOutcome = "no_op" | "changed";
 
 export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
 
@@ -10107,7 +10198,16 @@ misconfigured_step_count: number,
  * Exec command lines (main or setup) that interpolate a value into
  * inline code: refused at run time until fixed (KT-1017).
  */
-unsafe_step_count: number, enabled: boolean,
+unsafe_step_count: number,
+/**
+ * Every known refusal of a run, its sub-workflows and rollback chain
+ * included (KT-1138). 0 is not a promise that a run succeeds.
+ */
+blocker_count?: number,
+/**
+ * The blockers only a human can lift (approvals of agent-written lines).
+ */
+human_approval_count?: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */

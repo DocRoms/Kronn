@@ -252,7 +252,7 @@ Cron and Watch take an optional IANA `timezone`; without one they run in UTC.
 
 **sendingStartMap** — Lifted `Record<string, number>` timestamp map tracking when each discussion's agent request started. Persists across page switches so the elapsed timer remains accurate when navigating away and back.
 
-**Tauri desktop app** — Native desktop wrapper (Windows/macOS/Linux) in `desktop/`. Backend is embedded (no Docker needed), frontend served via HTTP with COOP/COEP headers for SharedArrayBuffer (required by WASM workers). Auto-detects and installs agents (npm required). Same features as web version. Built via `.github/workflows/desktop-build.yml`.
+**Tauri desktop app** — Native desktop wrapper (Windows/macOS/Linux) in `desktop/`. Backend is embedded (no Docker needed), frontend served via HTTP from the embedded backend, without COOP/COEP so allowed third-party players load (the TTS/STT WASM workers run single-threaded, as in Docker). Auto-detects and installs agents (npm required). Same features as web version. Built via `.github/workflows/desktop-build.yml`.
 
 **ModelTier** — Enum: `economy`, `default`, `reasoning`. Selects the model quality/cost tier per agent. Configured globally in `ModelTiersConfig` (one `ModelTierConfig` per agent). Can be overridden per-message or per-workflow-step via `AgentSettings`. Stored in DB via migrations 015-016.
 

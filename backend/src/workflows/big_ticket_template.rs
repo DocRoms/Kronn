@@ -142,6 +142,7 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
     });
 
     CreateWorkflowRequest {
+        retention: None,
         project_scope: None,
         name: workflow_name,
         project_id: params.project_id,
@@ -191,6 +192,7 @@ pub fn build_feasibility_child(
         build_implement_step(agent, ticket_ref)
     };
     CreateWorkflowRequest {
+        retention: None,
         project_scope: None,
         name: if decomposed {
             format!("{parent_name} — implement & verify (per-task)")

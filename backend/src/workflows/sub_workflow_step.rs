@@ -399,6 +399,7 @@ pub async fn execute_sub_workflow_step(
     };
     insert_snapshot_marker(&mut trigger, prepared.snapshot);
     let mut child_run = WorkflowRun {
+        outcome: None,
         id: child_run_id.clone(),
         workflow_id: child_wf.id.clone(),
         status: RunStatus::Pending,
@@ -1251,6 +1252,7 @@ async fn execute_foreach(
         } else {
             let now = Utc::now();
             let child = WorkflowRun {
+                outcome: None,
                 id: child_id.clone(),
                 workflow_id: child_wf.id.clone(),
                 status: RunStatus::Pending,
@@ -1579,6 +1581,7 @@ mod tests {
 
         // Child workflow: deterministic JsonData steps — no LLM, no project.
         let child_wf = crate::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "child-wf".into(),
@@ -1615,6 +1618,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         let parent_run = crate::models::WorkflowRun {
+            outcome: None,
             id: "parent-run".into(),
             workflow_id: "parent-wf".into(),
             status: crate::models::RunStatus::Running,

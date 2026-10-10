@@ -61,6 +61,28 @@ was 9.2 GB of a 10 GB base. Two mechanisms keep it bounded.
   and it returns once the file passes 2 GB.
 - **Row deletion, opt-in.** `server.run_retention_days > 0` deletes old runs
   with the same rules and chunking. `0` (default) never deletes history.
+- **Runs without changes (KT-1100), on by default.** A top-level run that
+  succeeded without any effect is stored with `outcome = 'no_op'` and deleted
+  24 h after it finished (`DEFAULT_NO_OP_RETENTION_HOURS`), with the same
+  rules and chunking; its unchanged Page publication does not hold it, the
+  publication stays with its run link cleared. Its step outputs are cut to
+  2 000 characters as soon as it is classified (every step succeeded, so no
+  error is cut). See [Runs without changes](#runs-without-changes-kt-1100).
+  `[src: file: backend/src/workflows/run_effect.rs:1]`
+- **Per-workflow retention (KT-1100).** `Workflow.retention`
+  (`{no_op_hours, success_days, failure_days}`, editor card "Run retention",
+  `workflow_update`) overrides each global window for its class: no-op runs,
+  other successful runs, and `Partial`/`Failed`/`Cancelled`/`StoppedByGuard`
+  runs. An absent window inherits, `0` keeps forever, and an unreadable
+  setting keeps every run of that workflow. One purge serves both: the pass
+  deletes per class, first each overriding workflow with its own window, then
+  every other workflow with the global one. The purge applies it whether the
+  workflow is enabled or not, so only a human sets it on a stored workflow:
+  an agent's update that changes it is refused, an agent's write keeps the
+  stored value in the UPDATE itself (no stale read), a `kronn/` re-import keeps
+  the stored value, and an agent may set it only on a new draft, which runs
+  nothing until a human enables it.
+  `[src: file: backend/src/core/run_retention.rs:1]`
 
 Never touched, whatever their age: runs that are not `Success`, `Partial`,
 `Failed`, `Cancelled` or `StoppedByGuard` (so not `Running`, `Pending`,
@@ -83,6 +105,33 @@ truncating checkpoint and reports the size before and after. It holds the
 write connection for the whole rewrite, so it is never automatic, it is
 refused while a workflow run is in progress, and it needs free space for the
 rebuilt copy both in the temporary directory and beside the database.
+
+### Runs without changes (KT-1100)
+
+A run is classified once, when a top-level linear run ends in `Success`; every
+other run keeps `outcome = NULL`, which retention treats as a run with an
+effect. The classification is fail-closed: `no_op` needs every step to be
+neutral and the database to hold no trace of an effect.
+
+| Step | Neutral when |
+|------|--------------|
+| Exec | exit 0 and a line that is exactly `KRONN_NOOP` on stdout or stderr |
+| Agent | its `---STEP_OUTPUT---` envelope has `"no_change": true` (tokens spent do not matter then) |
+| ApiCall | the method sent was `GET` or `HEAD` (read from the step summary) |
+| CollectApiData | every source is a Quick API read with no error; a CLI source never is |
+| PublishPageData | `content_changed` false, no changed dataset, no point added or removed |
+| JsonData, TransformData | always |
+| any other (Notify, Gate, batch, sub-workflow, trigger…) | never |
+
+A run that owns a worktree or preserved a branch is never `no_op`, and neither
+is a run with a dataset point, a publication that changed content, an
+`api_call_logs` row that is not `GET`/`HEAD`, or any other row of
+`REFERENCING_COLUMNS` (a discussion, a child run, a question…). A step's own
+declaration is trusted for what Kronn cannot observe: an Exec or Agent that
+prints the marker while writing files in the main checkout is the workflow
+author's error. The run list hides no-op runs by default
+(`GET /api/workflows/{id}/runs?hide_no_op=true`, same flag on `/runs/count`)
+and folds a streak of them into one row when shown.
 
 ### Measured on a generated base
 

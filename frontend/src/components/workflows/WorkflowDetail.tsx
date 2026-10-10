@@ -15,7 +15,7 @@ import {
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
   Eye, Pencil, FileText, Database, Shuffle, Clock,
 } from 'lucide-react';
-import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
+import { filterRuns, foldNoOpRuns, groupRunsByParent, isNoOpRun, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
@@ -211,6 +211,10 @@ export interface WorkflowDetailProps {
   /** KT-1017 — a human approves a step that waits for it. */
   onApproveUnsafeStep?: (issue: UnsafeExecStep) => Promise<void>;
   totalRuns?: number;
+  /** KT-1100 — runs that changed nothing, left out of `runs`. */
+  noOpRunsHidden?: number;
+  showNoOpRuns?: boolean;
+  onToggleNoOpRuns?: () => void;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
   onLoadMoreRuns?: (amount: number | 'all') => void;
@@ -1595,7 +1599,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1644,6 +1648,13 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   };
   const toggleGroup = (key: string, groupRuns: WorkflowRun[]) =>
     setGroupOverride(prev => ({ ...prev, [key]: !isGroupExpanded(key, groupRuns) }));
+  // KT-1100 — folded streaks of no-op runs stay closed until clicked.
+  const [openNoOpFolds, setOpenNoOpFolds] = useState<Set<string>>(new Set());
+  const toggleNoOpFold = (key: string) => setOpenNoOpFolds(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   // #11 — when arriving with a focus run id (drill from a parent's sub-run
   // link), make sure it's visible: clear filters, unfold the list, expand the
@@ -2415,13 +2426,24 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             <Trash2 size={9} /> {t('wf.deleteAll')}
           </button>
         )}
+        {onToggleNoOpRuns && (showNoOpRuns || noOpRunsHidden > 0) && (
+          <button
+            type="button"
+            className="wf-runs-noop-toggle"
+            data-active={showNoOpRuns}
+            aria-pressed={showNoOpRuns}
+            onClick={onToggleNoOpRuns}
+          >
+            {showNoOpRuns ? t('wf.runs.noOp.hide') : t('wf.runs.noOp.show', noOpRunsHidden)}
+          </button>
+        )}
         <button className="wf-icon-btn" onClick={() => setShowRuns(!showRuns)} aria-label={showRuns ? 'Collapse runs' : 'Expand runs'}>
           <ChevronRight size={12} className={showRuns ? 'wf-chevron-rotated' : 'wf-chevron'} />
         </button>
       </div>
 
       {showRuns && runs.length === 0 && (
-        <p className="text-sm text-faint mt-4">{t('wf.noRuns')}</p>
+        <p className="text-sm text-faint mt-4">{noOpRunsHidden > 0 ? t('wf.runs.noOp.onlyHidden', noOpRunsHidden) : t('wf.noRuns')}</p>
       )}
 
       {/* #2 — control bar: only when the list is long enough to warrant it. */}
@@ -2472,6 +2494,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               type="button"
               className="wf-run-compact"
               data-status={run.status}
+              data-outcome={isNoOpRun(run) ? 'no_op' : undefined}
               aria-expanded={expanded}
               onClick={() => toggleRunExpanded(run.id)}
             >
@@ -2562,7 +2585,26 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             {(totalRuns ?? runs.length) > RUN_PAGE_SIZE && visible.length === 0 && (
               <p className="text-sm text-faint mt-4">{t('wf.runs.noMatch')}</p>
             )}
-            {groups.map(g => {
+            {foldNoOpRuns(groups).map(item => {
+              if (item.kind === 'noop') {
+                const open = openNoOpFolds.has(item.key);
+                const since = new Date(item.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                return (
+                  <div key={item.key} className="wf-run-noop-fold" data-testid="wf-run-noop-fold">
+                    <button
+                      type="button"
+                      className="wf-run-noop-fold-header"
+                      aria-expanded={open}
+                      onClick={() => toggleNoOpFold(item.key)}
+                    >
+                      <ChevronRight size={12} className={open ? 'wf-chevron-rotated' : 'wf-chevron'} />
+                      <span>{t('wf.runs.noOp.fold', item.runs.length, since)}</span>
+                    </button>
+                    {open && <div className="wf-run-group-body">{item.runs.map(renderRunItem)}</div>}
+                  </div>
+                );
+              }
+              const g = item.group;
               // A real multi-child parent tick → group accordion. Standalone or
               // single runs render as plain compact rows (no group header).
               if (g.parentRunId && g.runs.length > 1) {

@@ -1933,6 +1933,7 @@ mod tests {
         fixture(&conn);
         let now = Utc::now();
         let workflow = crate::models::Workflow {
+            retention: None,
             project_scope: None,
             id: "wf-old-slug".into(),
             name: "Feeder".into(),

@@ -272,6 +272,7 @@ async fn create_bundle_as(
     mark_bundle_lines(&mut req.workflow.on_failure, writer);
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
+        retention: req.workflow.retention,
         project_scope: req.workflow.project_scope.clone(),
         pinned: false,
         id: wf_id.clone(),
@@ -332,6 +333,7 @@ async fn create_bundle_as(
             }
         };
         prepared_children.push(Workflow {
+            retention: creq.retention,
             project_scope: creq.project_scope.clone(),
             pinned: false,
             id: real_id,
@@ -461,6 +463,7 @@ async fn create_bundle_as(
     let workflow_id_for_response = wf_id.clone();
 
     let by_agent = writer == crate::api::workflows::WorkflowWriter::Agent;
+    let saved_root = wf_to_insert.clone();
     let insert_result = state
         .db
         .with_conn(move |conn| {
@@ -541,16 +544,34 @@ async fn create_bundle_as(
         )));
     }
 
-    Json(ApiResponse::ok(BundleResponse {
-        quick_prompts: qps_for_response,
-        quick_apis: qas_for_response,
-        custom_apis: custom_apis_for_response,
-        child_workflows: children_for_response,
-        workflow: BundleWorkflowCreated {
-            id: workflow_id_for_response,
-            name: workflow_name_for_response,
-        },
-    }))
+    // The chain was saved, which says nothing of whether it can start: the
+    // response names every blocker, children and rollbacks included.
+    let stored_id = saved_root.id.clone();
+    let saved_root = match state
+        .db
+        .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &stored_id))
+        .await
+    {
+        Ok(Some(stored)) => stored,
+        _ => saved_root,
+    };
+    let readiness = crate::api::workflows::workflow_readiness(&state, &saved_root).await;
+    let notice = (readiness.human_approval_count > 0).then(|| readiness.summary.clone());
+    Json(
+        ApiResponse::ok(BundleResponse {
+            readiness: readiness.clone(),
+            quick_prompts: qps_for_response,
+            quick_apis: qas_for_response,
+            custom_apis: custom_apis_for_response,
+            child_workflows: children_for_response,
+            workflow: BundleWorkflowCreated {
+                id: workflow_id_for_response,
+                name: workflow_name_for_response,
+            },
+        })
+        .with_notice(notice)
+        .with_readiness(Some(readiness)),
+    )
 }
 
 /// `bundle_id` allowed characters: ASCII alphanumeric + `_-`. Same

@@ -793,6 +793,7 @@ mod tests {
             exec_allowlist: vec![],
             variables: vec![],
             enabled: true,
+            retention: None,
             pinned: false,
             created_at: now,
             updated_at: now,
