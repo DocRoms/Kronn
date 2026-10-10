@@ -1,15 +1,21 @@
-import { useEffect, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { config as configApi } from '../lib/api';
-import type { EmbedOriginsChange } from '../types/generated';
+import { useWebSocket } from './useWebSocket';
+import { servedFrameOrigins } from '../lib/served-frame-policy';
+import type { EmbedOriginsChange, WsMessage } from '../types/generated';
 
 /**
  * The sites Live Pages may embed content from, shared by every Page view, the
  * import dialog and Configuration → Artifacts. One store per tab: a change made
- * in Configuration reaches the Pages of the same tab at once, and another tab
- * (a standalone Page on a wall screen) re-reads it when it becomes visible.
+ * in Configuration reaches the Pages of the same tab at once, and every other
+ * open tab re-reads it on the backend's `embed_origins_changed` event (and on
+ * reconnect or focus, for an event it missed).
  * `null` until the first read succeeds, and nothing is embedded meanwhile.
  */
 let origins: ReadonlySet<string> | null = null;
+// Set by the backend's change event, cleared only by a list read or change
+// that lands after it: until then no player is drawn, even if the read fails.
+let suspended = false;
 const listeners = new Set<() => void>();
 
 // A read only reflects the server as it was when the read started. Every
@@ -24,6 +30,7 @@ let inflight: { generation: number; read: Promise<void> } | null = null;
 
 function publish(next: readonly string[]): void {
   origins = new Set(next);
+  suspended = false;
   for (const listener of listeners) listener();
 }
 
@@ -50,6 +57,17 @@ export function refreshEmbedAllowedOrigins(): Promise<void> {
 export function invalidateEmbedAllowedOrigins(): Promise<void> {
   generation += 1;
   return refreshEmbedAllowedOrigins();
+}
+
+// Every mounted view receives the same frame: one read per frame, not per view.
+let invalidationQueued = false;
+function invalidateOnce(): void {
+  if (invalidationQueued) return;
+  invalidationQueued = true;
+  queueMicrotask(() => {
+    invalidationQueued = false;
+    void invalidateEmbedAllowedOrigins();
+  });
 }
 
 /** Apply a change on the backend and share the resulting list. */
@@ -82,18 +100,46 @@ function subscribe(listener: () => void): () => void {
 }
 
 const snapshot = () => origins;
+const suspendedSnapshot = () => suspended;
+
+/** The list changed on the server: suspend every player until it is read again. */
+function suspendAndInvalidate(): void {
+  // Reads already in flight predate the change: none of them may lift it.
+  generation += 1;
+  if (!suspended) {
+    suspended = true;
+    for (const listener of listeners) listener();
+  }
+  invalidateOnce();
+}
+
+/** Whether a change was announced and the new list is not read yet. */
+export function useEmbedOriginsSuspended(): boolean {
+  return useSyncExternalStore(subscribe, suspendedSnapshot, suspendedSnapshot);
+}
 
 /** Test-only: forget the shared list. */
 export function resetEmbedAllowedOriginsForTests(): void {
   origins = null;
+  suspended = false;
   inflight = null;
   generation = 0;
   changesInFlight = 0;
   changes = Promise.resolve();
 }
 
+/** Sites this document's CSP was served with, `null` when unknown. */
+export function embedOriginsFramableByThisDocument(): ReadonlySet<string> | null {
+  return servedFrameOrigins();
+}
+
 export function useEmbedAllowedOrigins(): ReadonlySet<string> | null {
   const current = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const onMessage = useCallback((message: WsMessage) => {
+    if (message.type === 'embed_origins_changed') suspendAndInvalidate();
+  }, []);
+  // A reconnect may have missed a revocation: read the list again.
+  useWebSocket(onMessage, invalidateOnce);
   useEffect(() => {
     void refreshEmbedAllowedOrigins();
     const onVisible = () => { if (document.visibilityState === 'visible') void refreshEmbedAllowedOrigins(); };

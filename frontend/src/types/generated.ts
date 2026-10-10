@@ -9931,4 +9931,4 @@ started_at: string,
 /**
  * Increases with every frame of one run.
  */
-seq: number, progress: AgentRunProgress, };
+seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" };

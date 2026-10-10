@@ -1505,6 +1505,134 @@ mod tests {
         assert_eq!(resp.headers()["cache-control"], "no-store");
     }
 
+    /// Removing an allowed site tells open tabs at once, by category only.
+    #[tokio::test]
+    #[serial]
+    async fn changing_allowed_sites_announces_it_to_open_tabs() {
+        isolate_config_dir();
+        let state = test_state();
+        state.config.write().await.embed_allowed_origins = vec!["https://suno.com".to_string()];
+        let mut bus = state.ws_broadcast.subscribe();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/embed-origins")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"add":[],"remove":["https://suno.com"]}"#))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"], serde_json::json!([]));
+        assert!(matches!(
+            bus.try_recv(),
+            Ok(crate::models::WsMessage::EmbedOriginsChanged)
+        ));
+
+        // A refused change announces nothing.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/embed-origins")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"add":["https://x.example/path"],"remove":[]}"#,
+            ))
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], false);
+        assert!(bus.try_recv().is_err());
+    }
+
+    /// The desktop serves its documents through `serve_app_documents`: each one
+    /// carries the frame policy built from the allowed list, never a 304.
+    #[tokio::test]
+    async fn app_documents_carry_the_host_frame_policy() {
+        let dist = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dist.path().join("index.html"),
+            "<!doctype html><html><head><title>k</title></head></html>",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dist.path().join("assets")).unwrap();
+        std::fs::write(dist.path().join("assets/app.js"), "export {};").unwrap();
+        let state = test_state();
+        state.config.write().await.embed_allowed_origins = vec![
+            "https://suno.com".to_string(),
+            "http://only-http.example".to_string(),
+        ];
+        let app = crate::api::live_pages::serve_app_documents(dist.path(), state.clone());
+        let expected = "frame-src 'self' https://suno.com; child-src 'self' https://suno.com; worker-src 'self' blob:";
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.headers()["content-security-policy"], expected);
+        assert!(first.headers().get("etag").is_none());
+        assert!(first.headers().get("last-modified").is_none());
+        // The marker carries exactly the sources of the header it came with.
+        let csp = first.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = String::from_utf8(
+            first
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let marker = body
+            .split("<meta name=\"kronn-served-frame-src\" content=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("marker after <head>")
+            .replace("&#39;", "'");
+        assert_eq!(csp, crate::core::embed_origins::policy_for_sources(&marker));
+        assert_eq!(marker, "'self' https://suno.com");
+
+        // A cached copy never comes back as a 304 with an older policy.
+        state.config.write().await.embed_allowed_origins.clear();
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("accept", "text/html")
+                    .header("if-modified-since", "Sat, 01 Jan 2100 00:00:00 GMT")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+        assert_eq!(
+            reload.headers()["content-security-policy"],
+            "frame-src 'self'; child-src 'self'; worker-src 'self' blob:"
+        );
+
+        let asset = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert!(asset.headers().contains_key("content-security-policy"));
+    }
+
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
     /// agent Install button — installs land in the container under Docker, so
     /// the UI must point to the host-side CLI instead. Health is unauthed.

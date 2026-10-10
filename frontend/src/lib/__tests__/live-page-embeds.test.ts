@@ -49,7 +49,7 @@ describe('planLivePageEmbeds', () => {
   const allowed = new Set(['https://suno.com']);
 
   it('draws nothing before the allowed sites are known', () => {
-    expect(planLivePageEmbeds([placement()], null)).toEqual({ players: [], blocked: [] });
+    expect(planLivePageEmbeds([placement()], null)).toEqual({ players: [], blocked: [], reload: [] });
   });
 
   it('splits allowed content from refused sites and drops malformed URLs', () => {
@@ -80,6 +80,46 @@ describe('planLivePageEmbeds', () => {
     expect(planLivePageEmbeds([other], allowed).players).toHaveLength(0);
     const plan = planLivePageEmbeds([other], new Set([...allowed, 'https://player.example.org']));
     expect(plan.players[0]).toMatchObject({ url: 'https://player.example.org/v/42', origin: 'https://player.example.org' });
+  });
+
+  it('asks for a reload instead of framing a site allowed after the document loaded', () => {
+    const other = placement({ key: 'eo:0', url: 'https://player.example.org/v/42' });
+    const now = new Set([...allowed, 'https://player.example.org']);
+    const plan = planLivePageEmbeds([placement(), other], now, allowed);
+    expect(plan.players.map(p => p.origin)).toEqual(['https://suno.com']);
+    expect(plan.reload.map(p => p.origin)).toEqual(['https://player.example.org']);
+    expect(plan.blocked).toEqual([]);
+    // Revoked since load: refused, never drawn because the old policy allowed it.
+    expect(planLivePageEmbeds([placement()], new Set<string>(), allowed).blocked).toHaveLength(1);
+  });
+
+  it('takes every player down once a site the document policy admits is revoked, even one whose own site stays allowed', () => {
+    const atLoad = new Set(['https://suno.com', 'https://player.example.org']);
+    const plan = planLivePageEmbeds([placement()], new Set(['https://suno.com']), atLoad);
+    expect(plan.players).toEqual([]);
+    expect(plan.reload.map(p => [p.origin, p.reason])).toEqual([['https://suno.com', 'revoked']]);
+    // Only additions since load: players stay.
+    const grown = planLivePageEmbeds([placement()], new Set([...atLoad, 'https://x.example']), atLoad);
+    expect(grown.players).toHaveLength(1);
+    // Allowed again: the policy admits nothing that is not allowed, players return.
+    expect(planLivePageEmbeds([placement()], atLoad, atLoad).players).toHaveLength(1);
+  });
+
+  it('never frames an http-only allowed site and says why instead of asking for a reload', () => {
+    const http = placement({ key: 'eh:0', url: 'http://player.example:8080/v' });
+    const httpOnly = new Set(['http://player.example:8080']);
+    const plan = planLivePageEmbeds([http], httpOnly, new Set<string>());
+    expect(plan.players).toEqual([]);
+    expect(plan.reload.map(p => [p.origin, p.reason])).toEqual([['http://player.example:8080', 'httpOnly']]);
+    // Its https address allowed too, and served: framed.
+    const both = new Set(['http://player.example:8080', 'https://player.example:8080']);
+    expect(planLivePageEmbeds([http], both, both).players).toHaveLength(1);
+  });
+
+  it('frames nothing while the document policy is unknown', () => {
+    const plan = planLivePageEmbeds([placement()], allowed, null);
+    expect(plan.players).toEqual([]);
+    expect(plan.reload.map(p => p.reason)).toEqual(['unknown']);
   });
 });
 

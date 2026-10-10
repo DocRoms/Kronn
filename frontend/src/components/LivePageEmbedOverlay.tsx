@@ -1,9 +1,9 @@
 import { useLayoutEffect, useState } from 'react';
-import { ShieldAlert } from 'lucide-react';
+import { RotateCw, ShieldAlert } from 'lucide-react';
 import type { LivePageEmbedPlacement } from '../lib/live-page-sandbox';
 import { embedPlacementStyle, isEmbedPlacementShown, planLivePageEmbeds } from '../lib/live-page-embeds';
 import { openEmbedSettings } from '../lib/live-page-navigation';
-import { useEmbedAllowedOrigins } from '../hooks/useEmbedAllowedOrigins';
+import { embedOriginsFramableByThisDocument, useEmbedAllowedOrigins, useEmbedOriginsSuspended } from '../hooks/useEmbedAllowedOrigins';
 import { useT } from '../lib/I18nContext';
 import './LivePageEmbedOverlay.css';
 
@@ -20,6 +20,14 @@ interface FrameBox { left: number; top: number; width: number; height: number }
 function sameBox(a: FrameBox | null, b: FrameBox): boolean {
   return a !== null && a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
 }
+
+const RELOAD_DETAIL = {
+  added: 'pages.embed.reloadNeededDetail',
+  revoked: 'pages.embed.reloadRevokedDetail',
+  pending: 'pages.embed.reloadPendingDetail',
+  unknown: 'pages.embed.reloadUnknownDetail',
+  httpOnly: 'pages.embed.httpOnlyDetail',
+} as const;
 
 /**
  * Draw the third-party content a Page placed, in the host, over the Page iframe.
@@ -42,6 +50,7 @@ function sameBox(a: FrameBox | null, b: FrameBox): boolean {
 export function LivePageEmbedOverlay({ frameRef, embeds, onConfigureOrigin = openEmbedSettings }: LivePageEmbedOverlayProps) {
   const { t } = useT();
   const allowedOrigins = useEmbedAllowedOrigins();
+  const suspended = useEmbedOriginsSuspended();
   const [box, setBox] = useState<FrameBox | null>(null);
   const [order, setOrder] = useState<string[]>([]);
 
@@ -67,7 +76,7 @@ export function LivePageEmbedOverlay({ frameRef, embeds, onConfigureOrigin = ope
     };
   }, [frameRef]);
 
-  const { players, blocked } = planLivePageEmbeds(embeds, allowedOrigins);
+  const { players, blocked, reload } = planLivePageEmbeds(embeds, allowedOrigins, embedOriginsFramableByThisDocument(), suspended);
   const byKey = new Map(players.map(player => [player.placement.key, player]));
   // First-seen order, kept as derived state: a player that changes rank in the
   // Page must not move in the DOM, where moving it would reload it.
@@ -82,7 +91,7 @@ export function LivePageEmbedOverlay({ frameRef, embeds, onConfigureOrigin = ope
     const player = byKey.get(key);
     return player ? [player] : [];
   });
-  if (ordered.length === 0 && blocked.length === 0) return null;
+  if (ordered.length === 0 && blocked.length === 0 && reload.length === 0) return null;
 
   return (
     <div
@@ -133,6 +142,63 @@ export function LivePageEmbedOverlay({ frameRef, embeds, onConfigureOrigin = ope
               onClick={() => onConfigureOrigin(origin)}
             >
               {t('pages.embed.configure')}
+            </button>
+          </div>
+        );
+      })}
+      {reload.map(({ placement, origin, reason }) => {
+        const shown = isEmbedPlacementShown(placement);
+        if (reason === 'httpOnly') {
+          const secure = origin.replace(/^http:/, 'https:');
+          return (
+            <div
+              key={placement.key}
+              className="live-page-embed-overlay__blocked"
+              data-embed-key={placement.key}
+              data-embed-origin={origin}
+              data-embed-reason="http-only"
+              role="note"
+              aria-hidden={shown ? undefined : true}
+              style={embedPlacementStyle(placement, shown)}
+            >
+              <ShieldAlert size={16} aria-hidden="true" />
+              <div className="live-page-embed-overlay__blocked-text">
+                <strong>{t('pages.embed.httpOnly')}</strong>
+                <span>{t('pages.embed.httpOnlyDetail', origin, secure)}</span>
+              </div>
+              <button
+                type="button"
+                className="live-page-embed-overlay__configure"
+                tabIndex={shown ? undefined : -1}
+                onClick={() => onConfigureOrigin(secure)}
+              >
+                {t('pages.embed.configure')}
+              </button>
+            </div>
+          );
+        }
+        return (
+          <div
+            key={placement.key}
+            className="live-page-embed-overlay__blocked live-page-embed-overlay__blocked--reload"
+            data-embed-key={placement.key}
+            data-embed-origin={origin}
+            role="note"
+            aria-hidden={shown ? undefined : true}
+            style={embedPlacementStyle(placement, shown)}
+          >
+            <RotateCw size={16} aria-hidden="true" />
+            <div className="live-page-embed-overlay__blocked-text">
+              <strong>{t('pages.embed.reloadNeeded')}</strong>
+              <span>{t(RELOAD_DETAIL[reason ?? 'added'], origin)}</span>
+            </div>
+            <button
+              type="button"
+              className="live-page-embed-overlay__configure"
+              tabIndex={shown ? undefined : -1}
+              onClick={() => window.location.reload()}
+            >
+              {t('pages.embed.reload')}
             </button>
           </div>
         );

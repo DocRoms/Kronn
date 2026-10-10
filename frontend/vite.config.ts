@@ -1,6 +1,7 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { framePolicyPlugin } from './vite-frame-policy.ts';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 
@@ -10,7 +11,7 @@ const backendAgent = new URL(backendTarget).protocol === 'https:'
   : new HttpAgent({ keepAlive: true });
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), framePolicyPlugin(backendTarget)],
   worker: {
     format: 'es',
   },

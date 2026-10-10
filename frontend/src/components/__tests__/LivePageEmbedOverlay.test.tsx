@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, waitFor } from '@testing-library/react';
 
 vi.mock('../../lib/api', () => ({
+  getApiBase: vi.fn(() => ''),
+  getAuthToken: vi.fn(() => null),
   config: {
     getEmbedOrigins: vi.fn(),
     changeEmbedOrigins: vi.fn(),
@@ -27,6 +29,17 @@ import { LivePageEmbedOverlay } from '../LivePageEmbedOverlay';
 import { I18nProvider } from '../../lib/I18nContext';
 import type { LivePageEmbedPlacement } from '../../lib/live-page-sandbox';
 import { changeEmbedAllowedOrigins, resetEmbedAllowedOriginsForTests } from '../../hooks/useEmbedAllowedOrigins';
+import { resetServedFrameOriginsForTests } from '../../lib/served-frame-policy';
+
+/** The marker the host puts on the document, with the sources its CSP admits. */
+function servePolicy(...origins: string[]) {
+  document.querySelectorAll('meta[name="kronn-served-frame-src"]').forEach(meta => meta.remove());
+  const meta = document.createElement('meta');
+  meta.name = 'kronn-served-frame-src';
+  meta.content = ["'self'", ...origins].join(' ');
+  document.head.append(meta);
+  resetServedFrameOriginsForTests();
+}
 
 const CSS = readFileSync('src/components/LivePageEmbedOverlay.css', 'utf8');
 const ACTION_CSS = readFileSync('src/components/LivePageActionOverlay.css', 'utf8');
@@ -59,12 +72,33 @@ const players = (container: HTMLElement) =>
 const warnings = (container: HTMLElement) =>
   Array.from(container.querySelectorAll<HTMLElement>('.live-page-embed-overlay__blocked'));
 
+// The tab's WebSocket: the backend announces a change of the allowed sites.
+class FakeSocket {
+  static instances: FakeSocket[] = [];
+  static readonly OPEN = 1;
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor() { FakeSocket.instances.push(this); }
+  send() {}
+  close() { this.readyState = 3; this.onclose?.(); }
+  open() { this.readyState = 1; this.onopen?.(); }
+  receive(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
+}
+const socket = () => FakeSocket.instances[FakeSocket.instances.length - 1];
+
 beforeEach(() => {
   resetEmbedAllowedOriginsForTests();
+  servePolicy('https://suno.com');
+  FakeSocket.instances = [];
+  vi.stubGlobal('WebSocket', FakeSocket);
   vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com']);
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -125,6 +159,124 @@ describe('LivePageEmbedOverlay', () => {
     expect(warnings(container)).toHaveLength(0);
   });
 
+  it('takes the content down in an open, visible tab as soon as the backend announces a revocation', async () => {
+    const { container } = renderOverlay([placement()]);
+    await waitFor(() => expect(players(container)).toHaveLength(1));
+    await act(async () => { socket().open(); });
+    const reads = vi.mocked(configApi.getEmbedOrigins).mock.calls.length;
+    // Revoked from another tab: no focus or visibility change here.
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue([]);
+    await act(async () => { socket().receive({ type: 'embed_origins_changed' }); });
+    await waitFor(() => expect(players(container)).toHaveLength(0));
+    expect(warnings(container)).toHaveLength(1);
+    expect(vi.mocked(configApi.getEmbedOrigins).mock.calls.length).toBe(reads + 1);
+    // Other frames change nothing.
+    await act(async () => { socket().receive({ type: 'shared_run_updated', run_id: 'r' }); });
+    expect(vi.mocked(configApi.getEmbedOrigins).mock.calls.length).toBe(reads + 1);
+  });
+
+  it('takes down a player whose own site stays allowed when another site of the document policy is revoked', async () => {
+    servePolicy('https://suno.com', 'https://redirect-target.example');
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com', 'https://redirect-target.example']);
+    const { container } = renderOverlay([placement()]);
+    await waitFor(() => expect(players(container)).toHaveLength(1));
+    await act(async () => { socket().open(); });
+    // The Suno player may have been redirected to the revoked site.
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com']);
+    await act(async () => { socket().receive({ type: 'embed_origins_changed' }); });
+    await waitFor(() => expect(container.querySelectorAll('iframe.live-page-embed-overlay__player')).toHaveLength(0));
+    const notice = container.querySelector<HTMLElement>('.live-page-embed-overlay__blocked--reload')!;
+    expect(notice.dataset.embedOrigin).toBe('https://suno.com');
+    expect(notice.textContent).toMatch(/removed after this page was opened/);
+  });
+
+  it('keeps every player down after a change event whose re-read fails, until a read succeeds', async () => {
+    const { container } = renderOverlay([placement()]);
+    await waitFor(() => expect(players(container)).toHaveLength(1));
+    await act(async () => { socket().open(); });
+    vi.mocked(configApi.getEmbedOrigins).mockRejectedValue(new Error('offline'));
+    await act(async () => { socket().receive({ type: 'embed_origins_changed' }); });
+    await waitFor(() => expect(vi.mocked(configApi.getEmbedOrigins)).toHaveBeenCalledTimes(3));
+    expect(players(container)).toHaveLength(0);
+    const notice = container.querySelector<HTMLElement>('.live-page-embed-overlay__blocked--reload')!;
+    expect(notice.textContent).toMatch(/could not be read again/);
+    // Another failed read (focus) changes nothing.
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(vi.mocked(configApi.getEmbedOrigins)).toHaveBeenCalledTimes(4));
+    expect(players(container)).toHaveLength(0);
+    // The list is read again, unchanged: the player comes back.
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com']);
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(players(container)).toHaveLength(1));
+  });
+
+  it('frames nothing when a site its served policy admits was revoked before the first read', async () => {
+    // Served with Suno and a redirect target; the target is revoked before this view opens.
+    servePolicy('https://suno.com', 'https://redirect-target.example');
+    const { container } = renderOverlay([placement()]);
+    await waitFor(() => expect(container.querySelector('.live-page-embed-overlay__blocked--reload')).not.toBeNull());
+    expect(players(container)).toHaveLength(0);
+    expect(container.textContent).toMatch(/removed after this page was opened/);
+  });
+
+  it('tells to allow an http-only site over https, with no reload button', async () => {
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com', 'http://player.example:8080']);
+    const { container, onConfigureOrigin } = renderOverlay([placement({ key: 'eh:0', url: 'http://player.example:8080/v' })]);
+    const notice = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>('[data-embed-reason="http-only"]');
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(players(container)).toHaveLength(0);
+    expect(notice.textContent).toContain('https://player.example:8080');
+    expect(notice.textContent).not.toMatch(/reload/i);
+    fireEvent.click(notice.querySelector('button')!);
+    expect(onConfigureOrigin).toHaveBeenCalledWith('https://player.example:8080');
+  });
+
+  it('frames nothing when the document carries no known policy', async () => {
+    document.querySelectorAll('meta[name="kronn-served-frame-src"]').forEach(meta => meta.remove());
+    resetServedFrameOriginsForTests();
+    const { container } = renderOverlay([placement()]);
+    await waitFor(() => expect(container.querySelector('.live-page-embed-overlay__blocked--reload')).not.toBeNull());
+    expect(players(container)).toHaveLength(0);
+    expect(container.textContent).toMatch(/without a known embed policy/);
+  });
+
+  it('reads the list again on reconnect, for a revocation sent while disconnected', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval'] });
+    try {
+      const { container } = renderOverlay([placement()]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(players(container)).toHaveLength(1);
+      await act(async () => { socket().open(); });
+      await act(async () => { socket().close(); });
+      vi.mocked(configApi.getEmbedOrigins).mockResolvedValue([]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      await act(async () => { socket().open(); await vi.advanceTimersByTimeAsync(0); });
+      expect(players(container)).toHaveLength(0);
+      expect(warnings(container)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('asks for a reload, never frames, a site allowed after the document loaded', async () => {
+    const other = placement({ key: 'eo:0', url: 'https://player.example.org/v/1' });
+    const { container } = renderOverlay([placement(), other]);
+    await waitFor(() => expect(players(container)).toHaveLength(1));
+    expect(warnings(container)).toHaveLength(1);
+    await act(async () => { socket().open(); });
+    vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com', 'https://player.example.org']);
+    await act(async () => { socket().receive({ type: 'embed_origins_changed' }); });
+    await waitFor(() => expect(container.querySelector('.live-page-embed-overlay__blocked--reload')).not.toBeNull());
+    expect(container.querySelector('iframe[src*="player.example.org"]')).toBeNull();
+    expect(players(container)).toHaveLength(1);
+    const notice = container.querySelector<HTMLElement>('.live-page-embed-overlay__blocked--reload')!;
+    expect(notice.dataset.embedOrigin).toBe('https://player.example.org');
+    expect(notice.querySelector('button')).not.toBeNull();
+  });
+
   it('cuts the content to what the Page’s scrolling container leaves visible', async () => {
     const { container, update } = renderOverlay([placement({
       rect: { left: 12, top: 30, width: 320, height: 152 },
@@ -150,6 +302,7 @@ describe('LivePageEmbedOverlay', () => {
   });
 
   it('keeps the same iframe while the Page scrolls, hides it out of view, and drops it when removed', async () => {
+    servePolicy('https://suno.com', 'https://www.youtube-nocookie.com');
     vi.mocked(configApi.getEmbedOrigins).mockResolvedValue(['https://suno.com', 'https://www.youtube-nocookie.com']);
     const youtube = placement({ key: 'eyt:0', url: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ' });
     const { container, update } = renderOverlay([placement(), youtube]);

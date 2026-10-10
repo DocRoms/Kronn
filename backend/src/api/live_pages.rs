@@ -638,6 +638,91 @@ pub async fn embed_frame_src(
     )
 }
 
+/// Tell every open tab that the allowed sites changed: they re-read the list
+/// and take down what was revoked. The event names the change, never the list.
+pub fn announce_embed_origins_changed(state: &AppState) {
+    let _ = state
+        .ws_broadcast
+        .send(crate::models::WsMessage::EmbedOriginsChanged);
+}
+
+fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"))
+}
+
+/// Puts the host frame policy on every response of the app's static files,
+/// so the browser itself refuses to frame a site that is not allowed, even
+/// after a redirect. Documents lose their validators: a reload must carry the
+/// current list, never a 304 for an older one.
+pub async fn document_frame_policy(
+    State(state): State<AppState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    use axum::response::IntoResponse;
+    if accepts_html(request.headers()) {
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+    }
+    let mut response = next.run(request).await;
+    let sources = {
+        let config = state.config.read().await;
+        crate::core::embed_origins::frame_src_sources(&config.embed_allowed_origins)
+    };
+    let policy = crate::core::embed_origins::policy_for_sources(&sources);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&policy).unwrap_or_else(|_| {
+            HeaderValue::from_static("frame-src 'self'; child-src 'self'; worker-src 'self' blob:")
+        }),
+    );
+    let is_html = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+    if !is_html {
+        return response;
+    }
+    headers.remove(header::ETAG);
+    headers.remove(header::LAST_MODIFIED);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // The page reads the sources its CSP was served with from this marker.
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_APP_DOCUMENT_BYTES).await else {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "document too large",
+        )
+            .into_response();
+    };
+    let body = crate::core::embed_origins::inject_served_frame_src(&bytes, &sources)
+        .map(axum::body::Body::from)
+        .unwrap_or_else(|| axum::body::Body::from(bytes));
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, body)
+}
+
+/// Bound on an app document buffered to carry the served-sources marker.
+const MAX_APP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The app's built frontend, served with the host frame policy. The desktop
+/// serves its documents through this, the only place they get a CSP there.
+pub fn serve_app_documents(dist_dir: &std::path::Path, state: AppState) -> axum::Router {
+    axum::Router::new()
+        .fallback_service(
+            tower_http::services::ServeDir::new(dist_dir).append_index_html_on_directories(true),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            document_frame_policy,
+        ))
+}
+
 /// POST /api/config/embed-origins: allow and revoke origins, then persist.
 /// Returns the new list.
 pub async fn change_embed_origins(
@@ -661,6 +746,8 @@ pub async fn change_embed_origins(
             format!("Unable to save allowed sites: {error}"),
         ));
     }
+    drop(config);
+    announce_embed_origins_changed(&state);
     Json(ApiResponse::ok(next))
 }
 

@@ -13,7 +13,7 @@ cleanup() { docker rm -f $P-gw $P-be $P-fe >/dev/null 2>&1; docker network rm $N
 trap 'cleanup; rm -rf "$DIR"' EXIT
 cleanup
 
-echo '<!doctype html><title>app</title>' > "$DIR/index.html"
+echo '<!doctype html><html><head><title>app</title></head></html>' > "$DIR/index.html"
 cat > "$DIR/frontend.conf" <<'EOF'
 server { listen 80; root /usr/share/nginx/html;
   location = /index.html { add_header Cache-Control "no-cache, must-revalidate"; }
@@ -49,6 +49,9 @@ check "frame-src is exactly self + the allowed sites" \
 for h in X-Frame-Options X-Content-Type-Options X-XSS-Protection Referrer-Policy; do
   check "$h kept on the document" 'echo "$doc" | grep -qi "^$h:"'
 done
+body=$(curl -s "http://127.0.0.1:$PORT/discussions/x")
+check "the document carries the sources its CSP was served with" \
+  'echo "$body" | grep -qF "<head><meta name=\"kronn-served-frame-src\" content=\"'"'"'self'"'"' https://suno.com https://player.example.com:8443\">"'
 check "no validators on the document" '! echo "$doc" | grep -qi "^etag:\|^last-modified:"'
 cond=$(headers -H 'If-None-Match: "x"' -H 'If-Modified-Since: Thu, 01 Jan 2099 00:00:00 GMT' "http://127.0.0.1:$PORT/")
 check "a conditional reload gets a full 200" 'echo "$cond" | head -1 | grep -q " 200"'
@@ -69,5 +72,7 @@ docker stop $P-be >/dev/null
 down=$(headers "http://127.0.0.1:$PORT/")
 check "backend down: document still served, frame-src self" \
   'echo "$down" | head -1 | grep -q " 200" && echo "$down" | csp | grep -q "frame-src '"'"'self'"'"';\$"'
+check "backend down: the marker says self too" \
+  'curl -s "http://127.0.0.1:$PORT/" | grep -qF "content=\"'"'"'self'"'"'\">"'
 
 exit $fail

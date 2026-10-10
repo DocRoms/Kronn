@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The Docker gateway puts the allowed embed sites in the app document's
-frame-src, and keeps one CSP and every security header doing it."""
+frame-src, and keeps one CSP and every security header doing it. The desktop
+and native (Vite) servers put the same host frame policy on their documents."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 CONF = (ROOT / ".docker" / "nginx.conf").read_text()
 LIVE_PAGES = (ROOT / "backend" / "src" / "api" / "live_pages.rs").read_text()
+DESKTOP = (ROOT / "desktop" / "src-tauri" / "src" / "main.rs").read_text()
+VITE = (ROOT / "frontend" / "vite.config.ts").read_text()
 
 
 def strip_comments(conf: str) -> str:
@@ -73,11 +76,33 @@ class GatewayFrameSrcTest(unittest.TestCase):
                 self.assertIn(directive, body)
         self.assertNotIn("auth_request", self.locations["/assets/"])
 
+    def test_documents_carry_the_served_sources_marker(self):
+        marker = (
+            "sub_filter '<head>' '<head><meta name=\"kronn-served-frame-src\" "
+            "content=\"$kronn_frame_src\">';"
+        )
+        for head in ("/", "@frontend_self_frames"):
+            body = self.locations[head]
+            self.assertIn(marker, body, head)
+            self.assertIn("sub_filter_once on;", body, head)
+            # sub_filter cannot rewrite a compressed upstream body.
+            self.assertIn('proxy_set_header Accept-Encoding "";', body, head)
+
     def test_lookup_targets_the_backend_route(self):
         path = re.search(r'EMBED_FRAME_SRC_PATH: &str = "([^"]+)"', LIVE_PAGES).group(1)
         lookup = self.locations["= /_kronn/frame-src"]
         self.assertIn("internal;", lookup)
         self.assertIn(f"proxy_pass http://backend:3140{path};", lookup)
+
+
+class HostFramePolicyWiringTest(unittest.TestCase):
+    def test_desktop_serves_its_documents_with_the_policy(self):
+        # With a null Tauri CSP, this response header is the only enforcement.
+        self.assertIn("kronn::api::live_pages::serve_app_documents(", DESKTOP)
+        self.assertNotIn("ServeDir::new", DESKTOP)
+
+    def test_native_dev_server_serves_its_documents_with_the_policy(self):
+        self.assertRegex(VITE, r"plugins:\s*\[[^\]]*framePolicyPlugin\(backendTarget\)")
 
 
 if __name__ == "__main__":

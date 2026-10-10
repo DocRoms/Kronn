@@ -7035,6 +7035,7 @@ def _wait_once(args):
 # cannot service control traffic (ping/cancel/progress), so each slice is
 # kept small and everything is serviced between slices.
 _WAIT_POLL_SECS = 15
+_WAIT_MIN_QUIET_POLL_SECS = 1.0
 _WAIT_PROGRESS_SLICE_SECS = 10
 
 
@@ -7126,25 +7127,6 @@ def _wait_abort_reason():
     if rid is not None and _is_cancelled(rid):
         return "cancelled"
     return _service_control_traffic()
-
-
-def _wait_sleep(delay, polls, started):
-    """Sleep `delay` seconds in short slices; the abort reason, else None.
-
-    Emits a progress heartbeat every ~10 s so a client never sees a
-    silent gap approaching its tool-call timeout during long pacing.
-    """
-    end = time.monotonic() + max(0, delay)
-    next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
-    while time.monotonic() < end:
-        reason = _wait_abort_reason()
-        if reason:
-            return reason
-        if time.monotonic() >= next_progress:
-            _emit_wait_progress(polls, int(time.monotonic() - started))
-            next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
-        time.sleep(min(1.0, max(0.0, end - time.monotonic())))
-    return _wait_abort_reason()
 
 
 # A wait ended by a queued tools/call: the host may have backgrounded it and
@@ -7367,6 +7349,7 @@ def call_disc_wait_for_peer(args):
         _emit_wait_progress(polls, int(time.monotonic() - started))
         poll_args["timeout_secs"] = poll_secs
         poll_args["_retry_deadline"] = deadline
+        poll_started = time.monotonic()
         try:
             result = _wait_once(poll_args)
         except _WaitAborted as aborted:
@@ -7421,23 +7404,12 @@ def call_disc_wait_for_peer(args):
         if deadline is not None and time.monotonic() >= deadline:
             result["hint"] = _wait_budget_hint(started, polls)
             return result
-        # Follow the server's pacing between polls; presence eligibility is
-        # derived from next_poll_at + grace, so honoring it keeps the
-        # session an eligible responder while it sleeps.
-        pacing = result.get("pacing") or {}
-        delay = pacing.get("next_delay_seconds")
-        try:
-            delay = min(max(int(delay), 0), 480) if delay is not None else 0
-        except (TypeError, ValueError):
-            delay = 0
-        if deadline is not None:
-            delay = min(delay, max(0, int(deadline - time.monotonic())))
-        sleep_reason = _wait_sleep(delay, polls, started) if delay else None
-        if sleep_reason:
-            if sleep_reason != "cancelled":
-                result["hint"] = interrupted_hint
-                _mark_wait_interrupted(result, sleep_reason)
-            return result
+        # KT-703 — re-poll at once: server pacing sizes model-turn re-arms, and
+        # sleeping it here left the bridge deaf for up to 8 min per quiet cycle.
+        early = _WAIT_MIN_QUIET_POLL_SECS - (time.monotonic() - poll_started)
+        if early > 0:
+            # A server that answers before the window would otherwise spin.
+            time.sleep(early)
         # Resume from what this poll actually observed so replays stay exact.
         latest = result.get("latest_sort_order")
         if isinstance(latest, int):

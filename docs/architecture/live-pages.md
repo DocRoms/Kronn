@@ -498,8 +498,14 @@ malformed one rejects the whole change.
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
-in-tab store; another tab (a wall screen) re-reads it when it becomes visible,
-so a revoked site disappears at the next check. Changes are sent one after the
+in-tab store. Every change of the list (Configuration, an import that allowed
+sites, a configuration reset) broadcasts `{type:'embed_origins_changed'}` on
+the local WebSocket, with no origin in it (never relayed to a P2P peer); every
+open tab, a visible wall screen included, re-reads the list at once and a
+revoked site's players are unmounted. A tab also re-reads on WebSocket
+reconnect (for an event sent while it was disconnected) and on focus.
+[src: file: backend/src/api/live_pages.rs:643]
+Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
 drop a confirmed one. An import that allowed sites invalidates the store the
@@ -507,21 +513,64 @@ same way and reads the list again at once.
 [src: file: frontend/src/components/settings/ExternalContentSection.tsx:24]
 [src: file: frontend/src/hooks/useEmbedAllowedOrigins.ts:95]
 
-Docker. The gateway's CSP applies to the app document, so its `frame-src` is
-`'self'` plus exactly the allowed sites. On every document request the gateway
-asks `GET /api/embed-origins/frame-src` through `auth_request` (open like
-`/api/health`: it carries no credentials and returns only what the document's
-CSP shows anyway) and copies `X-Kronn-Frame-Src` into its single CSP header.
-Each origin is re-checked as a plain CSP host source (no `;`, quote, space,
-wildcard, `_` or IPv6 literal). CSP lets an `http://` source also match its
-`https://` upgrade, so an `http://` site is listed only when that upgrade is
-allowed too. The value is bounded at 16 KiB: an addition that would exceed it
-is refused, so every accepted site is listed. Validators
-are dropped on the document, so a newly allowed site plays after a reload; if
-the backend does not answer, the document is served with `frame-src 'self'`.
-Assets and `/api` keep `frame-src 'self'`. Desktop (no CSP) and native mode are
-unaffected.
+Browser enforcement. The host, not only the overlay, limits what may be
+framed: every app document carries `frame-src` (and `child-src`) set to
+`'self'` plus exactly the allowed sites, built once by `frame_src_sources`
+(each origin re-checked as a plain CSP host source: no `;`, quote, space,
+wildcard, `_` or IPv6 literal; an `http://` site is listed only when its
+`https://` upgrade is allowed too, since CSP lets the former match the latter;
+bounded at 16 KiB, and an addition that would exceed it is refused). The
+browser applies it to every navigation of a player frame, so an allowed site
+that redirects, or navigates its frame, to another origin is blocked before
+any request reaches that origin (`e2e/specs/live-page-embed-frame-policy.spec.ts`).
+Each mode serves it on the real document response:
+- Docker: the gateway asks `GET /api/embed-origins/frame-src` through
+  `auth_request` on every document request (open like `/api/health`: it
+  carries no credentials and returns only what the document's CSP shows
+  anyway) and copies `X-Kronn-Frame-Src` into its single CSP header. If the
+  backend does not answer, the document gets `frame-src 'self'`. Assets and
+  `/api` keep `frame-src 'self'`.
+- Desktop: the Tauri CSP is `null`, but the webview loads the app over HTTP
+  from the embedded backend, which serves the built frontend through
+  `serve_app_documents`; its middleware puts
+  `frame-src S; child-src S; worker-src 'self' blob:` on each response, which
+  the webview enforces.
+- Native (`./kronn start-dev`, and the desktop dev URL): Vite serves the
+  documents; the `kronn-frame-policy` plugin reads the same backend route per
+  document request and sets the same policy, re-validating the sources and
+  falling back to `'self'` when the backend is down or the value is malformed.
+  It renders the app document itself (`transformIndexHtml` included) and
+  writes the header and the marker in one response, before Vite's later
+  layers. `vite preview` is not used by Kronn: the plugin does nothing there,
+  so its documents carry no marker and draw no player.
+Documents never answer with a 304 (validators dropped), so a reload carries
+the current list. Each document also carries the exact sources its CSP was served
+with, as `<meta name="kronn-served-frame-src" content="…">` right after
+`<head>` (HTML-escaped; the desktop middleware and the Vite plugin write it
+with the header, the Docker gateway with `sub_filter` from the same value).
+The page compares every later list against that marker, never against a list
+it read afterwards, so a site revoked between serving and the first read is
+still seen as revoked. A missing or malformed marker means an unknown policy:
+no player is drawn until a reload. A policy is fixed for the life of a
+document: a site allowed after the page was opened is shown as a "reload to
+show this content" notice, never as a frame the browser would refuse. An
+allowed `http://` site whose `https://` address is not allowed is never in
+`frame-src` (see above): it gets a notice to allow it over https, not a reload
+notice. A revoked site stays in that policy until a reload, and an allowed player may have been redirected to it, or could be
+again: so once any site the document's policy admits is revoked, every player
+of the tab is unmounted and replaced by the reload notice, whatever its own
+site; only a reload (a document with the new policy) brings players back, or
+the site being allowed again. A change event also suspends every player until
+the list is read again successfully, so a failed re-read never leaves players
+running under a list that may have shrunk. Additions alone keep the players.
+Not enforceable: a frame that an allowed site creates inside its own page is
+governed by that site's document, not by Kronn's CSP, so an allowed site can
+itself embed other origins; Kronn controls only what the Page frames directly,
+redirects included.
 [src: file: backend/src/core/embed_origins.rs:254]
+[src: file: backend/src/api/live_pages.rs:660]
+[src: file: frontend/vite-frame-policy.ts:72]
+[src: file: frontend/src/lib/served-frame-policy.ts:9]
 [src: file: .docker/nginx.conf:31]
 
 Bridge. The injected script finds every `[data-kronn-embed]` (including ones

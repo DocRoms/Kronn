@@ -855,12 +855,12 @@ async fn start_backend(
     // backend/src/main.rs (feature in the lib, spawn per-binary).
     let prewarm = kronn::api::projects::resource_prewarm::Prewarm::start(state.db.clone());
 
+    // Static files carry the host frame policy: with no Tauri CSP, this header
+    // is what makes the webview refuse a site that is not allowed.
+    let frontend_service = kronn::api::live_pages::serve_app_documents(&dist_dir, state.clone());
+
     // Build API router
     let api_router = build_router(state);
-
-    // Serve frontend static files + API
-    let frontend_service =
-        tower_http::services::ServeDir::new(&dist_dir).append_index_html_on_directories(true);
 
     // Merge: /api/* → backend, /* → frontend static files
     let app = axum::Router::new()

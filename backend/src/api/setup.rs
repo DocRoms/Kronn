@@ -2591,6 +2591,8 @@ pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     cfg.server.auth_token_session_only = previous.server.auth_token_session_only;
     // Defaults turn P2P off; the gate follows.
     state.p2p.set(cfg.server.p2p_enabled);
+    // Defaults allow no embed site: open tabs take theirs down.
+    crate::api::live_pages::announce_embed_origins_changed(&state);
 
     if key_locked {
         // Nothing encrypted is left: resolve the key and arm the store now

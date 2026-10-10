@@ -1828,13 +1828,24 @@ pub async fn wait_for_peer(
             // gets no field at all, so the common path stays as small as it was.
             let session_budget = if let Some(session_pk) = caller_session_pk {
                 let budget = crate::core::session_budget::SessionBudget::default();
+                let budget_disc = disc_id.clone();
                 state
                     .db
                     .with_read_conn(move |conn| {
+                        // KT-703 — rotation is for delegated workers; in a shared
+                        // room the verdict read as an order to stop listening.
+                        if !crate::db::orchestration::discussion_is_execution_room(
+                            conn,
+                            &budget_disc,
+                        )? {
+                            return Ok(None);
+                        }
                         crate::db::cli_telemetry::assess_session(conn, session_pk, &budget)
+                            .map(Some)
                     })
                     .await
                     .ok()
+                    .flatten()
                     // Only when actionable: a healthy session gets no field
                     // at all, so the common path stays as small as it was.
                     .filter(|assessment| {
@@ -2690,6 +2701,45 @@ mod tests {
         .unwrap();
         let cfg = Arc::new(RwLock::new(default_config()));
         AppState::new_defaults(cfg, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    /// Turn `disc_id` into a delegated worker's execution room held by `worker_pk`.
+    fn make_execution_room(
+        conn: &rusqlite::Connection,
+        disc_id: &str,
+        worker_pk: i64,
+    ) -> anyhow::Result<()> {
+        let parent = format!("{disc_id}-parent");
+        conn.execute(
+            "INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+             VALUES (?1, 'p-test', 'Parent room', 'now', 'now')",
+            rusqlite::params![parent],
+        )?;
+        conn.execute(
+            "INSERT INTO orchestration_runs (id, kind, discussion_id, created_at, updated_at)
+             VALUES (?1, 'single_task', ?2, 'now', 'now')",
+            rusqlite::params![format!("{disc_id}-run"), parent],
+        )?;
+        conn.execute(
+            "INSERT INTO planning_tasks (id, task_number, title, created_at, updated_at)
+             VALUES (?1, 703, 'Delegated task', 'now', 'now')",
+            rusqlite::params![format!("{disc_id}-task")],
+        )?;
+        conn.execute(
+            "INSERT INTO task_executions (id, orchestration_run_id, task_id,
+                 parent_discussion_id, sub_discussion_id, status, worker_target_kind,
+                 worker_agent_type, worker_cli_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'Working', 'cli', 'ClaudeCode', ?6, 'now', 'now')",
+            rusqlite::params![
+                format!("{disc_id}-exec"),
+                format!("{disc_id}-run"),
+                format!("{disc_id}-task"),
+                parent,
+                disc_id,
+                worker_pk
+            ],
+        )?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -4864,6 +4914,7 @@ mod tests {
                     Some("cli-b"),
                     "peer",
                 )?;
+                make_execution_room(conn, "d-budget", pk)?;
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
                     "INSERT INTO messages (id, discussion_id, role, content, timestamp,
@@ -4918,6 +4969,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_shared_room_never_carries_the_rotation_verdict() {
+        // KT-703 — the verdict read as "stop" and ended a CLI's listening in a
+        // shared room; only a delegated execution room may carry it.
+        let state = make_state_with_disc("d-budget-room").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let pk = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-budget-room",
+                    "ClaudeCode",
+                    Some("cli-room"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, timestamp,
+                         sort_order)
+                     VALUES ('u-wake', 'd-budget-room', 'User', 'ping', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::discussions::replace_message_targets(
+                    conn,
+                    "u-wake",
+                    &[crate::models::MessageTarget::cli(
+                        crate::models::AgentType::ClaudeCode,
+                        pk,
+                    )],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-budget-room".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("cli-room".to_string()),
+                conversation_id: None,
+                ack_awareness_upto: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        assert_eq!(response.messages.len(), 1, "the addressed turn still wakes");
+        assert!(
+            response.session_budget.is_none(),
+            "an unmeasured session in a shared room must not be told to rotate",
+        );
+    }
+
+    #[tokio::test]
     async fn a_healthy_session_gets_no_budget_field_at_all() {
         // The token-saving half of the rule, and the one worth pinning: the
         // common path must stay exactly as small as it was. A status block on
@@ -4933,6 +5043,7 @@ mod tests {
                     Some("cli-ok"),
                     "peer",
                 )?;
+                make_execution_room(conn, "d-budget-ok", pk)?;
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
                     "INSERT INTO messages (id, discussion_id, role, content, timestamp,
@@ -6288,6 +6399,7 @@ mod tests {
                     Some("cli-hot"),
                     "peer",
                 )?;
+                make_execution_room(conn, "d-hot", pk)?;
                 crate::db::cli_telemetry::upsert(
                     conn,
                     &crate::db::cli_telemetry::CliSessionTelemetry {

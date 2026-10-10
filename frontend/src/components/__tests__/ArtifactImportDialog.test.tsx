@@ -16,6 +16,7 @@ vi.mock('../../lib/api', () => ({
   projects: { list: mocks.projects },
   config: { getEmbedOrigins: mocks.origins, changeEmbedOrigins: mocks.changeOrigins },
 }));
+vi.mock('../../hooks/useWebSocket', () => ({ useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })) }));
 vi.mock('../../lib/I18nContext', () => ({ useT: () => ({ t: (key: string, ...args: unknown[]) => args.length ? `${key}:${args.join(',')}` : key }) }));
 
 const preview: ArtifactImportPreview = {
