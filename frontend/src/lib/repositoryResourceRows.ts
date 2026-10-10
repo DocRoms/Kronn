@@ -15,7 +15,7 @@ export type RowGroup = ProjectRepositoryResourcesTab;
  *  everything else is the backend status, always defined. */
 export type SyncState = ProjectRepositoryResourceStatus | 'catalog';
 export type Presence = 'repository' | 'kronn' | 'both';
-export type KronnScope = 'catalog' | 'attached' | 'referenced' | 'absent' | 'suggested';
+export type KronnScope = 'catalog' | 'attached' | 'project' | 'referenced' | 'absent' | 'suggested';
 export type PresenceFilter = 'all' | Presence;
 
 export type PrimaryAction =
@@ -217,6 +217,7 @@ function skillRow(skill: ProjectRepositorySkill, available: boolean): ResourceRo
   if (available) scope = 'catalog';
   else if (skill.suggested) scope = 'suggested';
   else if (skill.referenced) scope = 'referenced';
+  else if (skill.project_owned) scope = 'project';
   else if (linked) scope = 'attached';
   else if (nativeFolder) scope = 'catalog';
   const shownPath = available || skill.suggested ? '' : (paths[0] ?? targetPath);
@@ -280,8 +281,9 @@ export const allRows = (rows: RepositoryRows): ResourceRow[] => [
 /** Ids of the skills already attached to the project — the list a
  *  `default-skills` update must resend, since it replaces the whole set. */
 export const attachedSkillIds = (data: ProjectRepositoryResources): string[] => (
+  // A project's own skill is listed without being a default of its discussions.
   data.skills_present
-    .filter(skill => skill.provenance !== 'repository' && !skill.suggested)
+    .filter(skill => skill.attached)
     .map(skill => skill.id)
 );
 

@@ -17,12 +17,13 @@
 // buildApiMock, key-passthrough i18n stub, render + waitFor.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { Project, Workflow, WorkflowStep, WorkflowSummary } from '../../../types/generated';
 
-const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock } = vi.hoisted(() => ({
+const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock, usedSkillsMock } = vi.hoisted(() => ({
+  usedSkillsMock: vi.fn().mockResolvedValue([]),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   qpListMock: vi.fn(),
@@ -41,6 +42,9 @@ vi.mock('../../../lib/api', () => buildApiMock({
   },
   skills: {
     list: skillListMock as never,
+  },
+  projects: {
+    usedSkills: usedSkillsMock as never,
   },
   profiles: {
     list: profileListMock as never,
@@ -974,6 +978,63 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'rust' })[0]);
 
     expect(context.textContent).toContain('wiz.agentContextSkillsCount:1');
+  });
+
+  it('offers no other project\'s skill, and keeps one already picked visible to remove it', async () => {
+    skillListMock.mockResolvedValue([
+      { id: 'skill-rust', name: 'rust' },
+      { id: 'custom-mine', name: 'mine', project_id: 'p-other' },
+      { id: 'custom-picked', name: 'picked', project_id: 'p-other' },
+    ]);
+    toSteps([mkStep({ skill_ids: ['custom-picked'] }), mkStep({ name: 'beta' })]);
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    const context = firstCard.querySelector('.wf-agent-context-config') as HTMLDetailsElement;
+    fireEvent.click(context.querySelector('.wf-agent-context-summary') as HTMLElement);
+
+    const card = within(firstCard);
+    expect(card.getByRole('button', { name: 'rust' })).toBeInTheDocument();
+    expect(card.queryByRole('button', { name: 'mine' })).toBeNull();
+    const picked = card.getByRole('button', { name: 'picked' });
+    expect(picked).toHaveAttribute('data-foreign', 'true');
+    expect(picked).toHaveAttribute('title', 'skills.otherProject');
+    fireEvent.click(picked);
+    expect(card.queryByRole('button', { name: 'picked' })).toBeNull();
+  });
+
+  it('offers the workflow project\'s repository skills, which a run reads from the default branch', async () => {
+    skillListMock.mockResolvedValue([{ id: 'skill-rust', name: 'rust' }]);
+    usedSkillsMock.mockResolvedValue([
+      { project_id: 'proj-1', slug: 'block-migration', name: 'Block migration', root: '.agents/skills', relative_path: '.agents/skills/block-migration/SKILL.md', referenced: true, published: false },
+      { project_id: 'proj-2', slug: 'elsewhere', name: 'Elsewhere', root: '.agents/skills', relative_path: '.agents/skills/elsewhere/SKILL.md', referenced: true, published: false },
+    ]);
+    toSteps();
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(firstCard.querySelector('.wf-agent-context-summary') as HTMLElement);
+    const card = within(firstCard);
+    await waitFor(() => expect(card.getByRole('button', { name: 'Block migration' })).toBeInTheDocument());
+    expect(card.queryByRole('button', { name: 'Elsewhere' })).toBeNull();
+    fireEvent.click(card.getByRole('button', { name: 'Block migration' }));
+    expect(firstCard.textContent).toContain('wiz.agentContextSkillsCount:1');
+  });
+
+  it('keeps a repository skill picked for another project removable', async () => {
+    skillListMock.mockResolvedValue([{ id: 'skill-rust', name: 'rust' }]);
+    usedSkillsMock.mockResolvedValue([
+      { project_id: 'proj-2', slug: 'review', name: 'Review', root: '.agents/skills', relative_path: '.agents/skills/review/SKILL.md', referenced: true, published: false },
+    ]);
+    toSteps([mkStep({ skill_ids: ['repository:proj-2:review'] }), mkStep({ name: 'beta' })]);
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(firstCard.querySelector('.wf-agent-context-summary') as HTMLElement);
+    const card = within(firstCard);
+    const picked = await card.findByRole('button', { name: 'Review' });
+    expect(picked).toHaveAttribute('data-foreign', 'true');
+    fireEvent.click(picked);
+    expect(card.queryByRole('button', { name: 'Review' })).toBeNull();
+    expect(firstCard.textContent).not.toContain('wiz.agentContextSkillsCount');
+    expect(firstCard.textContent).toContain('wiz.agentContextEmpty');
   });
 
   it('swapping to Notify reveals the webhook URL field and edits url/method/body', () => {

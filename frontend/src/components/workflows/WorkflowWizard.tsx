@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
 import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
+import { offeredToProject, pickedButNotOffered, repositorySkillsOf } from '../../lib/automationSkills';
+import { workflows as workflowsApi, projects as projectsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
@@ -22,7 +23,7 @@ import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
-  CreateWorkflowRequest, Skill, AgentProfile, Directive,
+  CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope,
@@ -615,6 +616,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // FreeText, passe-la en Structured"), inutile de les masquer.
   const [saveError, setSaveError] = useState<string | null>(null);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [usedSkills, setUsedSkills] = useState<ProjectUsedSkill[]>([]);
+  // Another project's skill is never offered; one already picked stays visible so it can be removed.
+  // A run reads the project's repository skills from its default branch.
+  const offeredSkills = useMemo(
+    () => [
+      ...availableSkills.filter(skill => offeredToProject(skill, projectId || null)),
+      ...(projectId ? repositorySkillsOf(usedSkills, projectId) : []),
+    ],
+    [availableSkills, usedSkills, projectId],
+  );
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
@@ -689,6 +700,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       .then(setAvailableProfiles)
       .catch(e => console.warn('Failed to load profiles:', e));
     skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
+    projectsApi.usedSkills().then(setUsedSkills).catch(e => console.warn('Failed to load repository skills:', e));
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
@@ -4096,7 +4108,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     </summary>
                     <div className="wf-agent-context-body">
                 {/* Skills selector per step */}
-                {availableSkills.length > 0 && (
+                {offeredSkills.length > 0 && (
                   <details className="wf-agent-context-group" open={(step.skill_ids?.length ?? 0) > 0 || undefined}>
                     <summary>
                       <span><Zap size={12} /> {t('skills.selectSkills')}</span>
@@ -4104,9 +4116,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       <ChevronDown size={13} aria-hidden="true" />
                     </summary>
                     <div className="wf-agent-context-options">
-                      {availableSkills.map(skill => {
+                      {[
+                        ...offeredSkills,
+                        ...pickedButNotOffered(step.skill_ids ?? [], offeredSkills, availableSkills, usedSkills),
+                      ].map(skill => {
                         const ids = step.skill_ids ?? [];
                         const selected = ids.includes(skill.id);
+                        const foreign = !offeredSkills.some(offered => offered.id === skill.id);
                         return (
                           <button
                             key={skill.id}
@@ -4117,7 +4133,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             }}
                             className="wf-chip wf-chip-skill"
                             data-selected={selected}
-                            title={skill.name}
+                            data-foreign={foreign || undefined}
+                            title={foreign ? t('skills.otherProject') : skill.name}
                           >
                             {selected && <Check size={8} />}
                             {skill.name}

@@ -27,6 +27,33 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- A skill can belong to one project (KT-1128). "Nouveau skill" joins the
+  Automation page's create menu, and a custom skill's sheet gets "Modifier";
+  the form takes an optional project (the page's project filter by default).
+  A project skill is a custom skill of the library carrying
+  `metadata.kronn-project`: same file, same `custom-<slug>` id, so the run
+  pins and every reference keep working. It is listed on its project's
+  AI & automation tab as a project skill ("Dans Kronn seulement" until it is
+  published) without becoming a default of its discussions. No other project
+  offers it, in its discussions, workflow steps or tab. An agent launch of
+  another project that names it is refused by name, before anything starts.
+  The tab proposes the user's global skills before Kronn's built-in ones.
+  `POST`/`PUT /api/skills` and the MCP `skill_create`/`skill_update` take
+  `project_id`: absent keeps it on update, `null` (or `""` through the MCP)
+  makes the skill global, and an unknown project is refused. A `skill:<slug>`
+  reference resolves the project's own skill and its repository skill in the
+  project scope (both at once is refused as ambiguous), then a global custom
+  skill, then a built-in; another project's skill never resolves.
+- A workflow Agent step loads the project's repository skills (KT-1128). A
+  step may name a `repository:<project>:<slug>` skill, which a run used to
+  drop without a word. The run pin (KT-1096) reads it as committed on the
+  repository's default branch (the remote one when the clone has it) and pins
+  it with the other skills: neither the branch the checkout is on, nor the
+  run's worktree, nor a later commit changes what the step loads. A skill the
+  pin lacks (another project's, not committed on the default branch, no longer
+  used by the project, or a launch outside a run) stops the step by name. The
+  step editor offers the workflow project's repository skills.
+
 - Multi-agent discussions now say who is launched and how (KT-1109). While a
   draft names several agents, the composer shows "N agents launched in
   parallel" with one chip per agent, and the sent message's routing line adds

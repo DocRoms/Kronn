@@ -57,6 +57,53 @@ export function repositorySkillId(projectId: string, slug: string): string {
   return `repository:${projectId}:${slug}`;
 }
 
+/** The body without a leading frontmatter: the backend writes it from the fields. */
+export function skillBody(content: string): string {
+  return content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '');
+}
+
+/** A skill scoped to a project is offered there only; a global one everywhere. */
+export function offeredToProject(skill: Pick<Skill, 'project_id'>, projectId: string | null | undefined): boolean {
+  return !skill.project_id || skill.project_id === projectId;
+}
+
+/** The skills only `projectId`'s repository holds, as a skill picker lists them. */
+export function repositorySkillsOf(usedSkills: readonly ProjectUsedSkill[], projectId: string): Skill[] {
+  return usedSkills
+    .filter(used => used.project_id === projectId && !used.skill_id)
+    .map(repositorySkill);
+}
+
+/** The ids already picked that `offered` does not list, as skills a picker can
+ *  show to remove them: another project's, or one that no longer exists. */
+export function pickedButNotOffered(
+  pickedIds: readonly string[],
+  offered: readonly Skill[],
+  catalog: readonly Skill[],
+  usedSkills: readonly ProjectUsedSkill[],
+): Skill[] {
+  const listed = new Set(offered.map(skill => skill.id));
+  const known = new Map<string, Skill>([
+    ...usedSkills.filter(used => !used.skill_id).map(used => {
+      const skill = repositorySkill(used);
+      return [skill.id, skill] as const;
+    }),
+    ...catalog.map(skill => [skill.id, skill] as const),
+  ]);
+  return pickedIds
+    .filter(id => !listed.has(id))
+    .map(id => known.get(id) ?? {
+      id,
+      name: isRepositorySkillId(id) ? id.slice(id.lastIndexOf(':') + 1) || id : id,
+      description: '',
+      icon: '❔',
+      category: 'Domain',
+      content: '',
+      is_builtin: false,
+      token_estimate: 0,
+    });
+}
+
 export function isRepositorySkillId(id: string): boolean {
   return id.startsWith('repository:');
 }
@@ -136,6 +183,7 @@ export function automationSkillEntries(
     const using = new Set([
       ...projectsUsingSkill(skill.id, projects).map(project => project.id),
       ...(publishedBy.get(skill.id) ?? []),
+      ...(skill.project_id ? [skill.project_id] : []),
     ]);
     // Kept in the order the page received the projects.
     const projectIds = projects.filter(project => using.has(project.id)).map(project => project.id);

@@ -2315,6 +2315,7 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             &skill.content,
             skill.license.as_deref(),
             skill.allowed_tools.as_deref(),
+            skill.project_id.as_deref(),
         );
     }
     for directive in &data.custom_directives {

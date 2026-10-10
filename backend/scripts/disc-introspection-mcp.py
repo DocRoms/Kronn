@@ -1927,8 +1927,8 @@ TOOLS = [
             "Create a CUSTOM skill in the user's library. Required: `name`, "
             "`description`, `icon`, `category` (one of Language/Domain/Business), "
             "`content` (the markdown skill body). Optional: `license`, "
-            "`allowed_tools`. The new skill is immediately bindable via an Agent "
-            "step's / QP's `skill_ids`. Returns the created skill incl its id."
+            "`allowed_tools`, `project_id` (used in that project only). "
+            "Bind it via an Agent step's / QP's `skill_ids`. Returns the skill incl its id."
         ),
         "inputSchema": {
             "type": "object",
@@ -1940,6 +1940,7 @@ TOOLS = [
                 "content": {"type": "string", "description": "Markdown body of the skill."},
                 "license": {"type": "string"},
                 "allowed_tools": {"type": "string"},
+                "project_id": {"type": "string"},
             },
             "required": ["name", "description", "icon", "category", "content"],
         },
@@ -1947,9 +1948,8 @@ TOOLS = [
     {
         "name": "skill_update",
         "description": (
-            "Patch a CUSTOM skill (load-merge-write; only fields you pass change). "
-            "Builtin skills are rejected. ⚠ The backend recreates the skill so its "
-            "id CHANGES — use the id in the returned object afterwards."
+            "Patch a CUSTOM skill in place, same id (only fields you pass change; "
+            "`project_id` \"\" makes it global). Builtins are rejected."
         ),
         "inputSchema": {
             "type": "object",
@@ -1962,6 +1962,7 @@ TOOLS = [
                 "content": {"type": "string"},
                 "license": {"type": "string"},
                 "allowed_tools": {"type": "string"},
+                "project_id": {"type": "string"},
             },
             "required": ["skill_id"],
         },
@@ -8996,10 +8997,9 @@ _AGENT_LIB = {
     "skill": {
         "path": "/api/skills",
         "required": ("name", "description", "icon", "category", "content"),
-        "optional": ("license", "allowed_tools"),
+        "optional": ("license", "allowed_tools", "project_id"),
         "categories": ("Language", "Domain", "Business"),
-        # skill update = delete+recreate server-side → the id CHANGES.
-        "update_remints_id": True,
+        "update_remints_id": False,
     },
     "profile": {
         "path": "/api/profiles",
@@ -9083,7 +9083,7 @@ def _lib_delete(kind, args):
 def call_skill_create(args):
     """Create a custom SKILL (POST /api/skills). Required: name, description,
     icon, category (Language|Domain|Business), content (the markdown body).
-    Optional: license, allowed_tools. Use to author a reusable skill an Agent
+    Optional: license, allowed_tools, project_id. Use to author a reusable skill an Agent
     step / QP can then bind via `skill_ids`. Returns the created skill (incl id)."""
     return _lib_create("skill", args)
 

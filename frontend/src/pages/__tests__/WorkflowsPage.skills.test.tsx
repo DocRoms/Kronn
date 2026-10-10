@@ -102,6 +102,7 @@ const PROMPT = {
 } as QuickPrompt;
 
 const FAVORITES_KEY = 'kronn:automationSkillFavorites';
+const AUTOMATION_ACTIONS = 'Créer ou importer';
 
 beforeEach(() => {
   mockSkillsApi.list.mockResolvedValue(SKILLS);
@@ -353,6 +354,54 @@ describe('WorkflowsPage — skills (KT-914)', () => {
     await wrap(page({ onNavigateSettings }));
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir dans Config' }));
     expect(onNavigateSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a skill from the Automation menu, for the project picked or for every project', async () => {
+    const created = skill({ id: 'custom-pr-review', name: 'PR review', project_id: 'p-beta' });
+    mockSkillsApi.create.mockResolvedValue(created);
+    await wrap(page());
+    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: AUTOMATION_ACTIONS })[0]); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Nouveau skill' })); });
+    const form = screen.getByRole('region', { name: 'Nouveau skill' });
+    const save = within(form).getByRole('button', { name: 'Ajouter un skill' });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(within(form).getByRole('textbox', { name: 'Nom *' }), { target: { value: ' PR review ' } });
+    fireEvent.change(within(form).getByRole('textbox', { name: 'Contenu (system prompt) *' }), { target: { value: 'Review it.' } });
+    const project = within(form).getByRole('combobox', { name: /^Projet/ });
+    expect(project).toHaveValue('');
+    expect(within(form).getByText('Proposé dans tous les projets.')).toBeInTheDocument();
+    fireEvent.change(project, { target: { value: 'p-beta' } });
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, created]);
+    await act(async () => { fireEvent.click(save); });
+
+    expect(mockSkillsApi.create).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'PR review', content: 'Review it.', project_id: 'p-beta',
+    }));
+    expect(screen.queryByRole('region', { name: 'Nouveau skill' })).toBeNull();
+    expect(screen.getByTestId('skill-project')).toHaveTextContent('Projet : Beta');
+  });
+
+  it('edits a skill the user wrote from its sheet and can make it global', async () => {
+    const scoped = skill({ id: 'custom-pr-review', name: 'PR review', project_id: 'p-beta', license: 'MIT' });
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, scoped]);
+    mockSkillsApi.update.mockResolvedValue({ ...scoped, project_id: undefined });
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'custom-pr-review' }));
+    await wrap(page());
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Modifier' })); });
+    const form = screen.getByRole('region', { name: 'Modifier le skill' });
+    expect(within(form).getByRole('combobox', { name: /^Projet/ })).toHaveValue('p-beta');
+    fireEvent.change(within(form).getByRole('combobox', { name: /^Projet/ }), { target: { value: '' } });
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Enregistrer' })); });
+    expect(mockSkillsApi.update).toHaveBeenCalledWith('custom-pr-review', expect.objectContaining({
+      project_id: null, license: 'MIT',
+    }));
+  });
+
+  it('offers no edit for a built-in skill', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'rust' }));
+    await wrap(page());
+    expect(screen.queryByRole('button', { name: 'Modifier' })).toBeNull();
   });
 
   it('deletes a skill the user wrote from its sheet, and leaves a built-in one alone', async () => {

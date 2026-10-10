@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ExternalLink, Settings, Star } from 'lucide-react';
+import { ExternalLink, Pencil, Settings, Star } from 'lucide-react';
 import { useT } from '../lib/I18nContext';
 import { projectsUsingSkill, skillOrigin, type RepositorySkillOrigin } from '../lib/automationSkills';
 import type { Project, Skill } from '../types/generated';
@@ -116,15 +116,17 @@ interface SheetProps extends FavoriteProps {
   contentStatus?: SkillContentStatus;
   /** Present for a skill the user wrote; a built-in one cannot be deleted. */
   onDelete?: () => Promise<void>;
-  /** Opens the existing Settings screen, the only place a skill is edited. */
+  /** Opens the existing Settings screen. */
   onOpenSettings?: () => void;
+  /** Edits a custom skill in place. */
+  onEdit?: () => void;
   onError?: (message: string) => void;
 }
 
 /** The sheet of a skill, read in place: what it is, who uses it, and its
  *  SKILL.md rendered as safe Markdown (never raw HTML) or as source. There is
  *  no launch and no variable here — a skill is read, not run. */
-export function SkillSheet({ skill, projects, usedBy, repository, contentStatus, pinned, onTogglePinned, onDelete, onOpenSettings, onError }: SheetProps) {
+export function SkillSheet({ skill, projects, usedBy, repository, contentStatus, pinned, onTogglePinned, onDelete, onOpenSettings, onEdit, onError }: SheetProps) {
   const { t } = useT();
   const [view, setView] = useState<TextView>('rendered');
   const users = usedBy ?? projectsUsingSkill(skill.id, projects);
@@ -149,6 +151,11 @@ export function SkillSheet({ skill, projects, usedBy, repository, contentStatus,
       <div className="skill-sheet-body">
         <div className="skill-sheet-meta">
           <SkillBadges skill={skill} repository={repository} />
+          {skill.project_id && (
+            <span className="skill-sheet-badge" data-origin="project" data-testid="skill-project">
+              {t('skills.projectBadge', projects.find(project => project.id === skill.project_id)?.name ?? skill.project_id)}
+            </span>
+          )}
           {sourceUrl && (
             <a className="skill-sheet-link" href={sourceUrl} target="_blank" rel="noopener noreferrer">
               <ExternalLink size={11} aria-hidden="true" /> {t('skills.source')}
@@ -199,6 +206,11 @@ export function SkillSheet({ skill, projects, usedBy, repository, contentStatus,
             {t(repository ? 'automation.skill.repositoryHint' : skill.is_builtin ? 'automation.skill.builtinHint' : 'automation.skill.editHint')}
           </p>
           <div className="skill-sheet-buttons">
+            {onEdit && (
+              <button type="button" className="skill-sheet-action" onClick={onEdit}>
+                <Pencil size={12} aria-hidden="true" /> {t('skills.edit')}
+              </button>
+            )}
             {onOpenSettings && (
               <button type="button" className="skill-sheet-action" onClick={onOpenSettings}>
                 <Settings size={12} aria-hidden="true" /> {t('automation.skill.openSettings')}

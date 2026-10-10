@@ -2999,6 +2999,122 @@ mod tests {
         assert!(first["name"].is_string());
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn a_skill_names_a_known_project_and_an_update_keeps_or_clears_it() {
+        isolate_config_dir();
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "skill-proj".into(),
+                    name: "Skill Project".into(),
+                    path: "/tmp/skill-project".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    write_access: None,
+                    mcp_sync_report: None,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    workspace: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let call = |method: &str, uri: String, body: serde_json::Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let skill = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "name": "Project Scope Api Review",
+                "description": "Review a PR.",
+                "icon": "🔎",
+                "category": "Domain",
+                "content": "Body."
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "POST",
+                "/api/skills".into(),
+                skill(serde_json::json!({"project_id": "nope"})),
+            ),
+        )
+        .await;
+        assert_eq!(body["success"], false, "{body}");
+        assert_eq!(body["error"], "Project not found");
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "POST",
+                "/api/skills".into(),
+                skill(serde_json::json!({"project_id": "skill-proj"})),
+            ),
+        )
+        .await;
+        assert_eq!(body["data"]["project_id"], "skill-proj", "{body}");
+        let id = body["data"]["id"].as_str().unwrap().to_string();
+
+        let uri = format!("/api/skills/{id}");
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call("PUT", uri.clone(), skill(serde_json::json!({}))),
+        )
+        .await;
+        assert_eq!(
+            body["data"]["project_id"], "skill-proj",
+            "absent keeps it: {body}"
+        );
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "PUT",
+                uri.clone(),
+                skill(serde_json::json!({"project_id": null})),
+            ),
+        )
+        .await;
+        assert!(
+            body["data"].get("project_id").is_none(),
+            "null makes it global: {body}"
+        );
+
+        crate::core::skills::delete_custom_skill(&id).unwrap();
+    }
+
     // ─── Q11: Profiles API integration tests ──────────────────────────────────
 
     #[tokio::test]

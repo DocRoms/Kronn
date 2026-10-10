@@ -174,6 +174,7 @@ async fn batch_children_start_on_the_pinned_skills_and_directives_even_after_a_r
         "PINNED-SKILL-BODY",
         None,
         None,
+        None,
     )
     .unwrap();
     let directive = crate::core::directives::save_custom_directive(
@@ -237,6 +238,7 @@ async fn batch_children_start_on_the_pinned_skills_and_directives_even_after_a_r
         "S",
         &SkillCategory::Domain,
         "LIVE-SKILL-BODY",
+        None,
         None,
         None,
     )

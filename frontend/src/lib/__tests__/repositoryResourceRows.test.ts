@@ -117,6 +117,18 @@ describe('repository resource rows', () => {
     expect(attachedSkillIds(data)).toEqual(['kept']);
   });
 
+  it('shows a project\'s own skill as such without making it a default of its discussions', () => {
+    const data = listing({
+      skills_present: [
+        skill({ id: 'kept', name: 'Kept', provenance: 'kronn', status: 'kronn_only' }),
+        skill({ id: 'custom-mine', name: 'Mine', provenance: 'kronn', status: 'kronn_only', attached: false, project_owned: true }),
+      ],
+    });
+    expect(attachedSkillIds(data)).toEqual(['kept']);
+    const mine = buildRows(data).skills.find(row => row.id === 'custom-mine');
+    expect(mine).toMatchObject({ scope: 'project', state: 'kronn_only' });
+  });
+
   it('orders what needs attention by urgency: two versions, approval, late, new', () => {
     const data = listing({
       resources: [

@@ -3804,6 +3804,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // it. For a normal discussion `work_dir` is None → falls back to
     // `project_path` (unchanged behaviour). Additive: only creates missing
     // files, never removes others.
+    if !config.skill_ids.is_empty() {
+        let launched_skills = match config.run_snapshot_id {
+            Some(run_id) => crate::core::skills::get_skills_snapshot(run_id, config.skill_ids),
+            None => crate::core::skills::get_skills_by_ids(config.skill_ids),
+        };
+        crate::core::skills::refuse_foreign_project_skills(&launched_skills, config.project_id)?;
+    }
     let agent_cwd = config.work_dir.unwrap_or(config.project_path);
     // KT-1096 — a pinned run gets its skills and profiles inline: a shared
     // native file can be rewritten from the live catalog during its turn.

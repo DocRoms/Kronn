@@ -15,11 +15,37 @@ pub async fn list(_state: State<AppState>) -> Json<ApiResponse<Vec<Skill>>> {
     Json(ApiResponse::ok(all))
 }
 
+/// A skill may only name a project Kronn knows.
+async fn check_project(
+    state: &AppState,
+    project_id: Option<&Option<String>>,
+) -> Result<(), String> {
+    let Some(Some(id)) = project_id else {
+        return Ok(());
+    };
+    if id.is_empty() {
+        return Ok(());
+    }
+    let id = id.clone();
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("Project not found".into()),
+        Err(error) => Err(format!("Cannot read the project: {error}")),
+    }
+}
+
 /// POST /api/skills — create a custom skill
 pub async fn create(
-    _state: State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
+    if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
+        return Json(ApiResponse::err(error));
+    }
     match skills::save_custom_skill(
         &req.name,
         &req.description,
@@ -28,6 +54,7 @@ pub async fn create(
         &req.content,
         req.license.as_deref(),
         req.allowed_tools.as_deref(),
+        req.project_id.as_ref().and_then(|p| p.as_deref()),
     ) {
         Ok(id) => match skills::get_skill(&id) {
             Some(skill) => Json(ApiResponse::ok(skill)),
@@ -41,11 +68,14 @@ pub async fn create(
 /// changes, even when the skill is renamed.
 pub async fn update(
     Path(id): Path<String>,
-    _state: State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
     if !id.starts_with("custom-") {
         return Json(ApiResponse::err("Cannot modify builtin skills"));
+    }
+    if let Err(error) = check_project(&state, req.project_id.as_ref()).await {
+        return Json(ApiResponse::err(error));
     }
 
     match skills::update_custom_skill(
@@ -57,6 +87,7 @@ pub async fn update(
         &req.content,
         req.license.as_deref(),
         req.allowed_tools.as_deref(),
+        req.project_id.as_ref().map(|p| p.as_deref()),
     ) {
         Ok(updated_id) => match skills::get_skill(&updated_id) {
             Some(skill) => Json(ApiResponse::ok(skill)),

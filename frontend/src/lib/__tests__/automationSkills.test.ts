@@ -4,6 +4,8 @@ import {
   SKILL_UPDATED_AT,
   automationSkillEntries,
   isRepositorySkillId,
+  offeredToProject,
+  pickedButNotOffered,
   projectsUsingSkill,
   readSkillFavorites,
   repositorySkillId,
@@ -16,6 +18,46 @@ import type { ProjectUsedSkill, Skill } from '../../types/generated';
 afterEach(() => localStorage.removeItem(SKILL_FAVORITES_STORAGE_KEY));
 
 describe('automation skills', () => {
+  it('offers a project skill in its project only and a global one everywhere', () => {
+    expect(offeredToProject({ project_id: 'alpha' }, 'alpha')).toBe(true);
+    expect(offeredToProject({ project_id: 'alpha' }, 'beta')).toBe(false);
+    expect(offeredToProject({ project_id: 'alpha' }, null)).toBe(false);
+    expect(offeredToProject({}, 'beta')).toBe(true);
+    expect(offeredToProject({ project_id: undefined }, undefined)).toBe(true);
+  });
+
+  it('keeps every picked id the picker no longer offers, so it can be removed', () => {
+    const mk = (id: string, name: string, project_id?: string): Skill => ({
+      id, name, description: '', icon: '🔧', category: 'Domain', content: '', is_builtin: false, token_estimate: 0, project_id,
+    });
+    const offered = [mk('rust', 'Rust')];
+    const catalog = [mk('rust', 'Rust'), mk('custom-theirs', 'Theirs', 'beta')];
+    const used: ProjectUsedSkill[] = [{
+      project_id: 'alpha', slug: 'review', name: 'Review', root: '.agents/skills',
+      relative_path: '.agents/skills/review/SKILL.md', referenced: true, published: false,
+    }];
+    const picked = pickedButNotOffered(
+      ['rust', 'custom-theirs', 'repository:alpha:review', 'repository:gone:old', 'deleted'],
+      offered, catalog, used,
+    );
+    expect(picked.map(skill => [skill.id, skill.name])).toEqual([
+      ['custom-theirs', 'Theirs'],
+      ['repository:alpha:review', 'Review'],
+      ['repository:gone:old', 'old'],
+      ['deleted', 'deleted'],
+    ]);
+  });
+
+  it('lists a project skill under the project that owns it', () => {
+    const owned: Skill = {
+      id: 'custom-pr-review', name: 'PR review', description: '', icon: '🔎', category: 'Domain',
+      content: '', is_builtin: false, token_estimate: 0, project_id: 'beta',
+    };
+    const projects = [{ id: 'alpha', name: 'Alpha' }, { id: 'beta', name: 'Beta' }];
+    const [entry] = automationSkillEntries([owned], projects, []);
+    expect(entry).toMatchObject({ projectIds: ['beta'], used: true });
+  });
+
   it('finds the projects that list a skill among their default skills', () => {
     const projects = [
       { id: 'alpha', name: 'Alpha', default_skill_ids: ['review', 'rust'] },

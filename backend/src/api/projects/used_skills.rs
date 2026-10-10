@@ -243,15 +243,28 @@ pub enum RepositorySkillProblem {
     /// The project uses it but its `SKILL.md` cannot be read (gone from the
     /// repository, behind a symbolic link, unreadable).
     Unreadable,
+    /// A workflow reads it from the default branch, and it is not committed
+    /// there (or the repository has no default branch).
+    NotOnDefaultBranch,
+}
+
+/// Where a repository skill is read from. A discussion takes the checkout as it
+/// is; a workflow run takes the default branch, so neither the branch the
+/// checkout is on nor the run's own worktree can change the skill it loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositorySkillSource {
+    WorkingTree,
+    DefaultBranch,
 }
 
 impl RepositorySkillProblem {
     fn reason(self) -> &'static str {
         match self {
-            Self::OtherProject => "it belongs to another project than this discussion's",
+            Self::OtherProject => "it belongs to another project",
             Self::ProjectGone => "its project no longer exists",
             Self::NotUsed => "the project no longer uses it",
             Self::Unreadable => "its SKILL.md cannot be read from the repository",
+            Self::NotOnDefaultBranch => "its SKILL.md is not committed on the default branch",
         }
     }
 }
@@ -351,6 +364,7 @@ fn repository_skill(id: &str, used: &ProjectUsedSkill, text: &str) -> (Skill, bo
                 crate::core::agent_skill::parse_variables(json, &file.arguments).ok()
             })
             .unwrap_or_default(),
+        project_id: None,
     };
     (skill, truncated)
 }
@@ -364,6 +378,8 @@ fn read_used_skill(
     project_id: &str,
     slug: &str,
     catalog: &BTreeMap<String, String>,
+    source: RepositorySkillSource,
+    commits: &mut BTreeMap<std::path::PathBuf, Option<String>>,
 ) -> anyhow::Result<Result<(ProjectUsedSkill, String), RepositorySkillProblem>> {
     let Some(project) = crate::db::projects::get_project(conn, project_id)? else {
         return Ok(Err(RepositorySkillProblem::ProjectGone));
@@ -376,11 +392,75 @@ fn read_used_skill(
     else {
         return Ok(Err(RepositorySkillProblem::NotUsed));
     };
-    let Some(bytes) = read_repository_file(root, &used.relative_path) else {
-        return Ok(Err(RepositorySkillProblem::Unreadable));
+    let bytes = match source {
+        RepositorySkillSource::WorkingTree => read_repository_file(root, &used.relative_path)
+            .ok_or(RepositorySkillProblem::Unreadable),
+        RepositorySkillSource::DefaultBranch => {
+            // One commit per repository and pass, so two skills never come
+            // from two states of the default branch.
+            let commit = commits
+                .entry(root.to_path_buf())
+                .or_insert_with(|| default_branch_commit(root))
+                .clone();
+            commit
+                .and_then(|commit| read_at_commit(root, &commit, &used.relative_path))
+                .ok_or(RepositorySkillProblem::NotOnDefaultBranch)
+        }
+    };
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(problem) => return Ok(Err(problem)),
     };
     let (text, _) = side_text(&bytes);
     Ok(Ok((used, text)))
+}
+
+/// The commit a workflow reads repository skills at: the remote default branch
+/// (`origin/HEAD`, else `origin/main` or `origin/master`). The local `main` or
+/// `master` is used only when the clone has no such remote reference at all; a
+/// remote reference that resolves to no commit is no default branch.
+fn default_branch_commit(root: &Path) -> Option<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let output = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (output.status.success() && !text.is_empty()).then_some(text)
+    };
+    let exists = |reference: &str| git(&["rev-parse", "--verify", "--quiet", reference]).is_some();
+    let remote = git(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).or_else(|| {
+        ["refs/remotes/origin/main", "refs/remotes/origin/master"]
+            .into_iter()
+            .find(|reference| exists(reference))
+            .map(str::to_string)
+    });
+    let reference = remote.or_else(|| {
+        ["refs/heads/main", "refs/heads/master"]
+            .into_iter()
+            .find(|reference| exists(reference))
+            .map(str::to_string)
+    })?;
+    git(&[
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        &format!("{reference}^{{commit}}"),
+    ])
+}
+
+/// `relative` as committed at `commit`, never a path out of the repository.
+fn read_at_commit(root: &Path, commit: &str, relative: &str) -> Option<Vec<u8>> {
+    let inside = !relative.is_empty()
+        && !relative.starts_with('/')
+        && relative
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !inside {
+        return None;
+    }
+    crate::core::worktree::file_at_revision(root, commit, relative).ok()
 }
 
 /// The repository skills among `skill_ids` (catalog ids are left to the
@@ -393,6 +473,22 @@ pub fn resolve_repository_skills(
     discussion_project_id: Option<&str>,
     skill_ids: &[String],
 ) -> anyhow::Result<RepositorySkills> {
+    resolve_repository_skills_from(
+        conn,
+        discussion_project_id,
+        skill_ids,
+        RepositorySkillSource::WorkingTree,
+    )
+}
+
+/// [`resolve_repository_skills`], read from `source`.
+pub fn resolve_repository_skills_from(
+    conn: &rusqlite::Connection,
+    project_id: Option<&str>,
+    skill_ids: &[String],
+    source: RepositorySkillSource,
+) -> anyhow::Result<RepositorySkills> {
+    let discussion_project_id = project_id;
     let mut seen = std::collections::BTreeSet::new();
     let wanted: Vec<(&String, &str, &str)> = skill_ids
         .iter()
@@ -404,9 +500,10 @@ pub fn resolve_repository_skills(
         return Ok(result);
     }
     let catalog = catalog_ids_by_slug();
+    let mut commits = BTreeMap::new();
     for (id, project_id, slug) in wanted {
         let outcome = if discussion_project_id == Some(project_id) {
-            read_used_skill(conn, project_id, slug, &catalog)?
+            read_used_skill(conn, project_id, slug, &catalog, source, &mut commits)?
         } else {
             Err(RepositorySkillProblem::OtherProject)
         };
@@ -820,6 +917,175 @@ mod tests {
 
     fn ids(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn write_block_migration(root: &Path, body: &str) {
+        let dir = root.join(".agents/skills/block-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: block-migration\ndescription: Moves a block.\n---\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    async fn from_default_branch(state: &AppState, project: Option<&str>) -> RepositorySkills {
+        let project = project.map(str::to_string);
+        state
+            .db
+            .with_read_conn(move |conn| {
+                resolve_repository_skills_from(
+                    conn,
+                    project.as_deref(),
+                    &ids(&["repository:p1:block-migration"]),
+                    RepositorySkillSource::DefaultBranch,
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_workflow_reads_a_repository_skill_from_the_default_branch_not_the_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state_with_project(root.path()).await;
+        reference_block_migration(&state).await;
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        git(root.path(), &["config", "user.email", "t@example.com"]);
+        git(root.path(), &["config", "user.name", "t"]);
+
+        write_block_migration(root.path(), "Uncommitted.");
+        let skills = from_default_branch(&state, Some("p1")).await;
+        assert!(skills.resolved.is_empty());
+        assert_eq!(
+            skills.unresolved[0].problem,
+            RepositorySkillProblem::NotOnDefaultBranch
+        );
+        assert!(skills
+            .notice()
+            .unwrap()
+            .contains("not committed on the default branch"));
+
+        write_block_migration(root.path(), "Committed on main.");
+        git(root.path(), &["add", "--", "."]);
+        git(root.path(), &["commit", "-q", "-m", "skill"]);
+        git(root.path(), &["checkout", "-q", "-b", "feature"]);
+        write_block_migration(root.path(), "Edited on a feature branch.");
+
+        let skills = from_default_branch(&state, Some("p1")).await;
+        assert_eq!(skills.resolved.len(), 1, "{:?}", skills.unresolved);
+        assert!(skills.resolved[0].content.contains("Committed on main."));
+        assert!(!skills.resolved[0].content.contains("feature branch"));
+        let elsewhere = from_default_branch(&state, Some("p2")).await;
+        assert_eq!(
+            elsewhere.unresolved[0].problem,
+            RepositorySkillProblem::OtherProject
+        );
+    }
+
+    fn git_out(root: &Path, args: &[&str]) -> String {
+        let output = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn the_default_branch_is_the_remote_head_and_never_an_older_local_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        let state = state_with_project(repo).await;
+        reference_block_migration(&state).await;
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(repo, &["config", "user.email", "t@example.com"]);
+        git(repo, &["config", "user.name", "t"]);
+        write_block_migration(repo, "MAIN-BODY");
+        git(repo, &["add", "--", "."]);
+        git(repo, &["commit", "-q", "-m", "main"]);
+        let main = git_out(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "develop"]);
+        write_block_migration(repo, "DEVELOP-BODY");
+        git(repo, &["commit", "-q", "-am", "develop"]);
+        let develop = git_out(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["rm", "-q", "-r", ".agents"]);
+        git(repo, &["commit", "-q", "-m", "drop the skill"]);
+        let dropped = git_out(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "feature", &main]);
+        write_block_migration(repo, "CHECKOUT-BODY");
+        let loaded =
+            |skills: RepositorySkills| skills.resolved.first().map(|skill| skill.content.clone());
+
+        // The remote's own default wins over a local `main`, whatever its name.
+        for (name, commit, body) in [
+            ("develop", &develop, "DEVELOP-BODY"),
+            ("release", &main, "MAIN-BODY"),
+            ("stable", &develop, "DEVELOP-BODY"),
+        ] {
+            git(
+                repo,
+                &["update-ref", &format!("refs/remotes/origin/{name}"), commit],
+            );
+            git(
+                repo,
+                &[
+                    "symbolic-ref",
+                    "refs/remotes/origin/HEAD",
+                    &format!("refs/remotes/origin/{name}"),
+                ],
+            );
+            let content = loaded(from_default_branch(&state, Some("p1")).await).unwrap_or_default();
+            assert!(content.contains(body), "{name}: {content}");
+        }
+
+        // The remote dropped the skill: an older local `main` still holding it is not the default branch.
+        git(
+            repo,
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        git(repo, &["update-ref", "refs/remotes/origin/main", &dropped]);
+        let skills = from_default_branch(&state, Some("p1")).await;
+        assert_eq!(loaded(skills), None);
+        assert_eq!(
+            from_default_branch(&state, Some("p1")).await.unresolved[0].problem,
+            RepositorySkillProblem::NotOnDefaultBranch
+        );
+
+        // A remote default that names no commit is no default branch either.
+        git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/gone",
+            ],
+        );
+        assert_eq!(loaded(from_default_branch(&state, Some("p1")).await), None);
+    }
+
+    #[test]
+    fn a_default_branch_read_never_leaves_the_repository() {
+        let root = tempfile::tempdir().unwrap();
+        for path in [
+            "",
+            "/etc/passwd",
+            "../outside/SKILL.md",
+            "a//b",
+            "./SKILL.md",
+        ] {
+            assert_eq!(read_at_commit(root.path(), "HEAD", path), None, "{path}");
+        }
     }
 
     #[test]

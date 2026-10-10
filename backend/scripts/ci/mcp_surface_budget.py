@@ -73,9 +73,12 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # `force` input and its enable guidance; ceiling lowered by 400 B.
 # KT-1098: `page_update_html` gained `slug` (rename), paid for inside its own
 # declaration; ceiling unchanged.
+# KT-1128: `skill_create` and `skill_update` gained `project_id`, paid for by
+# dropping the false claim that an update changes the skill's id; ceiling
+# lowered by 9 B.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 85_735
+CATALOGUE_MAX_BYTES = 85_726
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is
