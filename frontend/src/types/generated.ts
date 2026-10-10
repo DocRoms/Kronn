@@ -5,6 +5,12 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+/**
+ * `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
+ * citations were checked by hand and still hold.
+ */
+export type AcknowledgeCitationsRequest = { doc: string, };
+
 export type ActiveAgentDispatch = { id: string, trigger_message_id: string, agent_type: AgentType, status: string,
 /**
  * Number of times this durable dispatch has been claimed. A value above
@@ -1659,6 +1665,22 @@ notice?: string | null, };
  * could read is not a passing one.
  */
 export type CiState = "passing" | "failing" | "unknown";
+
+export type CitationDriftReport = { sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+/**
+ * `GET /api/projects/:id/citation-drift`: broken and moved citations per
+ * section, plus the last scheduled re-verification.
+ */
+export type CitationDriftResponse = { last_scheduled_check: ScheduledCheck | null, sources_state: SourcesState, sections: Array<SectionCitations>, broken_count: number, moved_count: number, unchanged_count: number, };
+
+export type CitationState = "unchanged" | "moved" | "changed" | "removed" | "file_missing";
+
+export type CitationStatus = { cite: string, file: string, line: number | null, end_line: number | null, state: CitationState,
+/**
+ * Where a moved citation now starts.
+ */
+current_line: number | null, };
 
 /**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
@@ -3463,7 +3485,11 @@ unused_files: Array<string>,
  */
 paid_agent_growth: Array<AgentContextGrowth>, };
 
-export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
+export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number,
+/**
+ * "Sources clean" badge, recomputed from the cited lines.
+ */
+sources_state: SourcesState, broken_citations: number, };
 
 export type DriftSection = { ai_file: string, audit_step: number, changed_sources: Array<string>, };
 
@@ -6713,6 +6739,8 @@ export type RecentMessagePreview = { sort_order: number, role: string, agent_typ
  */
 preview: string, };
 
+export type RecordReason = "validation" | "audit" | "acknowledged";
+
 export type RecoveryStatus = { configured: boolean,
 /**
  * `recovery.key` is known (by its fingerprint) to wrap the key in use. An
@@ -7419,12 +7447,36 @@ scan_depth: number, };
 
 export type ScheduleAgentWakeRequest = { delay_seconds: number, reason: string, dedupe_key: string, task_execution_id?: string | null, };
 
+/**
+ * Last scheduled result per project path; the report itself is recomputed
+ * on every read, the cron only records when it last looked and what it saw.
+ */
+export type ScheduledCheck = { checked_at: string, sources_state: SourcesState, broken_count: number, };
+
 export type Section = { heading: string, bytes: number, class: SectionClass,
 /**
  * Why it was classed that way. Kept because a classification a human cannot
  * check is a classification they will either trust blindly or ignore.
  */
 because: string, };
+
+export type SectionCitations = {
+/**
+ * Doc path relative to the project root, as `ai_file` in the drift report.
+ */
+doc: string, recorded_at: string, reason: RecordReason, stale: boolean, doc_missing: boolean,
+/**
+ * The doc was edited since its citations were recorded.
+ */
+doc_changed: boolean, unchanged_count: number,
+/**
+ * Broken and moved citations only; unchanged ones are counted above.
+ */
+citations: Array<CitationStatus>,
+/**
+ * Citations the doc carries now that were never fingerprinted.
+ */
+unrecorded: Array<string>, };
 
 /**
  * What a section is, for the purpose of deciding whether it must be loaded every
@@ -8088,6 +8140,12 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
  * What kind of source a `[src: …]` marker points at.
  */
 export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+
+/**
+ * "Sources clean" badge, recomputed on every read. Distinct from the dated
+ * "audit complete" milestone (`validated_at` in `.kronn.json`).
+ */
+export type SourcesState = "unknown" | "clean" | "needs_reverification";
 
 /**
  * One source's contribution, or a stated reason it has none.

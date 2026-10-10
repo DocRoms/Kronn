@@ -22604,6 +22604,70 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn validation_records_citations_and_the_sources_badge_follows_them() {
+        let (_dir, repo) = seed_repo("validate-citations");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 3;\n").unwrap();
+        std::fs::write(
+            repo.join("docs/AGENTS.md"),
+            "# AGENTS\nRetries are three [src: src/config.rs:1].\n",
+        )
+        .unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation(&state, &pid).await;
+
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/validate-audit"),
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert!(repo.join("docs/citations.json").exists());
+
+        let drift_url = format!("/api/projects/{pid}/citation-drift");
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &drift_url).await;
+        assert_eq!(json["data"]["sources_state"], "clean", "{json}");
+
+        std::fs::write(repo.join("src/config.rs"), "pub const RETRIES: u32 = 5;\n").unwrap();
+        let (_, json) = get_json(build_router_with_auth(state.clone(), false), &drift_url).await;
+        assert_eq!(
+            json["data"]["sources_state"], "needs_reverification",
+            "{json}"
+        );
+        assert_eq!(json["data"]["broken_count"], 1);
+        assert_eq!(json["data"]["sections"][0]["doc"], "docs/AGENTS.md");
+        assert_eq!(
+            json["data"]["sections"][0]["citations"][0]["cite"],
+            "src/config.rs:1"
+        );
+        assert_eq!(
+            json["data"]["sections"][0]["citations"][0]["state"],
+            "changed"
+        );
+        // The dated milestone is untouched: the two badges are distinct.
+        let (_, project) = get_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}"),
+        )
+        .await;
+        assert_eq!(project["data"]["audit_status"], "Validated", "{project}");
+
+        let (_, json) = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{pid}/citation-drift/acknowledge"),
+            serde_json::json!({ "doc": "docs/AGENTS.md" }),
+        )
+        .await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true), "{json}");
+        assert_eq!(json["data"]["stale"], serde_json::Value::Bool(false));
+        let (_, json) = get_json(build_router_with_auth(state, false), &drift_url).await;
+        assert_eq!(json["data"]["sources_state"], "clean", "{json}");
+    }
+
+    #[tokio::test]
     async fn validate_audit_is_idempotent_preserves_first_date() {
         // Second call must NOT overwrite the validated_at timestamp.
         // (kronn_state::mark_validated does the no-op-if-set check).

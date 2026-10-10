@@ -58,10 +58,89 @@ pub async fn check_drift(
                     .collect(),
                 fresh_sections: drift.fresh_sections,
                 total_sections: drift.total_sections,
+                sources_state: drift.sources_state,
+                broken_citations: drift.broken_citations,
             };
             Json(ApiResponse::ok(response))
         }
         Err(e) => Json(ApiResponse::err(format!("Drift check failed: {}", e))),
+    }
+}
+
+async fn project_path_of(
+    state: &AppState,
+    id: String,
+) -> Result<(String, std::path::PathBuf), String> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
+        Ok(Some(p)) => {
+            let path = scanner::resolve_host_path(&p.path);
+            Ok((p.id, path))
+        }
+        Ok(None) => Err("Project not found".into()),
+        Err(e) => Err(format!("DB error: {e}")),
+    }
+}
+
+/// GET /api/projects/:id/citation-drift
+/// Every recorded citation compared with the current code, per section.
+/// Deterministic, no model: the base "Revalider l'audit" (KT-1168) reads.
+pub async fn citation_drift(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<CitationDriftResponse>> {
+    let project_path = match project_path_of(&state, id).await {
+        Ok((_, path)) => path,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let result = tokio::task::spawn_blocking(move || CitationDriftResponse {
+        report: crate::core::citation_drift::check(&project_path),
+        last_scheduled_check: crate::core::citation_drift::last_scheduled_check(&project_path),
+    })
+    .await;
+    match result {
+        Ok(response) => Json(ApiResponse::ok(response)),
+        Err(e) => Json(ApiResponse::err(format!("Citation drift failed: {e}"))),
+    }
+}
+
+/// POST /api/projects/:id/citation-drift/acknowledge
+/// "Verified, unchanged": refreshes one section's fingerprints without
+/// rewriting the doc. Held under the project lease like a validation.
+pub async fn acknowledge_citations(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AcknowledgeCitationsRequest>,
+) -> Json<ApiResponse<crate::core::citation_drift::SectionCitations>> {
+    let (project_id, project_path) = match project_path_of(&state, id).await {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    if !state
+        .audit_tracker
+        .lock()
+        .map(|mut t| t.try_acquire_lease(&project_id))
+        .unwrap_or(false)
+    {
+        return Json(ApiResponse::err(
+            "An audit is currently running on this project — acknowledge once it has finished.",
+        ));
+    }
+    let tracker = state.audit_tracker.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::core::citation_drift::acknowledge(&project_path, &req.doc)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {e}")));
+    if let Ok(mut t) = tracker.lock() {
+        t.release_lease(&project_id);
+    }
+    match result {
+        Ok(section) => Json(ApiResponse::ok(section)),
+        Err(e) => Json(ApiResponse::err(e)),
     }
 }
 

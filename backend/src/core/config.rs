@@ -777,6 +777,7 @@ pub fn default_config() -> AppConfig {
         unlocked_profiles: Vec::new(),
         disabled_auto_skills: Vec::new(),
         embed_allowed_origins: Vec::new(),
+        audit_reverify_cron: None,
     }
 }
 

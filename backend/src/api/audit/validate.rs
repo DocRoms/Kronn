@@ -195,6 +195,7 @@ pub async fn validate_audit(
             }
         }
 
+        crate::core::citation_drift::record_all(&project_path)?;
         kronn_state::mark_validated(&project_path)
     })
     .await

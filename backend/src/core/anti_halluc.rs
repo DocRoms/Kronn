@@ -1196,6 +1196,18 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     (SourceKind::File, s.to_string())
 }
 
+/// The cited path and line span of a `file:` or `code-comment:` marker,
+/// cleaned exactly as the verifier cleans it. `None` for any other kind.
+pub(crate) fn file_citation(raw: &str) -> Option<(String, Option<(usize, usize)>)> {
+    let (kind, reference) = classify_source(raw);
+    if !matches!(kind, SourceKind::File | SourceKind::CodeComment) {
+        return None;
+    }
+    let (path, lines) = split_path_and_lines(clean_reference(&reference));
+    let path = clean_reference(path);
+    (!path.is_empty()).then(|| (path.to_string(), lines))
+}
+
 /// If `s` starts (case-insensitively) with `keyword` AT A TOKEN BOUNDARY
 /// (followed by end-of-string, `:`, or whitespace), return the trimmed
 /// remainder (after an optional `:`). Returns `None` when the keyword is just

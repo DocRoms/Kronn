@@ -1635,6 +1635,29 @@ pub struct DriftCheckResponse {
     pub stale_sections: Vec<DriftSection>,
     pub fresh_sections: Vec<String>,
     pub total_sections: usize,
+    /// "Sources clean" badge, recomputed from the cited lines.
+    #[serde(default)]
+    pub sources_state: crate::core::citation_drift::SourcesState,
+    #[serde(default)]
+    pub broken_citations: usize,
+}
+
+/// `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
+/// citations were checked by hand and still hold.
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct AcknowledgeCitationsRequest {
+    pub doc: String,
+}
+
+/// `GET /api/projects/:id/citation-drift`: broken and moved citations per
+/// section, plus the last scheduled re-verification.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CitationDriftResponse {
+    #[serde(flatten)]
+    pub report: crate::core::citation_drift::CitationDriftReport,
+    pub last_scheduled_check: Option<crate::core::citation_drift::ScheduledCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

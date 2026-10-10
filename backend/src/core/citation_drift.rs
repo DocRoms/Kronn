@@ -1,0 +1,698 @@
+// Per-citation drift: a fingerprint of every `[src: path:line]` cited by the
+// Kronn docs, recorded at validation (and after each audit), then compared
+// with the current code. Deterministic, no model involved.
+//
+// Stored as `docs/citations.json`, next to `checksums.json` and `.kronn.json`:
+// it must travel with `git clone` like the docs it describes, so a teammate
+// sees the same "sources clean / to re-verify" state. Only paths, line numbers
+// and SHA-256 digests are written. Each cited line is hashed after secret
+// redaction, so a digest never depends on a secret value.
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
+use ts_rs::TS;
+
+pub const CITATIONS_FILENAME: &str = "citations.json";
+
+const CITATIONS_README: &str = "Managed by Kronn. Fingerprints of the code lines cited by \
+these docs, used to detect which citations changed since validation. Paths, line numbers \
+and SHA-256 digests only. Commit it with the docs.";
+
+/// A moved line is searched this many lines above and below its recorded place.
+pub const REANCHOR_WINDOW: usize = 50;
+/// A cited line needs this many alphanumeric characters to be re-anchored:
+/// `}` or `]` reappear everywhere and would re-anchor onto any of them.
+const REANCHOR_MIN_ALNUM: usize = 3;
+/// Same cap as the citation verifier: larger files are tracked by existence only.
+const FILE_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_DOCS: usize = 1000;
+const MAX_CITATIONS_PER_DOC: usize = 5000;
+/// Docs dir sub-folders whose citations are not Kronn's to track.
+const SKIPPED_DOC_DIRS: &[&str] = &["legacy", "var"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordReason {
+    Validation,
+    Audit,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CitationFingerprint {
+    /// The citation as the doc names it, `path:line` or `path:start-end`.
+    pub cite: String,
+    pub file: String,
+    /// `None`: a bare-path citation, tracked by the file's existence only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocFingerprints {
+    /// Digest of the doc itself when its citations were recorded: an audit
+    /// re-records a doc only when it rewrote it.
+    pub doc_sha256: String,
+    pub recorded_at: String,
+    pub reason: RecordReason,
+    pub citations: Vec<CitationFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CitationsFile {
+    #[serde(rename = "_readme", default)]
+    pub readme: String,
+    /// Doc path relative to the project root (`docs/AGENTS.md`) → its citations.
+    #[serde(default)]
+    pub docs: BTreeMap<String, DocFingerprints>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum CitationState {
+    Unchanged,
+    /// Same content found within the window: re-anchored, not stale.
+    Moved,
+    /// The cited line now holds other content (modified, or removed in place).
+    Changed,
+    /// The cited line is past the end of the file.
+    Removed,
+    FileMissing,
+}
+
+impl CitationState {
+    pub fn is_broken(self) -> bool {
+        matches!(self, Self::Changed | Self::Removed | Self::FileMissing)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Moved => "moved",
+            Self::Changed => "changed",
+            Self::Removed => "removed",
+            Self::FileMissing => "file missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CitationStatus {
+    pub cite: String,
+    pub file: String,
+    #[ts(type = "number | null")]
+    pub line: Option<usize>,
+    #[ts(type = "number | null")]
+    pub end_line: Option<usize>,
+    pub state: CitationState,
+    /// Where a moved citation now starts.
+    #[ts(type = "number | null")]
+    pub current_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SectionCitations {
+    /// Doc path relative to the project root, as `ai_file` in the drift report.
+    pub doc: String,
+    pub recorded_at: String,
+    pub reason: RecordReason,
+    pub stale: bool,
+    pub doc_missing: bool,
+    /// The doc was edited since its citations were recorded.
+    pub doc_changed: bool,
+    #[ts(type = "number")]
+    pub unchanged_count: usize,
+    /// Broken and moved citations only; unchanged ones are counted above.
+    pub citations: Vec<CitationStatus>,
+    /// Citations the doc carries now that were never fingerprinted.
+    pub unrecorded: Vec<String>,
+}
+
+/// "Sources clean" badge, recomputed on every read. Distinct from the dated
+/// "audit complete" milestone (`validated_at` in `.kronn.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcesState {
+    /// No fingerprint recorded yet.
+    #[default]
+    Unknown,
+    Clean,
+    NeedsReverification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+pub struct CitationDriftReport {
+    pub sources_state: SourcesState,
+    pub sections: Vec<SectionCitations>,
+    #[ts(type = "number")]
+    pub broken_count: usize,
+    #[ts(type = "number")]
+    pub moved_count: usize,
+    #[ts(type = "number")]
+    pub unchanged_count: usize,
+}
+
+impl CitationDriftReport {
+    pub fn section(&self, doc: &str) -> Option<&SectionCitations> {
+        self.sections.iter().find(|s| s.doc == doc)
+    }
+}
+
+// ─── Hashing ──────────────────────────────────────────────────────────────
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whitespace-insensitive, secret-blind form of one line.
+fn normalize_line(line: &str) -> String {
+    let (redacted, _) = crate::core::redact::redact_for_audit_artifact(line);
+    redacted.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn block_hash(lines: &[String]) -> String {
+    sha256_hex(lines.join("\n").as_bytes())
+}
+
+fn worth_reanchoring(lines: &[String]) -> bool {
+    lines
+        .iter()
+        .flat_map(|l| l.chars())
+        .filter(|c| c.is_alphanumeric())
+        .count()
+        >= REANCHOR_MIN_ALNUM
+}
+
+// ─── Paths ────────────────────────────────────────────────────────────────
+
+fn is_plain_relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// The cited file under the project root, or `None` when the citation is not
+/// a plain relative path or resolves outside the root (symlink).
+fn resolve_cited(project_path: &Path, file: &str) -> Option<PathBuf> {
+    let rel = Path::new(file);
+    if !is_plain_relative(rel) {
+        return None;
+    }
+    let candidate = project_path.join(rel);
+    match (candidate.canonicalize(), project_path.canonicalize()) {
+        (Ok(real), Ok(root)) if !real.starts_with(&root) => None,
+        _ => Some(candidate),
+    }
+}
+
+enum FileLines {
+    Missing,
+    /// Present but not line-addressable here (too large, binary, unreadable).
+    Opaque,
+    Lines(Vec<String>),
+}
+
+fn read_lines(path: &Path) -> FileLines {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return FileLines::Missing;
+    };
+    if !meta.is_file() || meta.len() > FILE_SIZE_CAP_BYTES {
+        return FileLines::Opaque;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => FileLines::Lines(text.lines().map(normalize_line).collect()),
+        Err(_) => FileLines::Opaque,
+    }
+}
+
+// ─── Citations of a doc ───────────────────────────────────────────────────
+
+struct DocCitation {
+    cite: String,
+    file: String,
+    lines: Option<(usize, usize)>,
+}
+
+fn cite_label(file: &str, lines: Option<(usize, usize)>) -> String {
+    match lines {
+        None => file.to_string(),
+        Some((s, e)) if s == e => format!("{file}:{s}"),
+        Some((s, e)) => format!("{file}:{s}-{e}"),
+    }
+}
+
+/// The distinct file citations of a doc, in order of first appearance.
+fn doc_citations(content: &str) -> Vec<DocCitation> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for raw in crate::core::anti_halluc::extract_source_markers(content) {
+        let Some((file, lines)) = crate::core::anti_halluc::file_citation(&raw) else {
+            continue;
+        };
+        if !is_plain_relative(Path::new(&file)) {
+            continue;
+        }
+        let cite = cite_label(&file, lines);
+        if seen.insert(cite.clone()) {
+            out.push(DocCitation { cite, file, lines });
+            if out.len() >= MAX_CITATIONS_PER_DOC {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn fingerprint(project_path: &Path, citation: &DocCitation) -> Option<CitationFingerprint> {
+    let path = resolve_cited(project_path, &citation.file)?;
+    let mut fp = CitationFingerprint {
+        cite: citation.cite.clone(),
+        file: citation.file.clone(),
+        line: None,
+        end_line: None,
+        sha256: None,
+    };
+    let Some((start, end)) = citation.lines else {
+        return Some(fp);
+    };
+    fp.line = Some(start);
+    fp.end_line = Some(end);
+    if let FileLines::Lines(lines) = read_lines(&path) {
+        if end <= lines.len() {
+            fp.sha256 = Some(block_hash(&lines[start - 1..end]));
+        }
+    }
+    Some(fp)
+}
+
+fn fingerprint_doc(project_path: &Path, content: &str, reason: RecordReason) -> DocFingerprints {
+    DocFingerprints {
+        doc_sha256: sha256_hex(content.as_bytes()),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        reason,
+        citations: doc_citations(content)
+            .iter()
+            .filter_map(|c| fingerprint(project_path, c))
+            .collect(),
+    }
+}
+
+// ─── Store ────────────────────────────────────────────────────────────────
+
+pub fn citations_path(project_path: &Path) -> PathBuf {
+    crate::core::scanner::detect_docs_dir(project_path).join(CITATIONS_FILENAME)
+}
+
+/// `Ok(None)` when missing, `Err` when unreadable or malformed: a writer must
+/// not rebuild from empty and lose the other docs' fingerprints.
+pub fn read_strict(project_path: &Path) -> Result<Option<CitationsFile>, String> {
+    let path = citations_path(project_path);
+    match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| format!("{} is malformed: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
+    }
+}
+
+fn write(project_path: &Path, file: &mut CitationsFile) -> Result<(), String> {
+    file.readme = CITATIONS_README.to_string();
+    let json = serde_json::to_string_pretty(file).map_err(|e| format!("JSON error: {e}"))?;
+    crate::core::mcp_scanner::atomic_write(&citations_path(project_path), &json)
+}
+
+/// Markdown docs under the docs dir, as paths relative to the project root.
+fn doc_files(project_path: &Path) -> Vec<String> {
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    let mut out = Vec::new();
+    let mut stack = vec![docs_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                let skipped = dir == docs_dir
+                    && SKIPPED_DOC_DIRS
+                        .iter()
+                        .any(|s| entry.file_name().to_str() == Some(s));
+                if !skipped {
+                    stack.push(path);
+                }
+            } else if kind.is_file() && path.extension().is_some_and(|e| e == "md") {
+                if let Ok(rel) = path.strip_prefix(project_path) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+    out.sort();
+    out.truncate(MAX_DOCS);
+    out
+}
+
+fn read_doc(project_path: &Path, doc: &str) -> Option<String> {
+    std::fs::read_to_string(project_path.join(doc)).ok()
+}
+
+/// Validation: every doc's citations are re-fingerprinted from the code as it
+/// is now. The human has just checked the whole set.
+pub fn record_all(project_path: &Path) -> Result<(), String> {
+    let mut file = CitationsFile::default();
+    for doc in doc_files(project_path) {
+        if let Some(content) = read_doc(project_path, &doc) {
+            file.docs.insert(
+                doc,
+                fingerprint_doc(project_path, &content, RecordReason::Validation),
+            );
+        }
+    }
+    write(project_path, &mut file)
+}
+
+/// After an audit: a doc the run rewrote (or created) gets fresh fingerprints;
+/// a doc it left byte-identical keeps the ones its validation recorded, so a
+/// partial refresh never acknowledges the citations it did not look at.
+pub fn record_after_audit(project_path: &Path) -> Result<(), String> {
+    let previous = read_strict(project_path)?.unwrap_or_default();
+    let docs = doc_files(project_path);
+    if docs.is_empty() && previous.docs.is_empty() {
+        return Ok(());
+    }
+    let mut file = CitationsFile::default();
+    for doc in docs {
+        let Some(content) = read_doc(project_path, &doc) else {
+            continue;
+        };
+        let kept = previous
+            .docs
+            .get(&doc)
+            .filter(|prev| prev.doc_sha256 == sha256_hex(content.as_bytes()))
+            .cloned();
+        let entry =
+            kept.unwrap_or_else(|| fingerprint_doc(project_path, &content, RecordReason::Audit));
+        file.docs.insert(doc, entry);
+    }
+    if file == previous {
+        return Ok(());
+    }
+    write(project_path, &mut file)
+}
+
+/// "Verified, unchanged": refresh one section's fingerprints from the current
+/// code. Only `citations.json` is written, never the doc.
+pub fn acknowledge(project_path: &Path, doc: &str) -> Result<SectionCitations, String> {
+    let rel = Path::new(doc);
+    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
+    let inside_docs = project_path
+        .join(rel)
+        .strip_prefix(&docs_dir)
+        .is_ok_and(|p| !p.as_os_str().is_empty());
+    if !is_plain_relative(rel) || !inside_docs || rel.extension().is_none_or(|e| e != "md") {
+        return Err(format!("`{doc}` is not a Markdown doc of this project"));
+    }
+    let content = read_doc(project_path, doc).ok_or_else(|| format!("`{doc}` not found"))?;
+    let mut file = read_strict(project_path)?.unwrap_or_default();
+    let entry = fingerprint_doc(project_path, &content, RecordReason::Acknowledged);
+    file.docs.insert(doc.to_string(), entry.clone());
+    write(project_path, &mut file)?;
+    Ok(evaluate_section(project_path, doc, &entry))
+}
+
+// ─── Evaluation ───────────────────────────────────────────────────────────
+
+fn find_moved(lines: &[String], start: usize, len: usize, hash: &str) -> Option<usize> {
+    let fits = |s: usize| s >= 1 && s + len - 1 <= lines.len();
+    let matches = |s: usize| fits(s) && block_hash(&lines[s - 1..s - 1 + len]) == hash;
+    (1..=REANCHOR_WINDOW).find_map(|d| {
+        [start.checked_sub(d), Some(start + d)]
+            .into_iter()
+            .flatten()
+            .find(|&s| matches(s))
+    })
+}
+
+fn evaluate_citation(project_path: &Path, fp: &CitationFingerprint) -> CitationStatus {
+    let mut status = CitationStatus {
+        cite: fp.cite.clone(),
+        file: fp.file.clone(),
+        line: fp.line,
+        end_line: fp.end_line,
+        state: CitationState::Unchanged,
+        current_line: None,
+    };
+    let Some(path) = resolve_cited(project_path, &fp.file) else {
+        status.state = CitationState::FileMissing;
+        return status;
+    };
+    let lines = match read_lines(&path) {
+        FileLines::Missing => {
+            status.state = CitationState::FileMissing;
+            return status;
+        }
+        FileLines::Opaque => return status,
+        FileLines::Lines(lines) => lines,
+    };
+    let (Some(start), Some(end)) = (fp.line, fp.end_line) else {
+        return status;
+    };
+    let Some(hash) = fp.sha256.as_deref() else {
+        // Recorded past the end of the file: still past it, or now resolvable.
+        if end > lines.len() {
+            status.state = CitationState::Removed;
+        }
+        return status;
+    };
+    if end <= lines.len() && block_hash(&lines[start - 1..end]) == hash {
+        return status;
+    }
+    let len = end - start + 1;
+    if let Some(found) = find_moved(&lines, start, len, hash) {
+        if worth_reanchoring(&lines[found - 1..found - 1 + len]) {
+            status.state = CitationState::Moved;
+            status.current_line = Some(found);
+            return status;
+        }
+    }
+    status.state = if end > lines.len() {
+        CitationState::Removed
+    } else {
+        CitationState::Changed
+    };
+    status
+}
+
+fn evaluate_section(project_path: &Path, doc: &str, entry: &DocFingerprints) -> SectionCitations {
+    let current = read_doc(project_path, doc);
+    let mut section = SectionCitations {
+        doc: doc.to_string(),
+        recorded_at: entry.recorded_at.clone(),
+        reason: entry.reason,
+        stale: false,
+        doc_missing: current.is_none(),
+        doc_changed: false,
+        unchanged_count: 0,
+        citations: Vec::new(),
+        unrecorded: Vec::new(),
+    };
+    let Some(content) = current else {
+        section.stale = true;
+        return section;
+    };
+    section.doc_changed = sha256_hex(content.as_bytes()) != entry.doc_sha256;
+    let present: Vec<DocCitation> = doc_citations(&content);
+    let present_cites: BTreeSet<&str> = present.iter().map(|c| c.cite.as_str()).collect();
+    let recorded: BTreeSet<&str> = entry.citations.iter().map(|c| c.cite.as_str()).collect();
+    for fp in &entry.citations {
+        // A citation the doc no longer carries was fixed or removed by hand.
+        if section.doc_changed && !present_cites.contains(fp.cite.as_str()) {
+            continue;
+        }
+        let status = evaluate_citation(project_path, fp);
+        if status.state == CitationState::Unchanged {
+            section.unchanged_count += 1;
+        } else {
+            section.stale |= status.state.is_broken();
+            section.citations.push(status);
+        }
+    }
+    section.unrecorded = present
+        .iter()
+        .filter(|c| !recorded.contains(c.cite.as_str()))
+        .map(|c| c.cite.clone())
+        .collect();
+    section
+}
+
+/// Every recorded section, evaluated against the current code.
+pub fn check(project_path: &Path) -> CitationDriftReport {
+    let file = match read_strict(project_path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return CitationDriftReport::default(),
+        Err(e) => {
+            tracing::warn!("Citation drift unavailable: {e}");
+            return CitationDriftReport::default();
+        }
+    };
+    let mut report = CitationDriftReport::default();
+    for (doc, entry) in &file.docs {
+        let section = evaluate_section(project_path, doc, entry);
+        report.unchanged_count += section.unchanged_count;
+        for c in &section.citations {
+            if c.state.is_broken() {
+                report.broken_count += 1;
+            } else {
+                report.moved_count += 1;
+            }
+        }
+        report.sections.push(section);
+    }
+    report.sources_state = if report.sections.iter().any(|s| s.stale) {
+        SourcesState::NeedsReverification
+    } else {
+        SourcesState::Clean
+    };
+    report
+}
+
+/// The drift entries naming what broke in a stale section.
+pub fn changed_sources(section: &SectionCitations) -> Vec<String> {
+    if section.doc_missing {
+        return vec![format!("{} (deleted)", section.doc)];
+    }
+    section
+        .citations
+        .iter()
+        .filter(|c| c.state.is_broken())
+        .map(|c| format!("{} ({})", c.cite, c.state.label()))
+        .collect()
+}
+
+// ─── Scheduled re-verification ────────────────────────────────────────────
+
+/// Last scheduled result per project path; the report itself is recomputed
+/// on every read, the cron only records when it last looked and what it saw.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScheduledCheck {
+    pub checked_at: String,
+    pub sources_state: SourcesState,
+    #[ts(type = "number")]
+    pub broken_count: usize,
+}
+
+static SCHEDULED: std::sync::LazyLock<std::sync::Mutex<BTreeMap<PathBuf, ScheduledCheck>>> =
+    std::sync::LazyLock::new(Default::default);
+static LAST_TICK: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>> =
+    std::sync::Mutex::new(None);
+
+pub fn last_scheduled_check(project_path: &Path) -> Option<ScheduledCheck> {
+    SCHEDULED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(project_path)
+        .cloned()
+}
+
+/// Whether the re-verification cron has an occurrence in `(since, now]`.
+/// No expression configured means off.
+pub fn reverify_due(
+    cron: Option<&str>,
+    default_tz: chrono_tz::Tz,
+    since: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(schedule) = cron.map(str::trim).filter(|c| !c.is_empty()) else {
+        return false;
+    };
+    let trigger = crate::models::WorkflowTrigger::Cron {
+        schedule: schedule.to_string(),
+        timezone: None,
+    };
+    crate::workflows::trigger::should_fire(&trigger, default_tz, since, now)
+}
+
+/// Re-verify every project that has recorded fingerprints.
+pub fn reverify_projects(project_paths: &[PathBuf]) -> Vec<(PathBuf, ScheduledCheck)> {
+    let mut out = Vec::new();
+    for path in project_paths {
+        if !citations_path(path).is_file() {
+            continue;
+        }
+        let report = check(path);
+        let result = ScheduledCheck {
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            sources_state: report.sources_state,
+            broken_count: report.broken_count,
+        };
+        if report.sources_state == SourcesState::NeedsReverification {
+            tracing::warn!(
+                project = %path.display(),
+                broken = report.broken_count,
+                "Cited lines changed since validation: the docs need re-verification"
+            );
+        }
+        SCHEDULED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(path.clone(), result.clone());
+        out.push((path.clone(), result));
+    }
+    out
+}
+
+/// One scheduler tick, called by the workflow engine loop.
+pub async fn scheduled_tick(state: &crate::AppState) {
+    let now = chrono::Utc::now();
+    let since = {
+        let mut last = LAST_TICK.lock().unwrap_or_else(|p| p.into_inner());
+        last.replace(now).unwrap_or(now)
+    };
+    let cron = state.config.read().await.audit_reverify_cron.clone();
+    if !reverify_due(
+        cron.as_deref(),
+        crate::core::timezone::current(),
+        since,
+        now,
+    ) {
+        return;
+    }
+    let projects = match state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
+    {
+        Ok(projects) => projects,
+        Err(e) => {
+            tracing::warn!("Citation re-verification skipped: {e}");
+            return;
+        }
+    };
+    let paths: Vec<PathBuf> = projects
+        .iter()
+        .map(|p| crate::core::scanner::resolve_host_path(&p.path))
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || reverify_projects(&paths)).await;
+}
+
+#[cfg(test)]
+#[path = "citation_drift_test.rs"]
+mod tests;

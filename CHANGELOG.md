@@ -34,6 +34,21 @@ Release notes for 0.9.3 and earlier are available in the
   one diff per file that you accept one by one or all at once. You can also
   resume or abandon the merge. Every error says what to fix and offers
   "Reprendre".
+- Audit drift is now measured per citation (KT-1175, KT-1078). Validation,
+  and every audit baseline, records a fingerprint of each `[src: path:line]`
+  the docs cite in `docs/citations.json`: path, line and a SHA-256 of the
+  cited line (whitespace-normalised, secrets redacted), never its content.
+  A section with fingerprints goes stale only when one of its cited lines
+  changes or disappears, and the drift report names the citation; a commit
+  elsewhere no longer marks it stale. A line that only moved, by up to 50
+  lines, is re-anchored. `GET /api/projects/:id/citation-drift` lists broken
+  and moved citations per section, and
+  `POST /api/projects/:id/citation-drift/acknowledge` (`{"doc": "docs/…"}`)
+  records a section as checked and unchanged without rewriting it. A new
+  "Sources clean" badge, kept apart from the dated "Validated" one, turns to
+  "To re-verify" as soon as a citation breaks, with no new audit. An
+  optional cron, `audit_reverify_cron` in `config.toml` (off by default),
+  re-verifies every project on that schedule.
 
 ### Fixed
 

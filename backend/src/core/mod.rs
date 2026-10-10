@@ -11,6 +11,7 @@ pub mod backup;
 pub mod bridge_token;
 pub mod checksums;
 pub mod child_env;
+pub mod citation_drift;
 pub mod cli_access_probe;
 pub mod cmd;
 pub mod config;
