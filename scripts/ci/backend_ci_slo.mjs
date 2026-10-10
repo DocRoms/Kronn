@@ -54,15 +54,18 @@ export function runnerMilliseconds(jobs, run = {}) {
 }
 
 /**
- * Build start to aggregate end, or null when the build or the aggregate is
- * missing or the chain spans attempts (the span would include the wait).
+ * Build start to aggregate end in RUN's current attempt, or null when the
+ * build or the aggregate is missing, or when any job of the chain was copied
+ * from an earlier attempt (the span would include the wait, or not be current).
  */
-export function backendChain(jobs) {
+export function backendChain(jobs, run = {}) {
   const builds = jobs.filter((job) => job.name === BACKEND_BUILD_JOB);
   const aggregates = jobs.filter((job) => job.name === BACKEND_JOB);
   if (builds.length !== 1 || aggregates.length !== 1) return null;
   const partitions = jobs.filter((job) => job.name?.startsWith(BACKEND_PARTITION_PREFIX));
   const chain = [builds[0], ...partitions, aggregates[0]];
+  const copied = new Set(copiedJobs(run, jobs));
+  if (chain.some((job) => copied.has(job))) return null;
   if (new Set(chain.map((job) => Number(job.run_attempt ?? 1))).size !== 1) return null;
   const durationMs = milliseconds(builds[0].started_at, aggregates[0].completed_at);
   return durationMs === null ? null : { build: builds[0], partitions, aggregate: aggregates[0], durationMs };
@@ -80,9 +83,9 @@ export function percentile(values, percentileValue) {
   return sorted[Math.ceil(sorted.length * percentileValue) - 1];
 }
 
-/** History of hot chains: one job list per earlier run, kept when its build restored the cache. */
-export function summarizeBackendRuns(jobLists) {
-  const samples = jobLists.map(backendChain)
+/** History of hot chains: one { run, jobs } per earlier run, kept when its build restored the cache. */
+export function summarizeBackendRuns(runs) {
+  const samples = runs.map(({ run, jobs }) => backendChain(jobs, run))
     .filter((chain) => chain !== null && hasRestoredCompiledCache(chain.build))
     .map((chain) => ({ completed_at: chain.aggregate.completed_at, durationMs: chain.durationMs }));
   const durations = samples.map((sample) => sample.durationMs);
@@ -123,7 +126,13 @@ export function timingStatus(durationMs) {
   return durationMs > SLO_MS ? "breach" : "within SLO";
 }
 
-export function requireCurrentBackendChain(jobs) {
+/**
+ * The current attempt's backend chain, or { chain: null, unavailable } when a
+ * re-run copied part or all of it from an earlier attempt: a normal outcome,
+ * published as unavailable. Missing, duplicate or unfinished jobs, or a chain
+ * of this attempt without a valid duration, are invalid data and throw.
+ */
+export function currentBackendChain(jobs, run = {}) {
   for (const name of [BACKEND_BUILD_JOB, BACKEND_JOB]) {
     const matches = jobs.filter((job) => job.name === name);
     if (matches.length !== 1) throw new Error(`Expected exactly one ${name} job, found ${matches.length}`);
@@ -131,9 +140,16 @@ export function requireCurrentBackendChain(jobs) {
       throw new Error(`${name} is not complete (status: ${matches[0].status})`);
     }
   }
-  const chain = backendChain(jobs);
+  const copied = new Set(copiedJobs(run, jobs));
+  const chainJobs = jobs.filter((job) => job.name === BACKEND_BUILD_JOB || job.name === BACKEND_JOB
+    || job.name?.startsWith(BACKEND_PARTITION_PREFIX));
+  const copiedNames = chainJobs.filter((job) => copied.has(job)).map((job) => job.name);
+  if (copiedNames.length > 0) {
+    return { chain: null, unavailable: `partial re-run: ${copiedNames.join(", ")} copied from an earlier attempt` };
+  }
+  const chain = backendChain(jobs, run);
   if (chain === null) throw new Error(`${BACKEND_BUILD_JOB} to ${BACKEND_JOB} has no valid duration within one attempt`);
-  return chain;
+  return { chain, unavailable: null };
 }
 
 export function validateCompiledCacheState(requestedMode, state, compiledCacheHit) {
@@ -164,9 +180,9 @@ async function jobsForRun(runId) {
 
 const durationRow = (item) => `| ${item.name} | ${formatDuration(milliseconds(item.started_at, item.completed_at))} |`;
 
-export function markdown(summary, chain, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null, attempt: 1 }) {
+export function markdown(summary, chain, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null, attempt: 1 }, unavailable = null) {
   const currentDuration = chain?.durationMs ?? null;
-  const status = timingStatus(currentDuration);
+  const status = unavailable ?? timingStatus(currentDuration);
   const cacheState = mode === "cold" ? "not applicable" : compiledCacheHit ? "hit" : "miss";
   const attempt = runTotals.attempt ?? 1;
   const loopLabel = `Trigger to ${GATE_JOB}, attempt ${attempt}${attempt > 1 ? " (from the attempt's start)" : ""}`;
@@ -208,18 +224,18 @@ async function main() {
   const comparableRuns = mode === "hot"
     ? comparableSuccessfulHotRuns(history.workflow_runs ?? [], currentRun)
     : [];
-  const priorJobs = await Promise.all(comparableRuns.map((run) => jobsForRun(String(run.id))));
-  const chain = requireCurrentBackendChain(currentJobs);
-  const summary = summarizeBackendRuns(priorJobs);
+  const priorRuns = await Promise.all(comparableRuns.map(async (run) => ({ run, jobs: await jobsForRun(String(run.id)) })));
+  const { chain, unavailable } = currentBackendChain(currentJobs, currentRun);
+  const summary = summarizeBackendRuns(priorRuns);
   const runTotals = {
     fastLoopMs: fastLoopDurationMs(currentRun, currentJobs),
     runnerMs: runnerMilliseconds(currentJobs, currentRun),
     attempt: attemptOf(currentRun),
   };
-  const report = markdown(summary, chain, mode, compiledCacheHit, runTotals);
+  const report = markdown(summary, chain, mode, compiledCacheHit, runTotals, unavailable);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
-  if (chain.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::the backend chain took ${formatDuration(chain.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
+  if (chain && chain.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::the backend chain took ${formatDuration(chain.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) main().catch((error) => {

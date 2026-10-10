@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { SLO_MS, backendChain, comparableSuccessfulHotRuns, copiedJobs, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendChain, summarizeBackendRuns, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { SLO_MS, backendChain, comparableSuccessfulHotRuns, copiedJobs, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasRestoredCompiledCache, markdown, percentile, currentBackendChain, summarizeBackendRuns, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => new Date(Date.UTC(2026, 7, 31, 0, minutes)).toISOString();
 const hit = [{ name: "Record compiled cache hit", conclusion: "success" }];
@@ -26,7 +28,8 @@ assert.equal(backendChain(mixedAttempts), null, "a chain spanning attempts inclu
 
 const missChain = chainJobs(100, 3);
 missChain[0] = { ...missChain[0], steps: [{ name: "Record compiled cache warmup miss", conclusion: "success" }] };
-const summary = summarizeBackendRuns([chainJobs(0, 9), chainJobs(15, 11), chainJobs(32, 12), missChain, chainJobs(50, 9).slice(1)]);
+const firstRun = { run_attempt: 1 };
+const summary = summarizeBackendRuns([chainJobs(0, 9), chainJobs(15, 11), chainJobs(32, 12), missChain, chainJobs(50, 9).slice(1)].map((jobs) => ({ run: firstRun, jobs })));
 assert.equal(summary.samples.length, 3);
 assert.equal(summary.medianMs, 11 * 60 * 1000);
 assert.equal(summary.p95Ms, 12 * 60 * 1000);
@@ -56,15 +59,15 @@ assert.equal(hasRestoredCompiledCache({ steps: hit }), true);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache warmup miss", conclusion: "success" }] }), false);
 assert.equal(hasRestoredCompiledCache({ steps: [{ name: "Record compiled cache hit", conclusion: "failure" }] }), false);
 
-assert.equal(requireCurrentBackendChain(chainJobs(0, 14)).durationMs, 14 * 60 * 1000);
-assert.throws(() => requireCurrentBackendChain([]), /exactly one build-backend-tests job, found 0/);
-assert.throws(() => requireCurrentBackendChain([...chainJobs(0, 9), job("test-backend", 0, 9)]), /exactly one test-backend job, found 2/);
+assert.equal(currentBackendChain(chainJobs(0, 14)).chain.durationMs, 14 * 60 * 1000);
+assert.throws(() => currentBackendChain([]), /exactly one build-backend-tests job, found 0/);
+assert.throws(() => currentBackendChain([...chainJobs(0, 9), job("test-backend", 0, 9)]), /exactly one test-backend job, found 2/);
 const running = chainJobs(0, 9);
 running[3] = { ...running[3], status: "in_progress" };
-assert.throws(() => requireCurrentBackendChain(running), /test-backend is not complete/);
+assert.throws(() => currentBackendChain(running), /test-backend is not complete/);
 const noEnd = chainJobs(0, 9);
 noEnd[3] = { ...noEnd[3], completed_at: null };
-assert.throws(() => requireCurrentBackendChain(noEnd), /no valid duration/);
+assert.throws(() => currentBackendChain(noEnd), /no valid duration/);
 
 validateCompiledCacheState("cold", "", false);
 validateCompiledCacheState("hot", "miss", false);
@@ -114,3 +117,69 @@ assert.match(totalsReport, /Runner time, jobs run in this attempt \| 26m 0s/);
 assert.match(totalsReport, /\| test-backend-partition \(2\) \| 7m 0s \|/);
 const partialReport = markdown(summary, backendChain(partial), "hot", true, { fastLoopMs: null, runnerMs: 0, attempt: 2 });
 assert.match(partialReport, /attempt 2 \(from the attempt's start\) \| unavailable \(partial re-run\)/);
+
+// History never recycles a copied chain: a run re-run for another job keeps
+// its first attempt's backend chain, which is not a sample of that attempt.
+const copiedHistory = { run: { run_attempt: 2, run_started_at: at(80) }, jobs: [...chainJobs(0, 9, { run_attempt: 1 }), job("test-shell", 81, 82, { run_attempt: 2 })] };
+assert.equal(summarizeBackendRuns([copiedHistory]).samples.length, 0);
+assert.equal(summarizeBackendRuns([{ run: firstRun, jobs: chainJobs(0, 9) }]).samples.length, 1);
+
+// The real entry point, against GitHub API fixtures (fetch replaced at import).
+const SCRIPT = fileURLToPath(new URL("./backend_ci_slo.mjs", import.meta.url));
+const FETCH_STUB = `data:text/javascript,${encodeURIComponent(`
+  const fixtures = JSON.parse(process.env.SLO_FIXTURES);
+  globalThis.fetch = async (url) => {
+    const { pathname, search } = new URL(url);
+    const body = fixtures[pathname.replace(/^\\/repos\\/[^/]+\\/[^/]+/, "") + search];
+    return { ok: body !== undefined, status: body === undefined ? 404 : 200, json: async () => body };
+  };`)}`;
+function observe(run, jobs) {
+  const fixtures = {
+    "/actions/runs/7/jobs?per_page=100": { jobs },
+    "/actions/runs/7": { id: 7, event: "pull_request", head_branch: "feature/ci", ...run },
+    "/actions/workflows/ci-test.yml/runs?status=completed&per_page=20": { workflow_runs: [] },
+  };
+  const env = { ...process.env, SLO_FIXTURES: JSON.stringify(fixtures), GITHUB_RUN_ID: "7", GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: "t", CI_CACHE_MODE: "hot", CI_COMPILED_CACHE_HIT: "true", CI_COMPILED_CACHE_STATE: "hit" };
+  delete env.GITHUB_STEP_SUMMARY;
+  return spawnSync(process.execPath, ["--import", FETCH_STUB, SCRIPT], { env, encoding: "utf8" });
+}
+const attempt2 = { created_at: at(0), run_started_at: at(63), run_attempt: 2 };
+
+// Partial backend re-run: build and partition 2 copied, partition 1 and the
+// aggregate re-run green. The observer publishes the chain as unavailable.
+const partialBackend = observe(attempt2, [
+  job("build-backend-tests", 1, 3, { run_attempt: 1, steps: hit }),
+  job("test-backend-partition (1)", 64, 70, { run_attempt: 2 }),
+  job("test-backend-partition (2)", 3, 9, { run_attempt: 1 }),
+  job("test-backend", 70, 71, { run_attempt: 2 }),
+  job("ci-quality-gates", 71, 72, { run_attempt: 2 }),
+]);
+assert.equal(partialBackend.status, 0, partialBackend.stderr);
+assert.match(partialBackend.stdout, /Current backend critical path \| unavailable \(partial re-run: build-backend-tests, test-backend-partition \(2\) copied from an earlier attempt; hot\)/);
+assert.match(partialBackend.stdout, /attempt 2 \(from the attempt's start\) \| unavailable \(partial re-run\)/);
+assert.match(partialBackend.stdout, /Runner time, jobs run in this attempt \| 8m 0s/);
+assert.doesNotMatch(partialBackend.stdout, /\| build-backend-tests \|/);
+
+// Only test-shell re-run: the whole backend chain is the first attempt's.
+const shellOnly = observe(attempt2, [
+  ...chainJobs(1, 9, { run_attempt: 1 }),
+  job("ci-quality-gates", 10, 11, { run_attempt: 1 }),
+  job("test-shell", 64, 66, { run_attempt: 2 }),
+]);
+assert.equal(shellOnly.status, 0, shellOnly.stderr);
+assert.match(shellOnly.stdout, /Current backend critical path \| unavailable \(partial re-run: /);
+assert.doesNotMatch(shellOnly.stdout, /\| test-backend \| /);
+assert.match(shellOnly.stdout, /Runner time, jobs run in this attempt \| 2m 0s/);
+
+// Full re-run 63 minutes later: 9-minute chain, 12-minute loop, no wait counted.
+const fullRerun = observe(attempt2, [...chainJobs(64, 9, { run_attempt: 2 }), job("ci-quality-gates", 74, 75, { run_attempt: 2 })]);
+assert.equal(fullRerun.status, 0, fullRerun.stderr);
+assert.match(fullRerun.stdout, /Current backend critical path \| 9m 0s \(within SLO; hot\)/);
+assert.match(fullRerun.stdout, /attempt 2 \(from the attempt's start\) \| 12m 0s/);
+
+// Invalid data stays an error: the current attempt's aggregate has no end.
+const broken = chainJobs(64, 9, { run_attempt: 2 });
+broken[3] = { ...broken[3], completed_at: null };
+const invalid = observe(attempt2, [...broken, job("ci-quality-gates", 74, 75, { run_attempt: 2 })]);
+assert.equal(invalid.status, 1);
+assert.match(invalid.stderr, /::error title=Backend CI timing unavailable::build-backend-tests to test-backend has no valid duration/);
