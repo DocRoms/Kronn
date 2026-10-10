@@ -36,7 +36,10 @@ inputs = { environment = "staging" }
 "#;
 
 fn git(dir: &Path, args: &[&str]) {
+    // A commit detaches `git maintenance run --auto`, which keeps writing
+    // inside `.git` after the call returns; the walks below would race it.
     let output = crate::core::cmd::git_cmd()
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -302,7 +305,7 @@ fn tree_state(root: &Path) -> (BTreeMap<PathBuf, Vec<u8>>, String) {
     fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            let meta = std::fs::symlink_metadata(&path).unwrap();
+            let meta = std::fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
             if meta.is_dir() {
                 walk(&path, out);
             } else {
