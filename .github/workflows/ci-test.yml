@@ -26,6 +26,11 @@ on:
         required: false
         default: hot
         type: string
+      backend_partitions:
+        description: "Backend test partitions (empty: repository variable or 2)"
+        required: false
+        default: ""
+        type: string
   workflow_dispatch:
     inputs:
       ref:
@@ -39,6 +44,23 @@ on:
         default: hot
         type: choice
         options: [hot, cold]
+      backend_partitions:
+        description: "Backend test partitions; 1 gives the non-partitioned run that coverage_floors.py compare checks against (empty: repository variable or 2)"
+        required: false
+        default: ""
+        type: string
+      sccache:
+        description: "Route the instrumented build through sccache (measurement; default: repository variable CI_SCCACHE, else off)"
+        required: false
+        default: default
+        type: choice
+        options: [default, "off", "on"]
+      cargo_cache_fallback:
+        description: "Restore another Cargo.lock's backend cache on a miss (sccache comparator; default: CI_CARGO_CACHE_FALLBACK, else off)"
+        required: false
+        default: default
+        type: choice
+        options: [default, "off", "on"]
 
 # Opt every JS-based action (checkout, setup-node, cache, pnpm/action-setup,
 # setup-python) into the Node 24 runtime ahead of GitHub's 2026-06-02 forced
@@ -54,6 +76,11 @@ env:
   # build-frontend at `pnpm install`. Documented knob of the package's install
   # script; also set in frontend/Dockerfile + frontend/.npmrc.
   ONNXRUNTIME_NODE_INSTALL: skip
+  # Measurement knobs (KT-1118): a manual run's input, else the repository
+  # variable, else the default. Pull-request runs read the variables.
+  BACKEND_TEST_PARTITIONS: ${{ inputs.backend_partitions || vars.CI_BACKEND_PARTITIONS || '2' }}
+  CI_SCCACHE: ${{ inputs.sccache != 'default' && inputs.sccache || vars.CI_SCCACHE || 'off' }}
+  CI_CARGO_CACHE_FALLBACK: ${{ inputs.cargo_cache_fallback != 'default' && inputs.cargo_cache_fallback || vars.CI_CARGO_CACHE_FALLBACK || 'off' }}
 
 jobs:
   # Anti green-by-skip: every other job is gated on the `ci-test` label, so an
@@ -75,18 +102,22 @@ jobs:
           echo "::error::This PR has no 'ci-test' label — every CI job was SKIPPED (green-by-skip). Add the label to run the suite."
           exit 1
 
-  test-backend:
+  # The backend suite runs once, under nextest and coverage, split in three
+  # stages: one instrumented build archives every test binary, N partitions
+  # run a share of the tests each from that archive, and `test-backend` checks
+  # that the partitions form one complete run before enforcing the coverage
+  # floors once, on their merged profiles. The 10-minute SLO covers the build
+  # start to the aggregate's end, on a verified hot-cache hit.
+  build-backend-tests:
     if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
     runs-on: ubuntu-latest
-    # The one backend test pass: every lib, binary and integration test once,
-    # under nextest (one process per test) and coverage instrumentation, with
-    # the coverage floors enforced on that same run. A cache miss compiles the
-    # instrumented tree from scratch first. The 10-minute SLO is measured only
-    # on a verified hot-cache hit by backend-ci-performance.
     timeout-minutes: 40
     outputs:
       compiled_cache_hit: ${{ steps.verify-backend-cache.outputs.valid }}
       compiled_cache_state: ${{ steps.verify-backend-cache.outputs.state }}
+      partitions: ${{ steps.plan.outputs.matrix }}
+      partition_count: ${{ steps.plan.outputs.count }}
+      rust_toolchain: ${{ steps.toolchain.outputs.version }}
     defaults:
       run:
         working-directory: backend
@@ -95,11 +126,18 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      - name: Plan the backend partitions
+        id: plan
+        run: python3 scripts/ci/backend_partitions.py plan --count "$BACKEND_TEST_PARTITIONS" >> "$GITHUB_OUTPUT"
+
       # Cache the reusable instrumented directories in place. Never archive
       # profraw files, debug/incremental, tmp, or any other transient target
       # subtree: those can be multi-GB and do not make a warm critical-path
       # measurement representative. Caching the exact bounded directories
       # avoids a second full copy during both restore and warmup.
+      # CI_CARGO_CACHE_FALLBACK=on restores the newest cache of another
+      # Cargo.lock: the comparator sccache must beat. A partial restore reports
+      # no cache hit, so it never counts as a hot measurement.
       - name: Cache cargo registry and bounded backend build (hot)
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
         id: cache-backend-hot
@@ -113,6 +151,7 @@ jobs:
             target/llvm-cov-target/debug/build
             target/llvm-cov-target/debug/deps
           key: cargo-hot-v3-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: ${{ env.CI_CARGO_CACHE_FALLBACK == 'on' && format('cargo-hot-v3-{0}-', runner.os) || '' }}
 
       - name: Verify bounded compiled backend cache
         if: github.event_name != 'workflow_dispatch' || inputs.cache_mode == 'hot'
@@ -140,6 +179,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, llvm-tools-preview
+
+      # The aggregate merges the profiles with this exact toolchain's LLVM.
+      - name: Record the Rust toolchain
+        id: toolchain
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-llvm-cov and cargo-nextest
         uses: taiki-e/install-action@v2
@@ -178,52 +222,48 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.cache_mode == 'cold'
         run: "echo 'Cold measurement: compiled backend artifacts are never restored or archived.'"
 
+      # Measured trial (CI_SCCACHE=on), kept only if it shortens a lost-target
+      # build without slowing the hot one. cargo-llvm-cov chains a pre-existing
+      # RUSTC_WRAPPER, so the instrumentation flags are part of sccache's key.
+      - name: Enable sccache (measurement)
+        if: env.CI_SCCACHE == 'on'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Route rustc through sccache
+        if: env.CI_SCCACHE == 'on'
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      # Same runner and configuration as `make test-backend-cov`
-      # (backend/.config/nextest.toml, profile `ci`).
-      - name: cargo llvm-cov nextest — measured backend critical path and coverage floor
-        env:
-          NEXTEST_PROFILE: ci
-          # One profile per test process would be ~9,600 files and ~50 GB;
-          # LLVM merges them online into a pool of eight per binary instead.
-          LLVM_PROFILE_FILE_NAME: kronn-%8m.profraw
-        run: |
-          cargo llvm-cov nextest --workspace --summary-only \
-            --fail-under-lines 83 \
-            --fail-under-functions 83 \
-            --fail-under-regions 83
+      # Same build as `make test-backend-cov`: every lib, binary, example and
+      # integration test target, instrumented, then archived for the partitions.
+      - name: Build and archive the instrumented tests
+        run: cargo llvm-cov nextest-archive --workspace --archive-file ../target/kronn-tests.tar.zst
 
-      - name: cargo llvm-cov — key-management scoped floor
-        run: ../scripts/check-keymgmt-coverage.sh
-
-      # The `ci` profile ran the ts-rs exports with the suite above.
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Types — regenerate generated.ts and fail on drift
-        run: |
-          node ../frontend/scripts/assemble-generated-types.mjs
-          git diff --exit-code ../frontend/src/types/generated.ts
-
-      # The suite's build already compiled the example; run it rather than
-      # compiling the library a second time.
+      # The build compiled the example; run it rather than compiling again.
       - name: Lint — no raw Command::new in prod code
         env:
           LLVM_PROFILE_FILE: /dev/null
         run: ../target/llvm-cov-target/debug/examples/lint-no-raw-command
 
-      - name: Upload nextest JUnit report
-        if: always()
+      - name: Show sccache statistics
+        if: always() && env.CI_SCCACHE == 'on'
+        run: sccache --show-stats
+
+      - name: Upload the instrumented test archive
         uses: actions/upload-artifact@v4
         with:
-          name: backend-junit
-          path: target/llvm-cov-target/nextest/ci/junit.xml
-          if-no-files-found: ignore
-          retention-days: 7
+          name: backend-test-archive
+          path: target/kronn-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          # Already zstd-compressed.
+          compression-level: 0
 
       # On a warmup miss, validate the exact in-place directories before the
       # cache action persists them in its post-job hook. Cold measurements do
@@ -236,6 +276,203 @@ jobs:
           done
           find ../target/llvm-cov-target/debug/deps -type f -print -quit | grep -q .
           echo 'schema=3' > ../target/llvm-cov-target/debug/.kronn-backend-cache-v3
+
+  # One share of the tests (nextest `hash:K/N`), run from the shared archive.
+  # The archive is extracted inside the checkout: tests locate the repository
+  # (templates/) from their executable's path, as in the non-partitioned run.
+  test-backend-partition:
+    needs: build-backend-tests
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: ${{ fromJSON(needs.build-backend-tests.outputs.partitions) }}
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PARTITION: ${{ matrix.partition }}
+      PARTITION_COUNT: ${{ needs.build-backend-tests.outputs.partition_count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download the instrumented test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-test-archive
+          path: target
+
+      # Same profile pool as the whole run: LLVM merges one test process's
+      # counters into eight files per binary instead of one file per process.
+      - name: Run this partition under coverage
+        env:
+          NEXTEST_PROFILE: ci
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/target/partition/profiles/kronn-%8m.profraw
+        run: |
+          mkdir -p ../target/partition/profiles ../target/nextest-extract
+          cargo nextest run --archive-file ../target/kronn-tests.tar.zst \
+            --workspace-remap . --extract-to ../target/nextest-extract \
+            --partition "hash:$PARTITION/$PARTITION_COUNT"
+
+      # From an archive, nextest keeps its store under the remapped workspace.
+      - name: Record the partition manifest
+        if: always()
+        run: |
+          cp target/nextest/ci/junit.xml ../target/partition/junit.xml
+          python3 scripts/ci/backend_partitions.py manifest --partition "$PARTITION" \
+            --count "$PARTITION_COUNT" --archive ../target/kronn-tests.tar.zst \
+            --sha "$(git rev-parse HEAD)" --dir ../target/partition
+
+      - name: Upload the partition's report and profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-partition-${{ matrix.partition }}
+          path: target/partition
+          if-no-files-found: error
+          retention-days: 3
+
+  # Keeps the `test-backend` check name. Fails when the build or any partition
+  # did not succeed, when a partition's artifact is missing or comes from
+  # another archive, or when a test of the archive's inventory has no result.
+  test-backend:
+    needs: [build-backend-tests, test-backend-partition]
+    if: always() && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PARTITION_COUNT: ${{ needs.build-backend-tests.outputs.partition_count }}
+    steps:
+      - name: Require the build and every partition
+        working-directory: .
+        env:
+          BUILD_RESULT: ${{ needs.build-backend-tests.result }}
+          PARTITIONS_RESULT: ${{ needs.test-backend-partition.result }}
+        run: |
+          echo "build: $BUILD_RESULT, partitions: $PARTITIONS_RESULT"
+          [ "$BUILD_RESULT" = success ] && [ "$PARTITIONS_RESULT" = success ]
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install the build's Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.build-backend-tests.outputs.rust_toolchain }}
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      - name: Download the instrumented test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-test-archive
+          path: target
+
+      - name: Download every partition's report and profiles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-partition-*
+          path: target/partitions
+
+      # The inventory comes from the archive itself, not from the partitions.
+      # Extracting into llvm-cov-target is where `cargo llvm-cov report
+      # --nextest-archive-file` looks for the instrumented binaries.
+      - name: List the archive's tests
+        env:
+          NEXTEST_PROFILE: ci
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          mkdir -p ../target/llvm-cov-target
+          cargo nextest list --archive-file ../target/kronn-tests.tar.zst \
+            --workspace-remap . --extract-to ../target/llvm-cov-target \
+            --message-format json > ../target/inventory.json
+
+      - name: Verify every partition, artifact and test
+        run: |
+          python3 scripts/ci/backend_partitions.py verify --count "$PARTITION_COUNT" \
+            --artifacts ../target/partitions --inventory ../target/inventory.json \
+            --archive ../target/kronn-tests.tar.zst --sha "$(git rev-parse HEAD)"
+
+      - name: Merge the partitions' coverage
+        run: |
+          python3 scripts/ci/backend_partitions.py stage --count "$PARTITION_COUNT" \
+            --artifacts ../target/partitions --dest ../target/llvm-cov-target
+          cargo llvm-cov report --nextest-archive-file ../target/kronn-tests.tar.zst \
+            --json --summary-only --output-path ../target/coverage.json
+
+      # The one threshold check: total floor and key-management file floors.
+      - name: Coverage floors on the merged data
+        run: python3 scripts/ci/coverage_floors.py check ../target/coverage.json --summary-out ../target/coverage-summary.json
+
+      # `coverage_floors.py compare` holds this to a one-partition run of the same commit.
+      - name: Upload the coverage counts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage-summary
+          path: target/coverage-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The ts-rs exports, run from the archive beside the partitions, then the
+  # generated.ts drift check. They also run, under coverage, in the partitions.
+  test-backend-types:
+    needs: build-backend-tests
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Download the instrumented test archive
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-test-archive
+          path: target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Types — regenerate generated.ts and fail on drift
+        env:
+          NEXTEST_PROFILE: ci
+          LLVM_PROFILE_FILE: /dev/null
+        run: |
+          mkdir -p ../target/nextest-extract
+          cargo nextest run --archive-file ../target/kronn-tests.tar.zst \
+            --workspace-remap . --extract-to ../target/nextest-extract \
+            -E 'test(export_bindings)'
+          node ../frontend/scripts/assemble-generated-types.mjs
+          git diff --exit-code ../frontend/src/types/generated.ts
 
   test-backend-quality:
     if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
@@ -254,7 +491,6 @@ jobs:
           components: clippy
       # Dependencies only: Cargo rechecks the checked-out sources (their mtimes
       # are newer than any cached fingerprint), so no stale lint is replayed.
-      # No sccache here — it hashes deps/flags, not source content.
       - name: Cache cargo registry and clippy dependencies
         uses: actions/cache@v4
         with:
@@ -300,6 +536,10 @@ jobs:
         run: |
           python3 scripts/ci/test_tech_debt_registry.py
           python3 scripts/ci/tech_debt_registry.py
+      - name: Backend partitions and coverage floors — scripts' tests
+        run: |
+          python3 scripts/ci/test_backend_partitions.py
+          python3 scripts/ci/test_coverage_floors.py
       - name: Release body generator — links match attached installers
         run: python3 scripts/ci/test_release_notes.py
       - name: Agent task matrix — every task still reaches its content
@@ -713,7 +953,10 @@ jobs:
     if: always()
     needs:
       - require-ci-label
+      - build-backend-tests
+      - test-backend-partition
       - test-backend
+      - test-backend-types
       - test-backend-quality
       - duplication-check
       - diff-hygiene
@@ -757,7 +1000,7 @@ jobs:
     # This observer publishes timing evidence but never changes a functional
     # gate result: an SLO breach is a warning, while a real timeout still fails.
     if: always() && inputs.ref == '' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base))))
-    needs: [test-backend, ci-quality-gates]
+    needs: [build-backend-tests, test-backend, ci-quality-gates]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -771,6 +1014,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_CACHE_MODE: ${{ inputs.cache_mode || 'hot' }}
-          CI_COMPILED_CACHE_HIT: ${{ needs.test-backend.outputs.compiled_cache_hit }}
-          CI_COMPILED_CACHE_STATE: ${{ needs.test-backend.outputs.compiled_cache_state }}
+          CI_COMPILED_CACHE_HIT: ${{ needs.build-backend-tests.outputs.compiled_cache_hit }}
+          CI_COMPILED_CACHE_STATE: ${{ needs.build-backend-tests.outputs.compiled_cache_state }}
         run: node scripts/ci/backend_ci_slo.mjs
