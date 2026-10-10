@@ -5,6 +5,7 @@ pub mod approved_scripts;
 pub mod argv_roles;
 pub mod audit_detectors;
 pub mod audit_mcp_filter;
+pub mod audit_state;
 pub mod audit_validation;
 pub mod backup;
 pub mod bridge_token;

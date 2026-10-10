@@ -238,6 +238,62 @@ async fn audit_launcher_writes_sixteen_real_findings_then_their_index() {
     );
 }
 
+/// A committed fixture, so `git status` after the run lists only what it wrote.
+fn commit_fixture(root: &Path) {
+    for args in [
+        &["init", "-q"][..],
+        &["add", "-A"],
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let out = crate::core::cmd::git_cmd()
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+}
+
+/// After an audit only documentation shows; Kronn's working state is ignored.
+fn assert_git_shows_only_docs(root: &Path) {
+    let out = crate::core::cmd::git_cmd()
+        .args([
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let status = String::from_utf8_lossy(&out.stdout);
+    for line in status.lines() {
+        let path = &line[3..];
+        assert!(!path.contains(".kronn-"), "{status}");
+        if line.starts_with("!! ") {
+            assert!(path.starts_with(".kronn/"), "{status}");
+        } else {
+            // Documentation and its versioned metadata (`.kronn.json`, checksums).
+            assert!(
+                path.starts_with("docs/") || path.ends_with(".md"),
+                "{status}"
+            );
+        }
+    }
+    assert!(!root.join(".gitignore").exists(), "{status}");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_step() {
@@ -290,6 +346,26 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         std::fs::write(
             project.path().join("docs/tech-debt/TD-repair.md"),
             format!("# Finding\n[src: file: invented.rs:1]\n{human}"),
+        )
+        .unwrap();
+        commit_fixture(project.path());
+        // What an older version left in docs/: moved out on the first run.
+        let legacy = project.path().join("docs/.kronn-citation-originals");
+        std::fs::create_dir(&legacy).unwrap();
+        let legacy_original = b"# Earlier original\n";
+        let legacy_name = format!(
+            "{}.bak",
+            Sha256::digest(legacy_original)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        std::fs::write(legacy.join(&legacy_name), legacy_original).unwrap();
+        std::fs::write(
+            project
+                .path()
+                .join("docs/.kronn-document-optimization.json"),
+            "{}\n",
         )
         .unwrap();
         let total =
@@ -387,14 +463,34 @@ async fn http_resume_repairs_an_auxiliary_document_from_a_previously_successful_
         );
         assert_eq!(repaired.contains("invented.rs"), !correct);
         assert!(
-            std::fs::read_dir(project.path().join("docs/.kronn-citation-originals"))
-                .unwrap()
-                .any(
-                    |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
-                        == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
-                ),
+            std::fs::read_dir(
+                project
+                    .path()
+                    .join(crate::core::audit_state::CITATION_ORIGINALS_DIR)
+            )
+            .unwrap()
+            .any(
+                |entry| std::fs::read_to_string(entry.unwrap().path()).unwrap()
+                    == format!("# Finding\n[src: file: invented.rs:1]\n{human}")
+            ),
             "the original survives correction"
         );
+        assert_eq!(
+            std::fs::read(
+                project
+                    .path()
+                    .join(crate::core::audit_state::CITATION_ORIGINALS_DIR)
+                    .join(&legacy_name)
+            )
+            .unwrap(),
+            legacy_original,
+            "the legacy original moved with its content"
+        );
+        assert!(project
+            .path()
+            .join(crate::core::audit_state::REPORT_FILE)
+            .is_file());
+        assert_git_shows_only_docs(project.path());
         assert!(requests.lock().unwrap()[0]
             .to_string()
             .contains("targeted correction required"));
@@ -468,6 +564,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         "# Finding\n[src: file: invented.rs:1]\n",
     )
     .unwrap();
+    commit_fixture(project.path());
     let total =
         crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full).len() as u32;
     state
@@ -580,6 +677,7 @@ async fn assert_http_failure_is_persisted(after_write: bool) {
         crate::api::audit::full::already_succeeded_step_indices(&steps).len(),
         total as usize - 1
     );
+    assert_git_shows_only_docs(project.path());
 }
 
 #[tokio::test]

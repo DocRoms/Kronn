@@ -56,6 +56,14 @@ Release notes for 0.9.3 and earlier are available in the
   refuses, with the date of that refusal. The probe runs when the set of
   mentioned agents changes, not on each keystroke
   (`POST /api/agents/reachability`).
+- A Full audit no longer leaves its working files in your `docs/` (KT-1165,
+  issue #231). The citation originals and the documentary optimization report
+  now live in `.kronn/audit/`, which Kronn lists in the repository's local
+  `.git/info/exclude` and never in your `.gitignore`, so `git add docs` picks
+  up only documentation. Files an older version left in
+  `docs/.kronn-citation-originals/` move there on the next audit, after a
+  sha256 check of each one, and the old `docs/.kronn-document-optimization.json`
+  is removed, as each audit writes it again.
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and

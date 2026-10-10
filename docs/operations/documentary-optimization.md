@@ -2,7 +2,8 @@
 
 The full audit runs a deterministic `documentary_optimization` phase after
 reconciliation and before validation. It writes
-`docs/.kronn-document-optimization.json`; any blocking diagnostic prevents the
+`.kronn/audit/document-optimization.json`, Kronn's local working state (listed
+in `.git/info/exclude`, never in your `.gitignore`); any blocking diagnostic prevents the
 audit from completing and the validation endpoint re-runs the same gate before
 recording validated state. [src: file: backend/src/api/audit/full.rs:1715-1761]
 [src: file: backend/src/api/audit/validate.rs:142]

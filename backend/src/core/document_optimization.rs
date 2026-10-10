@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const CONFIG_FILE: &str = "docs/.kronn-document-budgets.json";
-pub const REPORT_FILE: &str = "docs/.kronn-document-optimization.json";
+pub use crate::core::audit_state::REPORT_FILE;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
@@ -188,17 +188,7 @@ pub fn analyze(project: &Path) -> Result<DocumentaryOptimizationReport, String> 
 pub fn analyze_and_write(project: &Path) -> Result<DocumentaryOptimizationReport, String> {
     let report = analyze(project)?;
     let body = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-    let project_real = project
-        .canonicalize()
-        .map_err(|e| format!("resolve project root: {e}"))?;
-    let docs = project.join("docs");
-    let docs_real = docs
-        .canonicalize()
-        .map_err(|e| format!("resolve docs directory: {e}"))?;
-    if !docs_real.starts_with(&project_real) {
-        return Err("docs directory resolves outside the project".into());
-    }
-    let target = project.join(REPORT_FILE);
+    let target = crate::core::audit_state::state_dir(project)?.join("document-optimization.json");
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(format!("{REPORT_FILE} is a symlink; refusing report write"));
     }
@@ -1338,6 +1328,7 @@ mod tests {
             &tmp.path().join("docs/AGENTS.md"),
             "# Entry\nSearch-first\n",
         );
+        fs::create_dir_all(tmp.path().join(crate::core::audit_state::STATE_DIR)).unwrap();
         symlink(external.path(), tmp.path().join(REPORT_FILE)).unwrap();
         let before = fs::read_to_string(external.path()).unwrap();
         let error = analyze_and_write(tmp.path()).unwrap_err();

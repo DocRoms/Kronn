@@ -65,51 +65,7 @@ pub(super) fn recovery_changed(project: &Path, before: &Snapshot, recovery: &[Di
 /// Save the sanitized original before either mechanical or model correction.
 /// Content-addressed, create-new files preserve every distinct failed attempt.
 fn preserve_original(project: &Path, content: &str) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
-    let root = project.canonicalize().map_err(|e| e.to_string())?;
-    let docs = project
-        .join("docs")
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    if !docs.starts_with(&root) {
-        return Err("docs escapes project root".into());
-    }
-    let directory = docs.join(".kronn-citation-originals");
-    match std::fs::symlink_metadata(&directory) {
-        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
-            return Err("citation backup directory is not a regular directory".into())
-        }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(&directory).map_err(|e| e.to_string())?
-        }
-        Err(e) => return Err(e.to_string()),
-    }
-    let digest: String = Sha256::digest(content.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let path = directory.join(format!("{digest}.bak"));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => file
-            .write_all(content.as_bytes())
-            .map_err(|e| e.to_string()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
-                || std::fs::read_to_string(&path).map_err(|e| e.to_string())? != content
-            {
-                Err("citation backup collision or symlink".into())
-            } else {
-                Ok(())
-            }
-        }
-        Err(e) => Err(e.to_string()),
-    }
+    crate::core::audit_state::preserve_citation_original(project, content)
 }
 
 pub(super) fn snapshot_for_recovery(
@@ -274,12 +230,15 @@ mod tests {
             .iter()
             .any(|d| d.message.contains("path does not exist")));
         assert!(blocking.iter().any(|d| d.message.contains("outside")));
-        let backup = std::fs::read_dir(dir.path().join("docs/.kronn-citation-originals"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+        let backup = std::fs::read_dir(
+            dir.path()
+                .join(crate::core::audit_state::CITATION_ORIGINALS_DIR),
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
         assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
         // An unchanged bad document stays a retry target.
         assert_eq!(check_attempt(dir.path(), &before, &[]).unwrap().len(), 2);
@@ -353,7 +312,7 @@ mod tests {
             human,
             "the human document is left as written"
         );
-        assert!(!root.join("docs/.kronn-citation-originals").exists());
+        assert!(!root.join(crate::core::audit_state::STATE_DIR).exists());
     }
 
     #[test]
