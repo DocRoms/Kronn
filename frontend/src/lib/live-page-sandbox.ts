@@ -98,6 +98,7 @@ interface LivePageActionRequest {
   channel_id: string;
   action_ref: string;
   bindings: Record<string, string>;
+  binding_labels?: Record<string, string>;
   anchor: { left: number; top: number; width: number; height: number };
 }
 
@@ -114,6 +115,9 @@ interface LivePageActionAnchorRequest {
 export interface LivePageActionIntent {
   actionRef: string;
   bindings: Record<string, string>;
+  /** Display text the Page gives a binding (`data-kronn-binding-labels`): shown
+   * on the card only, never sent to the server, which resolves the selector. */
+  bindingLabels?: Record<string, string>;
   anchor: LivePageActionAnchor;
 }
 
@@ -204,6 +208,18 @@ const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
 /** The row a click is bound to, spelled exactly as the backend stores a
  * launch's `binding_key`: sorted `name=selector` pairs joined by U+001F, empty
  * for an unbound CTA. The iframe bridge below computes the same string. */
+export const LIVE_PAGE_BINDING_LABEL_MAX = 200;
+
+/** Labels for bindings the click actually carries; anything else is dropped. */
+function parseBindingLabels(raw: unknown, bindings: Record<string, string>): Record<string, string> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const labels = Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([key, value]) => (
+    Object.hasOwn(bindings, key) && typeof value === 'string' && value.trim() !== ''
+      && value.length <= LIVE_PAGE_BINDING_LABEL_MAX
+  ))) as Record<string, string>;
+  return Object.keys(labels).length > 0 ? labels : null;
+}
+
 export function liveActionBindingKey(bindings: Record<string, string>): string {
   return Object.entries(bindings).map(([name, selector]) => `${name}=${selector}`).sort().join('\u001f');
 }
@@ -458,6 +474,18 @@ export function buildSandboxDocument(
       }
       return bindings;
     };
+    const readBindingLabels=(element,bindings)=>{
+      const labels={};
+      const raw=getAttribute.call(element,'data-kronn-binding-labels');
+      if(!raw)return labels;
+      try{
+        const parsed=parseJson(raw);
+        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
+          objectEntries(parsed).forEach(([key,value])=>{if(typeof bindings[key]==='string'&&typeof value==='string'&&value.length<=${LIVE_PAGE_BINDING_LABEL_MAX})labels[key]=value;});
+        }
+      }catch(_error){}
+      return labels;
+    };
     const bindingKey=bindings=>objectEntries(bindings).map(([name,selector])=>name+'='+selector).sort().join('\\u001f');
     const markActions=()=>{
       document.querySelectorAll('[data-kronn-action]').forEach(element=>{
@@ -536,7 +564,7 @@ export function buildSandboxDocument(
         const bindings=readBindings(action);
         anchored=action;
         anchoredAt={ref:actionRef,key:bindingKey(bindings)};
-        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:anchorRect(action)});
+        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,binding_labels:readBindingLabels(action,bindings),anchor:anchorRect(action)});
         return;
       }
       const anchor=element&&element.closest?element.closest('a[href]'):null;
@@ -873,7 +901,8 @@ export function createLivePageOpenLinkRelay(
       ))) as Record<string, string>;
       const anchor = message.anchor;
       if (!validAnchor(anchor)) return;
-      onAction?.({ actionRef: message.action_ref, bindings, anchor });
+      const bindingLabels = parseBindingLabels(message.binding_labels, bindings);
+      onAction?.({ actionRef: message.action_ref, bindings, ...(bindingLabels ? { bindingLabels } : {}), anchor });
       return;
     }
     if (message.type !== 'kronn:page-open-link') return;

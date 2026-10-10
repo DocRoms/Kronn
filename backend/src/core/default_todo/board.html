@@ -182,7 +182,7 @@
     fr: {
       title: 'Ma Todo', notice: 'Cette page utilise les Tâches et les Workflows de Kronn pour fonctionner. Vous pouvez l’éditer, ou demander à un agent de la modifier pour l’adapter à vos besoins.', closeNotice: 'Fermer ce message', add: '+ Ajouter', addAria: 'Ajouter une tâche', refresh: '↻', refreshAria: 'Relire les tâches',
       emptyCol: 'Rien ici pour l’instant', noMatch: 'Aucune carte ne correspond à la recherche.', search: 'Rechercher une tâche, un tag…', searchAria: 'Rechercher dans la todo', clearSearch: 'Effacer la recherche', filterTag: 'Filtrer sur ce tag', prio: { critical: 'Critique', high: 'Haute', low: 'Basse' }, updated: 'Modifiée', created: 'Créée', linked: 'Discussion liée', of: 'sur',
-      todo: 'À faire', in_progress: 'En cours', done: 'Fait',
+      todo: 'À faire', in_progress: 'En cours', done: 'Fait', atEnd: 'En fin de colonne', beforeCard: 'Avant « % »',
       emptyTodo: 'Rien à faire. « + Ajouter » pour noter la prochaine chose.', emptyDoing: 'Rien en cours. Glisse une carte ici ou ▶.', emptyDone: 'Rien de terminé récemment.',
       countTodo: 'à faire', countDoing: 'en cours',
       details: 'Afficher les détails', hideDetails: 'Masquer les détails', edit: 'Modifier le titre et la description', top: 'En tête de colonne',
@@ -196,7 +196,7 @@
     en: {
       title: 'My Todo', notice: 'This page runs on Kronn’s Tasks and Workflows. You can edit it, or ask an agent to change it to fit your needs.', closeNotice: 'Dismiss this message', add: '+ Add', addAria: 'Add a task', refresh: '↻', refreshAria: 'Reload the tasks',
       emptyCol: 'Nothing here yet', noMatch: 'No card matches the search.', search: 'Search tasks or tags…', searchAria: 'Search the todo', clearSearch: 'Clear the search', filterTag: 'Filter on this tag', prio: { critical: 'Critical', high: 'High', low: 'Low' }, updated: 'Updated', created: 'Created', linked: 'Linked discussion', of: 'of',
-      todo: 'To do', in_progress: 'In progress', done: 'Done',
+      todo: 'To do', in_progress: 'In progress', done: 'Done', atEnd: 'At the end of the column', beforeCard: 'Before “%”',
       emptyTodo: 'Nothing to do. “+ Add” to note the next thing.', emptyDoing: 'Nothing in progress. Drop a card here or use ▶.', emptyDone: 'Nothing finished recently.',
       countTodo: 'to do', countDoing: 'in progress',
       details: 'Show details', hideDetails: 'Hide details', edit: 'Edit title and description', top: 'Top of the column',
@@ -210,7 +210,7 @@
     es: {
       title: 'Mi Todo', notice: 'Esta página funciona con las Tareas y los Workflows de Kronn. Puedes editarla o pedir a un agente que la modifique para adaptarla a tus necesidades.', closeNotice: 'Cerrar este mensaje', add: '+ Añadir', addAria: 'Añadir una tarea', refresh: '↻', refreshAria: 'Volver a leer las tareas',
       emptyCol: 'Nada por aquí todavía', noMatch: 'Ninguna tarjeta coincide con la búsqueda.', search: 'Buscar tareas o etiquetas…', searchAria: 'Buscar en la lista', clearSearch: 'Borrar la búsqueda', filterTag: 'Filtrar por esta etiqueta', prio: { critical: 'Crítica', high: 'Alta', low: 'Baja' }, updated: 'Modificada', created: 'Creada', linked: 'Discusión vinculada', of: 'de',
-      todo: 'Por hacer', in_progress: 'En curso', done: 'Hecho',
+      todo: 'Por hacer', in_progress: 'En curso', done: 'Hecho', atEnd: 'Al final de la columna', beforeCard: 'Antes de «%»',
       emptyTodo: 'Nada por hacer. «+ Añadir» para anotar lo siguiente.', emptyDoing: 'Nada en curso. Suelta una tarjeta aquí o usa ▶.', emptyDone: 'Nada terminado recientemente.',
       countTodo: 'por hacer', countDoing: 'en curso',
       details: 'Mostrar detalles', hideDetails: 'Ocultar detalles', edit: 'Editar título y descripción', top: 'Al principio de la columna',
@@ -224,7 +224,7 @@
     zh: {
       title: '我的待办', notice: '此页面依靠 Kronn 的任务和工作流运行。你可以编辑它，或让代理修改它以满足你的需求。', closeNotice: '关闭此消息', add: '+ 添加', addAria: '添加任务', refresh: '↻', refreshAria: '重新读取任务',
       emptyCol: '这里暂时还没有内容', noMatch: '没有卡片符合搜索条件。', search: '搜索任务或标签…', searchAria: '搜索待办', clearSearch: '清除搜索', filterTag: '按此标签筛选', prio: { critical: '紧急', high: '高', low: '低' }, updated: '更新于', created: '创建于', linked: '已关联讨论', of: '/',
-      todo: '待办', in_progress: '进行中', done: '已完成',
+      todo: '待办', in_progress: '进行中', done: '已完成', atEnd: '列末尾', beforeCard: '在“%”之前',
       emptyTodo: '没有待办。点击“+ 添加”记下下一件事。', emptyDoing: '没有进行中的任务。把卡片拖到这里或点 ▶。', emptyDone: '最近没有完成的任务。',
       countTodo: '待办', countDoing: '进行中',
       details: '显示详情', hideDetails: '隐藏详情', edit: '编辑标题和描述', top: '移到列首',
@@ -294,6 +294,10 @@
 
   function marker(c) { return '__col_' + c + '__'; }
   function binding(o) { return esc(JSON.stringify(o)); }
+  // What Kronn's card shows for each binding; the bindings stay the row ids it resolves.
+  function titleOf(id) { var r = rows.filter(function (x) { return x.id === id; })[0]; return r && r.title ? r.title : id; }
+  function labels(o) { return ' data-kronn-binding-labels="' + binding(o) + '"'; }
+  function taskBinding(r) { return 'data-kronn-bindings="' + binding({ task: r.id }) + '"' + labels({ task: r.title || r.id }); }
   var rows = [];
   var pending = null;   // a move shown before Kronn saved it: { id, before, column, ... }
   var open = {};        // cards whose details are expanded, by id
@@ -328,7 +332,11 @@
 
   function moveButton(cls, label, aria, task, before, column) {
     return '<button class="' + cls + '" type="button" data-kronn-action="todo-move" data-kronn-bindings="' +
-      binding({ task: task, before: before, column: marker(column) }) + '" aria-label="' + esc(aria) + '" title="' + esc(aria) + '">' + esc(label) + '</button>';
+      binding({ task: task, before: before, column: marker(column) }) + '"' + labels({
+        task: titleOf(task),
+        before: before === marker(column) ? T.atEnd : T.beforeCard.replace('%', function () { return titleOf(before); }),
+        column: T[column]
+      }) + ' aria-label="' + esc(aria) + '" title="' + esc(aria) + '">' + esc(label) + '</button>';
   }
 
   // Accent- and case-insensitive text, for the search.
@@ -384,14 +392,14 @@
         '<button class="btn" type="button" data-cancel>' + esc(T.cancel) + '</button>' +
         (pending.waiting ? '<span class="note">' + esc(T.waiting) + '</span>' : '') + '</div>';
     } else {
-      if (!r.discussion_id) foot += '<button class="btn" type="button" data-kronn-action="todo-discuss" data-kronn-bindings="' + binding({ task: r.id }) + '" title="' + esc(T.discuss) + '" aria-label="' + esc(T.discuss + ' — ' + r.title) + '">💬</button>';
-      foot += '<button class="btn" type="button" data-kronn-action="todo-edit" data-kronn-bindings="' + binding({ task: r.id }) + '" title="' + esc(T.edit) + '" aria-label="' + esc(T.edit + ' — ' + r.title) + '">✎</button>';
+      if (!r.discussion_id) foot += '<button class="btn" type="button" data-kronn-action="todo-discuss" ' + taskBinding(r) + ' title="' + esc(T.discuss) + '" aria-label="' + esc(T.discuss + ' — ' + r.title) + '">💬</button>';
+      foot += '<button class="btn" type="button" data-kronn-action="todo-edit" ' + taskBinding(r) + ' title="' + esc(T.edit) + '" aria-label="' + esc(T.edit + ' — ' + r.title) + '">✎</button>';
       if (c !== 'done' && i > 0) foot += moveButton('btn', '⤒', T.top + ' — ' + r.title, r.id, list[0].id, c);
       if (c === 'todo') foot += moveButton('btn', '▶', T.toDoing + ' — ' + r.title, r.id, marker('in_progress'), 'in_progress');
       if (c === 'in_progress') foot += moveButton('btn', '◀', T.toTodo + ' — ' + r.title, r.id, marker('todo'), 'todo');
       foot += c === 'done'
-        ? '<button class="btn" type="button" data-kronn-action="todo-toggle" data-kronn-bindings="' + binding({ task: r.id }) + '" title="' + esc(T.reopen) + '" aria-label="' + esc(T.reopen + ' — ' + r.title) + '">↺</button>'
-        : '<button class="btn fait" type="button" data-kronn-action="todo-toggle" data-kronn-bindings="' + binding({ task: r.id }) + '" title="' + esc(T.markDone) + '" aria-label="' + esc(T.markDone + ' — ' + r.title) + '">✓</button>';
+        ? '<button class="btn" type="button" data-kronn-action="todo-toggle" ' + taskBinding(r) + ' title="' + esc(T.reopen) + '" aria-label="' + esc(T.reopen + ' — ' + r.title) + '">↺</button>'
+        : '<button class="btn fait" type="button" data-kronn-action="todo-toggle" ' + taskBinding(r) + ' title="' + esc(T.markDone) + '" aria-label="' + esc(T.markDone + ' — ' + r.title) + '">✓</button>';
     }
     return '<li class="carte' + (mine ? ' en-attente' : '') + '" draggable="true" data-id="' + esc(r.id) + '" data-colonne="' + c + '">' +
       '<div class="ligne1"><span class="poignee" aria-hidden="true">⠿</span><span class="titre">' + esc(r.title) + '</span>' + chevron + '</div>' +

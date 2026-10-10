@@ -27,6 +27,7 @@ pub mod docs_sidecar;
 pub mod docs_write_filter;
 pub mod document_optimization;
 pub mod embed_origins;
+pub mod endpoint_reachability;
 pub mod env;
 pub mod execution_variables;
 pub mod export_secrets;

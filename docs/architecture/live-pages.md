@@ -403,6 +403,15 @@ characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `~`, `-`); malformed script types,
 prefixed lookalike attributes and stale proposals removed from the current
 revision fail closed.
 
+A CTA may add `data-kronn-binding-labels`, a JSON map from the same binding
+names to display text (`{"ticket":"Frame the login bug"}`). The card shows it
+in place of the selector, which stays in the tooltip and the resolved values.
+A label is a string of at most 200 characters (UTF-16 code units); a longer,
+blank or non-string label is rejected and the card shows the raw selector
+instead. Labels are display only: the host keeps only those of bindings the
+click carries, never sends them to the server, and they do not enter the trust
+fingerprint.
+
 `dynamic_binding` references may resolve `page.id`, `page.slug`, `page.title`,
 a snapshot field, or a collection row selected with `find(<field>)`. The click
 supplies only the selector; Kronn rereads the current dataset value server-side.

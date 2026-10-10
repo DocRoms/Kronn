@@ -18,6 +18,8 @@ export interface LivePageActiveActionState {
   activation: number;
   actionRef: string;
   bindings: Record<string, string>;
+  /** The Page's display text for its bindings, for the card only. */
+  bindingLabels?: Record<string, string>;
   anchor: LivePageActionAnchor;
   /** What this click turned into once launched or declined — its own launch,
    * never written back over the offer the other buttons still draw from. */

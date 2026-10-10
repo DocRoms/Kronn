@@ -146,6 +146,32 @@ describe('LivePageActionCard', () => {
     ));
   });
 
+  it('names the row with the Page\'s labels, never its raw markers', () => {
+    const bound = (name: string, field: string) => ({
+      name, label: name, placeholder: '', description: null, required: true,
+      allow_manual_override: false, provenance: 'dynamic_binding' as const,
+      source_ref: `<page.dataset.todo.find(id).${field}>`,
+    });
+    render(
+      <LivePageActionCard
+        action={action({ kind: 'workflow', target_name: 'Ma Todo — déplacer', values: [
+          bound('task', 'id'), bound('before', 'id'), bound('column', 'column'),
+        ] })}
+        bindings={{ before: '__col_in_progress__', column: '__col_in_progress__', task: 't-42' }}
+        bindingLabels={{ task: 'Relire le ticket', before: 'En fin de colonne', column: 'En cours' }}
+        onChanged={vi.fn()}
+        onOpenDiscussion={vi.fn()}
+      />,
+    );
+    const row = screen.getByTestId('action-card-row');
+    // In the action's value order, whatever order the click's keys came in.
+    expect(row).toHaveTextContent(/^Relire le ticket · En fin de colonne · En cours$/);
+    expect(row.textContent).not.toContain('__col_');
+    // The selectors stay one hover away, and in the folded list of resolved values.
+    expect(row).toHaveAttribute('title', expect.stringContaining('__col_in_progress__'));
+    expect(screen.getByText(/dynamicBinding.*En cours \(__col_in_progress__\)/)).toBeInTheDocument();
+  });
+
   it('folds Page-resolved values apart from the fields the reader fills', () => {
     render(
       <LivePageActionCard

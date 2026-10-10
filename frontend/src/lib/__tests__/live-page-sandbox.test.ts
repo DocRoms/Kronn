@@ -199,6 +199,63 @@ describe('Live Page sandbox', () => {
     else Reflect.deleteProperty(navigator, 'userActivation');
   });
 
+  it('forwards the Page\'s labels only for the bindings the click carries', async () => {
+    const activationDescriptor = Object.getOwnPropertyDescriptor(navigator, 'userActivation');
+    Object.defineProperty(navigator, 'userActivation', { configurable: true, value: { isActive: true } });
+    const postMessage = vi.fn();
+    const onAction = vi.fn();
+    const relay = createLivePageOpenLinkRelay('channel-1', { openExternal: vi.fn(), onAction });
+    relay.connect({ postMessage } as unknown as Window);
+    const port = (postMessage.mock.calls[0][2] as MessagePort[])[0];
+    const anchor = { left: 0, top: 0, width: 10, height: 10 };
+    port.postMessage({
+      type: 'kronn:page-action', version: 1, channel_id: 'channel-1', action_ref: 'todo-move',
+      bindings: { column: '__col_in_progress__', task: 't-1' },
+      binding_labels: { column: 'En cours', task: '   ', stray: 'Nope', before: 'x'.repeat(201) },
+      anchor,
+    });
+    port.postMessage({
+      type: 'kronn:page-action', version: 1, channel_id: 'channel-1', action_ref: 'todo-move',
+      bindings: { task: 't-2' }, binding_labels: ['forged'], anchor,
+    });
+    await vi.waitFor(() => expect(onAction).toHaveBeenCalledTimes(2));
+    expect(onAction.mock.calls[0][0]).toEqual({
+      actionRef: 'todo-move',
+      bindings: { column: '__col_in_progress__', task: 't-1' },
+      bindingLabels: { column: 'En cours' },
+      anchor,
+    });
+    expect(onAction.mock.calls[1][0]).not.toHaveProperty('bindingLabels');
+    relay.dispose();
+    if (activationDescriptor) Object.defineProperty(navigator, 'userActivation', activationDescriptor);
+    else Reflect.deleteProperty(navigator, 'userActivation');
+  });
+
+  it('sends the clicked element\'s binding labels with its bindings', async () => {
+    const script = buildSandboxDocument('<main></main>', 'chan-labels').match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    const channel = new MessageChannel();
+    // The bridge captures `MessagePort.prototype.postMessage` at load: give it
+    // the class of the port it will receive, not happy-dom's.
+    const domPort = globalThis.MessagePort;
+    globalThis.MessagePort = channel.port2.constructor as typeof MessagePort;
+    try { new Function('window', script!)({}); } finally { globalThis.MessagePort = domPort; }
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'kronn:page-link-port', version: 1, channel_id: 'chan-labels' },
+      ports: [channel.port2],
+    }));
+    const received: unknown[] = [];
+    channel.port1.onmessage = event => { received.push(event.data); };
+    document.body.innerHTML = `<button data-kronn-action="todo-move"
+      data-kronn-bindings='{"task":"t-1","column":"__col_done__"}'
+      data-kronn-binding-labels='{"task":"Ship it","column":"Done","extra":"dropped"}'>go</button>`;
+    document.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    await vi.waitFor(() => expect(received.some(message => (message as { type?: string }).type === 'kronn:page-action')).toBe(true));
+    const message = received.find(entry => (entry as { type?: string }).type === 'kronn:page-action') as Record<string, unknown>;
+    expect(message.bindings).toEqual({ task: 't-1', column: '__col_done__' });
+    expect(message.binding_labels).toEqual({ task: 'Ship it', column: 'Done' });
+    channel.port1.close();
+  });
+
   it('carries the host theme into the document before the Page paints', () => {
     const out = buildSandboxDocument('<html><head></head><body>x</body></html>', 'channel-1', 'light');
     // Avant le markup de la Page : sinon elle peint une frame dans le mauvais theme.

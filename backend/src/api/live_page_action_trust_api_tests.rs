@@ -134,6 +134,14 @@ async fn trusted_claim(state: &AppState, fingerprint: String) -> String {
     )
     .await;
     assert!(approved.success, "{:?}", approved.error);
+    claim_without_approving(state)
+        .await
+        .expect("the trusted claim was refused")
+}
+
+/// Claims one trusted launch of `todo-move` for row T-1 under the approval
+/// already stored, or why it was refused.
+async fn claim_without_approving(state: &AppState) -> Result<String, String> {
     state
         .db
         .with_conn(|conn| {
@@ -151,7 +159,7 @@ async fn trusted_claim(state: &AppState, fingerprint: String) -> String {
             }
         })
         .await
-        .unwrap()
+        .map_err(|error| error.to_string())
 }
 
 async fn admitted_run(
@@ -412,5 +420,84 @@ async fn a_profile_change_between_the_claim_and_the_admission_is_refused() {
         &PROFILE.replace("make lint", "make lint && curl evil"),
     );
     assert!(admitted_run(&state, launch, |_| {}).await.is_err());
+    assert_eq!(run_count(&state).await, 0);
+}
+
+// ─── KT-1100 x KT-1029 — retention is not a revision, a step is ───
+
+/// A human edit of `wf-move` through the workflow API.
+async fn human_edit(state: &AppState, body: serde_json::Value) {
+    let Json(saved) = crate::api::workflows::update_as_labeled(
+        state.clone(),
+        "wf-move".into(),
+        serde_json::from_value(body).unwrap(),
+        crate::api::workflows::WorkflowWriter::Human,
+        None,
+    )
+    .await;
+    assert!(saved.success, "{:?}", saved.error);
+}
+
+/// `wf-move`'s steps with the first one's payload set to `column`.
+async fn steps_with(state: &AppState, column: &str) -> serde_json::Value {
+    let column = column.to_string();
+    let workflow = state
+        .db
+        .with_conn(|conn| {
+            crate::db::workflows::get_workflow(conn, "wf-move")?
+                .ok_or_else(|| anyhow::anyhow!("wf-move is missing"))
+        })
+        .await
+        .unwrap();
+    let mut steps = workflow.steps;
+    steps[0].json_data_payload = Some(serde_json::json!({ "column": column }));
+    serde_json::to_value(steps).unwrap()
+}
+
+/// The seeded action approved once, its workflow saved by a human first.
+async fn approved_by_a_human() -> AppState {
+    let (state, _) = seeded().await;
+    let steps = steps_with(&state, "todo").await;
+    human_edit(&state, serde_json::json!({ "steps": steps })).await;
+    approve_listed(&state).await;
+    state
+}
+
+#[tokio::test]
+async fn a_human_retention_edit_keeps_the_approval_and_the_run_is_admitted() {
+    let state = approved_by_a_human().await;
+    let approval = listed_state(&state).await.trust.unwrap().approval_id;
+    for retention in [
+        serde_json::json!({"success_days": 7, "failure_days": 0}),
+        serde_json::Value::Null,
+    ] {
+        human_edit(&state, serde_json::json!({ "retention": retention })).await;
+        let listed = listed_state(&state).await;
+        assert!(listed.active, "retention {retention} kept the approval");
+        let trust = listed.trust.unwrap();
+        assert_eq!(trust.invalidated_at, None);
+        assert_eq!(trust.approval_id, approval, "never re-approved");
+        let launch = claim_without_approving(&state).await.unwrap();
+        let run = admitted_run(&state, launch, |_| {}).await;
+        assert!(run.is_ok(), "retention {retention}: {run:?}");
+    }
+    assert_eq!(run_count(&state).await, 2);
+}
+
+#[tokio::test]
+async fn a_human_step_edit_invalidates_the_approval_even_once_reverted() {
+    let state = approved_by_a_human().await;
+    let done = steps_with(&state, "done").await;
+    human_edit(&state, serde_json::json!({ "steps": done })).await;
+    let todo = steps_with(&state, "todo").await;
+    human_edit(&state, serde_json::json!({ "steps": todo })).await;
+
+    let listed = listed_state(&state).await;
+    assert!(!listed.active, "the reverted step does not restore it");
+    assert_eq!(
+        listed.trust.unwrap().invalidated_reason,
+        Some(LivePageActionTrustRefusal::Changed)
+    );
+    assert!(claim_without_approving(&state).await.is_err());
     assert_eq!(run_count(&state).await, 0);
 }

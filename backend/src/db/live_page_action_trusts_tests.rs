@@ -854,7 +854,9 @@ fn a_pin_change_never_hides_a_content_or_enabled_change() {
 }
 
 /// Every column but `pinned` and `updated_at` is compared by the write triggers,
-/// so a column added later cannot slip past them unnoticed.
+/// so a column added later cannot slip past them unnoticed. A workflow's
+/// `retention_json` is the one other exclusion (244): it only drives the purge
+/// of finished runs, is human-only and is outside the revision fingerprint.
 #[test]
 fn the_write_triggers_compare_every_content_column() {
     let conn = connection();
@@ -878,7 +880,9 @@ fn the_write_triggers_compare_every_content_column() {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         for column in columns {
-            let exempt = column == "pinned" || column == "updated_at";
+            let exempt = column == "pinned"
+                || column == "updated_at"
+                || (table == "workflows" && column == "retention_json");
             let compared = sql.contains(&format!("OLD.{column} IS NEW.{column}"));
             assert_eq!(compared, !exempt, "{table}.{column} in {trigger}");
         }

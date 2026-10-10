@@ -10057,6 +10057,10 @@ fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
         "endpoint_unreachable" => {
             "The HTTP provider did not answer within the bounded discovery probe."
         }
+        "connectivity_unverified" => {
+            "No recent bounded probe result exists for this HTTP connection; Kronn does not \
+             treat an unprobed address as reachable."
+        }
         "model_not_configured" => {
             "No concrete model resolves for this HTTP provider; configure at least one tier."
         }
@@ -10097,6 +10101,57 @@ struct WorkerPreflight<'a> {
     quota_exhausted: &'a [(AgentType, bool)],
     media_capabilities: &'a [MediaCapabilityEntry],
     tier_verdicts: &'a [(AgentType, crate::models::CatalogTierVerdict)],
+    connection_reachability: &'a [(
+        String,
+        crate::core::endpoint_reachability::EndpointObservation,
+    )],
+}
+
+/// What the catalogue says about a named connection's network. A missing or
+/// expired observation is unverified: the absence of a probe is never success.
+fn connection_connectivity(
+    observation: Option<&crate::core::endpoint_reachability::EndpointObservation>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> crate::models::WorkerConnectivity {
+    use crate::core::endpoint_reachability::{ProbeOutcome, MAX_OBSERVATION_AGE};
+    use crate::models::WorkerConnectivityState as State;
+    let Some(observation) = observation else {
+        return crate::models::WorkerConnectivity {
+            state: State::Unverified,
+            unreachable_reason: None,
+            http_status: None,
+            checked_at: None,
+        };
+    };
+    let checked_at = Some(observation.checked_at.to_rfc3339());
+    let expired = (now - observation.checked_at)
+        .to_std()
+        .is_ok_and(|age| age > MAX_OBSERVATION_AGE);
+    if expired {
+        return crate::models::WorkerConnectivity {
+            state: State::Unverified,
+            unreachable_reason: None,
+            http_status: None,
+            checked_at,
+        };
+    }
+    match observation.outcome {
+        ProbeOutcome::Reachable { http_status } => crate::models::WorkerConnectivity {
+            state: State::Verified,
+            unreachable_reason: None,
+            http_status: Some(http_status),
+            checked_at,
+        },
+        ProbeOutcome::Unreachable {
+            reason,
+            http_status,
+        } => crate::models::WorkerConnectivity {
+            state: State::Unreachable,
+            unreachable_reason: Some(reason.as_str().to_string()),
+            http_status,
+            checked_at,
+        },
+    }
 }
 
 fn build_task_worker_catalogue(
@@ -10126,15 +10181,26 @@ fn build_task_worker_catalogue(
         } else {
             detection.and_then(|item| item.auth_ready).unwrap_or(true)
         };
+        let observed = preflight
+            .http_reachability
+            .iter()
+            .find(|(kind, _)| kind == &agent)
+            .map(|(_, value)| *value);
         let reachable = if http {
-            preflight
-                .http_reachability
-                .iter()
-                .find(|(kind, _)| kind == &agent)
-                .is_some_and(|(_, value)| *value)
+            observed.unwrap_or(false)
         } else {
             runtime_present
         };
+        let connectivity = http.then_some(crate::models::WorkerConnectivity {
+            state: match observed {
+                Some(true) => crate::models::WorkerConnectivityState::Verified,
+                Some(false) => crate::models::WorkerConnectivityState::Unreachable,
+                None => crate::models::WorkerConnectivityState::Unverified,
+            },
+            unreachable_reason: None,
+            http_status: None,
+            checked_at: None,
+        });
         let transport_configured = match agent {
             AgentType::Ollama => runtime_present || reachable,
             AgentType::LiteLlm => {
@@ -10230,6 +10296,7 @@ fn build_task_worker_catalogue(
             media: Vec::new(),
             reasons,
             warnings,
+            connectivity,
         });
     }
 
@@ -10259,6 +10326,7 @@ fn build_task_worker_catalogue(
             media: Vec::new(),
             reasons,
             warnings: Vec::new(),
+            connectivity: None,
         });
     }
 
@@ -10267,15 +10335,15 @@ fn build_task_worker_catalogue(
     // and every surface derived from detection ignored it. A principal could
     // therefore not delegate to a configured OpenRouter at all, and its media
     // models were invisible even though `/api/media/generate` serves them.
+    let now = chrono::Utc::now();
     for connection in connections {
-        let Some(endpoint) = connection
+        if connection
             .endpoint
             .as_ref()
-            .filter(|e| !e.trim().is_empty())
-        else {
+            .is_none_or(|e| e.trim().is_empty())
+        {
             continue;
-        };
-        let _ = endpoint;
+        }
         let mut worker = crate::models::MessageTarget::agent(AgentType::Custom);
         worker.connection_id = Some(connection.id.clone());
         worker.tier = Some(crate::models::ModelTier::Default);
@@ -10334,20 +10402,38 @@ fn build_task_worker_catalogue(
         if !has_text_model && media.is_empty() {
             reasons.push(fixed_worker_reason("model_unconfigured"));
         }
+        let connectivity = connection_connectivity(
+            preflight
+                .connection_reachability
+                .iter()
+                .find(|(id, _)| id == &connection.id)
+                .map(|(_, observation)| observation),
+            now,
+        );
+        let reachable = connectivity.state == crate::models::WorkerConnectivityState::Verified;
+        match connectivity.state {
+            crate::models::WorkerConnectivityState::Verified => {}
+            crate::models::WorkerConnectivityState::Unreachable => {
+                reasons.push(fixed_worker_reason("endpoint_unreachable"));
+            }
+            crate::models::WorkerConnectivityState::Unverified => {
+                reasons.push(fixed_worker_reason("connectivity_unverified"));
+            }
+        }
+        // Listed whatever the network says, so its id and media slots stay
+        // discoverable; only `available` depends on the probe.
         workers.push(crate::models::TaskWorkerCatalogueEntry {
             worker,
             label: connection.display_name.clone(),
             declared_model: None,
             configured: true,
-            // Same meaning as for a native CLI: an address exists and Kronn can
-            // dispatch to it. It is not a claim that it answered — no probe is
-            // run per connection here.
-            reachable: true,
-            available: reasons.is_empty(),
+            reachable,
+            available: reachable && reasons.is_empty(),
             tiers,
             media,
             reasons,
             warnings: Vec::new(),
+            connectivity: Some(connectivity),
         });
     }
 
@@ -10400,6 +10486,31 @@ async fn bounded_http_worker_reachability(state: &AppState) -> Vec<(AgentType, b
         ),
         (AgentType::Nvidia, nvidia.is_ok_and(|probe| probe.is_ok())),
     ]
+}
+
+/// One transport probe per named connection, all at once, each bounded and
+/// served from the shared short-lived cache when warm.
+async fn bounded_connection_reachability(
+    connections: &[crate::models::ExternalApiConnection],
+) -> Vec<(
+    String,
+    crate::core::endpoint_reachability::EndpointObservation,
+)> {
+    use crate::core::endpoint_reachability::{DEFAULT_BUDGET, SHARED};
+    futures::future::join_all(connections.iter().filter_map(|connection| {
+        let endpoint = connection
+            .endpoint
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())?;
+        Some(async move {
+            (
+                connection.id.clone(),
+                SHARED.observe(endpoint, DEFAULT_BUDGET).await,
+            )
+        })
+    }))
+    .await
 }
 
 async fn bounded_cli_worker_preflight(
@@ -10586,10 +10697,14 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     let mut detections = crate::agents::detect_all_cached(false).await;
     let config = state.config.read().await.clone();
     crate::agents::apply_configured_status(&mut detections, &config);
-    let reachability = bounded_http_worker_reachability(state).await;
+    // The network reads share one window rather than adding up.
+    let (reachability, connection_reachability, media_capabilities) = tokio::join!(
+        bounded_http_worker_reachability(state),
+        bounded_connection_reachability(&connections),
+        bounded_media_capabilities(state, &connections),
+    );
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
     let quota_state = bounded_provider_quota_state(state).await;
-    let media_capabilities = bounded_media_capabilities(state, &connections).await;
     let tier_verdicts = bounded_tier_verdicts(&state.db, &config.agents.model_tiers).await;
     Ok(build_task_worker_catalogue(
         &config,
@@ -10602,6 +10717,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
             quota_exhausted: &quota_state,
             media_capabilities: &media_capabilities,
             tier_verdicts: &tier_verdicts,
+            connection_reachability: &connection_reachability,
         },
     ))
 }
@@ -13161,12 +13277,216 @@ pub(crate) mod tests {
         )
     }
 
+    fn observed(
+        outcome: crate::core::endpoint_reachability::ProbeOutcome,
+        age: chrono::Duration,
+    ) -> Vec<(
+        String,
+        crate::core::endpoint_reachability::EndpointObservation,
+    )> {
+        vec![(
+            "conn-or".to_string(),
+            crate::core::endpoint_reachability::EndpointObservation {
+                outcome,
+                checked_at: chrono::Utc::now() - age,
+            },
+        )]
+    }
+
+    fn catalogue_observing(
+        connections: &[crate::models::ExternalApiConnection],
+        connection_reachability: &[(
+            String,
+            crate::core::endpoint_reachability::EndpointObservation,
+        )],
+        http_reachability: &[(AgentType, bool)],
+    ) -> crate::models::TaskWorkerCatalogue {
+        build_task_worker_catalogue(
+            &crate::core::config::default_config(),
+            &[],
+            &[],
+            connections,
+            &WorkerPreflight {
+                connection_reachability,
+                http_reachability,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn connection_entry(
+        catalogue: &crate::models::TaskWorkerCatalogue,
+    ) -> &crate::models::TaskWorkerCatalogueEntry {
+        catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.connection_id.as_deref() == Some("conn-or"))
+            .expect("the configured connection must stay listed")
+    }
+
+    fn reason_codes(entry: &crate::models::TaskWorkerCatalogueEntry) -> Vec<&str> {
+        entry.reasons.iter().map(|r| r.code.as_str()).collect()
+    }
+
+    /// KT-697: an address that does not resolve was reported reachable and
+    /// available, while the legacy family on the same address said
+    /// `endpoint_unreachable`. Both now say the same thing.
+    #[test]
+    fn a_named_connection_failing_dns_is_unreachable_like_the_legacy_family() {
+        use crate::core::endpoint_reachability::{ProbeOutcome, UnreachableReason};
+        let catalogue = catalogue_observing(
+            &[media_connection(None, Some("google/veo-3.1-lite"))],
+            &observed(
+                ProbeOutcome::Unreachable {
+                    reason: UnreachableReason::Dns,
+                    http_status: None,
+                },
+                chrono::Duration::zero(),
+            ),
+            &[(AgentType::LiteLlm, false)],
+        );
+        let entry = connection_entry(&catalogue);
+        assert!(entry.configured);
+        assert!(!entry.reachable, "{entry:#?}");
+        assert!(!entry.available, "{entry:#?}");
+        assert!(reason_codes(entry).contains(&"endpoint_unreachable"));
+        let connectivity = entry.connectivity.as_ref().unwrap();
+        assert_eq!(
+            connectivity.state,
+            crate::models::WorkerConnectivityState::Unreachable
+        );
+        assert_eq!(connectivity.unreachable_reason.as_deref(), Some("dns"));
+        assert!(
+            !entry.media.is_empty(),
+            "the media slot stays discoverable while the network is down"
+        );
+
+        let legacy = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.agent_type == AgentType::LiteLlm)
+            .unwrap();
+        assert_eq!(legacy.reachable, entry.reachable);
+        assert!(reason_codes(legacy).contains(&"endpoint_unreachable"));
+        assert_eq!(
+            legacy.connectivity.as_ref().unwrap().state,
+            crate::models::WorkerConnectivityState::Unreachable
+        );
+    }
+
+    #[test]
+    fn a_named_connection_is_reachable_only_on_a_fresh_verified_probe() {
+        use crate::core::endpoint_reachability::ProbeOutcome;
+        let reachable = ProbeOutcome::Reachable { http_status: 401 };
+        let fresh = catalogue_observing(
+            &[media_connection(None, None)],
+            &observed(reachable, chrono::Duration::zero()),
+            &[],
+        );
+        let entry = connection_entry(&fresh);
+        assert!(entry.reachable && entry.available, "{entry:#?}");
+        let connectivity = entry.connectivity.as_ref().unwrap();
+        assert_eq!(
+            connectivity.state,
+            crate::models::WorkerConnectivityState::Verified
+        );
+        assert!(connectivity.checked_at.is_some());
+
+        // Unknown: no probe ran. Never presented as connectivity.
+        let unknown = catalogue_observing(&[media_connection(None, None)], &[], &[]);
+        let entry = connection_entry(&unknown);
+        assert!(!entry.reachable && !entry.available, "{entry:#?}");
+        assert_eq!(reason_codes(entry), vec!["connectivity_unverified"]);
+        assert_eq!(
+            entry.connectivity.as_ref().unwrap().state,
+            crate::models::WorkerConnectivityState::Unverified
+        );
+
+        // Stale: a success older than the freshness bound vouches for nothing.
+        let stale = catalogue_observing(
+            &[media_connection(None, None)],
+            &observed(reachable, chrono::Duration::minutes(10)),
+            &[],
+        );
+        let entry = connection_entry(&stale);
+        assert!(!entry.reachable, "{entry:#?}");
+        let connectivity = entry.connectivity.as_ref().unwrap();
+        assert_eq!(
+            connectivity.state,
+            crate::models::WorkerConnectivityState::Unverified
+        );
+        assert!(connectivity.checked_at.is_some(), "the age stays visible");
+    }
+
+    /// End to end through the real probe: a stub that answers, an address
+    /// that does not resolve carrying a credential, and a recovery.
+    #[tokio::test]
+    async fn the_catalogue_reads_real_probes_without_leaking_the_address() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+            }
+        });
+        let mut up = media_connection(None, None);
+        up.endpoint = Some(format!("http://{address}"));
+        let mut down = media_connection(None, None);
+        down.id = "conn-down".into();
+        down.endpoint = Some("https://romu:sk-kt697-secret@kt697-no-such-host.invalid/api".into());
+
+        let started = std::time::Instant::now();
+        let observations = bounded_connection_reachability(&[up.clone(), down.clone()]).await;
+        server.abort();
+        assert!(started.elapsed() < std::time::Duration::from_secs(8));
+        let catalogue = catalogue_observing(&[up, down], &observations, &[]);
+
+        let up = connection_entry(&catalogue);
+        assert!(up.reachable && up.available, "{up:#?}");
+        let down = catalogue
+            .workers
+            .iter()
+            .find(|entry| entry.worker.connection_id.as_deref() == Some("conn-down"))
+            .unwrap();
+        assert!(!down.reachable && !down.available, "{down:#?}");
+        assert_eq!(
+            down.connectivity
+                .as_ref()
+                .unwrap()
+                .unreachable_reason
+                .as_deref(),
+            Some("dns")
+        );
+
+        let wire = serde_json::to_string(&catalogue).unwrap();
+        for secret in [
+            "sk-kt697-secret",
+            "romu",
+            "kt697-no-such-host",
+            &address.to_string(),
+        ] {
+            assert!(!wire.contains(secret), "{secret} leaked: {wire}");
+        }
+    }
+
     #[test]
     fn an_external_connection_is_a_worker_of_the_catalogue() {
         // Regression: `Custom` has no local binary, so detection produced
         // nothing for it and a configured OpenRouter was absent from the
         // catalogue entirely — impossible to delegate to.
-        let catalogue = catalogue_with(&[media_connection(None, None)]);
+        let catalogue = catalogue_observing(
+            &[media_connection(None, None)],
+            &observed(
+                crate::core::endpoint_reachability::ProbeOutcome::Reachable { http_status: 200 },
+                chrono::Duration::zero(),
+            ),
+            &[],
+        );
         let entry = catalogue
             .workers
             .iter()
@@ -13238,6 +13558,15 @@ pub(crate) mod tests {
             }),
             "its video slot is what media_generate needs: {:?}",
             entry.media
+        );
+        // KT-697: the route runs the probe; a closed port is not reachable.
+        assert!(!entry.reachable, "{entry:#?}");
+        assert_eq!(
+            entry
+                .connectivity
+                .as_ref()
+                .and_then(|c| c.unreachable_reason.as_deref()),
+            Some("refused")
         );
 
         let Json(missing) = read("disc-gone").await;

@@ -430,7 +430,8 @@ pub fn seed_resource_snapshots_as(conn: &Connection, run_id: &str, key: &str) ->
 /// The one revision identity of a workflow and everything it executes: its
 /// steps plus the transitive Quick Prompts, Quick APIs, sub-workflows, skills,
 /// directives and profiles. Any change to one of them changes the
-/// fingerprint; enabling, pinning and timestamps do not. An approval tied to
+/// fingerprint; enabling, pinning, timestamps and a workflow's run retention
+/// do not. An approval tied to
 /// this value (a run's pin, a Live Page action) must not outlive it.
 ///
 /// It does not cover the repository profiles (`kronn/project.toml`) the run
@@ -464,10 +465,10 @@ pub fn revision_fingerprint_with_profiles(
 /// Hashes exactly the closure `deps` materialised, never a second read.
 fn fingerprint_of(workflow: &Workflow, deps: &Deps, profiles: &ProfileSnapshots) -> Result<String> {
     let mut identity = serde_json::json!({
-        "workflow": revision_content(workflow)?,
+        "workflow": workflow_revision_content(workflow)?,
         "quick_prompts": deps.prompts.values().map(revision_content).collect::<Result<Vec<_>>>()?,
         "quick_apis": deps.apis.values().map(revision_content).collect::<Result<Vec<_>>>()?,
-        "workflows": deps.workflows.values().map(revision_content).collect::<Result<Vec<_>>>()?,
+        "workflows": deps.workflows.values().map(workflow_revision_content).collect::<Result<Vec<_>>>()?,
         "resolutions": deps.resolutions,
         "skills": deps.skills.values().collect::<Vec<_>>(),
         "directives": deps.directives.values().collect::<Vec<_>>(),
@@ -492,6 +493,16 @@ fn revision_content<T: Serialize>(resource: &T) -> Result<serde_json::Value> {
         for key in ["enabled", "pinned", "created_at", "updated_at"] {
             object.remove(key);
         }
+    }
+    Ok(value)
+}
+
+/// A workflow's revision also leaves out its run retention (KT-1100): it only
+/// decides when finished runs are purged, never what a run executes.
+fn workflow_revision_content(workflow: &Workflow) -> Result<serde_json::Value> {
+    let mut value = revision_content(workflow)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("retention");
     }
     Ok(value)
 }
@@ -1403,6 +1414,40 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    /// KT-1100 x KT-1029: retention, on the workflow or a sub-workflow, is
+    /// not part of the revision; a step still is.
+    #[tokio::test]
+    async fn the_fingerprint_leaves_out_retention_but_not_steps() {
+        let db = seeded().await;
+        let (plain, retained, child_retained, stepped) = db
+            .with_conn(|conn| {
+                let parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+                let plain = revision_fingerprint(conn, &parent, None)?;
+                let mut retained = parent.clone();
+                retained.retention = Some(crate::models::WorkflowRetention {
+                    success_days: Some(7),
+                    ..Default::default()
+                });
+                let retained = revision_fingerprint(conn, &retained, None)?;
+                let mut child = crate::db::workflows::get_workflow(conn, "child")?.unwrap();
+                child.retention = Some(crate::models::WorkflowRetention {
+                    failure_days: Some(0),
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(conn, &child)?;
+                let child_retained = revision_fingerprint(conn, &parent, None)?;
+                let mut stepped = parent.clone();
+                stepped.steps[0].name = "renamed".into();
+                let stepped = revision_fingerprint(conn, &stepped, None)?;
+                Ok((plain, retained, child_retained, stepped))
+            })
+            .await
+            .unwrap();
+        assert_eq!(retained, plain, "the workflow's retention");
+        assert_eq!(child_retained, plain, "a sub-workflow's retention");
+        assert_ne!(stepped, plain, "a step");
     }
 
     #[tokio::test]

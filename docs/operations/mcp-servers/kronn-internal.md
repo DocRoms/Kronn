@@ -550,6 +550,15 @@ keys, endpoints and hostnames are not returned. For Ollama, this discovery does
 not assert that the exact resolved tag is already pulled; a missing tag remains
 a separate, explicit `/api/chat` launch failure.
 
+HTTP entries also carry `connectivity` (KT-697): `verified` when a bounded
+probe answered, `unreachable` with an `unreachable_reason` (`dns`, `refused`,
+`timeout`, `tls`, `http_status`, `invalid_endpoint`, `connect`), or
+`unverified` when no probe result exists or the last one is older than 60 s.
+`reachable` is true only when verified. Named connections are probed with an
+unauthenticated `GET /v1/models` (3 s bound, in parallel, cached 30 s); one that
+is not verified stays listed with its media slots but is not `available`.
+[src: file: backend/src/core/endpoint_reachability.rs]
+
 The stdio bridge fingerprints the script contents it loaded. Every orchestration
 mutation, including principal review/cancel and worker commit/delivery, passes a
 central freshness guard before any HTTP request; recovery status reads remain
