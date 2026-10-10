@@ -43,6 +43,9 @@ mod signal_bench;
 #[path = "agent_workflow_tools.rs"]
 mod workflow_tools;
 
+#[path = "agent_page_tools.rs"]
+mod page_tools;
+
 pub struct KronnToolExecutor {
     state: AppState,
     /// Scopes `api_call` to the calling conversation when there is one, so the
@@ -320,6 +323,11 @@ fn fail(call: &ToolCall, message: impl Into<String>) -> ToolOutcome {
 /// remain available for the run. Quick Prompt batch launch and deletion are omitted
 /// to prevent unbounded fan-out and removal of saved run history.
 pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
+    (
+        "pages",
+        "find, create and update shared live Pages for workflow data: `page_list`, `page_get`, `page_create`, `page_update_html`, `page_add_dataset`",
+        &["page_list", "page_get", "page_create", "page_update_html", "page_add_dataset"],
+    ),
     (
         "media",
         "make an image or a video: `media_generate`, `media_job_status` (the connection comes from `agent_list`, in the core)",
@@ -951,6 +959,7 @@ pub fn tool_catalogue() -> Vec<Value> {
         }),
     ];
     catalogue.extend(workflow_tools::declarations());
+    catalogue.extend(page_tools::declarations());
     catalogue
 }
 
@@ -1332,7 +1341,19 @@ fn workflow_workspace_tool_catalogue() -> Vec<Value> {
 }
 
 fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
-    const WORKFLOW_TOOLS: &[&str] = &["mcp_list", "api_endpoints", "qa_list", "qa_run", "api_call"];
+    const WORKFLOW_TOOLS: &[&str] = &[
+        "mcp_list",
+        "api_endpoints",
+        "qa_list",
+        "qa_run",
+        "api_call",
+        "tool_manual",
+        "page_list",
+        "page_get",
+        "page_create",
+        "page_update_html",
+        "page_add_dataset",
+    ];
     tool_catalogue()
         .into_iter()
         .filter(|tool| {
@@ -1651,6 +1672,9 @@ impl ToolExecutor for KronnToolExecutor {
                 }
             }
             "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "page_list" | "page_get" | "page_create" | "page_update_html" | "page_add_dataset" => {
+                self.execute_page_tool(call).await
+            }
             "workflow_list"
             | "workflow_get"
             | "workflow_step_schema"
@@ -4009,6 +4033,8 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 /// about to author something pays for it.
 fn tool_manual(name: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
+        ("page_create", page_tools::CREATE_MANUAL),
+        ("page_update_html", page_tools::UPDATE_MANUAL),
         (
             "workflow_create_draft",
             "Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
@@ -5182,6 +5208,16 @@ mod tests {
             "workflow_update",
         ];
         let items = tool_catalogue();
+        let expected = expected
+            .into_iter()
+            .chain([
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
+            ])
+            .collect::<Vec<_>>();
         assert_eq!(items.len(), expected.len());
         for (item, name) in items.iter().zip(expected) {
             assert_eq!(item["type"], "function");
@@ -5210,24 +5246,51 @@ mod tests {
                 "api_endpoints",
                 "qa_list",
                 "qa_run",
+                "tool_manual",
                 "api_call",
                 "task_list",
-                "task_get"
+                "task_get",
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
             ]
         );
-        assert!(!names.iter().any(|name| {
-            name.contains("create")
-                || name.contains("update")
-                || name.contains("remove")
-                || name.contains("link")
-        }));
         let projectless_names: Vec<String> = workflow_tool_catalogue(false)
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
-        assert!(!projectless_names
-            .iter()
-            .any(|name| name.starts_with("task_")));
+        assert_eq!(
+            projectless_names,
+            vec![
+                "mcp_list",
+                "api_endpoints",
+                "qa_list",
+                "qa_run",
+                "tool_manual",
+                "api_call",
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
+            ]
+        );
+        for name in names
+            .into_iter()
+            .chain(projectless_names.iter().map(String::as_str))
+        {
+            if ["create", "update", "remove", "link"]
+                .iter()
+                .any(|verb| name.contains(verb))
+            {
+                assert!(
+                    ["page_create", "page_update_html", "page_add_dataset"].contains(&name),
+                    "unexpected workflow mutation: {name}"
+                );
+            }
+        }
     }
 
     #[test]

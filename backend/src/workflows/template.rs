@@ -165,6 +165,8 @@ impl TemplateContext {
             "role": attempt.role,
             "retained": selected.is_some(),
             "format_fallback": attempt.format_fallback,
+            "npx_fallback_command": attempt.npx_fallback_command,
+            "npx_fallback_version": attempt.npx_fallback_version,
             "attempts": provenance.attempts.len(),
         })
         .to_string();
@@ -1611,6 +1613,8 @@ mod tests {
             model_applied: None,
             observed_models: vec![],
             format_fallback: false,
+            npx_fallback_command: None,
+            npx_fallback_version: None,
             started_at: chrono::Utc::now(),
             duration_ms: 1,
             succeeded: true,
@@ -1620,6 +1624,41 @@ mod tests {
             cost_usd: None,
             cost_unknown_reason: None,
         }
+    }
+
+    #[test]
+    fn npx_fallback_provenance_roundtrips_without_changing_step_output() {
+        use crate::models::{AgentType, WorkflowAgentAttemptRole as Role, WorkflowAgentProvenance};
+        let command = vec![
+            "/tools with spaces/npx".to_owned(),
+            "--yes".into(),
+            "@openai/codex".into(),
+        ];
+        let mut launch = attempt(1, Role::Initial, AgentType::Codex, None);
+        launch.npx_fallback_command = Some(command.clone());
+        launch.npx_fallback_version = Some("0.154.0".into());
+        let provenance = WorkflowAgentProvenance {
+            attempts: vec![launch],
+            selected_attempt: Some(1),
+        };
+        let mut serialized = serde_json::to_value(&provenance).unwrap();
+        let restored: WorkflowAgentProvenance = serde_json::from_value(serialized.clone()).unwrap();
+        let output = r#"{"data":{"ok":true},"status":"OK"}"#;
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("draft", output);
+        ctx.set_step_provenance("draft", Some(&restored));
+        assert_eq!(ctx.render("{{steps.draft.output}}").unwrap(), output);
+        assert_eq!(ctx.resolve_value("steps.draft.data.ok").unwrap(), true);
+        let recorded = ctx.resolve_value("steps.draft.provenance").unwrap();
+        assert_eq!(recorded["npx_fallback_command"], serde_json::json!(command));
+        assert_eq!(recorded["npx_fallback_version"], "0.154.0");
+
+        let old_attempt = serialized["attempts"][0].as_object_mut().unwrap();
+        old_attempt.remove("npx_fallback_command");
+        old_attempt.remove("npx_fallback_version");
+        let legacy: WorkflowAgentProvenance = serde_json::from_value(serialized).unwrap();
+        assert!(legacy.attempts[0].npx_fallback_command.is_none());
+        assert!(legacy.attempts[0].npx_fallback_version.is_none());
     }
 
     #[test]

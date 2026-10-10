@@ -1655,6 +1655,14 @@ pub struct WorkflowAgentAttempt {
     /// Empty means unreported; never inferred from generated prose or config.
     pub observed_models: Vec<String>,
     pub format_fallback: bool,
+    /// Resolved npx executable and package arguments when direct CLI launch failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub npx_fallback_command: Option<Vec<String>>,
+    /// Last successful version probe for that command in the run's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub npx_fallback_version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub duration_ms: u64,
     pub succeeded: bool,

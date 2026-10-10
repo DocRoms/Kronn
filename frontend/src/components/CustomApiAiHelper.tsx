@@ -7,7 +7,7 @@
 //
 // TD-helpers-unify: ApiCallAiHelper and CustomApiAiHelper share ~60% of
 // their lifecycle code (phases, streaming, agent dropdown, welcome
-// state, KRONN:APPLY parsing). A future refactor should extract a
+// state). The KRONN:APPLY parser is already shared. A future refactor should extract a
 // shared `<AiChatHelperShell>` that both consume via injected
 // buildSystemPrompt / buildContext / onApply slots.
 
@@ -20,7 +20,8 @@ import { discussions as discussionsApi } from '../lib/api';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../lib/i18n';
 import type { AgentType, CustomApiPayload } from '../types/generated';
-import { parseApplyBlocks } from './workflows/apiCallAiHelperUtils';
+import { parseKronnApply } from '../lib/kronnApply';
+import { KronnApplyNotice } from './KronnApplyNotice';
 import {
   applyToCustomForm,
   buildContextBlock,
@@ -396,8 +397,11 @@ export function CustomApiAiHelper({
               <ChatMessageView
                 key={idx}
                 msg={msg}
+                streaming={streaming && idx === messages.length - 1}
                 appliedSignatures={appliedSignatures}
                 onApply={handleApply}
+                onRetry={() => void sendMessage(t('aiHelper.apply.retryPrompt'))}
+                retryDisabled={streaming || !discussionId}
                 t={t}
               />
             ))}
@@ -472,22 +476,24 @@ export function CustomApiAiHelper({
 }
 
 // ─── Sub-components (mirrored from ApiCallAiHelper, kept local to avoid
-// a fragile cross-component dependency). The shared parser primitive
-// `parseApplyBlocks` IS imported from ApiCallAiHelper since it's already
-// exported and represents the KRONN:APPLY wire contract. ────────────────
+// a fragile cross-component dependency). The KRONN:APPLY parser is shared
+// through lib/kronnApply. ────────────────────────────────────────────────
 
 interface ChatMessageViewProps {
   msg: ChatMessage;
+  /** True while this message is still being streamed: a partial block is not yet an error. */
+  streaming: boolean;
   appliedSignatures: Set<string>;
   onApply: (sig: string, parsed: Record<string, unknown>) => void;
+  onRetry: () => void;
+  retryDisabled: boolean;
   t: Translator;
 }
 
-const KRONN_APPLY_RX = /KRONN:APPLY\s*```json\s*([\s\S]*?)```/g;
-
-function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageViewProps) {
-  const blocks = msg.role === 'assistant' ? parseApplyBlocks(msg.text) : [];
-  const prose = msg.role === 'assistant' ? msg.text.replace(KRONN_APPLY_RX, '').trim() : msg.text;
+function ChatMessageView({ msg, streaming, appliedSignatures, onApply, onRetry, retryDisabled, t }: ChatMessageViewProps) {
+  const { blocks, prose, unreadable } = msg.role === 'assistant'
+    ? parseKronnApply(msg.text)
+    : { blocks: [], prose: msg.text, unreadable: null };
 
   return (
     <div className={`wf-apicall-ai-msg wf-apicall-ai-msg-${msg.role}`}>
@@ -501,6 +507,9 @@ function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageView
           t={t}
         />
       ))}
+      {unreadable !== null && !streaming && (
+        <KronnApplyNotice raw={unreadable} onRetry={onRetry} retryDisabled={retryDisabled} t={t} />
+      )}
     </div>
   );
 }

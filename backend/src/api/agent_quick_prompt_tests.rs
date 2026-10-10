@@ -691,3 +691,84 @@ async fn qp_run_estimates_count_only_the_principal_s_project() {
             .await;
     assert_eq!(human.data.expect("a human launch").samples, 3);
 }
+
+/// The saved effort reaches launch, where a case mismatch is refused with the
+/// catalogue's spelling rather than the generic "absent" reason.
+#[tokio::test]
+#[serial_test::serial(model_catalog_reasoning_modes)]
+async fn quick_prompt_native_run_names_a_mistyped_case_override_at_launch() {
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+
+    let state = state_with_prompts().await;
+    let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+    state
+        .db
+        .with_conn({
+            let target = target.clone();
+            move |conn| {
+                crate::db::model_catalog::create_manual(
+                    conn,
+                    &crate::models::UpsertManualModelRequest {
+                        runtime_target_id: target.clone(),
+                        agent_type: AgentType::ClaudeCode,
+                        model_id: "saved-model".into(),
+                        display_name: "Saved model".into(),
+                        capabilities: vec!["chat".into()],
+                        reasoning_modes: vec!["high".into()],
+                        default_reasoning_mode: Some("high".into()),
+                        tier_assignment: None,
+                        cost_hint: None,
+                        privacy_note: None,
+                    },
+                )?;
+                // A fresh, non-blocking refresh log so the launch preflight
+                // reuses this fixture instead of spawning a real CLI discovery.
+                crate::db::model_catalog::record_refresh_failure(
+                    conn,
+                    &target,
+                    &AgentType::ClaudeCode,
+                    crate::models::ModelUnavailableReason::Unsupported,
+                    "test fixture",
+                )?;
+                let mut qp = crate::db::quick_prompts::get_quick_prompt(conn, "global")?
+                    .context("saved Quick Prompt")?;
+                qp.agent = AgentType::ClaudeCode;
+                qp.connection_id = None;
+                let settings = qp.agent_settings.as_mut().context("saved agent settings")?;
+                settings.reasoning_effort = Some("High".into());
+                settings.max_tokens = None;
+                crate::db::quick_prompts::update_quick_prompt(conn, &qp)
+            }
+        })
+        .await
+        .unwrap();
+    crate::core::model_catalog::refresh_runtime_cache(&state.db)
+        .await
+        .unwrap();
+
+    let executor = KronnToolExecutor::new(state.clone(), Some("general".into()));
+    let run = call(
+        &executor,
+        "qp_run",
+        json!({"qp_id":"global","vars":{"topic":"fixture"}}),
+    )
+    .await;
+    assert!(run.ok, "{}", run.content);
+    let child = run.content["disc_id"].as_str().unwrap().to_string();
+
+    let stream = crate::api::discussions::streaming::make_agent_stream(state, child, None).await;
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.into_response().into_body().collect(),
+    )
+    .await
+    .expect("bounded fixture completion")
+    .unwrap()
+    .to_bytes();
+    let events = String::from_utf8_lossy(&body);
+    assert!(
+        events.contains("the catalogue lists 'high', not 'High'"),
+        "the refusal must name the actual mismatch, not the generic catalogue-absence reason: {events}"
+    );
+}

@@ -17,6 +17,7 @@ const detail: LivePageDetail = {
     current: { total: 1240 }, schema: null, max_points: 50_000, max_age_days: null,
     updated_at: page.updated_at, points: [], data_size_bytes: 1536,
   }],
+  slug_aliases: [],
 };
 const publications: LivePagePublication[] = [3, 2, 1].map(dataRevision => ({
   id: `publication-${dataRevision}`,

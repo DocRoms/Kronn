@@ -1799,6 +1799,7 @@ fn imported_artifact(
             &page_id,
             &UpdateLivePageRequest {
                 title: Some(exported.title.clone()),
+                slug: None,
                 pinned: None,
                 archived: Some(false),
             },

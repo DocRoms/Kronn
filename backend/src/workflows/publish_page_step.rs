@@ -298,6 +298,8 @@ mod tests {
                     model_applied: None,
                     observed_models: vec![],
                     format_fallback: false,
+                    npx_fallback_command: None,
+                    npx_fallback_version: None,
                     started_at: chrono::Utc::now(),
                     duration_ms: 1,
                     succeeded: true,

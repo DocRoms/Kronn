@@ -14,6 +14,7 @@ use crate::models::{
 use crate::AppState;
 
 const MAX_PAGE_HTML_BYTES: usize = 1_000_000;
+const INVALID_SLUG_MESSAGE: &str = "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id";
 
 pub async fn capability(
     State(state): State<AppState>,
@@ -179,6 +180,16 @@ pub async fn update(
             }
         };
     }
+    if let Some(slug) = request.slug.take() {
+        let slug = slug.trim().to_string();
+        if !valid_slug(&slug) {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                INVALID_SLUG_MESSAGE,
+            ));
+        }
+        request.slug = Some(slug);
+    }
     match state
         .db
         .with_conn(move |conn| crate::db::live_pages::update_live_page(conn, &id, &request))
@@ -189,6 +200,15 @@ pub async fn update(
             ApiErrorCode::NotFound,
             "Page not found",
         )),
+        Err(error)
+            if error.is::<crate::db::live_pages::SlugUnavailable>()
+                || error.to_string().contains("live_pages.slug") =>
+        {
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                crate::db::live_pages::SlugUnavailable.to_string(),
+            ))
+        }
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("Unable to update Page: {error}"),
@@ -353,7 +373,7 @@ pub async fn create(
     if !valid_slug(&slug) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
-            "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id",
+            INVALID_SLUG_MESSAGE,
         ));
     }
 
@@ -401,8 +421,7 @@ pub async fn create(
                 // Promoting another preview with the same title creates a new
                 // Artifact. Ordinary explicit-slug creation keeps its conflict contract.
                 let base = page_for_insert.slug.clone();
-                while tx.query_row("SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)",
-                    [&page_for_insert.slug], |row| row.get::<_, bool>(0))? {
+                while crate::db::live_pages::slug_is_taken(&tx, &page_for_insert.slug)? {
                     page_for_insert.slug = format!("{}-{}", base.chars().take(80).collect::<String>().trim_end_matches('-'), Uuid::new_v4().simple());
                 }
                 if page_for_insert.project_id.is_none() {
@@ -429,7 +448,9 @@ pub async fn create(
         let message = error.to_string();
         // Slugs are unique across projects: a token learns only that this one
         // is taken, never where.
-        if bridge.is_some() && message.contains("live_pages.slug") {
+        if error.is::<crate::db::live_pages::SlugUnavailable>()
+            || (bridge.is_some() && message.contains("live_pages.slug"))
+        {
             return Json(ApiResponse::err_coded(
                 ApiErrorCode::Conflict,
                 "This Page slug is not available; choose another",

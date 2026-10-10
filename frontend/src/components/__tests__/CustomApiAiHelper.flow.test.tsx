@@ -40,6 +40,7 @@ import { CustomApiAiHelper } from '../CustomApiAiHelper';
 import type { CustomApiAiHelperProps } from '../CustomApiAiHelper';
 import type { AgentType } from '../../types/generated';
 import { __setLocaleLoadersForTests, loadLocale } from '../../lib/i18n';
+import realApplyMessage from '../../lib/__tests__/fixtures/kronn-apply-4b62875d.txt?raw';
 
 const t: CustomApiAiHelperProps['t'] = (key, ...args) =>
   args.length === 0 ? key : `${key}(${args.join(',')})`;
@@ -195,6 +196,86 @@ describe('CustomApiAiHelper — send message', () => {
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /mcp.custom.helper.applied/ })).toBeTruthy(),
     );
+  });
+
+  it('turns the real marker-in-its-own-fence reply (4b62875d) into an Apply card that fills the form', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
+      onChunk(realApplyMessage);
+      onDone();
+      return Promise.resolve();
+    });
+    const { onApply } = await openChat();
+    const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'Insider Eureka' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    fireEvent.click(await screen.findByRole('button', { name: /mcp.custom.helper.apply$/ }));
+    expect(onApply).toHaveBeenCalledTimes(1);
+    expect(onApply.mock.calls[0][0]).toMatchObject({
+      name: 'Insider Eureka Search',
+      base_url: 'https://ineureka.api.useinsider.com',
+      docs_url: 'https://academy.insiderone.com/docs/eureka-search-api',
+    });
+    expect(screen.queryByText(/aiHelper.apply.unreadable/)).toBeNull();
+  });
+
+  it('shows an unreadable-proposal notice with Retry and raw JSON when no block parses', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
+      onChunk('Voici :\nKRONN:APPLY\n```json\n{ "name": "Broken", }\n```');
+      onDone();
+      return Promise.resolve();
+    });
+    await openChat();
+    const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'help' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    await screen.findByText(/aiHelper.apply.unreadable/);
+    expect(screen.queryByRole('button', { name: /mcp.custom.helper.apply$/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /aiHelper.apply.showRaw/ }));
+    expect(screen.getByText('{ "name": "Broken", }')).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.apply.retry$/ }));
+    });
+    await waitFor(() => expect(streamMock).toHaveBeenCalledTimes(2));
+    expect(streamMock.mock.calls[1][1].content).toContain('aiHelper.apply.retryPrompt');
+  });
+
+  it('shows the card and the notice together when one block of two is broken', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk, onDone) => {
+      onChunk('KRONN:APPLY\n```json\n{ "name": "Ok" }\n```\nKRONN:APPLY\n```json\n{ "name": "Broken", }\n```');
+      onDone();
+      return Promise.resolve();
+    });
+    await openChat();
+    const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'help' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    await screen.findByRole('button', { name: /mcp.custom.helper.apply$/ });
+    expect(screen.getByText(/aiHelper.apply.unreadable/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /aiHelper.apply.showRaw/ }));
+    expect(screen.getByText('{ "name": "Broken", }')).toBeTruthy();
+  });
+
+  it('does not warn while a proposal is still streaming', async () => {
+    streamMock.mockImplementation((_id, _req, onChunk) => {
+      onChunk('KRONN:APPLY\n```json\n{ "name": "Str');
+      return Promise.resolve();
+    });
+    await openChat();
+    const textarea = screen.getByPlaceholderText(/mcp.custom.helper.inputPlaceholder/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'help' } });
+    await act(async () => {
+      fireEvent.keyDown(textarea, { key: 'Enter' });
+    });
+    await waitFor(() => expect(streamMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(/aiHelper.apply.unreadable/)).toBeNull();
   });
 
   it('surfaces the onError stream branch as a visible error', async () => {

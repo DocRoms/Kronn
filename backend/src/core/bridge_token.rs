@@ -568,6 +568,7 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("POST", "/api/agent-api/call", Effect, &[]),
     r("POST", "/api/pages", Write, &[]),
     r("GET", "/api/pages/{id}", Read, &[("id", G)]),
+    r("PATCH", "/api/pages/{id}", Write, &[("id", G)]),
     r("PUT", "/api/pages/{id}/html", Write, &[("id", G)]),
     r("POST", "/api/pages/{id}/datasets", Write, &[("id", G)]),
     r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
@@ -1779,6 +1780,12 @@ pub fn canonical(
             )
             .optional()?
             .map(|project| (Kind::Project, project))),
+        // As the page handlers resolve it, so a slug or a renamed page's old
+        // slug is checked as the page it opens.
+        Kind::Page => {
+            Ok(crate::db::live_pages::resolve_live_page_id(conn, id)?
+                .map(|page| (Kind::Page, page)))
+        }
         _ => Ok(Some((kind, id.to_owned()))),
     }
 }

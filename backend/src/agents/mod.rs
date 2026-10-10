@@ -36,15 +36,22 @@ pub mod media_worker;
 pub(crate) mod ollama_memory;
 pub mod provenance;
 pub(crate) mod read_only_repos;
+pub mod readiness;
 pub mod runner;
 pub mod tool_trace;
 pub mod tools;
 pub mod vision;
 pub(crate) mod wsl;
 
-/// Cache for runtime probe results (npx availability).
-/// Key: binary name, Value: (available, probed_at)
-static RUNTIME_CACHE: std::sync::LazyLock<Mutex<HashMap<String, (bool, Instant)>>> =
+#[derive(Clone, Debug, Default)]
+struct RuntimeProbe {
+    available: bool,
+    command: Vec<String>,
+    version: Option<String>,
+}
+
+type RuntimeCache = Mutex<HashMap<(Vec<String>, std::path::PathBuf), (RuntimeProbe, Instant)>>;
+static RUNTIME_CACHE: std::sync::LazyLock<RuntimeCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// How long to cache a runtime probe result
@@ -174,8 +181,9 @@ pub(crate) fn should_skip_darwin_host_binary(
     name: &str,
     host_managed: bool,
     host_is_macos: bool,
+    in_container: bool,
 ) -> bool {
-    host_managed && host_is_macos && MACOS_HOST_BIN_SKIP.contains(&name)
+    in_container && host_managed && host_is_macos && MACOS_HOST_BIN_SKIP.contains(&name)
 }
 
 /// Public accessor so `/api/health` can stamp the host label into its body
@@ -344,6 +352,11 @@ pub(crate) fn with_cold_detection_cache<T>(f: impl FnOnce() -> T) -> T {
 /// immediately; an expired entry starts one background refresh.
 /// `force = true` bypasses + refreshes (right after an install/uninstall).
 pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
+    if force {
+        if let Ok(mut cache) = RUNTIME_CACHE.lock() {
+            cache.clear();
+        }
+    }
     detect_all_cached_with(force, detect_all()).await
 }
 
@@ -478,6 +491,10 @@ pub fn invalidate_detect_cache() {
     let mut cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.value = None;
     cache.generation = cache.generation.wrapping_add(1);
+    drop(cache);
+    if let Ok(mut cache) = RUNTIME_CACHE.lock() {
+        cache.clear();
+    }
 }
 
 /// A provider reached over HTTP with a credential, with no local binary and
@@ -502,6 +519,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             installed: true,
             enabled: true,
             path: None,
+            fallback_command: None,
             version: None,
             latest_version: release.latest.clone(),
             version_checked_at: release.checked_at.clone(),
@@ -574,6 +592,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             installed: true,
             enabled: true,
             path: Some(loc.path),
+            fallback_command: None,
             version,
             latest_version: release.latest.clone(),
             version_checked_at: release.checked_at.clone(),
@@ -593,14 +612,15 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
         }
     } else {
         // No local binary — probe npx/uvx fallback
-        let runtime_available = probe_runtime(def).await;
+        let runtime = probe_runtime(def).await;
         AgentDetection {
             name: def.name.to_string(),
             agent_type: def.agent_type.clone(),
             installed: false,
             enabled: true,
             path: None,
-            version: None,
+            fallback_command: (!runtime.command.is_empty()).then_some(runtime.command),
+            version: runtime.version,
             latest_version: release.latest,
             version_checked_at: release.checked_at,
             version_check_error: release.error,
@@ -609,7 +629,7 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
             install_command: Some(def.install_cmd.to_string()),
             host_managed: false,
             host_label: None,
-            runtime_available,
+            runtime_available: runtime.available,
             auth_ready: None,
             auth_setup_command: None,
             rtk_available,
@@ -980,7 +1000,7 @@ fn detect_runtime_warning(agent_type: &AgentType) -> Option<String> {
 
 /// Probe whether an agent is runnable via npx/uvx, with caching.
 /// Uses the same fallback path as the runner: `npx --yes <pkg> --version`.
-async fn probe_runtime(def: &AgentDef) -> bool {
+async fn probe_runtime(def: &AgentDef) -> RuntimeProbe {
     let npx_pkg = match def.agent_type {
         AgentType::ClaudeCode => Some("@anthropic-ai/claude-code"),
         AgentType::Codex => Some("@openai/codex"),
@@ -996,46 +1016,86 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::Custom => None,
     };
 
-    let Some(pkg) = npx_pkg else { return false };
+    let Some(pkg) = npx_pkg else {
+        return RuntimeProbe::default();
+    };
+    probe_npx_runtime(pkg, false, &std::env::temp_dir()).await
+}
 
-    // Check cache
-    let cache_key = def.binary.to_string();
-    if let Ok(cache) = RUNTIME_CACHE.lock() {
-        if let Some((available, probed_at)) = cache.get(&cache_key) {
-            if probed_at.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
-                return *available;
+fn npx_invocation(package: &str, args: &[String]) -> (String, Vec<String>, bool) {
+    let location = find_binary("npx");
+    let via_wsl = location.as_ref().is_some_and(|loc| loc.via_wsl);
+    let executable = location.map(|loc| loc.path).unwrap_or_else(|| "npx".into());
+    let mut argv = vec!["--yes".into(), package.into()];
+    argv.extend_from_slice(args);
+    (executable, argv, via_wsl)
+}
+
+async fn probe_npx_runtime(
+    package: &str,
+    refresh: bool,
+    work_dir: &std::path::Path,
+) -> RuntimeProbe {
+    probe_npx_invocation(npx_invocation(package, &[]), refresh, work_dir).await
+}
+
+async fn probe_npx_invocation(
+    invocation: (String, Vec<String>, bool),
+    refresh: bool,
+    work_dir: &std::path::Path,
+) -> RuntimeProbe {
+    let (executable, args, via_wsl) = invocation;
+    let family = crate::core::child_env::AgentFamily::from_launch(
+        &executable,
+        args.get(1).map(String::as_str),
+        "",
+    );
+    let (executable, args, work_dir) =
+        runner::platform_agent_invocation(executable, args, via_wsl, work_dir);
+    let command: Vec<String> = std::iter::once(executable.clone())
+        .chain(args.iter().cloned())
+        .collect();
+    let cache_key = (command.clone(), work_dir.clone());
+
+    if !refresh {
+        if let Ok(cache) = RUNTIME_CACHE.lock() {
+            if let Some((probe, probed_at)) = cache.get(&cache_key) {
+                if probed_at.elapsed().as_secs() < RUNTIME_CACHE_TTL_SECS {
+                    return probe.clone();
+                }
             }
         }
     }
 
-    // Probe: npx --yes <pkg> --version with 15s timeout
-    tracing::info!("Probing runtime for {} via npx {}", def.name, pkg);
-    let mut cmd = crate::core::cmd::discovery_cmd(
-        "npx",
-        crate::core::child_env::AgentFamily::from_agent_type(&def.agent_type),
-    );
-    cmd.args(["--yes", pkg, "--version"])
+    tracing::info!(?command, "Probing agent fallback runtime");
+    // Same scrubbed discovery environment as every other version probe; only
+    // the directory follows the run so the announced version is the one it gets.
+    let mut cmd = crate::core::cmd::discovery_cmd(&executable, family);
+    cmd.args(&args)
+        .arg("--version")
+        .current_dir(work_dir)
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let result = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output()).await;
 
-    let available = match result {
-        Ok(Ok(output)) => output.status.success(),
-        _ => false,
+    let (available, version) = match result {
+        Ok(Ok(output)) => (output.status.success(), version_from_output(&output).ok()),
+        _ => (false, None),
+    };
+    let probe = RuntimeProbe {
+        available,
+        command: command.clone(),
+        version,
     };
 
-    // Update cache
     if let Ok(mut cache) = RUNTIME_CACHE.lock() {
-        cache.insert(cache_key, (available, Instant::now()));
+        cache.insert(cache_key, (probe.clone(), Instant::now()));
     }
 
-    tracing::info!(
-        "Runtime probe for {}: {}",
-        def.name,
-        if available { "OK" } else { "unavailable" }
-    );
-    available
+    tracing::info!(?probe, "Agent fallback runtime probe finished");
+    probe
 }
 
 /// Result of finding a binary: path + whether it comes from the host
@@ -1057,82 +1117,28 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         .ok()
         .map(|v| std::env::split_paths(&v).collect())
         .unwrap_or_default();
+    let in_container = crate::core::env::is_docker();
+    let macos_host = host_is_macos();
 
     tracing::debug!(
         target: "kronn::agent_detect",
-        "find_binary('{}'): PATH={:?}, host_dirs={:?}",
+        "find_binary('{}'): PATH={:?}, host_dirs={:?}, in_container={}, host_is_macos={}",
         name,
         crate::core::child_env::var("PATH").ok(),
         host_dirs,
+        in_container,
+        macos_host,
     );
 
-    // Standard PATH
-    if let Ok(path) = which::which(name) {
-        let resolved = path.to_string_lossy().to_string();
-        // If the binary resolved by `which` lives under a KRONN_HOST_BIN directory,
-        // it is host-managed (mounted from the host into the container).
-        let host_managed = host_dirs.iter().any(|dir| path.starts_with(dir));
-        // A Darwin host binary reachable via PATH (the container mounts the
-        // host `~/.local/bin` onto PATH) must NOT be returned — it can't exec
-        // here. Fall through to the host-dir scan / Linux-package probes /
-        // npx runtime fallback instead of surfacing an "Exec format error".
-        if should_skip_darwin_host_binary(name, host_managed, host_is_macos()) {
-            tracing::debug!(
-                target: "kronn::agent_detect",
-                "find_binary('{}'): skipping Darwin host-mounted binary resolved via PATH at {} (macOS host — using Linux copy / npx runtime instead)",
-                name, resolved,
-            );
-        } else {
-            tracing::debug!(
-                target: "kronn::agent_detect",
-                "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
-                name, resolved, host_managed,
-            );
-            return Some(BinaryLocation {
-                path: resolved,
-                host_managed,
-                via_wsl: false,
-            });
-        }
-    }
-
-    // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
-    // On Windows, npm installs create .cmd/.exe wrappers (e.g. claude.cmd, codex.cmd).
-    // Match both exact name and name with common Windows extensions.
-    for dir in &host_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let file_name = entry.file_name();
-                let file_name_str = file_name.to_string_lossy();
-                let matches = file_name_str == name
-                    || file_name_str == format!("{}.cmd", name)
-                    || file_name_str == format!("{}.exe", name)
-                    || file_name_str == format!("{}.ps1", name);
-                if matches {
-                    // On macOS hosts, host-mounted binaries are Darwin
-                    // binaries that cannot execute in this Linux container.
-                    // The entrypoint.sh installs Linux versions via npm/curl.
-                    // These entries live under a host-mount dir, so they are
-                    // host_managed by construction. Source of truth for the
-                    // skip list is MACOS_HOST_BIN_SKIP above — a test enforces
-                    // that every npm agent is covered.
-                    if should_skip_darwin_host_binary(name, true, host_is_macos()) {
-                        tracing::debug!(
-                            target: "kronn::agent_detect",
-                            "find_binary('{}'): skipping Darwin host-mounted binary at {} (macOS host — Linux copy should come from entrypoint.sh)",
-                            name,
-                            entry.path().display(),
-                        );
-                        continue;
-                    }
-                    return Some(BinaryLocation {
-                        path: entry.path().to_string_lossy().to_string(),
-                        host_managed: true,
-                        via_wsl: false,
-                    });
-                }
-            }
-        }
+    if let Some(location) = find_binary_in_paths(
+        name,
+        crate::core::child_env::var_os("PATH"),
+        std::env::current_dir().ok(),
+        &host_dirs,
+        macos_host,
+        in_container,
+    ) {
+        return Some(location);
     }
 
     // On Linux native: probe non-PATH package manager locations.
@@ -1161,10 +1167,13 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         }
         for dir in &linux_dirs {
             let candidate = dir.join(name);
-            if candidate.exists() {
+            let host_managed = host_dirs.iter().any(|dir| candidate.starts_with(dir));
+            if candidate.exists()
+                && !should_skip_darwin_host_binary(name, host_managed, macos_host, in_container)
+            {
                 return Some(BinaryLocation {
                     path: candidate.to_string_lossy().to_string(),
-                    host_managed: false,
+                    host_managed,
                     via_wsl: false,
                 });
             }
@@ -1252,6 +1261,90 @@ fn version_probe_family(binary_path: &str) -> crate::core::child_env::AgentFamil
     crate::core::child_env::AgentFamily::from_launch(binary_path, None, "")
 }
 
+fn find_binary_in_paths(
+    name: &str,
+    paths: Option<std::ffi::OsString>,
+    cwd: Option<std::path::PathBuf>,
+    host_dirs: &[std::path::PathBuf],
+    macos_host: bool,
+    in_container: bool,
+) -> Option<BinaryLocation> {
+    // Standard PATH
+    for path in cwd
+        .and_then(|cwd| which::which_in_all(name, paths, cwd).ok())
+        .into_iter()
+        .flatten()
+    {
+        let resolved = path.to_string_lossy().to_string();
+        // If the binary resolved by `which` lives under a KRONN_HOST_BIN directory,
+        // it is host-managed (mounted from the host into the container).
+        let host_managed = host_dirs.iter().any(|dir| path.starts_with(dir));
+        // A Darwin host binary reachable via PATH (the container mounts the
+        // host `~/.local/bin` onto PATH) must NOT be returned — it can't exec
+        // here. Fall through to the host-dir scan / Linux-package probes /
+        // npx runtime fallback instead of surfacing an "Exec format error".
+        if should_skip_darwin_host_binary(name, host_managed, macos_host, in_container) {
+            tracing::debug!(
+                target: "kronn::agent_detect",
+                "find_binary('{}'): skipping Darwin host-mounted binary resolved via PATH at {} (macOS host — using Linux copy / npx runtime instead)",
+                name, resolved,
+            );
+        } else {
+            tracing::debug!(
+                target: "kronn::agent_detect",
+                "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
+                name, resolved, host_managed,
+            );
+            return Some(BinaryLocation {
+                path: resolved,
+                host_managed,
+                via_wsl: false,
+            });
+        }
+    }
+
+    // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
+    // On Windows, npm installs create .cmd/.exe wrappers (e.g. claude.cmd, codex.cmd).
+    // Match both exact name and name with common Windows extensions.
+    for dir in host_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let file_name_str = file_name.to_string_lossy();
+                let matches = file_name_str == name
+                    || file_name_str == format!("{}.cmd", name)
+                    || file_name_str == format!("{}.exe", name)
+                    || file_name_str == format!("{}.ps1", name);
+                if matches {
+                    // On macOS hosts, host-mounted binaries are Darwin
+                    // binaries that cannot execute in this Linux container.
+                    // The entrypoint.sh installs Linux versions via npm/curl.
+                    // These entries live under a host-mount dir, so they are
+                    // host_managed by construction. Source of truth for the
+                    // skip list is MACOS_HOST_BIN_SKIP above — a test enforces
+                    // that every npm agent is covered.
+                    if should_skip_darwin_host_binary(name, true, macos_host, in_container) {
+                        tracing::debug!(
+                            target: "kronn::agent_detect",
+                            "find_binary('{}'): skipping Darwin host-mounted binary at {} (macOS host — Linux copy should come from entrypoint.sh)",
+                            name,
+                            entry.path().display(),
+                        );
+                        continue;
+                    }
+                    return Some(BinaryLocation {
+                        path: entry.path().to_string_lossy().to_string(),
+                        host_managed: true,
+                        via_wsl: false,
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Try to get the version of an agent from its full path.
 /// On Windows, if the path is a WSL Linux path (starts with /), run via wsl.exe.
 async fn get_version_from(binary_path: &str) -> Result<String> {
@@ -1280,6 +1373,15 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
         }
     };
 
+    version_from_output(&output)
+}
+
+fn version_from_output(output: &std::process::Output) -> Result<String> {
+    anyhow::ensure!(
+        output.status.success(),
+        "Version command failed: {}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -1292,6 +1394,7 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
 
     // Extract semver pattern
     let raw = version_str.lines().next().unwrap_or(&version_str);
+    anyhow::ensure!(!raw.is_empty(), "Version command returned no version");
     if let Some(m) = regex_lite::Regex::new(r"\d+\.\d+\.\d+")
         .ok()
         .and_then(|re| re.find(raw))
@@ -1734,11 +1837,17 @@ mod tests {
             g.value = Some((Vec::new(), Instant::now()));
             g.refreshing = false;
         }
+        let key = (vec!["test-npx".into()], std::path::PathBuf::from("."));
+        RUNTIME_CACHE
+            .lock()
+            .unwrap()
+            .insert(key.clone(), (RuntimeProbe::default(), Instant::now()));
         invalidate_detect_cache();
         assert!(
             DETECT_ALL_CACHE.lock().unwrap().value.is_none(),
             "invalidate must drop the cached entry so the next call re-probes",
         );
+        assert!(!RUNTIME_CACHE.lock().unwrap().contains_key(&key));
     }
 
     #[tokio::test]
@@ -2007,6 +2116,265 @@ mod tests {
     // ─── find_binary: Windows extension matching ────────────────────────────
 
     #[test]
+    fn darwin_skip_is_inert_in_native_execution() {
+        for name in MACOS_HOST_BIN_SKIP {
+            assert!(!should_skip_darwin_host_binary(name, true, true, false));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_resolution_keeps_native_path_and_skips_only_container_host_mount() {
+        let root = tempfile::tempdir().unwrap();
+        let host = root.path().join("host");
+        let linux = root.path().join("linux");
+        for dir in [&host, &linux] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::rename(fake_cli(dir, "0.154.0"), dir.join("codex")).unwrap();
+        }
+        let paths = Some(std::env::join_paths([&host, &linux]).unwrap());
+        let native = find_binary_in_paths(
+            "codex",
+            paths.clone(),
+            Some(root.path().to_path_buf()),
+            std::slice::from_ref(&host),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(std::path::Path::new(&native.path), host.join("codex"));
+        assert!(native.host_managed);
+
+        let container = find_binary_in_paths(
+            "codex",
+            paths,
+            Some(root.path().to_path_buf()),
+            std::slice::from_ref(&host),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(std::path::Path::new(&container.path), linux.join("codex"));
+        assert!(!container.host_managed);
+
+        let only_host = Some(std::env::join_paths([&host]).unwrap());
+        assert!(find_binary_in_paths(
+            "codex",
+            only_host,
+            Some(root.path().to_path_buf()),
+            std::slice::from_ref(&host),
+            true,
+            true
+        )
+        .is_none());
+        let empty_path = Some(std::ffi::OsString::new());
+        let native_host_dir = find_binary_in_paths(
+            "codex",
+            empty_path.clone(),
+            Some(root.path().to_path_buf()),
+            std::slice::from_ref(&host),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            std::path::Path::new(&native_host_dir.path),
+            host.join("codex")
+        );
+        assert!(find_binary_in_paths(
+            "codex",
+            empty_path,
+            Some(root.path().to_path_buf()),
+            &[host],
+            true,
+            true
+        )
+        .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_resolution_scans_host_dirs_when_current_directory_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let host = root.path().to_path_buf();
+        let binary = host.join("codex");
+        std::fs::rename(fake_cli(&host, "0.154.0"), &binary).unwrap();
+        let paths = Some(std::env::join_paths([&host]).unwrap());
+        let native = find_binary_in_paths(
+            "codex",
+            paths.clone(),
+            None,
+            std::slice::from_ref(&host),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(std::path::Path::new(&native.path), binary);
+        assert!(native.host_managed);
+        assert!(find_binary_in_paths("codex", paths, None, &[host], true, true).is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn detection_announces_the_measured_fallback_when_the_cli_is_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePath(Option<std::ffi::OsString>);
+        impl Drop for RestorePath {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("PATH", value),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let npx = root.path().join("npx");
+        std::fs::write(&npx, "#!/bin/sh\necho 'codex-cli 0.154.0'\n").unwrap();
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_path = RestorePath(std::env::var_os("PATH"));
+        let mut paths = vec![root.path().to_path_buf()];
+        if let Some(value) = &original_path.0 {
+            paths.extend(std::env::split_paths(value));
+        }
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        let detection = detect_agent(&AgentDef {
+            name: "Codex fixture",
+            agent_type: AgentType::Codex,
+            binary: "kronn-kt665-missing-cli",
+            origin: "test",
+            install_cmd: "",
+        })
+        .await;
+        assert!(!detection.installed);
+        assert!(detection.path.is_none());
+        assert!(detection.runtime_available);
+        assert_eq!(detection.version.as_deref(), Some("0.154.0"));
+        assert_eq!(
+            detection.fallback_command,
+            Some(vec![
+                npx.to_string_lossy().to_string(),
+                "--yes".into(),
+                "@openai/codex".into()
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn missing_binary_fallback_keeps_command_version_and_refreshes_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let paths = Some(std::env::join_paths([root.path()]).unwrap());
+        assert!(find_binary_in_paths(
+            "codex",
+            paths,
+            Some(root.path().to_path_buf()),
+            &[],
+            true,
+            false
+        )
+        .is_none());
+        let npx = root.path().join("npx with spaces");
+        std::fs::write(&npx, "#!/bin/sh\n[ \"$1\" = --yes ] && [ \"$2\" = @openai/codex ] && [ \"$3\" = --version ] || exit 1\necho 'codex-cli 0.154.0' >&2\n").unwrap();
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let invocation = (
+            npx.to_string_lossy().to_string(),
+            vec!["--yes".into(), "@openai/codex".into()],
+            false,
+        );
+        let probe = probe_npx_invocation(invocation.clone(), false, root.path()).await;
+        assert!(probe.available);
+        assert_eq!(probe.version.as_deref(), Some("0.154.0"));
+        assert_eq!(
+            probe.command,
+            vec![
+                npx.to_string_lossy().to_string(),
+                "--yes".into(),
+                "@openai/codex".into()
+            ]
+        );
+
+        std::fs::write(&npx, "#!/bin/sh\necho 'codex-cli 0.155.0'\n").unwrap();
+        assert_eq!(
+            probe_npx_invocation(invocation.clone(), false, root.path())
+                .await
+                .version,
+            probe.version
+        );
+        assert_eq!(
+            probe_npx_invocation(invocation, true, root.path())
+                .await
+                .version
+                .as_deref(),
+            Some("0.155.0")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_or_empty_fallback_probe_never_reports_an_error_as_a_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let npx = root.path().join("npx");
+        for (script, available) in [("echo 'error 9.9.9' >&2\nexit 1", false), ("exit 0", true)] {
+            std::fs::write(&npx, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let probe = probe_npx_invocation(
+                (npx.to_string_lossy().to_string(), vec![], false),
+                true,
+                root.path(),
+            )
+            .await;
+            assert_eq!(probe.available, available);
+            assert_eq!(probe.version, None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial]
+    async fn fallback_version_is_probed_and_cached_in_the_invocation_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let other_project = root.path().join("other");
+        std::fs::create_dir(&other_project).unwrap();
+        std::fs::write(root.path().join("version"), "0.154.0").unwrap();
+        std::fs::write(other_project.join("version"), "0.136.0").unwrap();
+        let npx = root.path().join("npx");
+        std::fs::write(&npx, "#!/bin/sh\n/bin/cat version\n").unwrap();
+        std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let invocation = (npx.to_string_lossy().to_string(), vec![], false);
+        assert_eq!(
+            probe_npx_invocation(invocation.clone(), false, root.path())
+                .await
+                .version
+                .as_deref(),
+            Some("0.154.0")
+        );
+        assert_eq!(
+            probe_npx_invocation(invocation, false, &other_project)
+                .await
+                .version
+                .as_deref(),
+            Some("0.136.0")
+        );
+        let missing = probe_npx_invocation(
+            (
+                root.path().join("missing").to_string_lossy().to_string(),
+                vec![],
+                false,
+            ),
+            true,
+            root.path(),
+        )
+        .await;
+        assert!(!missing.available);
+        assert!(missing.version.is_none());
+    }
+
+    #[test]
     #[serial]
     fn find_binary_matches_cmd_extension() {
         // Create a temp dir with a fake "testbin.cmd" file
@@ -2270,7 +2638,7 @@ mod tests {
     #[test]
     fn should_skip_darwin_host_binary_fires_on_macos_host_managed() {
         assert!(
-            should_skip_darwin_host_binary("claude", true, true),
+            should_skip_darwin_host_binary("claude", true, true, true),
             "host-managed claude on a macOS host must be skipped"
         );
     }
@@ -2281,7 +2649,7 @@ mod tests {
     #[test]
     fn should_skip_darwin_host_binary_keeps_container_linux_copy() {
         assert!(
-            !should_skip_darwin_host_binary("claude", false, true),
+            !should_skip_darwin_host_binary("claude", false, true, true),
             "a non-host-managed (in-container Linux) claude must be kept"
         );
     }
@@ -2291,7 +2659,7 @@ mod tests {
     #[test]
     fn should_skip_darwin_host_binary_inert_off_macos() {
         assert!(
-            !should_skip_darwin_host_binary("claude", true, false),
+            !should_skip_darwin_host_binary("claude", true, false, true),
             "host-managed claude on a non-macOS host must NOT be skipped"
         );
     }
@@ -2300,13 +2668,13 @@ mod tests {
     #[test]
     fn should_skip_darwin_host_binary_only_for_listed_names() {
         assert!(
-            !should_skip_darwin_host_binary("ollama", true, true),
+            !should_skip_darwin_host_binary("ollama", true, true, true),
             "ollama is not in MACOS_HOST_BIN_SKIP and must not be skipped"
         );
         // Every listed agent is covered when host-managed on macOS.
         for name in MACOS_HOST_BIN_SKIP {
             assert!(
-                should_skip_darwin_host_binary(name, true, true),
+                should_skip_darwin_host_binary(name, true, true, true),
                 "{} is in the skip list but was not skipped",
                 name
             );

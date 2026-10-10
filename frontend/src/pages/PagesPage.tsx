@@ -26,6 +26,7 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { LivePageSlugEditor } from '../components/LivePageSlugEditor';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
@@ -968,6 +969,14 @@ export function PagesPage({
                     <ChevronDown size={11} />
                   </button>
                   {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
+                  <LivePageSlugEditor
+                    key={detail.id}
+                    page={detail}
+                    onSaved={(updated) => {
+                      setPages(current => current.map(item => item.id === updated.id ? updated : item));
+                      setDetail(current => current?.id === updated.id ? updated : current);
+                    }}
+                  />
                   <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} />
                 </div>
               </div>

@@ -96,6 +96,9 @@ pub struct LivePageDetail {
     pub page: LivePage,
     pub revision: LivePageRevision,
     pub datasets: Vec<LivePageDatasetView>,
+    /// Former slugs that still open this Page after a rename.
+    #[serde(default)]
+    pub slug_aliases: Vec<String>,
 }
 
 /// Live workflow configurations that publish into this Page. A Page is not
@@ -196,6 +199,8 @@ pub struct CreateLivePageRequest {
 #[ts(export)]
 pub struct UpdateLivePageRequest {
     pub title: Option<String>,
+    /// New slug; the previous one keeps resolving to this Page.
+    pub slug: Option<String>,
     pub pinned: Option<bool>,
     pub archived: Option<bool>,
 }

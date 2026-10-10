@@ -1977,6 +1977,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
+        .route("/api/agents/readiness", post(api::agents::readiness))
         // ── Dynamic model catalogs (KT-531) ──
         .route("/api/model-catalogs", get(api::model_catalog::list))
         .route(

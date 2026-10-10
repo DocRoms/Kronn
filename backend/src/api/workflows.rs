@@ -3183,7 +3183,13 @@ pub async fn export_workflow(
     let wf_id = id.clone();
     let wf = match state
         .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .with_conn(move |conn| {
+            let mut wf = crate::db::workflows::get_workflow(conn, &wf_id)?;
+            if let Some(wf) = wf.as_mut() {
+                canonicalize_exported_page_refs(conn, std::slice::from_mut(wf))?;
+            }
+            Ok(wf)
+        })
         .await
     {
         Ok(Some(wf)) => wf,
@@ -3233,6 +3239,7 @@ pub async fn export_workflow(
                     bundled.push(child.clone());
                 }
             }
+            canonicalize_exported_page_refs(conn, &mut bundled)?;
 
             let dependencies =
                 workflow_dependency_ids(std::iter::once(&root).chain(bundled.iter()));
@@ -3254,9 +3261,12 @@ pub async fn export_workflow(
                     qes.push(qe);
                 }
             }
-            let mut pages = Vec::with_capacity(dependencies.pages.len());
+            let mut pages: Vec<WorkflowExportPage> = Vec::with_capacity(dependencies.pages.len());
             for id in &dependencies.pages {
                 if let Some(page) = crate::db::live_pages::get_live_page(conn, id)? {
+                    if pages.iter().any(|known| known.id == page.page.id) {
+                        continue;
+                    }
                     pages.push(WorkflowExportPage {
                         id: page.page.id,
                         slug: page.page.slug,
@@ -3485,6 +3495,32 @@ pub(crate) fn rebind_quick_api_config(
     {
         quick_api.api_config_id = new_id;
     }
+}
+
+/// Point the literal Page targets of exported workflow copies at the page id,
+/// so a step naming a renamed page's former slug still matches the bundle.
+pub(crate) fn canonicalize_exported_page_refs(
+    conn: &rusqlite::Connection,
+    workflows: &mut [Workflow],
+) -> anyhow::Result<()> {
+    for workflow in workflows {
+        for step in workflow
+            .steps
+            .iter_mut()
+            .chain(workflow.on_failure.iter_mut())
+        {
+            let Some(config) = step.page_publish.as_mut() else {
+                continue;
+            };
+            if config.page_id.contains("{{") {
+                continue;
+            }
+            if let Some(id) = crate::db::live_pages::resolve_live_page_id(conn, &config.page_id)? {
+                config.page_id = id;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn remap_workflow_step_dependencies(
@@ -8544,6 +8580,40 @@ mod tests {
             Some("aws")
         );
         assert_eq!(step.page_publish.unwrap().page_id, "page-new");
+    }
+
+    /// KT-1098 — exported copies name the page id, not a former slug; templated
+    /// and unknown targets are left as written.
+    #[test]
+    fn exported_page_targets_are_canonical_ids() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO live_pages (id, title, slug, created_at, updated_at)
+             VALUES ('page-1', 'Board', 'board-new', 'now', 'now');
+             INSERT INTO live_page_slug_aliases (slug, page_id, created_at)
+             VALUES ('board-old', 'page-1', 'now');",
+        )
+        .unwrap();
+        let mut workflow = mk_workflow_for_export("w");
+        let publish = |page: &str| {
+            let mut step = mk_step("p", StepType::PublishPageData);
+            step.page_publish = Some(PublishPageDataConfig {
+                page_id: page.into(),
+                writes: vec![],
+            });
+            step
+        };
+        workflow.steps = vec![publish("board-old"), publish("{{target}}"), publish("gone")];
+        workflow.on_failure = vec![publish("board-new")];
+        canonicalize_exported_page_refs(&conn, std::slice::from_mut(&mut workflow)).unwrap();
+        let targets: Vec<_> = workflow
+            .steps
+            .iter()
+            .chain(&workflow.on_failure)
+            .map(|step| step.page_publish.as_ref().unwrap().page_id.as_str())
+            .collect();
+        assert_eq!(targets, ["page-1", "{{target}}", "gone", "page-1"]);
     }
 
     #[test]

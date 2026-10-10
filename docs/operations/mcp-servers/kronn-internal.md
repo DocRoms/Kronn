@@ -1090,6 +1090,9 @@ contracts; they are not claimed as entries in this first version.
   and also works from an unbound host CLI for a standalone Page. Pass
   `datasets: []` for standalone HTML or seed `initial` values for a mock-backed
   Page. `page_get` returns both Workflow and Discussion links.
+- Rename a Page's slug with `page_update_html({page_id, slug})` (`html` is
+  optional then). The former slug keeps opening the Page and stays reserved for
+  it, so existing links and workflow steps keep working.
 - Put buttons on a Page that launch a real QP, QA, QE or Workflow for each data
   row. `tool_manual({tool: "page_create"})` and
   `tool_manual({tool: "page_update_html"})` carry the contract: one inert

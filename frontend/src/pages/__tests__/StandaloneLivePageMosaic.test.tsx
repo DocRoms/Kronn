@@ -23,6 +23,7 @@ const details: Record<string, LivePageDetail> = Object.fromEntries(['page-1', 'p
     created_at: '2026-08-29T10:00:00Z',
   },
   datasets: [],
+  slug_aliases: [],
 }]));
 const relays = vi.hoisted(() => [] as {
   connect: ReturnType<typeof vi.fn>;

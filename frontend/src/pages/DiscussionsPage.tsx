@@ -36,11 +36,12 @@ import { CollectionSidebarRail } from '../components/CollectionShell';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
+import { AgentReadinessNotice } from '../components/AgentReadinessPanel';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun, QuickPrompt } from '../types/generated';
+import type { Project, AgentDetection, AgentReadiness, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun, QuickPrompt } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { useQpChain } from '../hooks/useQpChain';
@@ -806,6 +807,8 @@ export function DiscussionsPage({
   const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  // KT-1107 — the agent check of each room started from this page, until dismissed.
+  const [readinessByDisc, setReadinessByDisc] = useState<Record<string, AgentReadiness[]>>({});
   // A send refused because the previous run is still being recovered. Held as
   // state (not a blocking `confirm`) because recovery can take minutes: the tab
   // must stay usable. The submitted text is already back in the composer via
@@ -2442,6 +2445,10 @@ export function DiscussionsPage({
     setShowNewDiscussion(false);
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
+    if (config.readiness?.length) {
+      const readiness = config.readiness;
+      setReadinessByDisc(prev => ({ ...prev, [disc.id]: readiness }));
+    }
 
     // Upload pending context files (from NewDiscussionForm) before running agent
     if (config.pendingFiles?.length) {
@@ -5338,6 +5345,18 @@ export function DiscussionsPage({
                   >{t('disc.agentDisabledLink')}</span>
                 </span>
               </div>
+            )}
+
+            {readinessByDisc[activeDiscussion.id] && (
+              <AgentReadinessNotice
+                results={readinessByDisc[activeDiscussion.id]}
+                onDismiss={() => setReadinessByDisc(prev => {
+                  const next = { ...prev };
+                  delete next[activeDiscussion.id];
+                  return next;
+                })}
+                t={t}
+              />
             )}
 
             {/* Structured agent questions form (0.3.5) — surfaced when the

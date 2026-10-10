@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { NewDiscussionForm } from '../NewDiscussionForm';
-import type { Project, AgentDetection, AgentsConfig } from '../../types/generated';
+import type { Project, AgentDetection, AgentReadiness, AgentType, AgentsConfig } from '../../types/generated';
 import { loadDraft, NEW_DISCUSSION_DRAFT_ID } from '../../lib/chat-drafts';
 import type { ExternalApiConnectionView } from '../../lib/api';
 
@@ -18,6 +18,8 @@ vi.mock('../../lib/api', () => ({
   // KT-531 — AgentSwitchPicker reads the dynamic model catalog when its
   // popover opens.
   modelCatalogApi: { list: vi.fn().mockResolvedValue({ targets: [] }) },
+  // KT-1107 — a multi-agent start checks its agents first.
+  agents: { readiness: vi.fn().mockResolvedValue([]) },
   media: {
     capabilities: vi.fn().mockResolvedValue({ model: 'image-model', capabilities: null }),
     estimate: vi.fn().mockResolvedValue({ model: 'image-model', estimated_usd: null, samples: 0 }),
@@ -1471,5 +1473,347 @@ describe('NewDiscussionForm — native agents need full access', () => {
     });
     expect(screen.queryByTestId('full-access-required')).toBeNull();
     expect(document.querySelector('.disc-create-btn')).not.toBeDisabled();
+  });
+});
+
+
+describe('NewDiscussionForm — pre-launch agent check (KT-1107)', () => {
+  const readinessResult = (
+    agent: AgentType,
+    status: AgentReadiness['status'],
+    reason: AgentReadiness['reason'],
+    extra: Partial<AgentReadiness> = {},
+  ): AgentReadiness => ({
+    agent_type: agent,
+    status,
+    reason,
+    message_key: `readiness.reason.${reason}`,
+    servers: [],
+    secs: null,
+    detail: null,
+    cached: false,
+    checked_at: '2026-10-09T10:00:00Z',
+    ...extra,
+  });
+
+  const readinessMock = async () => {
+    const apiMod = await import('../../lib/api');
+    return apiMod.agents.readiness as ReturnType<typeof vi.fn>;
+  };
+
+  const renderTwoAgents = (onSubmit = vi.fn(), onNavigate = vi.fn(), onClose = vi.fn()) => {
+    const view = render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={onClose}
+        onNavigate={onNavigate}
+        t={(key: string) => key}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude vérifiez ceci.' },
+    });
+    return { onSubmit, onNavigate, onClose, view };
+  };
+
+  const clickCreate = async () => {
+    const create = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(create); });
+  };
+
+  afterEach(async () => {
+    (await readinessMock()).mockReset().mockResolvedValue([]);
+  });
+
+  it('launches nothing while an agent is not ready, and shows each state with its reason', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'not_logged_in'),
+    ]);
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    const panel = await screen.findByTestId('agent-readiness');
+    expect(panel).toHaveAttribute('data-state', 'blocked');
+    expect(panel).toHaveTextContent('readiness.blocked');
+    expect(panel).toHaveTextContent('✅');
+    expect(panel).toHaveTextContent('❌');
+    expect(panel).toHaveTextContent('readiness.reason.not_logged_in');
+    expect((await readinessMock())).toHaveBeenCalledWith({
+      project_id: null,
+      agents: ['Codex', 'ClaudeCode'],
+      force: false,
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('launch anyway starts every agent and hands the check to the room', async () => {
+    const results = [
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'not_logged_in'),
+    ];
+    (await readinessMock()).mockResolvedValueOnce(results);
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    await screen.findByTestId('agent-readiness');
+    await act(async () => { fireEvent.click(screen.getByText('readiness.launchAnyway')); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({
+      targetAgents: ['Codex', 'ClaudeCode'],
+      readiness: results,
+    }));
+  });
+
+  it('remove drops the agent from the brief, and the next start launches only the others', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'session_timeout', { secs: 90, servers: ['Hang'] }),
+    ]);
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    const panel = await screen.findByTestId('agent-readiness');
+    expect(panel).toHaveTextContent('readiness.servers');
+    const remove = screen.getAllByText('readiness.remove');
+    expect(remove).toHaveLength(1);
+    await act(async () => { fireEvent.click(remove[0]); });
+    expect(screen.getByRole('textbox', { name: 'disc.prompt' })).toHaveValue('@codex vérifiez ceci.');
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await clickCreate();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({ targetAgents: ['Codex'] }));
+    // A single agent is not pinged: its own start reports the same failure.
+    expect(await readinessMock()).toHaveBeenCalledTimes(1);
+  });
+
+  it('fix opens the setting that clears the reason and launches nothing', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'not_ready', 'not_installed'),
+      readinessResult('ClaudeCode', 'not_ready', 'session_failed', { detail: 'MCP Broken exited' }),
+    ]);
+    const { onSubmit, onNavigate, onClose } = renderTwoAgents();
+    await clickCreate();
+    await screen.findByTestId('agent-readiness');
+    const fixes = screen.getAllByText('readiness.fix');
+    expect(fixes).toHaveLength(2);
+    fireEvent.click(fixes[0]);
+    expect(onClose).toHaveBeenCalled();
+    expect(onNavigate).toHaveBeenCalledWith('settings', { scrollTo: 'settings-agent-config' });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('a session blocked by an MCP server is fixed on the MCP page', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'session_timeout', { secs: 90 }),
+    ]);
+    const { onNavigate } = renderTwoAgents();
+    await clickCreate();
+    await screen.findByTestId('agent-readiness');
+    fireEvent.click(screen.getByText('readiness.fix'));
+    expect(onNavigate).toHaveBeenCalledWith('mcps', undefined);
+  });
+
+  it('starts at once when every agent is ready or merely unverified', async () => {
+    const results = [
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'unknown', 'login_unverified'),
+    ];
+    (await readinessMock()).mockResolvedValueOnce(results);
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({ readiness: results }));
+  });
+
+  it('a check that fails does not launch, and launch anyway still can', async () => {
+    (await readinessMock()).mockRejectedValueOnce(new Error('backend down'));
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    const panel = await screen.findByTestId('agent-readiness');
+    expect(panel).toHaveAttribute('data-state', 'error');
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByText('readiness.launchAnyway')); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  });
+
+  it('a double click on launch anyway starts the room once', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'not_logged_in'),
+    ]);
+    let resolveSubmit: () => void = () => {};
+    const onSubmit = vi.fn(() => new Promise<void>(resolve => { resolveSubmit = resolve; }));
+    renderTwoAgents(onSubmit);
+    await clickCreate();
+    await screen.findByTestId('agent-readiness');
+    const anyway = screen.getByText('readiness.launchAnyway');
+    await act(async () => {
+      fireEvent.click(anyway);
+      fireEvent.click(anyway);
+    });
+    resolveSubmit();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  });
+  const ALL_READY = () => [
+    readinessResult('Codex', 'ready', 'ready'),
+    readinessResult('ClaudeCode', 'ready', 'ready'),
+  ];
+
+  /** A check that answers only when the test says so. */
+  const pendingCheck = async () => {
+    let resolveProbe!: (value: AgentReadiness[]) => void;
+    (await readinessMock()).mockReturnValueOnce(new Promise(resolve => { resolveProbe = resolve; }));
+    return (value: AgentReadiness[]) => act(async () => { resolveProbe(value); });
+  };
+
+  // Ported from the Codex review of 6fbe8022a.
+  it('closing the form while the check runs launches nothing', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit, onClose, view } = renderTwoAgents();
+    await clickCreate();
+    expect(await readinessMock()).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    view.unmount();
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('Escape while the check runs launches nothing', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit, onClose } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.keyDown(document.querySelector('.disc-new-card') as HTMLElement, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('a click on the overlay while the check runs launches nothing', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit, onClose } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.click(document.querySelector('.disc-new-overlay') as HTMLElement);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('a form unmounted by its parent while the check runs launches nothing', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit, view } = renderTwoAgents();
+    await clickCreate();
+    view.unmount();
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('changing the project while the check runs invalidates it', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    expect((await readinessMock()).mock.calls[0][0].project_id).toBeNull();
+    fireEvent.focus(screen.getByTestId('new-disc-project-picker'));
+    fireEvent.click(screen.getByRole('option', { name: /acme-frontend/ }));
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+  });
+
+  it('a stale blocked panel disappears when the project changes', async () => {
+    (await readinessMock()).mockResolvedValueOnce([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'not_logged_in'),
+    ]);
+    renderTwoAgents();
+    await clickCreate();
+    await screen.findByTestId('agent-readiness');
+    fireEvent.focus(screen.getByTestId('new-disc-project-picker'));
+    fireEvent.click(screen.getByRole('option', { name: /acme-frontend/ }));
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+    expect(screen.queryByText('readiness.launchAnyway')).toBeNull();
+  });
+
+  it('editing the brief while the check runs invalidates it', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude vérifiez plutôt cela.' },
+    });
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+  });
+
+  it('a ready check submits the form as it is when the answer arrives', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.change(document.querySelector('input.disc-input-styled') as HTMLInputElement, {
+      target: { value: 'Titre saisi pendant la vérification' },
+    });
+    await resolve(ALL_READY());
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({
+      title: 'Titre saisi pendant la vérification',
+      targetAgents: ['Codex', 'ClaudeCode'],
+    }));
+  });
+
+  it('cancel stops a pending check, and its late answer changes nothing (control)', async () => {
+    const resolve = await pendingCheck();
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.click(screen.getByText('readiness.cancel'));
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+    await resolve([
+      readinessResult('Codex', 'ready', 'ready'),
+      readinessResult('ClaudeCode', 'not_ready', 'not_logged_in'),
+    ]);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+  });
+
+  it('a late failure after cancel shows no panel either', async () => {
+    let rejectProbe!: (error: Error) => void;
+    (await readinessMock()).mockReturnValueOnce(new Promise((_, reject) => { rejectProbe = reject; }));
+    const { onSubmit } = renderTwoAgents();
+    await clickCreate();
+    fireEvent.click(screen.getByText('readiness.cancel'));
+    await act(async () => { rejectProbe(new Error('late')); });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('agent-readiness')).toBeNull();
+  });
+  // Ported from the Codex review of 9bd11c05e.
+  it('switching to media while the check runs invalidates the conversation start', async () => {
+    const resolve = await pendingCheck();
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[PROJECT_WITH_REPO]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        externalConnections={[MEDIA_CONNECTION]}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+    fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+      target: { value: '@codex @claude vérifiez ceci.' },
+    });
+    await clickCreate();
+    expect(await readinessMock()).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('new-disc-media-mode'));
+    expect(await screen.findByTestId('media-generate-form')).toBeInTheDocument();
+    await resolve(ALL_READY());
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

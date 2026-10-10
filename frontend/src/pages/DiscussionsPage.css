@@ -8488,3 +8488,85 @@ button.disc-contact-open {
   background: #000;
 }
 .disc-sequence-screen .disc-sequence-error { display: grid; gap: 8px; justify-items: center; color: #fff; }
+
+/* KT-1107 — pre-launch agent check (form) and its compact room notice. */
+.agent-readiness {
+  margin: 0 var(--kr-sp-4) var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-subtle);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.agent-readiness[data-state="blocked"],
+.agent-readiness[data-state="error"] {
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border-color: rgba(var(--kr-error-rgb), 0.28);
+}
+
+.agent-readiness-title {
+  font-weight: 600;
+  color: var(--kr-text-primary);
+  margin-bottom: var(--kr-sp-2);
+}
+
+.agent-readiness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.agent-readiness-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  line-height: 1.4;
+}
+
+.agent-readiness-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-readiness-row-actions,
+.agent-readiness-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.agent-readiness-actions {
+  justify-content: flex-end;
+  margin-top: var(--kr-sp-3);
+}
+
+.agent-readiness-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: var(--kr-sp-2) var(--kr-sp-4);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-subtle);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.agent-readiness-notice[data-state="blocked"] {
+  border-color: rgba(var(--kr-warning-rgb), 0.28);
+}
+
+.agent-readiness-chip {
+  padding: 0 var(--kr-sp-2);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}

@@ -23,6 +23,7 @@ const detail: LivePageDetail = {
     created_by_agent: 'Ollama', created_at: '2026-08-26T10:00:00Z',
   },
   datasets: [],
+  slug_aliases: [],
 };
 
 vi.mock('../../lib/api', () => ({

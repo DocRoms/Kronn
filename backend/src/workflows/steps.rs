@@ -1289,6 +1289,8 @@ async fn run_agent_with_timeout(
         model_applied: runtime.model_applied,
         observed_models: runtime.observed_models,
         format_fallback: runtime.format_fallback,
+        npx_fallback_command: runtime.npx_fallback_command,
+        npx_fallback_version: runtime.npx_fallback_version,
         started_at,
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         succeeded: result.is_ok(),
@@ -2085,7 +2087,10 @@ mod tests {
         use crate::models::{OnInvalid, StepOutputFormat};
         let data_schema = serde_json::json!({
             "type": "object",
-            "properties": { "score": { "type": "integer" } },
+            "properties": {
+                "score": { "type": "integer" },
+                "note": { "type": "string" }
+            },
             "required": ["score"]
         });
         let of = StepOutputFormat::TypedSchema {
@@ -2093,18 +2098,28 @@ mod tests {
             on_invalid: OnInvalid::Continue,
         };
         let wrapped = ollama_envelope_format(&of).expect("TypedSchema → envelope schema");
-        // The author schema becomes `data`; status/summary are added; data +
-        // status are required so extract_step_envelope strategy-2 recovers it.
-        assert_eq!(wrapped["properties"]["data"], data_schema);
-        assert_eq!(wrapped["properties"]["status"]["type"], "string");
-        assert_eq!(wrapped["properties"]["summary"]["type"], "string");
-        let required: Vec<&str> = wrapped["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(required.contains(&"data") && required.contains(&"status"));
+        assert_eq!(
+            wrapped,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "data": data_schema,
+                    "status": { "type": "string" },
+                    "summary": { "type": "string" }
+                },
+                "required": ["data", "status"]
+            })
+        );
+
+        let openai =
+            crate::agents::chat_codec::build_openai_chat_body("m", "", "hi", Some(&wrapped), false);
+        assert_eq!(openai["response_format"]["json_schema"]["strict"], false);
+        assert_eq!(openai["response_format"]["json_schema"]["schema"], wrapped);
+
+        let ollama = runner::build_ollama_chat_body("m", "", "hi", Some(&wrapped), 8192, None);
+        assert_eq!(ollama["format"], wrapped);
+        assert_eq!(ollama["stream"], false);
+        assert!(ollama.get("response_format").is_none());
     }
 
     #[test]
@@ -2139,6 +2154,97 @@ mod tests {
         );
         assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
         assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
+    }
+
+    // ─── Catalogue near-miss refusal reaches the workflow step launch path ────
+
+    #[tokio::test]
+    #[serial_test::serial(model_catalog_reasoning_modes)]
+    async fn workflow_step_reasoning_effort_override_names_the_catalogue_spelling_on_launch() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn({
+            let target = target.clone();
+            move |conn| {
+                crate::db::model_catalog::create_manual(
+                    conn,
+                    &crate::models::UpsertManualModelRequest {
+                        runtime_target_id: target,
+                        agent_type: AgentType::ClaudeCode,
+                        model_id: "manual-model".into(),
+                        display_name: "Manual model".into(),
+                        capabilities: vec!["chat".into()],
+                        reasoning_modes: vec!["high".into()],
+                        default_reasoning_mode: Some("high".into()),
+                        tier_assignment: None,
+                        cost_hint: None,
+                        privacy_note: None,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        crate::core::model_catalog::refresh_runtime_cache(&db)
+            .await
+            .unwrap();
+
+        let step = WorkflowStep {
+            agent: AgentType::ClaudeCode,
+            agent_settings: Some(AgentSettings {
+                model: Some("manual-model".into()),
+                tier: Some(ModelTier::Default),
+                reasoning_effort: Some("High".into()),
+                max_tokens: None,
+                connection_id: None,
+                tools: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let mut provenance = WorkflowAgentProvenance::default();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let error = run_agent_with_timeout(
+            &step,
+            &project,
+            None,
+            &project,
+            "does it matter",
+            &[],
+            &tokens,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("manual-model"),
+            None,
+            &mut provenance,
+            WorkflowAgentAttemptRole::Initial,
+            0,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a case-mismatched override must still be refused, never silently applied");
+        assert!(
+            error
+                .to_string()
+                .contains("the catalogue lists 'high', not 'High'"),
+            "the refusal must name the actual mismatch, not the generic catalogue-absence reason: {error}"
+        );
     }
 
     #[test]

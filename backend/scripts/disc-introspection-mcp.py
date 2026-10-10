@@ -1544,18 +1544,19 @@ TOOLS = [
     {
         "name": "page_update_html",
         "description": (
-            "New immutable HTML revision of a Live Page; datasets and publication "
-            "history are kept. Call page_get first and send the complete "
-            "self-contained HTML, not a patch. Action buttons: "
+            "New immutable HTML revision of a Live Page; datasets and history "
+            "are kept. Call page_get first; send complete self-contained HTML, "
+            "not a patch. `slug` renames it. Manual: "
             "`tool_manual({tool: \"page_update_html\"})`."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "page_id": {"type": "string", "description": "Page id or slug from page_list."},
-                "html": {"type": "string", "description": "Complete replacement HTML document (1 MB max)."},
+                "html": {"type": "string", "description": "Complete HTML document (1 MB max)."},
+                "slug": {"type": "string"},
             },
-            "required": ["page_id", "html"],
+            "required": ["page_id"],
         },
     },
     {
@@ -7682,18 +7683,49 @@ def call_page_create(args):
     return _unwrap(_http("POST", "/api/pages", body))
 
 
+_PAGE_HTML_MAX_BYTES = 1_000_000  # same limit as PUT /api/pages/{id}/html
+
+
 def call_page_update_html(args):
-    """Create an immutable replacement HTML revision for a Page."""
+    """New HTML revision for a Page, and/or a new slug (the old one keeps resolving)."""
     encoded = _page_selector(args, "page_update_html")
     html = args.get("html")
-    if not isinstance(html, str) or not html.strip():
-        raise RuntimeError("page_update_html: missing required 'html'")
-    actor = _agent_type_for_session()
-    body = {
-        "html": html,
-        "created_by_agent": None if actor == "Unknown" else actor,
+    slug = args.get("slug")
+    if slug is not None and not isinstance(slug, str):
+        raise RuntimeError("page_update_html: 'slug' must be a string")
+    if html is None and slug is None:
+        raise RuntimeError("page_update_html: missing required 'html' (or 'slug' to rename)")
+    # Provided HTML is checked before any write, so a rename never lands alone
+    # because of HTML the server would refuse anyway.
+    if html is not None:
+        if not isinstance(html, str) or not html.strip():
+            raise RuntimeError("page_update_html: missing required 'html'")
+        if len(html.encode("utf-8")) > _PAGE_HTML_MAX_BYTES:
+            raise RuntimeError("page_update_html: 'html' exceeds 1 MB")
+    result = None
+    if slug is not None:
+        result = _unwrap(_http("PATCH", f"/api/pages/{encoded}", {"slug": slug}))
+        # Address the page by its id from here, whatever selector was given.
+        encoded = urllib.parse.quote(result.get("id") or slug.strip(), safe="")
+    if html is not None:
+        actor = _agent_type_for_session()
+        body = {
+            "html": html,
+            "created_by_agent": None if actor == "Unknown" else actor,
+        }
+        try:
+            return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
+        except Exception as error:
+            if result is None:
+                raise
+            raise RuntimeError(
+                f"page_update_html: page '{result.get('id')}' was already renamed to slug "
+                f"'{result.get('slug')}', but the HTML revision failed: {error}"
+            ) from error
+    return {
+        key: result.get(key)
+        for key in ("id", "title", "slug", "slug_aliases", "project_id", "updated_at")
     }
-    return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
 
 
 def call_page_add_dataset(args):
@@ -9875,6 +9907,9 @@ TOOL_MANUALS = {
         "\n\n" + _PAGE_ACTION_CONTRACT
     ),
     "page_update_html": (
+        "`slug` renames the Page, alone or with `html`: lowercase ASCII letters, digits and "
+        "single '-', unique across every project. The former slug keeps opening the Page and "
+        "stays reserved for it, so existing links, workflow steps and calls still work.\n\n"
         "The new revision replaces the whole document. Keep each action block's "
         "`data-action-id` and its button's `data-kronn-action` unchanged across "
         "revisions: the reference is what ties a button to its past launches. A block "
