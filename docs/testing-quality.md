@@ -94,8 +94,17 @@ Supervisor cleanup must also reap live shell jobs whose PID was not yet recorded
 a termination signal can arrive between the fork and that assignment, leaving
 a child alive and keeping inherited test pipes open. The shell regression injects
 TERM at this boundary for both the backend and the watcher.
-`[src: file: scripts/dev-backend-supervisor.sh:54-62]`
-`[src: file: tests/bats/ui.bats:560-644]`
+`[src: file: scripts/dev-backend-supervisor.sh:62-73]`
+`[src: file: tests/bats/ui.bats:616-700]`
+
+Once its traps are set, the supervisor uses no `$(...)` or `<(...)`: bash 5.2
+can run a pending trap while it parses one, fail to parse the trap and drop the
+signal. Command output goes through files, and the build guard and Cargo run in
+the background behind `wait`, which a trap interrupts at once. A static check
+and a TERM-during-build test guard both.
+`[src: file: scripts/dev-backend-supervisor.sh:30-33]`
+`[src: file: scripts/dev-backend-supervisor.sh:90-103]`
+`[src: file: tests/bats/ui.bats:704-808]`
 
 ## Backend CI timing SLO
 

@@ -13,6 +13,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
+  5.2 the backend supervisor could drop a TERM that arrived while it expanded
+  a command substitution, right after its Cargo build, and keep running. It
+  also waited for a long initial build to finish before honouring the signal.
+  It now uses no command substitution once its traps are set and runs the
+  build in the background, so the signal stops the build at once.
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and
