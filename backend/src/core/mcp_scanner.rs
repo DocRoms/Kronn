@@ -5976,9 +5976,35 @@ Always send emails from contact@example.com
         "KRONN_MCP_SECRET_REFERENCES",
     ];
 
+    const ISOLATED_HOME_CHILD_ENV: &str = "KRONN_TEST_ISOLATED_HOME_CHILD";
+
+    /// Runs in a child process: HOME is process-wide, and parallel tests that
+    /// spawn real CLIs would otherwise write into the fake home meanwhile.
     #[test]
-    #[serial]
     fn an_isolated_data_dir_leaves_every_home_cli_config_byte_identical() {
+        if std::env::var_os(ISOLATED_HOME_CHILD_ENV).is_some() {
+            isolated_data_dir_leaves_home_untouched();
+            return;
+        }
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "core::mcp_scanner::host_sync_tests::an_isolated_data_dir_leaves_every_home_cli_config_byte_identical",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ISOLATED_HOME_CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            child.status.success() && stdout.contains("1 passed"),
+            "isolated-home child failed:\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&child.stderr),
+        );
+    }
+
+    fn isolated_data_dir_leaves_home_untouched() {
         let _restore = EnvRestore::capture(&HOST_SYNC_ENV);
         let root = tempfile::tempdir().unwrap();
         let home = fake_home_with_user_configs(root.path());
