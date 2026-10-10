@@ -245,9 +245,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Model inactivity watchdog** (KT-932) — `backend/src/agents/idle_watchdog.rs`. Fails an ACP or native-HTTP agent run whose model stays silent for the whole delay (bytes on the HTTP stream, frames from the ACP agent; progress restarts it) and cancels the generation, so Ollama is free for the next request. Delay: the discussion's agent inactivity timeout (at least 15 min) or the step's `stall_timeout_secs`; default 15 min. Distinct from the stall timeout, which watches what the consumer reads. While an ACP tool call is open (no terminal `completed`/`failed`/`cancelled` update yet) the model's delay is suspended in favour of `tool_execution_timeout` — 8× wider — so a long but healthy tool (a build, a test run) is never mistaken for a dead model; a tool call that never closes is still cut by that wider bound, named in the failure reason.
 
-**Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events. Shows what the agent is doing (reading files, running commands, editing) during a conversation or workflow step.
-
-**format_tool_log** — Formats rich log lines from tool name + JSON input. Displays human-readable activity: `Read path`, `$ command`, `Edit path`, etc. Used in agent activity log rendering.
+**Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events to the requester's bubble. A tool call leaves as its category only (`→ Read`, `✓ Execute`), never its name, input, path or URL — the same no-leak rule as the KT-1108 run progress (KT-1120). A stderr diagnostic shows as a fixed `⚠ Diagnostic` notice, once per run; its text stays in a failed run's error message.
 
 **sendingStartMap** — Lifted `Record<string, number>` timestamp map tracking when each discussion's agent request started. Persists across page switches so the elapsed timer remains accurate when navigating away and back.
 

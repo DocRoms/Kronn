@@ -5252,7 +5252,8 @@ fn parse_resume_interrupted_request(
 
 /// POST /api/workflow-runs/:run_id/resume
 ///
-/// A2 — manually resume an `Interrupted` run (backend restart, crash). The
+/// A2 — manually resume an `Interrupted` run (backend restart, crash), or a
+/// `WaitingQuota` run before its wake-up or once parked (KT-811). The
 /// atomic `Interrupted → Running` claim happens BEFORE this responds, so a
 /// double-click gets exactly one resume + one clear error. Execution then
 /// continues in the background from the step after the last completed result,
@@ -5327,29 +5328,8 @@ pub(crate) async fn resume_interrupted_as(
         return Json(ApiResponse::err(e.to_string()));
     }
 
-    let state_clone = state.clone();
     let response_run_id = run.id.clone();
-    tokio::spawn(async move {
-        let cfg = state_clone.config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-        if let Err(e) = crate::workflows::runner::resume_interrupted_run(
-            state_clone.clone(),
-            &workflow,
-            &mut run,
-            &tokens,
-            &agents,
-            None,
-        )
-        .await
-        {
-            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run, &e)
-                .await;
-        }
-        // Same unattended-failure contract as the gate resume path.
-        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run).await;
-    });
+    crate::workflows::runner::spawn_claimed_resume(state.clone(), workflow, run);
 
     Json(ApiResponse::ok(ResumeRunResponse {
         run_id: response_run_id,

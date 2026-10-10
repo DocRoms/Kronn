@@ -69,6 +69,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 },
                 condition_action: None,
             };
@@ -97,6 +98,7 @@ pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutc
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action: None,
     }

@@ -7493,6 +7493,7 @@ pub(crate) fn prepare_task_execution(
         project_id,
         launchable: reasons.is_empty(),
         reasons,
+        warnings: Vec::new(),
         active_execution,
     })
 }
@@ -9884,18 +9885,136 @@ fn worker_label(agent: &AgentType) -> &'static str {
 fn worker_tiers(
     agent: &AgentType,
     model_tiers: &crate::models::ModelTiersConfig,
+    verdicts: &[(AgentType, crate::models::CatalogTierVerdict)],
 ) -> Vec<crate::models::TaskWorkerTier> {
     [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning]
         .into_iter()
-        .map(|tier| crate::models::TaskWorkerTier {
-            tier,
-            resolved_model: crate::agents::runner::resolve_model_flag(
-                agent,
-                tier,
-                Some(model_tiers),
-            ),
+        .map(|tier| {
+            let configured =
+                crate::agents::runner::resolve_model_flag(agent, tier, Some(model_tiers));
+            let verdict = verdicts
+                .iter()
+                .find(|(kind, verdict)| kind == agent && verdict.tier == tier)
+                .map(|(_, verdict)| verdict);
+            match verdict {
+                Some(verdict) if !verdict.launchable => crate::models::TaskWorkerTier {
+                    tier,
+                    resolved_model: verdict.requested_model.clone().or(configured),
+                    refusal: Some(catalog_refusal_reason(tier, verdict)),
+                    requested_model: None,
+                    warning: None,
+                },
+                Some(verdict) => crate::models::TaskWorkerTier {
+                    tier,
+                    resolved_model: verdict.effective_model.clone().or(configured),
+                    refusal: None,
+                    requested_model: verdict
+                        .requested_model
+                        .clone()
+                        .filter(|requested| verdict.effective_model.as_ref() != Some(requested)),
+                    warning: catalog_notice_reason(verdict),
+                },
+                None => crate::models::TaskWorkerTier {
+                    tier,
+                    resolved_model: configured,
+                    refusal: None,
+                    requested_model: None,
+                    warning: None,
+                },
+            }
         })
         .collect()
+}
+
+fn catalog_refusal_reason(
+    tier: ModelTier,
+    verdict: &crate::models::CatalogTierVerdict,
+) -> crate::models::CampaignTaskReason {
+    preparation_reason(
+        "model_unavailable",
+        format!(
+            "the {tier:?} tier would be refused at launch for model `{}`: {}",
+            verdict
+                .requested_model
+                .as_deref()
+                .unwrap_or("runtime default"),
+            verdict
+                .detail
+                .as_deref()
+                .unwrap_or("the model catalogue refuses it"),
+        ),
+    )
+}
+
+fn catalog_notice_reason(
+    verdict: &crate::models::CatalogTierVerdict,
+) -> Option<crate::models::CampaignTaskReason> {
+    verdict
+        .notice
+        .as_ref()
+        .map(|notice| preparation_reason("model_not_listed", notice.clone()))
+}
+
+/// The verdict the launch preflight would reach for a native worker tier,
+/// read from the durable catalogue without running discovery.
+async fn native_tier_verdict(
+    db: &crate::db::Database,
+    agent: &AgentType,
+    tier: ModelTier,
+    model_tiers: &crate::models::ModelTiersConfig,
+) -> crate::models::CatalogTierVerdict {
+    let target = crate::core::model_catalog::legacy_runtime_target_id(db, agent).await;
+    let decision = crate::core::model_catalog::launch_verdict(
+        db,
+        target.as_deref(),
+        agent.clone(),
+        tier,
+        None,
+        Some(model_tiers),
+    )
+    .await;
+    let requested = match &decision {
+        Ok(resolution) => resolution.requested_model.clone(),
+        Err(failure) => failure.model_id.clone(),
+    };
+    crate::models::CatalogTierVerdict::from_decision(tier, requested, decision.map(Some))
+}
+
+async fn bounded_tier_verdicts(
+    db: &crate::db::Database,
+    model_tiers: &crate::models::ModelTiersConfig,
+) -> Vec<(AgentType, crate::models::CatalogTierVerdict)> {
+    let mut verdicts = Vec::new();
+    for agent in CATALOGUED_PROVIDERS {
+        for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
+            let verdict = native_tier_verdict(db, &agent, tier, model_tiers).await;
+            verdicts.push((agent.clone(), verdict));
+        }
+    }
+    verdicts
+}
+
+/// The catalogue verdict for a native worker's tier: a refusal the preflight
+/// would make, else its pre-launch warning, so `task_exec_prepare` never
+/// calls launchable what the run then rejects.
+async fn worker_catalog_verdict(
+    state: &AppState,
+    worker: &MessageTarget,
+) -> (
+    Option<crate::models::CampaignTaskReason>,
+    Option<crate::models::CampaignTaskReason>,
+) {
+    if worker.kind == MessageTargetKind::Cli || worker.connection_id.is_some() {
+        return (None, None);
+    }
+    let tiers = state.config.read().await.agents.model_tiers.clone();
+    let tier = worker.tier.unwrap_or_default();
+    let verdict = native_tier_verdict(&state.db, &worker.agent_type, tier, &tiers).await;
+    if verdict.launchable {
+        (None, catalog_notice_reason(&verdict))
+    } else {
+        (Some(catalog_refusal_reason(tier, &verdict)), None)
+    }
 }
 
 fn fixed_worker_reason(code: &str) -> crate::models::CampaignTaskReason {
@@ -9945,6 +10064,7 @@ struct WorkerPreflight<'a> {
     cli: &'a [(AgentType, crate::agents::runner::CopilotTaskWorkerPreflight)],
     quota_exhausted: &'a [(AgentType, bool)],
     media_capabilities: &'a [MediaCapabilityEntry],
+    tier_verdicts: &'a [(AgentType, crate::models::CatalogTierVerdict)],
 }
 
 fn build_task_worker_catalogue(
@@ -9998,7 +10118,7 @@ fn build_task_worker_catalogue(
             AgentType::Nvidia => true,
             _ => runtime_present,
         };
-        let tiers = worker_tiers(&agent, &config.agents.model_tiers);
+        let tiers = worker_tiers(&agent, &config.agents.model_tiers, preflight.tier_verdicts);
         let model_configured = !http
             || tiers.iter().any(|tier| {
                 tier.resolved_model
@@ -10050,10 +10170,23 @@ fn build_task_worker_catalogue(
         if let Some(reason) = worker_static_refusal(&worker) {
             reasons.push(reason);
         }
-        let warnings = detection
+        if let Some(refusal) = tiers
+            .iter()
+            .find(|tier| Some(tier.tier) == worker.tier)
+            .and_then(|tier| tier.refusal.clone())
+        {
+            reasons.push(refusal);
+        }
+        let mut warnings = detection
             .and_then(|item| item.runtime_warning.as_ref())
             .map(|_| vec![fixed_worker_reason("runtime_degraded")])
             .unwrap_or_default();
+        warnings.extend(
+            tiers
+                .iter()
+                .find(|tier| Some(tier.tier) == worker.tier)
+                .and_then(|tier| tier.warning.clone()),
+        );
         workers.push(crate::models::TaskWorkerCatalogueEntry {
             worker,
             label: worker_label(&agent).to_string(),
@@ -10127,6 +10260,9 @@ fn build_task_worker_catalogue(
         .map(|(tier, model)| crate::models::TaskWorkerTier {
             tier,
             resolved_model: model.clone().filter(|m| !m.trim().is_empty()),
+            refusal: None,
+            requested_model: None,
+            warning: None,
         })
         .collect::<Vec<_>>();
 
@@ -10422,6 +10558,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
     let cli_preflight = bounded_cli_worker_preflight(&detections).await;
     let quota_state = bounded_provider_quota_state(state).await;
     let media_capabilities = bounded_media_capabilities(state, &connections).await;
+    let tier_verdicts = bounded_tier_verdicts(&state.db, &config.agents.model_tiers).await;
     Ok(build_task_worker_catalogue(
         &config,
         &detections,
@@ -10432,6 +10569,7 @@ pub(crate) async fn task_worker_catalogue_for_discussion(
             cli: &cli_preflight,
             quota_exhausted: &quota_state,
             media_capabilities: &media_capabilities,
+            tier_verdicts: &tier_verdicts,
         },
     ))
 }
@@ -10581,6 +10719,7 @@ pub async fn task_exec_prepare(
     let worker = request.worker;
     let scope_refusal = worker_scope_refusal(&worker, request.worker_scope.as_ref());
     let validations_refusal = validations_refusal(&request.validations);
+    let (catalog_refusal, catalog_warning) = worker_catalog_verdict(&state, &worker).await;
     let result = state
         .db
         .with_conn(move |conn| {
@@ -10588,7 +10727,11 @@ pub async fn task_exec_prepare(
                 bail!("principal discussion not found or caller is not an active member");
             }
             let mut preparation = prepare_task_execution(conn, &task, &parent, &worker)?;
-            for reason in [scope_refusal, validations_refusal].into_iter().flatten() {
+            preparation.warnings.extend(catalog_warning);
+            for reason in [scope_refusal, validations_refusal, catalog_refusal]
+                .into_iter()
+                .flatten()
+            {
                 preparation.launchable = false;
                 preparation.reasons.push(reason);
             }
@@ -10648,13 +10791,21 @@ pub async fn task_exec_launch(
             format!("{}: {}", reason.code, reason.detail),
         ));
     }
+    let (catalog_refusal, _) = worker_catalog_verdict(&state, &request.worker).await;
     let preflight = {
         let task = request.task_reference.trim().to_string();
         let principal = parent.clone();
         let worker = request.worker.clone();
         state
             .db
-            .with_conn(move |conn| prepare_task_execution(conn, &task, &principal, &worker))
+            .with_conn(move |conn| {
+                let mut preparation = prepare_task_execution(conn, &task, &principal, &worker)?;
+                if let Some(reason) = catalog_refusal {
+                    preparation.launchable = false;
+                    preparation.reasons.push(reason);
+                }
+                Ok(preparation)
+            })
             .await
     };
     match preflight {
@@ -12540,6 +12691,275 @@ mod tests {
             detection(AgentType::Ollama, false, true, true, true),
         ]);
         assert_eq!(available, vec![AgentType::Codex, AgentType::Ollama]);
+    }
+
+    fn native_detection() -> crate::models::AgentDetection {
+        crate::models::AgentDetection {
+            name: "Agent".into(),
+            agent_type: AgentType::ClaudeCode,
+            installed: true,
+            enabled: true,
+            path: None,
+            version: None,
+            latest_version: None,
+            version_checked_at: None,
+            version_check_error: None,
+            version_source_url: None,
+            origin: "test".into(),
+            install_command: None,
+            host_managed: false,
+            host_label: None,
+            runtime_available: true,
+            auth_ready: Some(true),
+            auth_setup_command: None,
+            rtk_available: false,
+            rtk_hook_configured: false,
+            runtime_warning: None,
+            shadowed_installs: None,
+            fallback_command: None,
+        }
+    }
+
+    /// A Claude catalogue where `claude-fable-5[1m]` disappeared with no
+    /// replacement, as the launch preflight refuses it (KT-860).
+    async fn seed_refused_claude_alias(db: &Database) {
+        let listed = |id: &str| crate::db::model_catalog::DiscoveredModel {
+            model_id: id.into(),
+            display_name: id.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        };
+        db.with_conn(move |conn| {
+            let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[listed("claude-fable-5[1m]"), listed("sonnet")],
+            )?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[listed("sonnet")],
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    /// KT-860 — `agent_list` reads the preflight's verdict: a tier it would
+    /// refuse is listed with the reason, and a refused default tier makes the
+    /// worker unavailable.
+    #[tokio::test]
+    async fn kt860_agent_list_never_lists_a_tier_the_preflight_refuses_as_available() {
+        let db = Database::open_in_memory().unwrap();
+        seed_refused_claude_alias(&db).await;
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.claude_code.reasoning = Some("claude-fable-5[1m]".into());
+        config.agents.model_tiers.claude_code.default = Some("sonnet".into());
+        let detection = native_detection();
+        let claude =
+            |config: &crate::models::AppConfig,
+             verdicts: &[(AgentType, crate::models::CatalogTierVerdict)]| {
+                build_task_worker_catalogue(
+                    config,
+                    std::slice::from_ref(&detection),
+                    &[],
+                    &[],
+                    &WorkerPreflight {
+                        tier_verdicts: verdicts,
+                        ..Default::default()
+                    },
+                )
+                .workers
+                .into_iter()
+                .find(|entry| entry.worker.agent_type == AgentType::ClaudeCode)
+                .unwrap()
+            };
+
+        let verdicts = bounded_tier_verdicts(&db, &config.agents.model_tiers).await;
+        let entry = claude(&config, &verdicts);
+        let reasoning = entry
+            .tiers
+            .iter()
+            .find(|tier| tier.tier == ModelTier::Reasoning)
+            .unwrap();
+        let refusal = reasoning
+            .refusal
+            .as_ref()
+            .expect("the preflight refuses it");
+        assert_eq!(refusal.code, "model_unavailable");
+        assert!(
+            refusal.detail.contains("`claude-fable-5[1m]`"),
+            "{refusal:?}"
+        );
+        assert!(
+            entry.available,
+            "the default tier still launches: {entry:#?}"
+        );
+
+        // A replacement the preflight would run is what the listing shows.
+        config.agents.model_tiers.claude_code.default = Some("claude-fable-5[1m]".into());
+        let verdicts = bounded_tier_verdicts(&db, &config.agents.model_tiers).await;
+        let entry = claude(&config, &verdicts);
+        let default = entry
+            .tiers
+            .iter()
+            .find(|tier| tier.tier == ModelTier::Default)
+            .unwrap();
+        assert_eq!(default.resolved_model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            default.requested_model.as_deref(),
+            Some("claude-fable-5[1m]")
+        );
+        assert!(entry.available, "{entry:#?}");
+
+        // Without one, the worker's own tier is refused, so is the worker.
+        db.with_conn(|conn| {
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode),
+                &AgentType::ClaudeCode,
+                &[],
+            )
+        })
+        .await
+        .unwrap();
+        let verdicts = bounded_tier_verdicts(&db, &config.agents.model_tiers).await;
+        let entry = claude(&config, &verdicts);
+        assert!(!entry.available, "{entry:#?}");
+        assert!(entry
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "model_unavailable"));
+    }
+
+    /// KT-667 — a Codex tier pinned to a model its complete listing omits is
+    /// listed with a warning and stays available: a listing is no access proof.
+    #[tokio::test]
+    async fn kt667_agent_list_warns_about_a_pin_the_cli_listing_omits() {
+        let db = Database::open_in_memory().unwrap();
+        db.with_conn(|conn| {
+            let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::Codex);
+            crate::db::model_catalog::insert_migrated_seed(
+                conn,
+                &AgentType::Codex,
+                "gpt-5.6-sol",
+                "gpt-5.6-sol",
+                Some(ModelTier::Default),
+                &["chat".into()],
+                &[],
+            )?;
+            crate::db::model_catalog::reconcile_listing(
+                conn,
+                &target,
+                &AgentType::Codex,
+                &[],
+                crate::db::model_catalog::Refutation::Complete(["gpt-6-astra"].into()),
+            )
+        })
+        .await
+        .unwrap();
+        let config = crate::core::config::default_config();
+        let verdicts = bounded_tier_verdicts(&db, &config.agents.model_tiers).await;
+        let mut detection = native_detection();
+        detection.agent_type = AgentType::Codex;
+        let entry = build_task_worker_catalogue(
+            &config,
+            std::slice::from_ref(&detection),
+            &[],
+            &[],
+            &WorkerPreflight {
+                tier_verdicts: &verdicts,
+                ..Default::default()
+            },
+        )
+        .workers
+        .into_iter()
+        .find(|entry| entry.worker.agent_type == AgentType::Codex)
+        .unwrap();
+        assert!(entry.available, "{entry:#?}");
+        let tier = entry
+            .tiers
+            .iter()
+            .find(|tier| tier.tier == ModelTier::Default)
+            .unwrap();
+        assert!(tier.refusal.is_none());
+        assert_eq!(
+            tier.warning.as_ref().map(|w| w.code.as_str()),
+            Some("model_not_listed")
+        );
+        assert!(entry
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "model_not_listed"));
+    }
+
+    /// KT-860 — `task_exec_prepare` says not launchable, with the reason, for
+    /// the tier the run would be refused on; another tier stays launchable.
+    #[tokio::test]
+    async fn kt860_task_exec_prepare_refuses_a_tier_the_preflight_refuses() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _pid) = seed(&db, repo.path()).await;
+        {
+            let task_ref = task_ref.clone();
+            let parent_id = parent_id.clone();
+            db.with_conn(move |conn| {
+                crate::db::planning::link_discussion(
+                    conn,
+                    &task_ref,
+                    &crate::models::LinkPlanningDiscussionRequest {
+                        discussion_id: parent_id,
+                        placement: Default::default(),
+                        is_primary: true,
+                        position: None,
+                        actor: test_actor(),
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        }
+        seed_cli_session(&db, 103, &parent_id, "principal").await;
+        seed_refused_claude_alias(&db).await;
+        let mut config = crate::core::config::default_config();
+        config.agents.model_tiers.claude_code.reasoning = Some("claude-fable-5[1m]".into());
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let prepare = |tier: ModelTier| {
+            let request: TaskExecPrepareRequest = serde_json::from_value(serde_json::json!({
+                "task_reference": task_ref,
+                "parent_discussion_id": parent_id,
+                "worker": serde_json::to_value(native_worker().with_tier(tier)).unwrap(),
+                "source_agent": "ClaudeCode",
+                "source_session_id": "principal",
+                "worker_scope_intent": "generic",
+            }))
+            .expect("prepare request");
+            task_exec_prepare(State(state.clone()), Json(request))
+        };
+
+        let Json(refused) = prepare(ModelTier::Reasoning).await;
+        let preparation = refused.data.expect("a preflight answers");
+        assert!(!preparation.launchable);
+        let reason = preparation
+            .reasons
+            .iter()
+            .find(|reason| reason.code == "model_unavailable")
+            .expect("model_unavailable reason");
+        assert!(reason.detail.contains("`claude-fable-5[1m]`"), "{reason:?}");
+
+        let Json(accepted) = prepare(ModelTier::Economy).await;
+        let preparation = accepted.data.expect("a preflight answers");
+        assert!(preparation.launchable, "{:#?}", preparation.reasons);
     }
 
     #[test]
@@ -15230,6 +15650,135 @@ mod tests {
         );
     }
 
+    /// Kills and reaps a test child left running by a failed assertion, before
+    /// the TempDirs it works in are deleted. A group guard stops the whole
+    /// process group even once its leader has exited.
+    #[cfg(unix)]
+    struct ReapChild {
+        child: std::process::Child,
+        pgid: Option<i32>,
+    }
+
+    #[cfg(unix)]
+    impl ReapChild {
+        /// For a child spawned with `process_group(0)`: its pid is the group id.
+        fn group(child: std::process::Child) -> Self {
+            let pgid = Some(child.id() as i32);
+            Self { child, pgid }
+        }
+
+        fn single(child: std::process::Child) -> Self {
+            Self { child, pgid: None }
+        }
+
+        fn kill_group(&self) {
+            if let Some(pgid) = self.pgid {
+                // ESRCH (nothing left in the group) is the expected end state.
+                unsafe { libc::killpg(pgid, libc::SIGKILL) };
+            }
+        }
+
+        /// The leader's stderr after an early exit. The group is stopped first,
+        /// so a surviving descendant cannot hold the pipe open and block the read.
+        fn early_exit_stderr(&mut self) -> String {
+            self.kill_group();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = self.child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+            }
+            stderr
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ReapChild {
+        fn drop(&mut self) {
+            if self.pgid.is_some() {
+                self.kill_group();
+            } else if matches!(self.child.try_wait(), Ok(None)) {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+
+    /// A group leader that exits at once, leaving a `sleep` alive in its group
+    /// that keeps the leader's stderr pipe open. Returns the guard and that pid.
+    #[cfg(unix)]
+    fn exited_leader_with_live_descendant(dir: &std::path::Path) -> (ReapChild, i32) {
+        let pid_file = dir.join("descendant.pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                &format!("sleep 600 & echo $! > '{}'; exit 3", pid_file.display()),
+            ])
+            .stderr(std::process::Stdio::piped());
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut guard = ReapChild::group(command.spawn().unwrap());
+        assert_eq!(guard.child.wait().unwrap().code(), Some(3));
+        let descendant = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            process_alive(descendant),
+            "the descendant must outlive its leader"
+        );
+        (guard, descendant)
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// A killed descendant is reparented and reaped by init; the ceiling only bounds a hang.
+    #[cfg(unix)]
+    fn assert_gone(pid: i32, why: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while process_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if process_alive(pid) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!("{why}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_child_stops_a_group_whose_leader_already_exited() {
+        let dir = tempfile::tempdir().unwrap();
+        let (guard, descendant) = exited_leader_with_live_descendant(dir.path());
+        drop(guard);
+        assert_gone(
+            descendant,
+            "the guard must stop the group even after its leader exited",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_child_reads_early_exit_stderr_despite_a_live_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, descendant) = exited_leader_with_live_descendant(dir.path());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let stderr = guard.early_exit_stderr();
+            let _ = done_tx.send(());
+            stderr
+        });
+        let returned = done_rx.recv_timeout(std::time::Duration::from_secs(60));
+        if returned.is_err() {
+            unsafe { libc::kill(descendant, libc::SIGKILL) };
+        }
+        returned.expect("reading the early-exit stderr must not wait on a live descendant");
+        reader.join().unwrap();
+        assert_gone(descendant, "the diagnostic read must stop the group first");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn surviving_git_hook_blocks_restart_reap_until_it_exits() {
@@ -15282,20 +15831,32 @@ mod tests {
             .args(["commit", "--no-gpg-sign", "-m", "blocked hook"])
             .current_dir(repo.path());
         crate::core::config::inherit_data_dir_lock_on_command(&mut git_command, &inherited_lock);
-        let mut git_child = git_command.spawn().unwrap();
+        // Its own process group, so the guard also reaches the hook and its `sleep`.
+        std::os::unix::process::CommandExt::process_group(&mut git_command, 0);
+        git_command.stderr(std::process::Stdio::piped());
+        let mut git_child = ReapChild::group(git_command.spawn().unwrap());
 
         // Spawn an unrelated long-lived child while the targeted Git child is
         // alive. The duplicate stays CLOEXEC in the parent, so this child must
-        // not accidentally retain the backend lock.
-        let mut unrelated_child = std::process::Command::new("sh")
-            .args(["-c", "sleep 30"])
-            .spawn()
-            .unwrap();
+        // not accidentally retain the backend lock. Run directly, with no shell
+        // whose `sleep` would outlive a kill; long enough to outlive a slow run.
+        let mut unrelated_child = ReapChild::single(
+            std::process::Command::new("sleep")
+                .arg("600")
+                .spawn()
+                .unwrap(),
+        );
         drop(inherited_lock);
         drop(backend_lock);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // The hook's marker is the event; a Git that exits first ends the wait.
+        // The ceiling only bounds a hang (a fresh script's first exec is slow under load).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !hook_started.exists() && std::time::Instant::now() < deadline {
+            if let Some(status) = git_child.child.try_wait().unwrap() {
+                let stderr = git_child.early_exit_stderr();
+                panic!("Git exited before its pre-commit hook started: {status}: {stderr}");
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
@@ -15320,16 +15881,17 @@ mod tests {
         drop(still_live);
 
         std::fs::write(&release, "done\n").unwrap();
-        assert!(git_child.wait().unwrap().success());
+        assert!(git_child.child.wait().unwrap().success());
         // A different test thread may be between `fork` and `exec` right now.
         // Such a child temporarily has every parent descriptor, including this
         // one, until CLOEXEC closes it at `exec`. That is not an inheritance
         // leak: unlike the targeted Git/hook tree, the unrelated long-lived
         // child must stop holding the lock as soon as its exec completes.
-        let reacquire_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Polls the lock itself; the ceiling only bounds a hang.
+        let reacquire_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let replacement_lock = loop {
             assert!(
-                unrelated_child.try_wait().unwrap().is_none(),
+                unrelated_child.child.try_wait().unwrap().is_none(),
                 "the unrelated witness must still be alive while the lock becomes recoverable"
             );
             match crate::core::config::acquire_lock_in(database_dir.path()) {
@@ -15354,8 +15916,8 @@ mod tests {
             "once the Git child exits, backend boot may recover its lease"
         );
         drop(replacement_lock);
-        unrelated_child.kill().unwrap();
-        unrelated_child.wait().unwrap();
+        drop(unrelated_child);
+        drop(git_child);
     }
 
     #[tokio::test]
@@ -25799,16 +26361,32 @@ mod tests {
         );
     }
 
+    /// Waits for `expected`, failing at once on a state it can no longer leave.
+    /// The ceiling only bounds a hang.
     async fn wait_for_execution_status(
         db: &Database,
         exec_id: &str,
         expected: TaskExecutionStatus,
     ) -> TaskExecution {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 let execution = exec_of(db, exec_id).await;
                 if execution.status == expected {
                     return execution;
+                }
+                if execution.status.is_terminal()
+                    || matches!(
+                        execution.status,
+                        TaskExecutionStatus::Escalated | TaskExecutionStatus::Interrupted
+                    )
+                {
+                    panic!(
+                        "execution {exec_id} reached {} instead of {}: {:?} {:?}",
+                        execution.status.as_str(),
+                        expected.as_str(),
+                        execution.blocked_reason_code,
+                        execution.blocked_reason
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -25826,6 +26404,26 @@ mod tests {
         }
     }
 
+    /// A validation that signals `started` and holds until `release` appears, so a
+    /// test acts while it is running instead of racing a fixed delay.
+    fn held_validation(control: &Path) -> ValidationSpec {
+        let (started, release) = (control.join("started"), control.join("release"));
+        let mut spec = scripted_validation(
+            control,
+            &[
+                "import os, time",
+                &format!("open({:?}, 'w').close()", started.display().to_string()),
+                &format!(
+                    "while not os.path.exists({:?}): time.sleep(0.01)",
+                    release.display().to_string()
+                ),
+            ],
+        );
+        // Bounds a hang only: the test releases it.
+        spec.timeout_secs = Some(120);
+        spec
+    }
+
     /// A transport timeout after the handler has accepted an approval must not
     /// own the validation process. Hold the request wrapper open until the
     /// controlled validation is running, then abort it and prove the detached
@@ -25841,18 +26439,17 @@ mod tests {
         );
         let (_parent, _child, exec_id, _head, _path) =
             delivered_awaiting_review(&db, repo.path()).await;
+        let control = tempfile::tempdir().unwrap();
+        let (started, release) = (
+            control.path().join("started"),
+            control.path().join("release"),
+        );
+        let validation = held_validation(control.path());
         let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
         db.with_conn(move |conn| {
             conn.execute(
                 "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
-                rusqlite::params![
-                    run_id,
-                    serde_json::to_string(&vec![ValidationSpec {
-                        command: "sleep 1".to_string(),
-                        quick_exec_id: None,
-                        timeout_secs: Some(5),
-                    }])?
-                ],
+                rusqlite::params![run_id, serde_json::to_string(&vec![validation])?],
             )?;
             Ok(())
         })
@@ -25865,16 +26462,20 @@ mod tests {
             // Model middleware/response serialization still owns this future;
             // cancelling it models a caller disconnect after the handler has
             // accepted the review but while the detached validation is active.
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            // It never finishes on its own: only the abort below ends it.
+            std::future::pending::<()>().await;
             response
         });
 
+        // The validation holds until released, so the abort lands inside it.
+        wait_for_file(&started).await;
         wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Validating).await;
         response_task.abort();
         assert!(
             response_task.await.is_err(),
             "the request transport was cancelled"
         );
+        std::fs::write(&release, "go").unwrap();
 
         let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
         assert!(terminal.integrated_sha.is_some());
@@ -25915,18 +26516,17 @@ mod tests {
         );
         let (_parent, _child, exec_id, _head, _path) =
             delivered_awaiting_review(&db, repo.path()).await;
+        let control = tempfile::tempdir().unwrap();
+        let (started, release) = (
+            control.path().join("started"),
+            control.path().join("release"),
+        );
+        let validation = held_validation(control.path());
         let run_id = exec_of(&db, &exec_id).await.orchestration_run_id;
         db.with_conn(move |conn| {
             conn.execute(
                 "UPDATE orchestration_runs SET validation_json = ?2 WHERE id = ?1",
-                rusqlite::params![
-                    run_id,
-                    serde_json::to_string(&vec![ValidationSpec {
-                        command: "sleep 1".to_string(),
-                        quick_exec_id: None,
-                        timeout_secs: Some(5),
-                    }])?
-                ],
+                rusqlite::params![run_id, serde_json::to_string(&vec![validation])?],
             )?;
             Ok(())
         })
@@ -25957,6 +26557,9 @@ mod tests {
             "the competing retry must observe the durable claim"
         );
 
+        // Both transports answered while the validation was held: the loser met the claim.
+        wait_for_file(&started).await;
+        std::fs::write(&release, "go").unwrap();
         let terminal = wait_for_execution_status(&db, &exec_id, TaskExecutionStatus::Done).await;
         assert!(terminal.integrated_sha.is_some());
         let id = exec_id.clone();

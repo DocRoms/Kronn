@@ -68,6 +68,7 @@ import type {
   LaunchLivePageActionRequest,
   LivePageAction,
   DiscussionMeta,
+  WsMessage,
   DiscussionSession,
   DiscussionWorkspace,
   ParticipantView,
@@ -1752,7 +1753,7 @@ export const discussions = {
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; attach_agents?: AgentType[]; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
@@ -1775,6 +1776,8 @@ export const discussions = {
   /** Disc metadata incl. the server's `poll_policy` — the UI derives its
    *  presence thresholds from it instead of hardcoding the pacing cap. */
   meta: (id: string) => api<DiscussionMeta>('GET', `/discussions/${id}/meta`),
+  /** KT-1108 — the discussion's runs in progress, as their live frames. */
+  runProgress: (id: string) => api<WsMessage[]>('GET', `/discussions/${encodeURIComponent(id)}/run-progress`),
   /** 0.8.6 phase 2 — list active+paused participants of a disc.
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */

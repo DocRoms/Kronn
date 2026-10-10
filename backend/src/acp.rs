@@ -524,6 +524,8 @@ pub enum AcpSessionEvent {
     /// one whose connection died, and KT-932's inactivity watchdog cannot tell
     /// them apart.
     Activity,
+    /// The model is reasoning. Its text is never carried.
+    Thought,
     Completed,
 }
 
@@ -1438,6 +1440,9 @@ fn events_from_notifications(messages: Vec<Value>, session_id: &str) -> Vec<AcpS
             // tool content and future labelled variants must not become text.
             // Keep compatibility with older unlabelled runtime frames.
             let is_answer = matches!(kind, None | Some("agent_message_chunk"));
+            if kind == Some("agent_thought_chunk") {
+                events.push(AcpSessionEvent::Thought);
+            }
             if let (Some(content), true) = (update.get("content"), is_answer) {
                 match content {
                     Value::String(text) => events.push(AcpSessionEvent::TextDelta(text.to_owned())),
@@ -3047,8 +3052,10 @@ mod tests {
             })],
             "ses_live",
         );
-        assert!(
-            events.is_empty(),
+        // Only a content-free marker says the model is reasoning.
+        assert_eq!(
+            events,
+            vec![AcpSessionEvent::Thought],
             "reasoning leaked into the reply: {events:?}"
         );
     }
@@ -3078,7 +3085,9 @@ mod tests {
                     "vibe-session",
                 );
                 assert!(
-                    events.is_empty(),
+                    events
+                        .iter()
+                        .all(|event| matches!(event, AcpSessionEvent::Thought)),
                     "{kind} leaked into the answer: {events:?}"
                 );
             }

@@ -53,6 +53,7 @@ fn parse_run_status(s: &str) -> RunStatus {
         "WaitingApproval" => RunStatus::WaitingApproval,
         "StoppedByGuard" => RunStatus::StoppedByGuard,
         "Interrupted" => RunStatus::Interrupted,
+        "WaitingQuota" => RunStatus::WaitingQuota,
         _ => RunStatus::Pending,
     }
 }
@@ -68,6 +69,7 @@ fn run_status_str(s: &RunStatus) -> &'static str {
         RunStatus::WaitingApproval => "WaitingApproval",
         RunStatus::StoppedByGuard => "StoppedByGuard",
         RunStatus::Interrupted => "Interrupted",
+        RunStatus::WaitingQuota => "WaitingQuota",
     }
 }
 
@@ -1173,7 +1175,7 @@ pub fn runs_blocking_workflow_delete(conn: &Connection, workflow_id: &str) -> Re
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
           WHERE workflow_id = ?1
-            AND (status IN ('Pending', 'Running', 'WaitingApproval')
+            AND (status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
                  OR (status = 'Interrupted' AND workspace_path IS NOT NULL))",
         params![workflow_id],
         |row| row.get(0),
@@ -2155,16 +2157,40 @@ pub fn claim_run_status(
     Ok(n == 1)
 }
 
-/// Atomic `Interrupted → Running` claim that also persists the caller's
+/// Atomic `Interrupted`/`WaitingQuota` → `Running` claim that also persists the caller's
 /// updated durable state and clears the old interruption timestamp.
 /// `concurrency_key` is written with the claim: a run interrupted before its
 /// key was rendered (an older version stored none) resumes under its real key.
-pub fn claim_interrupted_run_status(
+pub fn claim_paused_run_status(
     conn: &Connection,
     run_id: &str,
+    from_status: &RunStatus,
+    quota_wait: Option<(usize, Option<&str>)>,
     state: &std::collections::HashMap<String, String>,
     concurrency_key: Option<&str>,
 ) -> Result<bool> {
+    if *from_status == RunStatus::WaitingQuota {
+        // A quota claim names the wait it read: a stale copy cannot claim a
+        // newer wait and write its old state over it.
+        let Some((step_index, wait_id)) = quota_wait else {
+            return Ok(false);
+        };
+        let state_json = if state.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(state)?)
+        };
+        let n = conn.execute(
+            &format!(
+                "UPDATE workflow_runs
+                 SET status = 'Running', finished_at = NULL, state = ?2, concurrency_key = ?3
+                 WHERE id = ?1 AND {}",
+                quota_wait_guard(step_index, 4)
+            ),
+            params![run_id, state_json, concurrency_key, wait_id],
+        )?;
+        return Ok(n == 1);
+    }
     let state_json = if state.is_empty() {
         None
     } else {
@@ -2173,10 +2199,73 @@ pub fn claim_interrupted_run_status(
     let n = conn.execute(
         "UPDATE workflow_runs
          SET status = 'Running', finished_at = NULL, state = ?2, concurrency_key = ?3
-         WHERE id = ?1 AND status = 'Interrupted'",
-        params![run_id, state_json, concurrency_key],
+         WHERE id = ?1 AND status = ?4",
+        params![
+            run_id,
+            state_json,
+            concurrency_key,
+            run_status_str(from_status)
+        ],
     )?;
     Ok(n == 1)
+}
+
+/// KT-811 — the SQL guard naming one quota wait: the run still waits, its
+/// trailing step is `step_index` and carries wait `?wait_id` (NULL for a wait
+/// recorded without an id).
+fn quota_wait_guard(step_index: usize, wait_param: usize) -> String {
+    format!(
+        "status = 'WaitingQuota' AND json_array_length(step_results_json) = {len} \
+         AND json_extract(step_results_json, '$[{step_index}].quota_wait.id') IS ?{wait_param}",
+        len = step_index + 1
+    )
+}
+
+/// KT-811 — parks the quota wait `wait_id` of a run, compare-and-set: only the
+/// wait and park fields change, and only while the run still holds that wait.
+pub fn park_quota_wait(
+    conn: &Connection,
+    run_id: &str,
+    step_index: usize,
+    wait_id: Option<&str>,
+    reason: crate::models::QuotaParkReason,
+    detail: &str,
+) -> Result<bool> {
+    let reason = serde_json::to_value(reason)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let path = format!("$[{step_index}].quota_wait");
+    let n = conn.execute(
+        &format!(
+            "UPDATE workflow_runs
+             SET step_results_json = json_set(
+                 json_remove(step_results_json, '{path}.wake_at'),
+                 '{path}.parked', ?3, '{path}.detail', ?4)
+             WHERE id = ?1 AND {}",
+            quota_wait_guard(step_index, 2)
+        ),
+        params![run_id, wait_id, reason, detail],
+    )?;
+    if n == 1 {
+        if let Some(run) = get_run(conn, run_id)? {
+            crate::db::shared_runs::sync_workflow(conn, &run)?;
+        }
+    }
+    Ok(n == 1)
+}
+
+/// KT-811 — runs parked on a provider quota, oldest first.
+pub fn list_quota_waiting_runs(conn: &Connection) -> Result<Vec<WorkflowRun>> {
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE status = 'WaitingQuota' ORDER BY started_at ASC",
+        WORKFLOW_RUN_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let runs = stmt
+        .query_map([], |row| Ok(row_to_run(row)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(runs)
 }
 
 pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus) -> Result<bool> {
@@ -2432,7 +2521,7 @@ pub fn count_admitted_runs(
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs
           WHERE workflow_id = ?1
-            AND status IN ('Pending', 'Running', 'WaitingApproval')
+            AND status IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')
             AND (?2 = 0 OR concurrency_key IS ?3)
             AND id IS NOT ?4
             AND (?5 = 0 OR project_id IS ?6)",

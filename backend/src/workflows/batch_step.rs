@@ -659,6 +659,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             },
             condition_action: None,
         };
@@ -850,6 +851,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -893,6 +895,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }

@@ -37,6 +37,7 @@ pub(crate) mod ollama_memory;
 pub mod provenance;
 pub(crate) mod read_only_repos;
 pub mod readiness;
+pub mod run_progress;
 pub mod runner;
 pub mod tool_trace;
 pub mod tools;
@@ -324,6 +325,18 @@ pub fn installed_or_unknown(agent: &AgentType) -> bool {
             .any(|detection| &detection.agent_type == agent && detection.installed),
         None => true,
     }
+}
+
+/// The version the last detection sweep read for this agent. Never probes, so
+/// error messages can name it on a hot path.
+pub fn cached_version(agent: &AgentType) -> Option<String> {
+    let cache = DETECT_ALL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.value.as_ref().and_then(|(detections, _)| {
+        detections
+            .iter()
+            .find(|detection| &detection.agent_type == agent)
+            .and_then(|detection| detection.version.clone())
+    })
 }
 
 /// Run `f` as if no detection sweep had completed yet, then restore the cache:

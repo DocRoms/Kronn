@@ -554,6 +554,7 @@ pub async fn execute_sub_workflow_step(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -1460,6 +1461,7 @@ async fn execute_foreach(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -1515,6 +1517,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action: None,
     }
@@ -2330,6 +2333,14 @@ mod tests {
     // ─── KT-1045 — a child goes through its workflow's admission ───
     /// A budget bounded like a runner whose timeout guard of `seconds`
     /// started now: the foreach waits for capacity until just before it.
+    /// A run with `left` seconds of its `seconds` budget remaining.
+    fn budget_with_left(left: i64, seconds: u64) -> crate::workflows::runner::SharedBudget {
+        crate::workflows::runner::SharedBudget::root(50).within_deadline(
+            chrono::Utc::now() + chrono::Duration::seconds(left),
+            seconds,
+        )
+    }
+
     fn budget_with_timeout(seconds: u64) -> crate::workflows::runner::SharedBudget {
         crate::workflows::runner::SharedBudget::root(50).within_deadline(
             chrono::Utc::now() + chrono::Duration::seconds(seconds as i64),
@@ -2588,28 +2599,25 @@ mod tests {
     #[tokio::test]
     async fn the_runner_records_skipped_items_before_its_timeout() {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;
-        let (parent, mut outer) = outer_foreach_run(&state, &step, 2, &ws).await;
-        // A later edit of the saved guard must not move the running deadline.
-        {
-            let state = state.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                state
-                    .db
-                    .with_conn(|c| {
-                        let mut parent =
-                            crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
-                        parent.guards = Some(crate::models::WorkflowGuards {
-                            timeout_seconds: Some(3600),
-                            ..Default::default()
-                        });
-                        crate::db::workflows::update_workflow(c, &parent)?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap();
-            });
-        }
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 100, &ws).await;
+        // 89 of 100 s spent: the capacity wait (10 s margin) ends in about 1 s, and
+        // the runner's deadline leaves 10 s to record the skipped items.
+        outer.started_at = chrono::Utc::now() - chrono::Duration::seconds(89);
+        // A stored edit of the guard must not move the running deadline: a run
+        // that read it would wait past its deadline instead of recording the skips.
+        state
+            .db
+            .with_conn(|c| {
+                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                parent.guards = Some(crate::models::WorkflowGuards {
+                    timeout_seconds: Some(3600),
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(c, &parent)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let _ = crate::workflows::runner::execute_run(
             state.clone(),
             &parent,
@@ -3092,7 +3100,7 @@ mod tests {
             "sub_workflow_foreach_file": "tasks.json",
             "sub_workflow_variables": {"ticketKey": "{{current_task.id}}"},
         }));
-        let run = |state: crate::AppState, timeout: u64| {
+        let run = |state: crate::AppState, budget: crate::workflows::runner::SharedBudget| {
             let (tokens, agents, ws, step) = (
                 tokens.clone(),
                 agents.clone(),
@@ -3108,7 +3116,7 @@ mod tests {
                     &step,
                     &tokens,
                     &agents,
-                    budget_with_timeout(timeout),
+                    budget,
                     Some(ws.to_string_lossy().to_string()),
                     super::ChildLaunch {
                         ctx: &ctx,
@@ -3130,7 +3138,9 @@ mod tests {
         };
 
         // The rendered key T1 is held: the old child does not slip through.
-        let refused = run(state.clone(), 1).await;
+        // Capacity wait already over (60 s margin of a 600 s budget, 30 s left), yet
+        // the deadline itself is 30 s away: setup under load cannot expire it.
+        let refused = run(state.clone(), budget_with_left(30, 600)).await;
         assert!(
             refused.result.output.contains("SkippedConcurrencyLimit"),
             "{}",
@@ -3143,7 +3153,7 @@ mod tests {
 
         // Once T1 is free, it resumes and keeps the rendered key.
         finish_run_later(&state, "t1-holder", 0).await;
-        let resumed = run(state.clone(), 3600).await;
+        let resumed = run(state.clone(), budget_with_timeout(3600)).await;
         assert!(
             resumed.result.output.contains("\"old-child\""),
             "{}",

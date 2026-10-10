@@ -24,6 +24,7 @@ pub mod project_scope;
 pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
+pub mod quota_wait;
 pub mod run_artifacts;
 pub mod run_scope;
 pub mod runner;
@@ -95,6 +96,7 @@ impl WorkflowEngine {
             if let Err(e) = self.check_triggers().await {
                 tracing::error!("Workflow engine tick error: {}", e);
             }
+            quota_wait::wake_due_runs(&self.state, Utc::now()).await;
         }
     }
 

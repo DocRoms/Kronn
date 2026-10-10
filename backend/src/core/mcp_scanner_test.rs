@@ -55,6 +55,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(tmp);
     }
 
+    /// The process-wide variables the host-sync fixtures depend on.
+    const HOST_ENV: [&str; 4] = [
+        "KRONN_IN_DOCKER",
+        "KRONN_HOST_BIN",
+        "KRONN_HOST_HOME",
+        "KRONN_MCP_SECRET_REFERENCES",
+    ];
+
+    /// Sets the four variables explicitly (`None` removes one) and restores the
+    /// previous values on drop, a failed assertion included, so no test runs on
+    /// the state another one left behind.
+    struct HostEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl HostEnv {
+        fn explicit(
+            in_docker: Option<&str>,
+            host_bin: Option<&std::path::Path>,
+            host_home: Option<&std::path::Path>,
+            secret_references: Option<&str>,
+        ) -> Self {
+            let saved = HOST_ENV
+                .iter()
+                .map(|name| (*name, crate::core::child_env::var_os(name)))
+                .collect();
+            let values: [Option<std::ffi::OsString>; 4] = [
+                in_docker.map(Into::into),
+                host_bin.map(|path| path.as_os_str().to_owned()),
+                host_home.map(|path| path.as_os_str().to_owned()),
+                secret_references.map(Into::into),
+            ];
+            for (name, value) in HOST_ENV.iter().zip(values) {
+                match value {
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
+                }
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for HostEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => crate::core::child_env::set_var(name, value),
+                    None => crate::core::child_env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn host_env_is_restored_after_a_failed_assertion() {
+        let _outer = HostEnv::explicit(
+            Some("outer-docker"),
+            Some(std::path::Path::new("/outer/bin")),
+            None,
+            Some("outer-refs"),
+        );
+        let before: Vec<_> = HOST_ENV
+            .iter()
+            .map(|name| crate::core::child_env::var_os(name))
+            .collect();
+        let panicked = std::panic::catch_unwind(|| {
+            let _env = HostEnv::explicit(
+                Some("1"),
+                Some(std::path::Path::new("/fixture/host-bin")),
+                Some(std::path::Path::new("/fixture/home")),
+                Some("1"),
+            );
+            assert_eq!(
+                crate::core::child_env::var("KRONN_IN_DOCKER").as_deref(),
+                Ok("1")
+            );
+            panic!("forced failure inside a fixture");
+        });
+        assert!(panicked.is_err());
+        let after: Vec<_> = HOST_ENV
+            .iter()
+            .map(|name| crate::core::child_env::var_os(name))
+            .collect();
+        assert_eq!(
+            after, before,
+            "all four variables come back, set and unset alike"
+        );
+    }
+
     // ─── mcp_args_carry_secret / mcp_entry_leaks_secret (KT-542 review) ───
 
     #[test]
@@ -3039,11 +3127,8 @@ args = ["@example/old-mcp"]
         // where the HOST CLI runs, not in the backend's PATH.
         use crate::core::mcp_scanner::host_mcp_command_available;
         let tmp = tempfile::TempDir::new().unwrap();
-        let prev_docker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
-        let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
-
         // Native: delegates to the backend-PATH check.
-        crate::core::child_env::remove_var("KRONN_IN_DOCKER");
+        let _env = HostEnv::explicit(None, None, None, None);
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
         {
@@ -3071,15 +3156,6 @@ args = ["@example/old-mcp"]
         // Docker without a host-bin mount → keep (never drop what may work).
         crate::core::child_env::remove_var("KRONN_HOST_BIN");
         assert!(host_mcp_command_available("uvx"));
-
-        match prev_docker {
-            Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
-            None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
-        }
-        match prev_hb {
-            Some(v) => crate::core::child_env::set_var("KRONN_HOST_BIN", v),
-            None => crate::core::child_env::remove_var("KRONN_HOST_BIN"),
-        }
     }
 
     /// KT-965 — under Docker the CLIs' global configs (~/.codex, ~/.copilot,
@@ -3093,8 +3169,8 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("host-sync-secrets");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
-        let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        // The `sh` command is judged against the backend PATH: no Docker host bin.
+        let env_guard = HostEnv::explicit(None, None, Some(&home), None);
 
         let secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -3171,10 +3247,7 @@ args = ["@example/old-mcp"]
 
         let docker = plans("1");
         let native = plans("0");
-        match prev_home {
-            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
-            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
-        }
+        drop(env_guard);
         cleanup(&tmp);
 
         for (name, content) in &docker {
@@ -3208,12 +3281,7 @@ args = ["@example/old-mcp"]
         std::fs::create_dir_all(&hostbin).unwrap();
         std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", hostbin.join("uvx")).unwrap();
 
-        let prev_home = crate::core::child_env::var("KRONN_HOST_HOME").ok();
-        let prev_docker = crate::core::child_env::var("KRONN_IN_DOCKER").ok();
-        let prev_hb = crate::core::child_env::var("KRONN_HOST_BIN").ok();
-        crate::core::child_env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
-        crate::core::child_env::set_var("KRONN_IN_DOCKER", "1");
-        crate::core::child_env::set_var("KRONN_HOST_BIN", hostbin.to_string_lossy().to_string());
+        let env_guard = HostEnv::explicit(Some("1"), Some(&hostbin), Some(&home), None);
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -3256,25 +3324,14 @@ args = ["@example/old-mcp"]
             "a host-installed uvx MCP must survive the Codex plan under Docker. Got:\n{}",
             plan.content
         );
-
-        match prev_home {
-            Some(v) => crate::core::child_env::set_var("KRONN_HOST_HOME", v),
-            None => crate::core::child_env::remove_var("KRONN_HOST_HOME"),
-        }
-        match prev_docker {
-            Some(v) => crate::core::child_env::set_var("KRONN_IN_DOCKER", v),
-            None => crate::core::child_env::remove_var("KRONN_IN_DOCKER"),
-        }
-        match prev_hb {
-            Some(v) => crate::core::child_env::set_var("KRONN_HOST_BIN", v),
-            None => crate::core::child_env::remove_var("KRONN_HOST_BIN"),
-        }
+        drop(env_guard);
         cleanup(&tmp);
     }
 
     #[test]
     #[serial]
     fn unavailable_command_is_skipped_by_codex_and_copilot_writers() {
+        let _env = HostEnv::explicit(None, None, None, None);
         // Parity regression (Codex install, 2026-07-12): entries whose
         // command isn't on the host failed every Codex startup with
         // "No such file or directory" — the .mcp.json writer filters them,
@@ -3355,6 +3412,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn codex_global_sync_emits_kronn_internal_into_config_toml() {
+        let _env = HostEnv::explicit(None, None, None, None);
         // Redirect Codex's home-config lookup to a tmp dir via the
         // KRONN_HOST_HOME hook. We don't share global env between tests
         // (cargo runs them in parallel by default), so we use a unique
@@ -3411,6 +3469,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn codex_global_sync_approves_only_kronn_internal_tools() {
+        let _env = HostEnv::explicit(None, None, None, None);
         let tmp = setup_tmp("codex-global-approval");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -3486,6 +3545,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn copilot_global_sync_emits_kronn_internal_into_mcp_config_json() {
+        let _env = HostEnv::explicit(None, None, None, None);
         let tmp = setup_tmp("copilot-global-inject");
         let home = tmp.join("fake-home");
         std::fs::create_dir_all(&home).unwrap();
@@ -3619,6 +3679,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn under_docker_mcp_files_hold_references_and_never_a_secret_value() {
+        let _env = HostEnv::explicit(None, None, None, None);
         use crate::models::{McpConfig, McpServer, McpSource, McpTransport};
         use rusqlite::Connection;
         let tmp = setup_tmp("secret-refs");
@@ -3712,6 +3773,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn natively_mcp_files_keep_their_values() {
+        let _env = HostEnv::explicit(None, None, None, None);
         use crate::models::{McpConfig, McpServer, McpSource, McpTransport};
         use rusqlite::Connection;
         let tmp = setup_tmp("secret-native");
@@ -3865,6 +3927,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn under_docker_a_projects_mcp_files_never_hold_a_secret_value() {
+        let _env = HostEnv::explicit(None, None, None, None);
         use crate::models::{
             AiAuditStatus, AiConfigStatus, McpConfig, McpServer, McpSource, McpTransport, Project,
         };
@@ -3985,6 +4048,7 @@ args = ["@example/old-mcp"]
     #[test]
     #[serial]
     fn under_docker_an_existing_token_in_a_project_mcp_file_gives_way_to_a_reference() {
+        let _env = HostEnv::explicit(None, None, None, None);
         use crate::models::{
             AiAuditStatus, AiConfigStatus, McpConfig, McpServer, McpSource, McpTransport, Project,
         };

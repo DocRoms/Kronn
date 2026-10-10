@@ -3007,3 +3007,73 @@ async fn a_renamed_page_stays_in_scope_and_its_old_slug_stays_its_own() {
     let (_, still) = call(&app, "GET", "/api/pages/c-old", Some(own.value()), None).await;
     assert_eq!(still["data"]["id"], "page-c", "{still}");
 }
+
+/// KT-1109 — attaching handoff recipients is the human's orchestration
+/// choice: an agent's token cannot widen them, even on its own room.
+#[tokio::test]
+async fn a_bridge_token_cannot_attach_agents_to_its_own_discussion() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let token = guard.value().to_owned();
+    let participants = |disc: &'static str| {
+        let db = db.clone();
+        async move {
+            db.with_read_conn(move |conn| {
+                Ok(kronn::db::discussions::get_discussion(conn, disc)?
+                    .expect("discussion")
+                    .participants)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let attach = json!({"attach_agents": ["Codex", "OpenCode"]});
+
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-a",
+        Some(&token),
+        Some(attach.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(participants("room-a").await.is_empty(), "nothing attached");
+
+    // Any other field the token may already change still goes through.
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-a",
+        Some(&token),
+        Some(json!({"title": "renamed by the agent"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-b",
+        Some(&token),
+        Some(attach.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(participants("room-b").await.is_empty());
+
+    // The human composer path attaches them.
+    let (status, body) = call(&app, "PATCH", "/api/discussions/room-a", None, Some(attach)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["success"], true, "{body}");
+    let attached: Vec<String> = participants("room-a")
+        .await
+        .iter()
+        .map(|agent| format!("{agent:?}"))
+        .collect();
+    assert_eq!(attached, vec!["Codex", "OpenCode"]);
+}

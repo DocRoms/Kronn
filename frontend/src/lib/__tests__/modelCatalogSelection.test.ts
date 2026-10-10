@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogModelEntry, ModelCatalogView } from '../../types/generated';
-import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, modelCallVerdict, modelRuntimeTargetId, modelSweepCounts } from '../modelCatalogSelection';
+import { catalogModelOptions, catalogModelProvenance, catalogTierEntry, modelCallVerdict, modelRuntimeTargetId, modelSweepCounts, resolveCatalogTier } from '../modelCatalogSelection';
 
 function entry(id: string, patch: Partial<CatalogModelEntry> = {}): CatalogModelEntry {
   return {
@@ -16,6 +16,50 @@ function view(models: CatalogModelEntry[]): ModelCatalogView {
 }
 
 describe('catalogue selection contract', () => {
+  // KT-860 — the pickers read the preflight's own verdict instead of
+  // re-deriving one from the row's availability.
+  it('follows the backend launch verdict for the model it judged', () => {
+    const claude = (patch: Partial<CatalogModelEntry>) => entry(patch.model_id ?? 'x', {
+      runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode', ...patch,
+    });
+    const snapshot = { targets: [{
+      runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode', stale: false, live_refresh_ok: true,
+      models: [
+        claude({ model_id: 'opus[1m]', availability: 'unavailable', unavailable_reason: 'disappeared' }),
+        claude({ model_id: 'opus', display_name: 'Opus', tier_assignment: 'reasoning' }),
+        claude({ model_id: 'fable[1m]', availability: 'unavailable', unavailable_reason: 'disappeared' }),
+      ],
+      tier_verdicts: [
+        { tier: 'reasoning', requested_model: 'opus[1m]', effective_model: 'opus', launchable: true,
+          reason: 'disappeared', detail: 'gone' },
+        { tier: 'economy', requested_model: 'fable[1m]', launchable: false, reason: 'disappeared',
+          detail: 'model `fable[1m]` disappeared and no available replacement exists' },
+      ],
+    } as ModelCatalogView] };
+    const target = { agent: 'ClaudeCode' as const };
+    const replaced = resolveCatalogTier(snapshot, { ...target, modelTiers: { reasoning: 'opus[1m]' } }, 'reasoning');
+    expect(replaced.unavailable).toBe(false);
+    expect(replaced.replacement).toBe('opus');
+    expect(replaced.model).toBe('Opus');
+
+    const refused = resolveCatalogTier(snapshot, { ...target, modelTiers: { economy: 'fable[1m]' } }, 'economy');
+    expect(refused.unavailable).toBe(true);
+    expect(refused.refusal).toContain('no available replacement');
+
+    // Absent from a complete CLI listing: a warning, still launchable.
+    const notListed = resolveCatalogTier({ targets: [{ ...snapshot.targets[0], tier_verdicts: [
+      { tier: 'default', requested_model: 'opus', effective_model: 'opus', launchable: true,
+        notice: 'model `opus` is not in the complete model list' },
+    ] }] }, { ...target, modelTiers: { default: 'opus' } }, 'default');
+    expect(notListed.unavailable).toBe(false);
+    expect(notListed.notice).toContain('not in the complete model list');
+
+    // A model the verdict did not judge keeps the row's own state.
+    const other = resolveCatalogTier(snapshot, { ...target, modelTiers: { reasoning: 'opus' } }, 'reasoning');
+    expect(other.unavailable).toBe(false);
+    expect(other.replacement).toBeNull();
+  });
+
   it('namespaces a connection independently of its agent family', () => {
     expect(modelRuntimeTargetId('Codex')).toBe('agent:codex');
     expect(modelRuntimeTargetId('OpenCode')).toBe('agent:opencode');

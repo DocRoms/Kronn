@@ -8,8 +8,8 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
-/// Statuses a run never leaves. `Interrupted` and `WaitingApproval` are absent
-/// on purpose: they resume from their step results.
+/// Statuses a run never leaves. `Interrupted`, `WaitingApproval` and
+/// `WaitingQuota` are absent on purpose: they resume from their step results.
 const TERMINAL_STATUSES: &str = "'Success','Partial','Failed','Cancelled','StoppedByGuard'";
 
 /// Plain workflow runs. Batch and compare rows carry human and AI ratings and

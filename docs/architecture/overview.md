@@ -430,6 +430,26 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
+- **A provider quota pauses the run, it does not fail it (KT-811).** When an
+  Agent step of a top-level run is refused for a quota or session limit
+  (`You've hit your session limit · resets 9:40pm (Europe/Paris)`, a 429 with
+  `Retry-After`, Codex's `try again in …`), the step and the run go to the
+  non-terminal `WaitingQuota` status with a `quota_wait` on the step: the
+  announced reset, the wake-up (reset + 2 min, at least 5, 10, 20, 40 min on
+  repeated refusals) or why it is parked for a human. The workflow engine tick
+  resumes due runs through the same claim and preconditions as a manual
+  resume (no child or batch run, worktree still there, no uncertain external
+  effect), at the refused step, without replaying earlier ones. The state is
+  on the run row, so a restart keeps it; a cancelled run is never woken. The
+  wait counts against the absolute timeout guard: a reset after the deadline,
+  no usable reset, a fifth refusal or a refused precondition parks the run
+  for the "Resume" button. A park or a claim names the wait it read (its
+  `id`), so a stale engine tick never undoes a resume or a newer wait.
+  Automatic resume covers linear root runs only: sub-workflow children,
+  batches and `on_failure` compensations are not resumed; a child ends
+  `Failed` with the quota classification on its step.
+  [src: file: backend/src/workflows/quota_wait.rs:27-264]
+  [src: file: backend/src/workflows/runner.rs:2618-2648]
 - **Worktrees nested in a run worktree (KT-985).** A step may add its own
   worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
   directory alone leaves that entry `prunable` in `git worktree list`, so

@@ -275,6 +275,22 @@ pub enum WsMessage {
         warned_steps: Vec<u32>,
         discussion_id: Option<String>,
     },
+    /// A discussion reply's live progress (KT-1108), coalesced by its run.
+    /// Local only: never relayed to a peer.
+    AgentRunProgress {
+        discussion_id: String,
+        /// The durable dispatch the run executes, when it has one.
+        dispatch_id: Option<String>,
+        trigger_message_id: Option<String>,
+        agent_type: super::AgentType,
+        /// One launch; a retry of the same dispatch gets another.
+        run_id: String,
+        /// When the launch started: the latest attempt of a dispatch is the one shown.
+        started_at: DateTime<Utc>,
+        /// Increases with every frame of one run.
+        seq: u32,
+        progress: super::AgentRunProgress,
+    },
 }
 
 impl WsMessage {
@@ -372,6 +388,18 @@ mod tests {
         assert!(!WsMessage::ContextFilesChanged {
             discussion_id: "local-d".into(),
             message_id: "m".into(),
+        }
+        .is_peer_relayable());
+        // KT-1108 — a reply's live progress stays on this machine.
+        assert!(!WsMessage::AgentRunProgress {
+            discussion_id: "d".into(),
+            dispatch_id: None,
+            trigger_message_id: None,
+            agent_type: crate::models::AgentType::OpenCode,
+            run_id: "r".into(),
+            started_at: chrono::Utc::now(),
+            seq: 1,
+            progress: crate::agents::run_progress::RunProgress::new().snapshot(),
         }
         .is_peer_relayable());
         // Shared-discussion traffic is the only thing relayed.

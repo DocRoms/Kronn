@@ -13,6 +13,54 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- Multi-agent discussions now say who is launched and how (KT-1109). While a
+  draft names several agents, the composer shows "N agents launched in
+  parallel" with one chip per agent, and the sent message's routing line adds
+  "N in parallel". When the first named agent is told to delegate to the
+  others ("@opencode lance @codex et @claude", "ask", "demande à", "fais
+  juger par"…), sending first asks whether that agent should orchestrate
+  them. Orchestrating attaches the other agents to the discussion
+  (`attach_agents` on `PATCH /api/discussions/{id}`, which never dispatches
+  them and is refused to agents' bridge tokens) and sends the message to the first agent alone, which hands off with
+  the existing `kronn:handoff` marker; the routing line then reads
+  "orchestrates @codex, @claude". The choice is offered only when agent
+  collaboration is on, warns when the paid handoff limit is below the number
+  of delegated agents, and launching everyone in parallel stays one click
+  away. The answer is bound to its discussion and draft: editing the text,
+  switching discussion or cancelling while the attachment is pending sends
+  nothing, and only the first choice taken runs. A native reply that names an agent in prose without launching it now
+  carries a discreet note saying so and why: already scheduled on this turn,
+  or a plain mention with no handoff.
+
+- The waiting reply bubble now shows what the agent is doing from the first
+  message on, for every agent (KT-1108). Before the first word it lists the
+  real startup phases with their times: a native ACP runtime being launched,
+  `initialize`, `session/new` while the project's MCP servers start (with
+  their count), model selection, a Claude or Codex CLI starting with its own
+  MCP servers, then the prompt sent and the wait for the model. Once the model
+  works, the phase follows it (thinking, using a tool, writing) and an
+  expandable list shows its tool calls by category, as in the audit Details
+  panel. When the agent is silent, the bubble counts down the inactivity
+  delay in force (a startup phase's own bound, the model's delay, or a tool's
+  wider one), and a stop by Kronn is announced in the same bubble. Every phase
+  comes from the code path that observed it; frames carry categories, counts
+  and durations only, never a tool's name, a path, a URL or agent text. They
+  travel on the local WebSocket only, coalesced per run (a phase or tool change
+  at most every 0.5 s, a mere sign of life at most every 5 s), and a frame
+  older than the one shown, or one after the run stopped, is ignored. A page
+  opened or reconnected mid-run reads the runs in progress from
+  `GET /api/discussions/{id}/run-progress` (not open to agents' bridge
+  tokens); reading it never restarts a run's silence. A reply always shows its
+  latest attempt, and a run is shown only in the bubble of its own dispatch or
+  turn. HTTP agents (Ollama, LiteLLM, OpenAI-compatible) report each request
+  with its first-token deadline (each retry attempt with its own, no countdown
+  during the backoff), the wait for the model's next answer after a tool,
+  reasoning and keepalive chunks as activity, a Kronn tool from the moment it
+  starts, and their own inactivity stop. A streamed HTTP run now owns its
+  silence bounds the way an ACP run does (first token, then a fresh bound once
+  the headers come, then each chunk), so the discussion and workflow
+  consumers no longer arm a second text-only timer on it; the global deadline
+  still holds.
 - HTTP agents (Ollama, LiteLLM, NVIDIA, custom connections) can find, create
   and update Pages: `page_list`, `page_get`, `page_create`, `page_update_html`
   and `page_add_dataset` join their native catalogue and call the same handlers
@@ -55,6 +103,44 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The reply bubble's Logs panel follows the same no-leak rule as the run
+  progress (KT-1120). A tool call is logged by its category only (`→ Read`
+  when it starts, `✓ Read` when it ends), never by its name, input, file path,
+  URL or command. Kronn reduces the line before sending it, so the client never
+  receives those details. When the agent writes to its stderr, the panel shows
+  a fixed `⚠ Diagnostic` notice once, never the text: it can name paths and
+  URLs. A failed run's error message still carries that text, and the tool
+  calls recorded in the transcript are unchanged.
+- `agent_list`, `task_exec_prepare`, `task_exec_launch` and the tier pickers
+  now read the launch preflight's own catalogue decision (KT-860). A tier the
+  preflight would refuse is listed with the reason (`model_unavailable`) and
+  is not launchable; a tier whose model disappeared shows the model that runs
+  in its place. A run refused at preflight keeps the refused model, the reason
+  and the next action in `last_error`, instead of "model catalogue preflight
+  refused this model".
+- Codex: Kronn now reads the whole `model/list` of the installed CLI, every
+  page and hidden models included (KT-667). A tier model absent from that
+  complete listing keeps its tier and launches with a warning shown
+  beforehand: a "Not listed" label on the tier choice (detail on hover), a
+  `model_not_listed` warning in `agent_list` and `task_exec_prepare`, and a
+  notice at the head of the run. It is never refused or replaced on that
+  evidence, since a listing does not prove account access; only a refusal the
+  provider actually returned blocks a model. A listing cut short or a failed
+  refresh leaves the evidence unknown, and models an older visible-only
+  listing had marked disappeared are available again. When Codex answers
+  "requires a newer version of Codex", the error names the model and the
+  detected and latest known CLI versions instead of repeating "upgrade".
+- A workflow Agent step refused for a provider quota or session limit no longer
+  fails the run and loses the steps before it (KT-811). The run waits in a new
+  `WaitingQuota` status, shown as "Quota" rather than as a failure, and resumes
+  at the refused step after the announced reset (Claude's
+  `resets 9:40pm (Europe/Paris)`, a `Retry-After`, Codex's `try again in …`,
+  an ISO reset), even across a backend restart. Without a usable reset, past
+  the workflow's time limit or after repeated refusals, the run is parked
+  with its reason and a "Resume" button; it can be cancelled while it waits.
+  Automatic resume covers linear root runs only: a sub-workflow child, a batch
+  or an `on_failure` compensation is not resumed, and a child ends `Failed`
+  with its step marked as quota.
 - On a native macOS backend, an agent CLI installed under a `KRONN_HOST_BIN`
   directory is run instead of being skipped for `npx`: the Darwin host-binary
   guard now applies only inside a container. In a container, resolution goes

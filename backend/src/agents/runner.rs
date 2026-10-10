@@ -3061,6 +3061,9 @@ pub struct AgentStartConfig<'a> {
     /// setting; `None` is [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`], sized for the
     /// first token of a large local model loaded cold.
     pub idle_timeout: Option<std::time::Duration>,
+    /// KT-1108 — receives the run's startup phases, tool categories and
+    /// signs of life for its live reply bubble.
+    pub run_progress: Option<super::run_progress::RunProgress>,
     /// Optional lifecycle owned by the caller (discussion/workflow). HTTP
     /// agents derive a child token from it so cancellation also interrupts the
     /// initial request, before an `AgentProcess`/lifeline exists.
@@ -3144,6 +3147,7 @@ impl<'a> AgentStartConfig<'a> {
             ollama_context_overrides: None,
             http_request_timeout: None,
             idle_timeout: None,
+            run_progress: None,
             cancel_token: None,
             #[cfg(test)]
             test_acp_transport: None,
@@ -4200,6 +4204,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.idle_timeout,
             config.context_images,
             config.activity,
+            config.run_progress,
         )
         .await;
     }
@@ -4271,6 +4276,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
             #[cfg(test)]
@@ -4318,6 +4324,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
             #[cfg(test)]
@@ -4798,6 +4805,7 @@ struct AcpSessionRequest<'a> {
     activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
     idle_timeout: Option<Duration>,
+    run_progress: Option<super::run_progress::RunProgress>,
     /// KT-908 — narrows the MCP servers offered to the session.
     step_tools: Option<&'a crate::models::StepTools>,
 }
@@ -4823,6 +4831,9 @@ async fn start_native_acp(
         acp_project_mcp_servers(request.project_path, false),
         request.step_tools,
     );
+    if let Some(progress) = request.run_progress.as_ref() {
+        progress.phase(crate::models::AgentRunPhase::Launching);
+    }
     let transport: Arc<dyn AcpTransport> = Arc::new(
         AcpJsonRpcTransport::spawn_native(
             acp_agent_kind,
@@ -5147,8 +5158,18 @@ async fn run_acp_session(
         provenance,
         activity,
         idle_timeout,
+        run_progress,
         step_tools,
     } = request;
+    use crate::models::{AgentRunPhase, AgentRunStop};
+    // Each startup phase shows the bound that ends it, so its countdown is real.
+    let startup_bounds = crate::acp::AcpRequestTimeouts::DEFAULT;
+    let enter = |phase: AgentRunPhase, bound: Option<Duration>| {
+        if let Some(progress) = run_progress.as_ref() {
+            progress.phase(phase);
+            progress.idle_limit(bound);
+        }
+    };
     use super::acp_start::{AcpStartFailure, AcpStartPhase};
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -5184,6 +5205,7 @@ async fn run_acp_session(
     };
     let cancelled = || format!("{agent_type:?} ACP start cancelled");
 
+    enter(AgentRunPhase::Initializing, Some(startup_bounds.control));
     let started = Instant::now();
     let negotiated = until_cancelled(
         parent_cancel,
@@ -5217,6 +5239,13 @@ async fn run_acp_session(
             return Err(acp_start_failure(&host, failure).await);
         }
     }
+    if let Some(progress) = run_progress.as_ref() {
+        progress.mcp_servers(mcp_servers.len());
+    }
+    enter(
+        AgentRunPhase::OpeningSession,
+        Some(startup_bounds.session_setup),
+    );
     let (resumed, resume_failed) = match resume_id {
         Some(conversation_id) => {
             let agent = match acp_agent(agent_type) {
@@ -5309,6 +5338,7 @@ async fn run_acp_session(
     // models of the directory it runs in, so a model seen from elsewhere can be
     // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
+        enter(AgentRunPhase::SelectingModel, Some(startup_bounds.control));
         let started = Instant::now();
         let Some(selected) =
             until_cancelled(parent_cancel, host.select_model(&session, model)).await
@@ -5408,6 +5438,20 @@ async fn run_acp_session(
         }
     };
     let lifeline_stdin = lifeline.stdin.take();
+    // An adapter spawns its CLI with the prompt: the CLI then starts its own
+    // MCP servers before it says it is ready.
+    let adapted =
+        crate::acp::resolve_acp_route(agent_type) == crate::acp::AcpProductionRoute::AdaptedAcp;
+    enter(
+        if adapted {
+            AgentRunPhase::StartingCli
+        } else {
+            AgentRunPhase::WaitingModel
+        },
+        Some(model_idle_limit),
+    );
+    let forwarder_progress = run_progress.clone();
+    let stall_progress = run_progress.clone();
 
     tokio::spawn(async move {
         let mut lifeline_stdin = lifeline_stdin;
@@ -5422,6 +5466,18 @@ async fn run_acp_session(
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 forwarder_idle.beat();
+                if let Some(progress) = forwarder_progress.as_ref() {
+                    match &event {
+                        AcpSessionEvent::TextDelta(_) => progress.text(),
+                        AcpSessionEvent::Thought => progress.thought(),
+                        AcpSessionEvent::ToolActivity(update) => progress.tool(update),
+                        AcpSessionEvent::CliSessionObserved(_)
+                        | AcpSessionEvent::NativeSessionId(_) => {
+                            progress.phase(AgentRunPhase::WaitingModel)
+                        }
+                        _ => progress.beat(),
+                    }
+                }
                 match event {
                     AcpSessionEvent::TextDelta(text) => {
                         if tx.send(text).await.is_err() {
@@ -5454,10 +5510,16 @@ async fn run_acp_session(
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
                         forwarder_idle.begin_tool(id.as_deref(), &name, tool_execution_limit);
+                        if let Some(progress) = forwarder_progress.as_ref() {
+                            progress.idle_limit(Some(forwarder_idle.limit()));
+                        }
                     }
                     AcpSessionEvent::ToolCallEnded { id } => {
                         // Back to watching the model itself.
                         forwarder_idle.end_tool(id.as_deref());
+                        if let Some(progress) = forwarder_progress.as_ref() {
+                            progress.idle_limit(Some(forwarder_idle.limit()));
+                        }
                     }
                     AcpSessionEvent::ToolActivity(update) => {
                         // Counted once per call, whatever its progress updates.
@@ -5511,7 +5573,9 @@ async fn run_acp_session(
                         }
                     }
                     // Proof of life that has nothing to show: it only beat the clock.
-                    AcpSessionEvent::Activity | AcpSessionEvent::Completed => {}
+                    AcpSessionEvent::Activity
+                    | AcpSessionEvent::Thought
+                    | AcpSessionEvent::Completed => {}
                 }
             }
         });
@@ -5553,6 +5617,9 @@ async fn run_acp_session(
                     }
                 };
                 tracing::warn!(agent = %event_agent_label, "{reason}");
+                if let Some(progress) = stall_progress.as_ref() {
+                    progress.stop(AgentRunStop::Idle);
+                }
                 if let Ok(mut capture) = task_stderr.lock() {
                     capture.push(reason);
                 }
@@ -7658,6 +7725,8 @@ pub(crate) struct TokenTally {
     eval: u64,
     cost_usd_micros: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
+    /// KT-1108 — the run's live progress: reasoning, text and signs of life.
+    progress: Option<super::run_progress::RunProgress>,
 }
 
 /// Cumulative ceiling telemetry carried in stderr; the last marker wins.
@@ -8025,6 +8094,11 @@ pub(crate) struct LeadingThinkingFilter {
 }
 
 impl LeadingThinkingFilter {
+    /// Inside a leading reasoning block the model's text is withheld.
+    pub(crate) fn is_suppressing(&self) -> bool {
+        self.state == LeadingThinkingState::Suppressing
+    }
+
     const OPEN_TAGS: [&'static str; 2] = ["<think>", "<thinking>"];
     const CLOSE_TAGS: [&'static str; 2] = ["</think>", "</thinking>"];
 
@@ -8202,6 +8276,8 @@ pub(crate) async fn forward_chat_line(
     let Some(chunk) = codec.parse_line(line) else {
         return true;
     };
+    // Shape only: which kind of chunk it is, never its text.
+    let reasoning = super::activity::is_reasoning_frame(line);
     if let Some(model) = &chunk.model {
         provenance::observe_model(tally.provenance.as_ref(), model);
     }
@@ -8231,13 +8307,26 @@ pub(crate) async fn forward_chat_line(
         *provider_error = Some(err.clone());
         *got_error = true;
     }
+    let mut shown = false;
+    let mut withheld_thought = false;
     if let Some(text) = chunk.delta {
         let visible = replay_hold.push(thinking_filter.push(&text));
+        withheld_thought = thinking_filter.is_suppressing();
+        shown = !visible.is_empty();
         if !visible.is_empty() {
             *emitted_any = true;
         }
         if !visible.is_empty() && tx.send(visible).await.is_err() {
             return false;
+        }
+    }
+    if let Some(progress) = tally.progress.as_ref() {
+        if shown {
+            progress.text();
+        } else if reasoning || withheld_thought {
+            progress.thought();
+        } else {
+            progress.beat();
         }
     }
     if chunk.prompt_tokens > 0 {
@@ -8492,6 +8581,7 @@ async fn send_http_agent_request(
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
     idle: Duration,
+    progress: Option<&super::run_progress::RunProgress>,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
     // Anthropic caches only the prefixes a request marks. Measured at about a
     // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
@@ -8508,6 +8598,10 @@ async fn send_http_agent_request(
     let first_token_within = body["stream"].as_bool().unwrap_or(true).then_some(idle);
     let mut attempt = first_attempt;
     loop {
+        // Each attempt has its own first-token bound: the bubble shows it.
+        if let Some(progress) = progress {
+            progress.request_sent(first_token_within);
+        }
         let mut request = client.post(url).json(body);
         if let Some(key) = auth_key {
             request = request.bearer_auth(key);
@@ -8520,6 +8614,9 @@ async fn send_http_agent_request(
                 // dropped future closes it, which is what frees the model.
                 Err(_) => {
                     super::http_diagnostics::record_failure(stderr, None);
+                    if let Some(progress) = progress {
+                        progress.stop(crate::models::AgentRunStop::Idle);
+                    }
                     return Err(HttpProviderFailure {
                         status: None,
                         detail: idle_watchdog::stall_reason(
@@ -8536,6 +8633,10 @@ async fn send_http_agent_request(
         match sent {
             Ok(response) if response.status().is_success() => {
                 super::http_diagnostics::clear_failure(stderr);
+                // Reading the body starts a new bound: the bubble shows it from now.
+                if let Some(progress) = progress {
+                    progress.restart_deadline(first_token_within);
+                }
                 return Ok((response, attempt));
             }
             Ok(response) => {
@@ -8556,6 +8657,9 @@ async fn send_http_agent_request(
                             delay.as_millis()
                         ),
                     );
+                    if let Some(progress) = progress {
+                        progress.backoff();
+                    }
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -8580,6 +8684,9 @@ async fn send_http_agent_request(
                             delay.as_millis()
                         ),
                     );
+                    if let Some(progress) = progress {
+                        progress.backoff();
+                    }
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -8660,6 +8767,7 @@ async fn start_ollama_http(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -8702,6 +8810,7 @@ async fn start_ollama_http_with_idle(
     idle_timeout: Option<Duration>,
     images: Option<&super::vision::ContextImages>,
     activity: Option<super::activity::AgentActivitySink>,
+    run_progress: Option<super::run_progress::RunProgress>,
 ) -> Result<AgentProcess, String> {
     let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
@@ -9124,6 +9233,9 @@ async fn start_ollama_http_with_idle(
         .map(tokio_util::sync::CancellationToken::child_token)
         .unwrap_or_default();
     let initial_request_started_at = std::time::Instant::now();
+    // A streamed run bounds every silence itself (first token, each chunk), so
+    // the consumer's text timer stands down, as for ACP; a non-streamed one does not.
+    let streamed = body["stream"].as_bool().unwrap_or(true);
     provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
     let mut initial = tokio::select! {
         biased;
@@ -9141,6 +9253,7 @@ async fn start_ollama_http_with_idle(
             true,
             &stderr_capture,
                     idle_limit,
+                    run_progress.as_ref(),
         ) => response,
     };
     // Workflow prompts already carry the schema and the caller validates the
@@ -9179,6 +9292,7 @@ async fn start_ollama_http_with_idle(
                     &client, &url, &body, auth_key.as_deref(), backend,
                     attempt, attempt, false, &stderr_capture,
                     idle_limit,
+                    run_progress.as_ref(),
                 ) => response,
             };
         }
@@ -9384,6 +9498,7 @@ async fn start_ollama_http_with_idle(
             // counts; parse_token_usage later sums the independent markers.
             let mut tally = TokenTally {
                 provenance: provenance.clone(),
+                progress: run_progress.clone(),
                 ..Default::default()
             };
             // The response below was generated from this exact catalogue. A
@@ -9443,6 +9558,9 @@ async fn start_ollama_http_with_idle(
                             };
                             let reason = idle_watchdog::stall_reason(backend, idle_limit, &progress);
                             tracing::warn!(target: "kronn::agent::idle", "{reason}");
+                            if let Some(run) = run_progress.as_ref() {
+                                run.stop(crate::models::AgentRunStop::Idle);
+                            }
                             if let Ok(mut se) = stderr_clone.lock() {
                                 se.push(reason);
                             }
@@ -9453,6 +9571,10 @@ async fn start_ollama_http_with_idle(
                 };
                 let Some(chunk) = chunk else { break };
                 received_chunks += 1;
+                // Every chunk re-arms the stream's bound, keepalives included.
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.beat();
+                }
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
@@ -9527,6 +9649,9 @@ async fn start_ollama_http_with_idle(
             }
             if had_trailing {
                 emitted_this_turn = true;
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.text();
+                }
             }
             emitted_text |= emitted_this_turn;
 
@@ -9658,6 +9783,9 @@ async fn start_ollama_http_with_idle(
                     ),
                 );
                 replay_hold.discard();
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.backoff();
+                }
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {
@@ -9686,6 +9814,7 @@ async fn start_ollama_http_with_idle(
                         !external_effect_observed,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 match retried {
@@ -9725,6 +9854,9 @@ async fn start_ollama_http_with_idle(
                 if tx.send(held).await.is_err() {
                     finish(&mut lifeline, false).await;
                     return;
+                }
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.text();
                 }
                 emitted_text = true;
             }
@@ -9830,6 +9962,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match delivery_retry {
@@ -9920,6 +10053,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match repair_retry {
@@ -9996,6 +10130,7 @@ async fn start_ollama_http_with_idle(
                         false,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 response = match finalization_retry {
@@ -10111,6 +10246,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match finalization_retry {
@@ -10176,6 +10312,7 @@ async fn start_ollama_http_with_idle(
                         false,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 response = match worker_retry {
@@ -10241,6 +10378,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match final_answer {
@@ -10801,6 +10939,14 @@ async fn start_ollama_http_with_idle(
                         // From this point onward no provider retry is safe.
                         external_effect_observed = true;
                         fresh_execution = true;
+                        if let Some(progress) = run_progress.as_ref() {
+                            // Its category only, before it runs; no inactivity
+                            // bound applies while Kronn executes it.
+                            progress.tool(&super::activity::ToolActivityUpdate::named(
+                                None, &call.name,
+                            ));
+                            progress.idle_limit(None);
+                        }
                         let fresh = tokio::select! {
                             biased;
                             _ = task_cancel.cancelled() => {
@@ -11737,6 +11883,7 @@ async fn start_ollama_http_with_idle(
                     false,
                     &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                 ) => result,
             };
             response = match next_turn {
@@ -11796,7 +11943,7 @@ async fn start_ollama_http_with_idle(
         http_cancel: Some(http_cancel),
         pgid: None,
         token_fragments: false,
-        activity_watched: false,
+        activity_watched: streamed,
         bridge_token: None,
     })
 }
@@ -14311,6 +14458,7 @@ mod acp_resume_tests {
                 provenance: None,
                 activity: None,
                 idle_timeout: None,
+                run_progress: None,
             },
             transport,
         )
@@ -14657,6 +14805,7 @@ mod acp_resume_tests {
                     provenance: None,
                     activity: None,
                     idle_timeout: None,
+                    run_progress: None,
                 },
                 transport.clone(),
             )
@@ -14898,6 +15047,7 @@ mod acp_resume_tests {
             provenance: None,
             activity: None,
             idle_timeout: None,
+            run_progress: None,
         }
     }
 

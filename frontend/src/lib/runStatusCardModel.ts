@@ -12,7 +12,9 @@ export type RunStatusCardStatus =
   | 'partial'
   | 'failed'
   | 'cancelled'
-  | 'timeout';
+  | 'timeout'
+  // KT-811 — waiting for a provider quota reset: not a failure.
+  | 'quota';
 
 export type RunStatusCardProgress = {
   completed: number;
@@ -45,11 +47,12 @@ export function sharedRunStatusCardModel(
 ): RunStatusCardModel {
   const result = run.result as {
     progress?: { completed: number; total: number; current_label?: string | null };
+    quota?: unknown;
   } | null;
   return {
     id: run.id,
     kind: run.kind,
-    status: run.status,
+    status: run.status === 'running' && result?.quota ? 'quota' : run.status,
     startedAt: run.started_at,
     finishedAt: run.finished_at,
     durationMs: run.duration_ms,
@@ -85,13 +88,11 @@ export function workflowRunStatusCardModel(run: {
     StoppedByGuard: 'timeout',
     Interrupted: 'failed',
     WaitingApproval: 'running',
+    WaitingQuota: 'quota',
   };
-  const completed = run.step_results.filter(
-    step => !['Pending', 'Running', 'WaitingApproval'].includes(step.status),
-  ).length;
-  const current = run.step_results.find(step =>
-    ['Pending', 'Running', 'WaitingApproval'].includes(step.status),
-  );
+  const pending = ['Pending', 'Running', 'WaitingApproval', 'WaitingQuota'];
+  const completed = run.step_results.filter(step => !pending.includes(step.status)).length;
+  const current = run.step_results.find(step => pending.includes(step.status));
   return {
     id: run.id,
     kind: 'workflow',

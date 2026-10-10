@@ -247,6 +247,7 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 },
                 condition_action: None,
             };
@@ -344,6 +345,7 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 },
                 condition_action: None,
             };
@@ -389,6 +391,7 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 },
                 condition_action: None,
             };
@@ -749,6 +752,7 @@ pub async fn execute_step(
                                         cached_prompt_tokens,
                                         cache_write_prompt_tokens,
                                         last_activity: None,
+                                        quota_wait: None,
                                     },
                                     condition_action: None,
                                 };
@@ -891,6 +895,7 @@ pub async fn execute_step(
                         cached_prompt_tokens,
                         cache_write_prompt_tokens,
                         last_activity: None,
+                        quota_wait: None,
                     },
                     condition_action,
                 };
@@ -903,6 +908,37 @@ pub async fn execute_step(
                     attempt + 1,
                     last_error
                 );
+                // KT-811 — a quota refusal does not clear within the retry
+                // backoff; retrying only spends the run's attempts.
+                if let Some(quota) = super::quota_wait::classify(&last_error, chrono::Utc::now()) {
+                    provenance.selected_attempt = None;
+                    return StepOutcome {
+                        result: StepResult {
+                            step_name: step.name.clone(),
+                            status: RunStatus::Failed,
+                            output: format!("Provider quota or session limit: {last_error}"),
+                            tokens_used: None,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            started_at: None,
+                            condition_result: None,
+                            envelope_detected: None,
+                            step_kind: None,
+                            step_agent: None,
+                            step_model: None,
+                            step_api_plugin_slug: None,
+                            step_api_endpoint_path: None,
+                            is_rollback: false,
+                            child_run_id: None,
+                            agent_provenance: Some(Box::new(provenance)),
+                            native_tool_calls: Box::default(),
+                            cached_prompt_tokens: None,
+                            cache_write_prompt_tokens: None,
+                            last_activity: None,
+                            quota_wait: Some(quota),
+                        },
+                        condition_action: None,
+                    };
+                }
             }
         }
     }
@@ -939,6 +975,7 @@ pub async fn execute_step(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -1105,6 +1142,7 @@ async fn preflight_workflow_launch(
             requested_model: model.clone(),
             effective_model: model,
             warning: None,
+            notice: None,
         });
     };
     let runtime_target_id = connection
@@ -1992,6 +2030,7 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action: None,
     })
