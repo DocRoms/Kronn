@@ -895,7 +895,10 @@ pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), Stri
                 ));
             }
             for write in &config.writes {
-                if write.dataset.trim().is_empty() || write.value_from.trim().is_empty() {
+                let needs_value = write.operation != crate::models::LivePageWriteOperation::Clear;
+                if write.dataset.trim().is_empty()
+                    || (needs_value && write.value_from.trim().is_empty())
+                {
                     return Err(format!(
                         "Step PublishPageData « {} » : chaque écriture requiert `dataset` et `value_from`.",
                         s.name
@@ -5579,6 +5582,92 @@ pub struct DecideRunRequest {
 pub struct DecideRunResponse {
     pub run_id: String,
     pub new_status: RunStatus,
+}
+
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CronPreviewRequest {
+    pub schedule: String,
+    /// The trigger's own zone; absent means Kronn's global zone.
+    #[serde(default)]
+    #[ts(optional)]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CronPreview {
+    /// The zone the schedule is read in.
+    pub timezone: String,
+    /// True when that zone is Kronn's global one (no trigger override).
+    pub inherited: bool,
+    /// The next firings, RFC 3339 with the zone's offset.
+    pub next: Vec<String>,
+}
+
+/// POST /api/workflows/cron-preview — the next 3 firings of a schedule, with
+/// the scheduler's own zone and DST rules (KT-1103).
+pub async fn cron_preview(Json(req): Json<CronPreviewRequest>) -> Json<ApiResponse<CronPreview>> {
+    Json(
+        cron_preview_at(&req, crate::core::timezone::current(), Utc::now())
+            .map_or_else(ApiResponse::err, ApiResponse::ok),
+    )
+}
+
+pub(crate) fn cron_preview_at(
+    req: &CronPreviewRequest,
+    default_tz: chrono_tz::Tz,
+    now: chrono::DateTime<Utc>,
+) -> Result<CronPreview, String> {
+    use crate::workflows::trigger;
+    let own = req
+        .timezone
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let tz = trigger::trigger_timezone(own, default_tz)?;
+    let next = trigger::next_fires(req.schedule.trim(), tz, now, 3)?;
+    Ok(CronPreview {
+        timezone: tz.name().to_string(),
+        inherited: own.is_none(),
+        next: next.iter().map(|at| at.to_rfc3339()).collect(),
+    })
+}
+
+#[cfg(test)]
+mod cron_preview_tests {
+    use super::*;
+
+    #[test]
+    fn the_preview_follows_the_global_zone_unless_the_trigger_has_one() {
+        let req = |tz: Option<&str>| CronPreviewRequest {
+            schedule: "0 7-21 * * 1-5".into(),
+            timezone: tz.map(String::from),
+        };
+        // Friday 2026-10-23 21:30 Paris; Monday is after the DST change.
+        let now = "2026-10-23T19:30:00Z".parse().unwrap();
+        let paris = cron_preview_at(&req(None), chrono_tz::Europe::Paris, now).unwrap();
+        assert_eq!(paris.timezone, "Europe/Paris");
+        assert!(paris.inherited);
+        assert_eq!(
+            paris.next,
+            [
+                "2026-10-26T07:00:00+01:00",
+                "2026-10-26T08:00:00+01:00",
+                "2026-10-26T09:00:00+01:00"
+            ]
+        );
+        let utc = cron_preview_at(&req(Some("UTC")), chrono_tz::Europe::Paris, now).unwrap();
+        assert_eq!((utc.timezone.as_str(), utc.inherited), ("UTC", false));
+        assert_eq!(utc.next[0], "2026-10-23T20:00:00+00:00");
+        // A blank override is no override.
+        assert!(
+            cron_preview_at(&req(Some(" ")), chrono_tz::UTC, now)
+                .unwrap()
+                .inherited
+        );
+        assert!(cron_preview_at(&req(Some("Mars/Olympus")), chrono_tz::UTC, now).is_err());
+    }
 }
 
 #[derive(Debug, serde::Deserialize, ts_rs::TS)]

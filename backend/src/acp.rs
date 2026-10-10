@@ -19,6 +19,7 @@ use tokio::time::{timeout, Duration};
 use crate::models::AgentType;
 
 mod adapter_process;
+mod bridge_env;
 mod claude_adapter;
 mod codex_adapter;
 mod permission_broker;
@@ -618,6 +619,9 @@ pub struct AcpJsonRpcTransport {
     launch_mcp_servers: Mutex<Option<(Vec<AcpMcpServer>, Vec<AcpMcpServer>)>>,
     /// The name this session declares Kronn's bridge under.
     bridge_id: String,
+    /// The `env` declared for the bridge, and the secrets file it names, kept
+    /// for as long as the runtime may restart the bridge (KT-1082).
+    bridge_env: bridge_env::BridgeEnv,
     timeouts: AcpRequestTimeouts,
 }
 
@@ -927,6 +931,8 @@ impl AcpJsonRpcTransport {
         }
         let mut command =
             native_command(agent, program, &args, cwd, &launch).map_err(AcpError::Transport)?;
+        let bridge_env =
+            bridge_env::for_launch(agent, command.as_std()).map_err(AcpError::Transport)?;
         // The servers are authorized once, by the session's own broker: the
         // launch arguments never name a server `session/new` does not declare.
         let broker = session_broker(full_access, Some(scope));
@@ -946,6 +952,7 @@ impl AcpJsonRpcTransport {
         ));
         let mut transport = Self::spawn_with_broker(agent, command, broker).await?;
         transport.bridge_id = bridge_id;
+        transport.bridge_env = bridge_env;
         *transport.launch_mcp_servers.lock().await = Some((mcp_candidates, servers));
         Ok(transport)
     }
@@ -1020,6 +1027,7 @@ impl AcpJsonRpcTransport {
             broker,
             launch_mcp_servers: Mutex::new(None),
             bridge_id: "kronn-internal".into(),
+            bridge_env: bridge_env::BridgeEnv::default(),
             timeouts: AcpRequestTimeouts::DEFAULT,
         })
     }
@@ -1554,6 +1562,28 @@ fn native_session_mcp_servers(
     servers
 }
 
+/// The `mcpServers` of `session/new`: only the bridge carries an `env`, the one
+/// its runtime needs declared (empty for a runtime whose servers inherit).
+fn session_mcp_declarations(
+    servers: Vec<AcpMcpServer>,
+    bridge_id: &str,
+    bridge_env: &[Value],
+) -> Vec<Value> {
+    servers
+        .into_iter()
+        .map(|server| {
+            let env = if server.id == bridge_id {
+                bridge_env.to_vec()
+            } else {
+                Vec::new()
+            };
+            json!({
+                "name": server.id, "command": server.command, "args": server.args, "env": env,
+            })
+        })
+        .collect()
+}
+
 #[async_trait]
 impl AcpTransport for AcpJsonRpcTransport {
     async fn initialize(
@@ -1570,14 +1600,7 @@ impl AcpTransport for AcpJsonRpcTransport {
                 &self.bridge_id,
             ),
         };
-        let servers: Vec<Value> = servers
-            .into_iter()
-            .map(|server| {
-                json!({
-                    "name": server.id, "command": server.command, "args": server.args, "env": [],
-                })
-            })
-            .collect();
+        let servers = session_mcp_declarations(servers, &self.bridge_id, &self.bridge_env.declared);
         let result = self
             .request(
                 "initialize",
@@ -1946,6 +1969,113 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    /// KT-1082 — Vibe starts its stdio servers with the MCP SDK's default
+    /// environment only, and persists what `session/new` declares. The bridge's
+    /// plain values are declared inline; its secrets sit in an owner-only file
+    /// the declaration names, removed with the transport.
+    #[test]
+    fn vibe_declares_the_bridge_environment_without_its_secrets() {
+        let project = tempfile::tempdir().unwrap();
+        let launch = NativeLaunchEnv {
+            discussion_id: Some("room-1082".into()),
+            workflow_step: Some(crate::agents::runner::WorkflowStepBridgeContext {
+                discussion_id: "room-1082".into(),
+                run_id: "run-1".into(),
+                step_key: "step".into(),
+                capability: "cap_secret_1082".into(),
+            }),
+            bridge_token: Some("kbt_secret_1082".into()),
+            ..Default::default()
+        };
+        let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::Vibe,
+                "vibe-acp",
+                &[],
+                &project.path().to_string_lossy(),
+                &launch,
+            )
+            .unwrap()
+        });
+        let env = bridge_env::for_launch(AcpAgent::Vibe, command.as_std()).unwrap();
+        let server = |id: &str| AcpMcpServer {
+            id: id.into(),
+            command: "python3".into(),
+            args: vec!["bridge.py".into()],
+            allowed_tools: Vec::new(),
+        };
+        let declared = session_mcp_declarations(
+            vec![server("kronn-internal"), server("project-server")],
+            "kronn-internal",
+            &env.declared,
+        );
+
+        let wire = serde_json::to_string(&declared).unwrap();
+        for secret in ["kbt_secret_1082", "cap_secret_1082"] {
+            assert!(!wire.contains(secret), "{secret} is in the declaration");
+        }
+        let bridge: HashMap<String, String> = declared[0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["name"].as_str().unwrap().to_owned(),
+                    entry["value"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(bridge["KRONN_DISCUSSION_ID"], "room-1082");
+        assert!(bridge.contains_key("KRONN_BACKEND_URL"));
+        assert_eq!(
+            declared[1]["env"],
+            json!([]),
+            "only the bridge gets the env"
+        );
+
+        let file = std::path::PathBuf::from(&bridge[bridge_env::SECRET_FILE_ENV]);
+        let secrets: HashMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(secrets["KRONN_BRIDGE_TOKEN"], "kbt_secret_1082");
+        assert!(secrets["KRONN_WORKFLOW_STEP_CONTEXT"].contains("cap_secret_1082"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &std::path::Path| {
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+            };
+            assert_eq!(mode(&file), 0o600);
+            assert_eq!(mode(file.parent().unwrap()), 0o700);
+        }
+        drop(env);
+        assert!(!file.exists(), "the secrets file outlived its transport");
+    }
+
+    /// A runtime whose stdio servers inherit its environment keeps an empty
+    /// declaration and gets no secrets file.
+    #[test]
+    fn an_inheriting_runtime_declares_no_bridge_environment() {
+        let project = tempfile::tempdir().unwrap();
+        let launch = NativeLaunchEnv {
+            discussion_id: Some("room-1082".into()),
+            bridge_token: Some("kbt_secret_1082".into()),
+            ..Default::default()
+        };
+        let command = crate::core::child_env::with_parent_env(&[("PATH", "/usr/bin")], || {
+            native_command(
+                AcpAgent::OpenCode,
+                "opencode",
+                &["acp"],
+                &project.path().to_string_lossy(),
+                &launch,
+            )
+            .unwrap()
+        });
+        let env = bridge_env::for_launch(AcpAgent::OpenCode, command.as_std()).unwrap();
+        assert!(env.declared.is_empty());
+        assert!(env._secret_file.is_none());
     }
 
     /// KT-1013 — a native ACP agent gets the values the other routes give:

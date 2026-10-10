@@ -1607,8 +1607,17 @@ async fn execute_run_body(
         crate::core::docs_write_filter::scan_sensitive_files(std::path::Path::new(&work_dir))
     });
 
+    // The zone pinned with the run (KT-1103): a resume after a Settings
+    // change renders the same dates. Unpinned runs read the live zone.
+    let zone_run = run.id.clone();
+    let run_timezone = state
+        .db
+        .with_read_conn(move |conn| super::run_pins::pinned_timezone(conn, &zone_run))
+        .await?
+        .unwrap_or_else(crate::core::timezone::current);
     // Build template context from trigger context
-    let mut ctx = TemplateContext::with_time_anchor(run.started_at);
+    let mut ctx =
+        TemplateContext::with_time_anchor(run.started_at).with_default_timezone(run_timezone);
     if let Some(ref trigger_ctx) = run.trigger_context {
         inject_trigger_context(&mut ctx, trigger_ctx);
     }
@@ -1830,13 +1839,13 @@ async fn execute_run_body(
 
             // Resolve every statically reachable Agent step before the first
             // one starts. Dynamic branches are checked again immediately
-            // before dispatch by `execute_step`.
+            // before dispatch by `execute_step`. A native agent without full
+            // access has no catalogue to read: its step fails on that reason.
             let mut catalog_failures = Vec::new();
-            for step in workflow
-                .steps
-                .iter()
-                .filter(|step| matches!(step.step_type, StepType::Agent))
-            {
+            for step in workflow.steps.iter().filter(|step| {
+                matches!(step.step_type, StepType::Agent)
+                    && super::steps::native_full_access_refusal_for(&step.agent).is_none()
+            }) {
                 let tier = step
                     .agent_settings
                     .as_ref()
@@ -10478,6 +10487,7 @@ mod tests {
     }
 
     mod gate_guard_runs;
+    mod native_full_access_runs;
     mod quota_wait_runs;
     mod run_effect_runs;
     mod run_pin_runs;

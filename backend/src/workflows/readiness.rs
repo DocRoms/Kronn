@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use crate::models::{
-    StepType, Workflow, WorkflowBlocker, WorkflowBlockerKind, WorkflowReadiness, WorkflowStep,
+    AgentType, StepType, Workflow, WorkflowBlocker, WorkflowBlockerKind, WorkflowReadiness,
+    WorkflowStep,
 };
 
 const HUMAN_APPROVAL_ACTION: &str = "Ask a human to review and approve this line in the \
@@ -23,6 +24,7 @@ pub fn assess(root: &Workflow, workflows: &HashMap<String, Workflow>) -> Workflo
         path: Vec::new(),
         checked: Vec::new(),
         blockers: Vec::new(),
+        full_access_refusals: HashMap::new(),
     };
     walk.visit(root);
     finish(root, walk.checked, walk.blockers)
@@ -59,9 +61,55 @@ struct Walk<'a> {
     path: Vec<String>,
     checked: Vec<String>,
     blockers: Vec<WorkflowBlocker>,
+    /// Each agent's setting is read once per check, as the runner reads it.
+    full_access_refusals: HashMap<String, bool>,
 }
 
 impl Walk<'_> {
+    fn refused_for_full_access(&mut self, agent: &AgentType) -> bool {
+        *self
+            .full_access_refusals
+            .entry(format!("{agent:?}"))
+            .or_insert_with(|| {
+                crate::workflows::steps::native_full_access_refusal_for(agent).is_some()
+            })
+    }
+
+    /// The step's agents a native full-access refusal would stop: the step's
+    /// own, and a different debate reviewer.
+    fn full_access_blockers(&mut self, wf: &Workflow, step: &WorkflowStep, on_failure: bool) {
+        if step.step_type != StepType::Agent {
+            return;
+        }
+        let mut agents = vec![&step.agent];
+        if let Some(review) = step.multi_agent_review.as_ref() {
+            if review.reviewer_agent != step.agent {
+                agents.push(&review.reviewer_agent);
+            }
+        }
+        for agent in agents {
+            if !self.refused_for_full_access(agent) {
+                continue;
+            }
+            let label = crate::agents::runner::agent_settings_label(agent);
+            self.blockers.push(WorkflowBlocker {
+                workflow_id: wf.id.clone(),
+                workflow_name: wf.name.clone(),
+                step: Some(step.name.clone()),
+                on_failure,
+                kind: WorkflowBlockerKind::MisconfiguredStep,
+                phase: None,
+                reason: Some(crate::agents::runner::NATIVE_FULL_ACCESS_REQUIRED.into()),
+                message: crate::agents::runner::native_full_access_refusal_in(agent, "en"),
+                action: format!(
+                    "Ask the user to turn on full access in Config › Agents › {label}, or pick \
+                     another agent for this step (workflow_update)."
+                ),
+                human_only: false,
+            });
+        }
+    }
+
     fn lookup(&self, id: &str) -> Option<&Workflow> {
         if id == self.root.id {
             Some(self.root)
@@ -79,6 +127,7 @@ impl Walk<'_> {
         for (chain, on_failure) in [(&wf.steps, false), (&wf.on_failure, true)] {
             for step in chain {
                 self.blockers.extend(step_blockers(wf, step, on_failure));
+                self.full_access_blockers(wf, step, on_failure);
             }
         }
         self.path.push(wf.id.clone());

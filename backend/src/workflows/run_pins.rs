@@ -41,6 +41,10 @@ struct RunHeader {
     /// [`revision_fingerprint`] at pin time; `None` when inherited.
     #[serde(default)]
     fingerprint: Option<String>,
+    /// Zone of the run's `{{time.now}}` (KT-1103); absent (pinned before
+    /// zones existed) means UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
 }
 
 /// Pins `workflow` and its dependencies the first time `run` executes and
@@ -152,10 +156,18 @@ fn pin_fresh(
             )?;
         }
     }
+    let timezone = match run.parent_run_id.as_deref().filter(|_| inherited) {
+        Some(parent) => inherited_timezone(tx, parent)?,
+        // A run that already executed steps before it had a pin started
+        // under UTC templates: it keeps them.
+        None if !run.step_results.is_empty() => chrono_tz::UTC,
+        None => crate::core::timezone::current(),
+    };
     let header = RunHeader {
         pinned_at: Utc::now(),
         workflow: Some(workflow.clone()),
         fingerprint,
+        timezone: Some(timezone.name().to_string()),
     };
     rows::insert(
         tx,
@@ -307,6 +319,27 @@ pub fn pinned_fingerprint(conn: &Connection, run_id: &str) -> Result<Option<Stri
     Ok(header(conn, run_id)?.and_then(|header| header.fingerprint))
 }
 
+/// The zone `run_id`'s templates render in: the one it pinned, UTC for a pin
+/// older than zones, `None` while it has no pin yet.
+pub fn pinned_timezone(conn: &Connection, run_id: &str) -> Result<Option<chrono_tz::Tz>> {
+    Ok(header(conn, run_id)?.map(|header| zone_of(&header)))
+}
+
+fn zone_of(header: &RunHeader) -> chrono_tz::Tz {
+    header
+        .timezone
+        .as_deref()
+        .and_then(|name| name.parse().ok())
+        .unwrap_or(chrono_tz::UTC)
+}
+
+/// A child renders in its parent's pinned zone.
+fn inherited_timezone(conn: &Connection, parent_run_id: &str) -> Result<chrono_tz::Tz> {
+    Ok(header(conn, parent_run_id)?
+        .map(|header| zone_of(&header))
+        .unwrap_or(chrono_tz::UTC))
+}
+
 /// A BatchQuickPrompt run reads its chain prompts from its parent's pin.
 pub fn inherit_for_batch(conn: &Connection, parent_run_id: &str, batch_run_id: &str) -> Result<()> {
     if !rows::has_pin(conn, parent_run_id)? {
@@ -317,6 +350,7 @@ pub fn inherit_for_batch(conn: &Connection, parent_run_id: &str, batch_run_id: &
         pinned_at: Utc::now(),
         workflow: None,
         fingerprint: None,
+        timezone: Some(inherited_timezone(conn, parent_run_id)?.name().to_string()),
     };
     rows::insert(
         conn,

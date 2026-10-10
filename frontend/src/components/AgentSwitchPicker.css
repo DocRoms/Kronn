@@ -195,6 +195,17 @@
   cursor: pointer;
 }
 
+.kr-agent-switch-badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: var(--kr-radius-pill);
+  background: var(--kr-warning-bg);
+  color: var(--kr-warning-soft);
+  font-size: 9px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .kr-agent-switch-catalog-meta {
   position: absolute;
   right: 3px;

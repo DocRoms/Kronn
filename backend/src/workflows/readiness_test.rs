@@ -345,3 +345,69 @@ fn the_default_todo_workflows_are_ready() {
         assert!(readiness.blockers.is_empty());
     }
 }
+
+/// A native ACP Agent step whose full access is off is a blocker before the
+/// run, with the runtime's reason code and the way out; turning the setting
+/// on lifts it. The rollback chain and a debate reviewer count too.
+#[test]
+fn a_native_agent_without_full_access_blocks_the_run() {
+    use crate::core::config::test_saved_access;
+    use crate::models::{AgentType, MultiAgentReviewConfig};
+    let agent_step = |name: &str, agent: AgentType| WorkflowStep {
+        name: name.into(),
+        step_type: StepType::Agent,
+        agent,
+        prompt_template: "Review the change.".into(),
+        ..Default::default()
+    };
+    let mut debated = agent_step("debated", AgentType::ClaudeCode);
+    debated.multi_agent_review = Some(MultiAgentReviewConfig {
+        reviewer_agent: AgentType::CopilotCli,
+        reviewer_tier: None,
+        debate_prompt: "Challenge it".into(),
+        max_rounds: Some(1),
+    });
+    let wf = workflow(
+        "native",
+        vec![agent_step("review", AgentType::CopilotCli), debated],
+        vec![agent_step("undo", AgentType::CopilotCli)],
+    );
+    let full_access_blockers = |readiness: &WorkflowReadiness| -> Vec<WorkflowBlocker> {
+        readiness
+            .blockers
+            .iter()
+            .filter(|b| b.reason.as_deref() == Some("native_full_access_required"))
+            .cloned()
+            .collect()
+    };
+
+    let _off = test_saved_access::set(&AgentType::CopilotCli, false);
+    let readiness = assess(&wf, &HashMap::new());
+    assert!(!readiness.ready);
+    let found = full_access_blockers(&readiness);
+    let located: Vec<(&str, bool)> = found
+        .iter()
+        .map(|b| (b.step.as_deref().unwrap(), b.on_failure))
+        .collect();
+    assert_eq!(
+        located,
+        vec![("review", false), ("debated", false), ("undo", true)]
+    );
+    let blocker = &found[0];
+    assert_eq!(blocker.kind, WorkflowBlockerKind::MisconfiguredStep);
+    assert!(!blocker.human_only, "another agent lifts it too");
+    assert!(
+        blocker
+            .message
+            .contains("GitHub Copilot runs only with full access"),
+        "{}",
+        blocker.message
+    );
+    assert!(blocker.action.contains("Config › Agents › GitHub Copilot"));
+    assert!(blocker.action.contains("another agent"));
+
+    let _on = test_saved_access::set(&AgentType::CopilotCli, true);
+    let readiness = assess(&wf, &HashMap::new());
+    assert!(full_access_blockers(&readiness).is_empty());
+    assert!(readiness.ready, "{:?}", readiness.blockers);
+}

@@ -66,8 +66,21 @@ export function buildWatchTrigger(d: WatchDraft): WorkflowTrigger {
   return trigger;
 }
 
-/** A Cron trigger; an empty timezone is omitted so the schedule stays in UTC. */
+/** A Cron trigger; an empty timezone is omitted so the schedule follows Kronn's zone. */
 export function buildCronTrigger(schedule: string, timezone: string): WorkflowTrigger {
   const tz = timezone.trim();
   return tz ? { type: 'Cron', schedule, timezone: tz } : { type: 'Cron', schedule };
+}
+
+/** "lun. 26 oct., 07:00" in the schedule's own zone, whatever the browser's. */
+export function formatFires(next: string[], timeZone: string, locale: string): string {
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat(locale, {
+      weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone,
+    });
+  } catch {
+    return next.join(', ');
+  }
+  return next.map(at => format.format(new Date(at))).join(' · ');
 }

@@ -52,6 +52,8 @@ pub struct TemplateContext {
     step_kinds: HashMap<String, String>,
     /// The step whose output `previous_step` currently holds.
     previous_step_name: Option<String>,
+    /// Zone of `{{time.now}}` without `tz:`: Kronn's global one (KT-1103).
+    default_timezone: Tz,
 }
 
 impl Default for TemplateContext {
@@ -72,7 +74,14 @@ impl TemplateContext {
             time_anchor,
             step_kinds: HashMap::new(),
             previous_step_name: None,
+            default_timezone: crate::core::timezone::current(),
         }
+    }
+
+    /// Renders `{{time.now}}` without `tz:` in `timezone`.
+    pub fn with_default_timezone(mut self, timezone: Tz) -> Self {
+        self.default_timezone = timezone;
+        self
     }
 
     /// The flat value stored under `key`, if any.
@@ -467,7 +476,7 @@ impl TemplateContext {
     }
 
     fn resolve_time_expression(&self, expression: &str) -> Result<Option<String>> {
-        let Some(parsed) = TimeExpression::parse(expression)? else {
+        let Some(parsed) = TimeExpression::parse(expression, self.default_timezone)? else {
             return Ok(None);
         };
         parsed.render(self.time_anchor).map(Some)
@@ -499,7 +508,7 @@ struct TimeExpression {
 }
 
 impl TimeExpression {
-    fn parse(expression: &str) -> Result<Option<Self>> {
+    fn parse(expression: &str, default_timezone: Tz) -> Result<Option<Self>> {
         let mut parts = expression.split('|').map(str::trim);
         let base = parts.next().unwrap_or_default();
         let Some(base_suffix) = base
@@ -514,7 +523,7 @@ impl TimeExpression {
 
         let mut parsed = Self {
             shift: Duration::zero(),
-            timezone: chrono_tz::UTC,
+            timezone: default_timezone,
             floor: None,
             format: TimeFormat::Rfc3339,
         };
@@ -2015,6 +2024,44 @@ mod tests {
         assert_eq!(
             after_transition.render_strict(template).unwrap(),
             "2026-03-30T00:00:00.000+02:00"
+        );
+    }
+
+    #[test]
+    fn time_defaults_to_the_global_zone_and_an_explicit_tz_still_wins() {
+        // 2026-08-14T22:30Z is already the 15th in Paris (UTC+2).
+        let paris = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 22, 30))
+            .with_default_timezone(chrono_tz::Europe::Paris);
+        assert_eq!(
+            paris.render_strict("{{time.now|fmt:date}}").unwrap(),
+            "2026-08-15"
+        );
+        assert_eq!(
+            paris
+                .render_strict("{{now|floor:day|fmt:rfc3339}}")
+                .unwrap(),
+            "2026-08-15T00:00:00.000+02:00"
+        );
+        assert_eq!(
+            paris.render_strict("{{time.now|tz:UTC|fmt:date}}").unwrap(),
+            "2026-08-14"
+        );
+        assert_eq!(
+            paris
+                .render_strict("{{time.now|tz:Asia/Tokyo|fmt:local_iso_ms}}")
+                .unwrap(),
+            "2026-08-15T07:30:00.000"
+        );
+        // Same instant whatever the zone.
+        assert_eq!(
+            paris.render_strict("{{time.now|fmt:unix}}").unwrap(),
+            "1786746600"
+        );
+        let utc = TemplateContext::with_time_anchor(utc_anchor(2026, 8, 14, 22, 30))
+            .with_default_timezone(chrono_tz::UTC);
+        assert_eq!(
+            utc.render_strict("{{time.now|fmt:date}}").unwrap(),
+            "2026-08-14"
         );
     }
 

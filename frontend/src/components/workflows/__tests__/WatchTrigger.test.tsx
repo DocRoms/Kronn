@@ -7,13 +7,14 @@ import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { Workflow, WorkflowStep, WatchStatus } from '../../../types/generated';
 
-const { updateMock, quickApiListMock } = vi.hoisted(() => ({
+const { updateMock, quickApiListMock, cronPreviewMock } = vi.hoisted(() => ({
   updateMock: vi.fn(),
   quickApiListMock: vi.fn(),
+  cronPreviewMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
-  workflows: { update: updateMock as never },
+  workflows: { update: updateMock as never, cronPreview: cronPreviewMock as never },
   quickApis: { list: quickApiListMock as never },
 }));
 
@@ -28,7 +29,7 @@ vi.mock('../../../lib/I18nContext', () => ({
 
 import { WorkflowWizard } from '../WorkflowWizard';
 import { WatchStatusLine } from '../WatchStatusLine';
-import { buildCronTrigger, buildWatchTrigger, watchDraftFrom } from '../../../lib/watchTrigger';
+import { buildCronTrigger, buildWatchTrigger, formatFires, watchDraftFrom } from '../../../lib/watchTrigger';
 
 const step = (name: string): WorkflowStep => ({
   id: null,
@@ -78,6 +79,8 @@ beforeEach(() => {
   updateMock.mockReset();
   updateMock.mockResolvedValue({});
   quickApiListMock.mockReset();
+  cronPreviewMock.mockReset();
+  cronPreviewMock.mockResolvedValue({ timezone: 'UTC', inherited: true, next: [] });
   quickApiListMock.mockResolvedValue([]);
   vi.stubGlobal('confirm', vi.fn(() => true));
 });
@@ -161,12 +164,38 @@ describe('WorkflowWizard — Watch trigger', () => {
     });
   });
 
-  it('keeps a Cron in UTC unless a timezone is set, and says so', async () => {
+  it('reads a Cron in Kronn\'s zone unless a timezone is set, and says so', async () => {
     render(<WorkflowWizard {...props} editWorkflow={workflow({ type: 'Cron', schedule: '0 7 * * 1-5' })} />);
     openTrigger();
-    expect(screen.getByText('wiz.timezoneUtcNote')).toBeInTheDocument();
+    expect(screen.getByText('wiz.timezoneDefaultNote')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('wiz.timezone'), { target: { value: 'Europe/Paris' } });
     expect(await saveFromTrigger()).toEqual({ type: 'Cron', schedule: '0 7 * * 1-5', timezone: 'Europe/Paris' });
+  });
+
+  // KT-1103 — the editor shows the zone in use and the next 3 firings in it.
+  it('shows the zone in use and the next three firings in that zone', async () => {
+    cronPreviewMock.mockImplementation(async ({ timezone }: { timezone?: string }) => timezone
+      ? { timezone, inherited: false, next: ['2026-10-26T07:00:00+01:00', '2026-10-27T07:00:00+01:00', '2026-10-28T07:00:00+01:00'] }
+      : { timezone: 'Asia/Tokyo', inherited: true, next: ['2026-10-26T07:00:00+09:00'] });
+    render(<WorkflowWizard {...props} editWorkflow={workflow({ type: 'Cron', schedule: '0 7 * * 1-5' })} />);
+    openTrigger();
+    const preview = () => screen.getByTestId(/wf-cron-timezone.*-preview/);
+    await waitFor(() => expect(preview()).toHaveTextContent('wiz.timezoneInUseKronn:Asia/Tokyo'));
+    expect(cronPreviewMock).toHaveBeenLastCalledWith({ schedule: '0 7 * * 1-5' });
+    expect(screen.getByLabelText('wiz.timezone')).toHaveAttribute('placeholder', 'Asia/Tokyo');
+
+    fireEvent.change(screen.getByLabelText('wiz.timezone'), { target: { value: 'Europe/Paris' } });
+    await waitFor(() => expect(preview()).toHaveTextContent('wiz.timezoneInUse:Europe/Paris'));
+    expect(cronPreviewMock).toHaveBeenLastCalledWith({ schedule: '0 7 * * 1-5', timezone: 'Europe/Paris' });
+    const fires = formatFires(['2026-10-26T07:00:00+01:00', '2026-10-27T07:00:00+01:00', '2026-10-28T07:00:00+01:00'], 'Europe/Paris', 'en');
+    expect(preview()).toHaveTextContent(`wiz.cronNextFires:${fires}`);
+  });
+
+  it('formats the firings in the schedule\'s zone, not the browser\'s', () => {
+    const at = ['2026-10-26T06:00:00Z'];
+    expect(formatFires(at, 'Europe/Paris', 'en')).toContain('07:00');
+    expect(formatFires(at, 'Asia/Tokyo', 'en')).toContain('15:00');
+    expect(formatFires(at, 'UTC', 'fr')).toMatch(/lun\.?.*06:00/);
   });
 
   it('does not add a timezone to an existing Cron saved unchanged', async () => {

@@ -24,8 +24,40 @@ Release notes for 0.9.3 and earlier are available in the
   that had already started when you upgrade is not paused for approval when it
   resumes (after a Gate, a quota wait or a restart), but it is refused by the
   sandbox setting, and newly set limits measure from the point it resumes.
+- Cron and Watch triggers saved before this version are pinned to `UTC`
+  (KT-1103, migration 242), so they keep firing at the same instants. A new
+  trigger without a timezone follows Kronn's timezone instead: to write a
+  schedule in local time, clear the `UTC` of an existing trigger and rewrite
+  its hours (e.g. `5-19` UTC becomes `7-21` in Europe/Paris, with no rewrite
+  at each DST change). `{{time.now}}` without `tz:` now renders in Kronn's
+  timezone; add `|tz:UTC` where a template needs UTC.
 
 ### Added
+
+- Kronn has a timezone (KT-1103): Settings > Server, an IANA name, by
+  default the machine's zone (`TZ`, then the OS setting, then UTC; a Docker
+  container reports UTC unless the compose `TZ` is set). Cron and Watch
+  triggers without their own `timezone`, and `{{time.now}}` without `tz:`,
+  use it. A local time the spring DST change skips does not fire that day;
+  one the autumn change repeats fires once. The trigger editor shows the zone
+  in use and the next 3 firings in it (`POST /api/workflows/cron-preview`).
+  Tracker intervals stay in UTC.
+  A run renders its dates in the zone it started under, through Gate,
+  quota and restart resumes and in its child runs; a run pinned before this
+  version renders in UTC. The desktop app applies the zone at boot too.
+- Live Pages: a dataset can now be emptied, re-limited and deleted
+  (KT-1104). `clear` is a publish write for every kind (time-series points
+  deleted, snapshot set to `null`, collection to `[]`), also usable in a
+  `PublishPageData` step without `value_from`. `PATCH
+  /api/pages/{id}/datasets/{name}` changes `max_points` / `max_age_days` and
+  prunes the existing points at once. `DELETE /api/pages/{id}/datasets/{name}`
+  (MCP `page_delete_dataset`) is refused, with the list of references, while a
+  workflow writes the dataset, the Page HTML names it or a Page button binds
+  to it; a human can force it from the Page, an agent cannot. The data panel
+  now shows each dataset's size, last write, writing workflows and whether the
+  HTML names it, with Empty, Delete and limit controls behind confirmations.
+  Changing limits and reading usage are human-only. The MCP catalogue stays
+  within its byte ceiling (lowered to 85,341 B).
 
 - « Ma Todo » ships with Kronn (KT-1030): a board Page (to do / in progress /
   done) over the planning tasks tagged `todo`, with add, edit, ⤒ ▶ ◀ ✓ ↺,
@@ -37,8 +69,10 @@ Release notes for 0.9.3 and earlier are available in the
   arrive enabled, and no action is pre-approved: approve « todo-move » once in
   the Page's details to save a drag and drop without its card. A drop moves
   the card at once and puts it back with the reason if the launch fails. A
-  first-view notice, dismissible, says the page runs on Kronn's Tasks and
-  Workflows and can be edited by hand or by an agent.
+  first-view notice, dismissible, says the page runs without an agent, on
+  Kronn's Tasks (Planning) and Workflows (Automation), and that any configured
+  agent can adapt it and its workflows through Kronn's MCP tools (blocks, new
+  statistics, a validation or sorting step).
   Editing a task writes only what changed, so a long description is never
   cut. Closing the notice is remembered by Kronn for that Page (a sandboxed
   Page has no storage of its own).
@@ -400,6 +434,21 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- Under Vibe, Kronn's bridge now knows its discussion: `disc_meta` no longer
+  fails with "no disc bound" (KT-1082). Vibe starts MCP servers without its own
+  environment, so Kronn declares the discussion id and backend URL for the
+  bridge in `session/new`. The bridge token and a workflow step's capability
+  are not declared, because Vibe saves that declaration in its session files:
+  they go in an owner-only file (mode 0600, in a 0700 directory) that the
+  declaration names and that is deleted when the session ends. The other
+  native agents are unchanged.
+- A workflow Agent step on OpenCode, Vibe, GitHub Copilot, Gemini CLI or Kiro
+  whose full access is off now fails at once with
+  `native_full_access_required` and a message naming the agent and the fix
+  (KT-1086). It is not retried, not read as a quota limit, and the
+  `on_failure` chain still runs. The workflow's readiness check lists it as a
+  blocker before the run, and the step's agent picker badges such agents
+  "Needs full access" until the setting is turned on.
 - Kronn's action card names the row in words a Page gives it (KT-1030). A
   Page can add `data-kronn-binding-labels` next to `data-kronn-bindings`; the
   card shows those labels instead of raw selectors such as

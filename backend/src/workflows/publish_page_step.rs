@@ -102,14 +102,18 @@ fn build_request(
         if write.dataset.trim().is_empty() {
             bail!("Page dataset name cannot be empty");
         }
-        let key = typed_source_key(&write.value_from)?;
-        let value = context
-            .resolve_value(key)
-            .ok_or_else(|| anyhow!("Unknown typed Page data source '{key}'"))?;
-        let value = if from_exec(key, &value, context) {
-            exec_value(write.dataset.trim(), key, value, context)?
+        let value = if write.operation == LivePageWriteOperation::Clear {
+            serde_json::Value::Null
         } else {
-            value
+            let key = typed_source_key(&write.value_from)?;
+            let value = context
+                .resolve_value(key)
+                .ok_or_else(|| anyhow!("Unknown typed Page data source '{key}'"))?;
+            if from_exec(key, &value, context) {
+                exec_value(write.dataset.trim(), key, value, context)?
+            } else {
+                value
+            }
         };
         let observed_at = write
             .observed_at
@@ -358,6 +362,42 @@ mod tests {
         assert!(request.writes[0].value.is_array());
         assert_eq!(request.writes[0].value[1]["value"], 19);
         assert_eq!(request.writes[0].dedupe_key.as_deref(), Some("run-42:0"));
+    }
+
+    #[test]
+    fn a_stored_clear_write_may_omit_its_source_and_only_clear_may() {
+        let step_with = |operation: &str| -> WorkflowStep {
+            serde_json::from_value(serde_json::json!({
+                "name": "publish", "step_type": {"type": "PublishPageData"},
+                "page_publish": {"page_id": "stats", "writes": [{"dataset": "traffic", "operation": operation}]}
+            }))
+            .expect("a write without value_from deserializes")
+        };
+        let clear = step_with("clear");
+        assert!(clear.page_publish.as_ref().unwrap().writes[0]
+            .value_from
+            .is_empty());
+        assert!(crate::api::workflows::validate_step_required_fields(&clear).is_ok());
+        for operation in ["replace", "append", "upsert"] {
+            assert!(
+                crate::api::workflows::validate_step_required_fields(&step_with(operation))
+                    .is_err(),
+                "{operation} without value_from is refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_clear_write_needs_no_source() {
+        let mut clear = step("");
+        clear.page_publish.as_mut().unwrap().writes[0].operation = LivePageWriteOperation::Clear;
+        let request = build_request(&clear, "workflow-1", "run-42", &TemplateContext::new())
+            .expect("a clear resolves nothing");
+        assert_eq!(request.writes[0].operation, LivePageWriteOperation::Clear);
+        assert!(request.writes[0].value.is_null());
+        assert!(crate::api::workflows::validate_step_required_fields(&clear).is_ok());
+        let unsourced = step("");
+        assert!(crate::api::workflows::validate_step_required_fields(&unsourced).is_err());
     }
 
     #[test]

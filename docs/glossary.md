@@ -132,7 +132,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 - **Manual** — triggered from dashboard or CLI on demand.
 - **Watch** — polls an API source through the broker at intervals and creates a run only when the source changed (304 / ETag / body or JSONPath fingerprint). A poll creates no run.
 
-Cron and Watch take an optional IANA `timezone`; without one they run in UTC.
+Cron and Watch take an optional IANA `timezone`; without one they follow Kronn's global timezone (Settings, default the machine's zone, UTC fallback). Triggers saved before 0.15.0 were pinned to `UTC` on upgrade. A local time the spring DST change skips does not fire that day; one the autumn change repeats fires once. Tracker intervals stay in UTC.
 
 **WorkflowStep** — A single unit of work within a workflow. Has an agent, optional per-step capabilities, a prompt using Kronn's purpose-built `{{variable}}` syntax (not Liquid; no filters), optional debate mode, optional `on_result` conditions, and optional `AgentSettings` override.
 

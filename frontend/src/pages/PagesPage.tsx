@@ -6,7 +6,7 @@ import {
   PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
-  LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
+  LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
   LivePageRevision, LivePageWorkflowLink, Project,
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
@@ -27,6 +27,7 @@ import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
 import { LivePageSlugEditor } from '../components/LivePageSlugEditor';
+import { LivePageDatasetControls, LivePageDatasetUsageLine } from '../components/LivePageDatasetControls';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { LivePageTrustedActions } from '../components/LivePageTrustedActions';
@@ -216,6 +217,7 @@ export function PagesPage({
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+  const [datasetUsage, setDatasetUsage] = useState<LivePageDatasetUsage[]>([]);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
@@ -258,17 +260,20 @@ export function PagesPage({
   }, [collapsedSections]);
 
   const loadDetail = useCallback(async (pageId: string) => {
-    const [[nextDetail, workflows, publications, discussions, pageRevisions]] = await Promise.all([
+    const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
         pagesApi.get(pageId),
         pagesApi.workflows(pageId),
         pagesApi.publications(pageId),
         pagesApi.discussions(pageId),
         pagesApi.revisions(pageId),
+        // Informational: a failed usage read leaves the Page usable.
+        pagesApi.datasetUsage(pageId).catch((): LivePageDatasetUsage[] => []),
       ]),
       reloadPageActions(pageId),
     ]);
     setDetail(nextDetail);
+    setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
     setLinkedDiscussions(discussions);
@@ -296,6 +301,7 @@ export function PagesPage({
         await loadDetail(target);
       } else {
         setDetail(null);
+        setDatasetUsage([]);
         setLinkedWorkflows([]);
         setRecentPublications([]);
         setLinkedDiscussions([]);
@@ -1106,6 +1112,7 @@ export function PagesPage({
                           <button type="button" key={dataset.id} onClick={() => setSelectedDatasetId(dataset.id)} title={t('pages.datasetSizeTitle', dataset.name, formatBytes(dataset.data_size_bytes))}>
                             <strong>{dataset.name}</strong>
                             {formatBytes(dataset.data_size_bytes)}
+                            <LivePageDatasetUsageLine dataset={dataset} usage={datasetUsage.find(item => item.name === dataset.name)} />
                           </button>
                         ))}
                       </div>
@@ -1239,6 +1246,14 @@ export function PagesPage({
                     {selectedDatasetRecords.length > 100 && <small>{t('pages.datasetPreviewLimit', selectedDatasetRecords.length)}</small>}
                   </div>
                 ) : <pre>{JSON.stringify(selectedDataset.current, null, 2)}</pre>}
+                <LivePageDatasetUsageLine dataset={selectedDataset} usage={datasetUsage.find(item => item.name === selectedDataset.name)} />
+                <LivePageDatasetControls
+                  key={`${selectedDataset.id}:${selectedDataset.max_points}:${selectedDataset.max_age_days ?? ''}`}
+                  pageId={detail.id}
+                  dataset={selectedDataset}
+                  onChanged={() => loadDetail(detail.id)}
+                  onDeleted={() => setSelectedDatasetId(null)}
+                />
               </section>
             )}
             {editingHtml ? (

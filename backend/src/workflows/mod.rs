@@ -191,13 +191,14 @@ impl WorkflowEngine {
 
         let db = self.db().clone();
         let workflows = db.with_conn(crate::db::workflows::list_workflows).await?;
+        let default_tz = crate::core::timezone::current();
 
         for wf in workflows {
             if !wf.enabled {
                 continue;
             }
 
-            if !trigger::should_fire(&wf.trigger, since, now) {
+            if !trigger::should_fire(&wf.trigger, default_tz, since, now) {
                 continue;
             }
 

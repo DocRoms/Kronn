@@ -49,6 +49,8 @@ interface AgentSwitchPickerProps {
   staticClassName?: string;
   suffix?: string;
   displayName?: string;
+  /** Agents that cannot run until their full access is turned on (badged in the list). */
+  needsFullAccess?: (agent: AgentType) => boolean;
 }
 
 /**
@@ -78,6 +80,7 @@ export function AgentSwitchPicker({
   staticClassName,
   suffix,
   displayName,
+  needsFullAccess,
 }: AgentSwitchPickerProps) {
   const { t } = useT();
   const pickerId = useId();
@@ -119,6 +122,11 @@ export function AgentSwitchPicker({
 
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
+  const fullAccessBadge = (target: AgentSwitchTarget) => needsFullAccess?.(target.agent) && (
+    <span className="kr-agent-switch-badge" data-testid="agent-needs-full-access">
+      {t('agentPicker.needsFullAccess')}
+    </span>
+  );
   const resolvedTier = (target: AgentSwitchTarget, tier: ModelTier) => resolveCatalogTier(
     catalog, target, tier, modelTiers,
     targetKey(target) === targetKey(currentTarget) && tier === currentTier ? currentModel : null,
@@ -344,6 +352,7 @@ export function AgentSwitchPicker({
                   style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
                 />
                 {targetLabel(target)}
+                {fullAccessBadge(target)}
               </span>
               <span className="kr-agent-switch-tier-choices">
                 {tierOptions.map(tier => {
@@ -413,6 +422,7 @@ export function AgentSwitchPicker({
                 style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
               />
               {targetLabel(target)}
+              {fullAccessBadge(target)}
               {targetKey(target) === targetKey(currentTarget) && <Check size={10} />}
             </button>
           ))}

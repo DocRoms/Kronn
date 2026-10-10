@@ -93,7 +93,10 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # (KT-1138 + KT-1100 + KT-1139 + KT-800): exactly 85_348 B.
 # KT-697: `agent_list` says reachability is probed, in 5 B less; re-measured
 # on the 0.15.0 integration head: exactly 85_343 B.
-CATALOGUE_MAX_BYTES = 85_343
+# KT-1104: `page_delete_dataset` was paid for by tightening the page family
+# and `convention_get` descriptions; re-measured on the 0.15.0 integration
+# head: exactly 85_341 B.
+CATALOGUE_MAX_BYTES = 85_341
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

@@ -6938,7 +6938,7 @@ class LivePageToolTests(unittest.TestCase):
         names = [tool["name"] for tool in self.mod.TOOLS]
         for name in [
             "page_list", "page_get", "page_create", "page_update_html",
-            "page_add_dataset",
+            "page_add_dataset", "page_delete_dataset",
         ]:
             self.assertIn(name, names)
             self.assertIn(name, self.mod.DISPATCH)
@@ -6952,6 +6952,7 @@ class LivePageToolTests(unittest.TestCase):
         self.assertIn("Live Pages", instructions)
         self.assertIn("page_list", instructions)
         self.assertIn("page_add_dataset", instructions)
+        self.assertIn("page_delete_dataset", instructions)
         self.assertIn("closed 12", instructions)
         self.assertNotIn("closed 9", instructions)
 
@@ -7155,6 +7156,31 @@ class LivePageToolTests(unittest.TestCase):
             self.mod.call_page_add_dataset({
                 "page_id": "page-1", "name": "auto_reviews", "kind": "bogus",
             })
+
+
+    def test_page_delete_dataset_never_forces(self):
+        # Overriding the reference guard is a human's call: the tool has no
+        # `force` and never sends one, whatever the agent passes.
+        declaration = next(
+            tool for tool in self.mod.TOOLS if tool["name"] == "page_delete_dataset"
+        )
+        self.assertNotIn("force", declaration["inputSchema"]["properties"])
+        with mock.patch.object(
+            self.mod, "_http",
+            return_value=self._env({"page_id": "page-1", "name": "auto reviews"}),
+        ) as http:
+            self.mod.call_page_delete_dataset({
+                "page_id": "page/one", "name": " auto reviews ", "force": True,
+            })
+        http.assert_called_once_with(
+            "DELETE", "/api/pages/page%2Fone/datasets/auto%20reviews",
+        )
+
+    def test_page_delete_dataset_requires_page_id_and_name(self):
+        with self.assertRaisesRegex(RuntimeError, "page_id"):
+            self.mod.call_page_delete_dataset({"name": "auto_reviews"})
+        with self.assertRaisesRegex(RuntimeError, "name"):
+            self.mod.call_page_delete_dataset({"page_id": "page-1", "name": " "})
 
 
 class WorkflowRunHistoryTests(unittest.TestCase):
@@ -13085,6 +13111,57 @@ class RealStdioSizeContractTests(unittest.TestCase):
                 process.stderr.close()
         self.assertEqual(process.returncode, 0)
         self.assertNotIn(secret, stderr)
+
+
+class BridgeSecretEnvFileTests(unittest.TestCase):
+    """KT-1082: Vibe declares the secrets file; the bridge loads it at start."""
+
+    _NAMES = ("KRONN_BRIDGE_SECRET_ENV_FILE", "KRONN_BRIDGE_TOKEN", "KRONN_WORKFLOW_STEP_CONTEXT")
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        saved = {name: os.environ.pop(name, None) for name in self._NAMES}
+
+        def restore():
+            for name, value in saved.items():
+                os.environ.pop(name, None)
+                if value is not None:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+
+    def _write(self, mode):
+        path = os.path.join(self._dir.name, "env.json")
+        with open(path, "w") as handle:
+            json.dump({"KRONN_BRIDGE_TOKEN": "kbt_file", "KRONN_AUTH_TOKEN": "admin"}, handle)
+        os.chmod(path, mode)
+        os.environ["KRONN_BRIDGE_SECRET_ENV_FILE"] = path
+        return path
+
+    def test_an_owner_only_file_sets_the_bridge_token(self):
+        self._write(0o600)
+        module = _load_module()
+        self.assertEqual(module._bearer_token(), "kbt_file")
+
+    def test_an_unnamed_variable_is_never_loaded(self):
+        before = os.environ.get("KRONN_AUTH_TOKEN")
+        self._write(0o600)
+        _load_module()
+        self.assertEqual(os.environ.get("KRONN_AUTH_TOKEN"), before)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions")
+    def test_a_file_others_can_read_is_ignored(self):
+        self._write(0o644)
+        with contextlib.redirect_stderr(io.StringIO()):
+            _load_module()
+        self.assertIsNone(os.environ.get("KRONN_BRIDGE_TOKEN"))
+
+    def test_a_held_value_wins_over_the_file(self):
+        self._write(0o600)
+        os.environ["KRONN_BRIDGE_TOKEN"] = "kbt_env"
+        module = _load_module()
+        self.assertEqual(module._bearer_token(), "kbt_env")
 
 
 if __name__ == "__main__":

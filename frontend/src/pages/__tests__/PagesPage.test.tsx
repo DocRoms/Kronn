@@ -51,6 +51,7 @@ vi.mock('../../lib/api', () => ({
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
+    datasetUsage: vi.fn(() => Promise.resolve([])), deleteDataset: vi.fn(), updateDataset: vi.fn(), publish: vi.fn(),
     exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
     defaultTodo: vi.fn(() => Promise.resolve({ state: 'installed', page_id: null, workflow_ids: [], own_page_id: null })),
     installDefaultTodo: vi.fn(),

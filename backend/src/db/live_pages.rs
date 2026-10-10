@@ -11,6 +11,10 @@ use crate::models::{
     LivePagesCapability, PublishLivePageRequest, PublishLivePageResult, UpdateLivePageRequest,
 };
 
+#[path = "live_page_datasets.rs"]
+pub(crate) mod datasets;
+pub use datasets::*;
+
 pub fn list_live_page_workflows(
     conn: &Connection,
     page_id_or_slug: &str,
@@ -846,6 +850,28 @@ pub fn publish_live_page(
                     params![dataset.id, published_at.to_rfc3339()],
                 )?;
                 points_added > added_before || points_removed > removed_before
+            }
+            LivePageWriteOperation::Clear => {
+                let removed = tx.execute(
+                    "DELETE FROM live_page_dataset_points WHERE dataset_id = ?1",
+                    [&dataset.id],
+                )?;
+                points_removed += removed as u32;
+                // A collection stays an array, so a Page iterating it keeps working.
+                let emptied = match dataset.kind {
+                    LivePageDatasetKind::Collection => Some(serde_json::json!([])),
+                    _ => None,
+                };
+                let changed = removed > 0 || dataset.current != emptied;
+                tx.execute(
+                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![
+                        dataset.id,
+                        emptied.as_ref().map(serde_json::to_string).transpose()?,
+                        published_at.to_rfc3339()
+                    ],
+                )?;
+                changed
             }
             LivePageWriteOperation::Upsert => {
                 if dataset.kind != LivePageDatasetKind::Collection {

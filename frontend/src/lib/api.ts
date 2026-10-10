@@ -242,6 +242,10 @@ import type {
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
+  LivePageDatasetUsage,
+  DeleteLivePageDatasetResult,
+  UpdateLivePageDatasetRequest,
+  UpdateLivePageDatasetResult,
   UpdateLivePageHtmlRequest,
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
@@ -276,7 +280,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
-import type { SafetyCheckRequest, SafetyWarning } from '../types/generated';
+import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
 import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
@@ -950,7 +954,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[] }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -2616,6 +2620,9 @@ export const workflows = {
   /** KT-1043 — the Security settings a run on this host would refuse. */
   safetyCheck: (request: SafetyCheckRequest) =>
     api<SafetyWarning[]>('POST', '/workflows/safety-check', request),
+  /** KT-1103 — the zone a schedule is read in and its next 3 firings. */
+  cronPreview: (request: CronPreviewRequest) =>
+    api<CronPreview>('POST', '/workflows/cron-preview', request),
   decideRun: (id: string, runId: string, payload: DecideRunRequest) =>
     api<DecideRunResponse>(
       'POST', `/workflows/${id}/runs/${runId}/decide`, payload
@@ -2801,6 +2808,15 @@ export const pages = {
     api<void>('DELETE', `/pages/${encodeURIComponent(id)}/discussions/${encodeURIComponent(discussionId)}`),
   updateHtml: (id: string, request: UpdateLivePageHtmlRequest) =>
     api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
+  datasetUsage: (id: string) =>
+    api<LivePageDatasetUsage[]>('GET', `/pages/${encodeURIComponent(id)}/dataset-usage`),
+  deleteDataset: (id: string, name: string, force = false) =>
+    api<DeleteLivePageDatasetResult>(
+      'DELETE',
+      `/pages/${encodeURIComponent(id)}/datasets/${encodeURIComponent(name)}${force ? '?force=true' : ''}`,
+    ),
+  updateDataset: (id: string, name: string, request: UpdateLivePageDatasetRequest) =>
+    api<UpdateLivePageDatasetResult>('PATCH', `/pages/${encodeURIComponent(id)}/datasets/${encodeURIComponent(name)}`, request),
   publish: (id: string, request: PublishLivePageRequest) =>
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
   actions: (id: string) =>
