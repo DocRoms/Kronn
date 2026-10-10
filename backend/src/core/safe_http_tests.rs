@@ -271,6 +271,7 @@ async fn a_cross_origin_307_is_refused_and_the_body_never_reaches_it() {
             attach_body: &attach,
             has_body: true,
             pinned_base: None,
+            hop_guard: None,
         },
     )
     .await
@@ -314,6 +315,7 @@ async fn a_cross_origin_hop_drops_secret_slots_whatever_their_name_and_secret_qu
             attach_body: &attach,
             has_body: false,
             pinned_base: None,
+            hop_guard: None,
         },
     )
     .await
@@ -358,6 +360,7 @@ async fn a_cross_origin_302_that_would_resend_a_put_body_is_refused() {
             attach_body: &attach,
             has_body: true,
             pinned_base: None,
+            hop_guard: None,
         },
     )
     .await

@@ -186,6 +186,7 @@ pub async fn execute_notify_step_with_policy(
             attach_body: &attach_body,
             has_body: send_body,
             pinned_base: None,
+            hop_guard: None,
         },
     )
     .await

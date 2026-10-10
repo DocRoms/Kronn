@@ -2633,7 +2633,7 @@ async fn make_agent_stream_inner(
                     // by the broker metadata block (tenant id, workspace
                     // slug, …). Auth values stay in this backend process and
                     // are never rendered into agent context.
-                    let (api_plugins, preference_plugins) = state
+                    let (api_plugins, preference_plugins, access_policies) = state
                         .db
                         .with_conn(move |conn| {
                             let api_plugins =
@@ -2647,7 +2647,13 @@ async fn make_agent_stream_inner(
                                     conn,
                                     project_id.as_deref(),
                                 )?;
-                            Ok::<_, anyhow::Error>((api_plugins, preference_plugins))
+                            let access_policies =
+                                crate::db::api_access_policies::list(conn).unwrap_or_default();
+                            Ok::<_, anyhow::Error>((
+                                api_plugins,
+                                preference_plugins,
+                                access_policies,
+                            ))
                         })
                         .await
                         .unwrap_or_default();
@@ -2656,7 +2662,10 @@ async fn make_agent_stream_inner(
                     // request time. Resolving it here used to put the bearer
                     // in `--append-system-prompt`, argv and logs even when the
                     // agent never called the API.
-                    let api_block = crate::core::mcp_scanner::build_api_context_block(&api_plugins);
+                    let api_block = crate::core::mcp_scanner::build_api_context_block_with_policies(
+                        &api_plugins,
+                        &access_policies,
+                    );
                     let preference_block =
                         crate::core::mcp_scanner::build_plugin_invocation_preferences(
                             &preference_plugins,

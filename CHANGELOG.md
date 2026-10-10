@@ -101,7 +101,64 @@ Release notes for 0.9.3 and earlier are available in the
   import. The new routes (`GET /api/assistant-conversations`,
   `PATCH /api/assistant-conversations/{discussion_id}`) are not open to agents'
   bridge tokens. Conversations deleted by earlier versions cannot be recovered.
+- A plugin's API can now be limited to chosen agents (optionally one model
+  each), to local models only, or blocked, as a whole and per endpoint, from
+  the plugin's Access tab (KT-1026). Under a policy the broker is strict: only
+  declared endpoints (the spec's and the policy's) can be called, with exact
+  method and segment matching (a placeholder keeps the literal text around it,
+  so `report-{id}.json` never opens `private.csv`; malformed braces are
+  refused), so `/blocks/{id}/children` no longer reaches what a rule on
+  `/pages/{id}` protects; an encoded slash, a dot segment or a path leaving the
+  base URL is refused. Every request the call sends is re-decided: each next
+  page and each redirect hop, including one that turns a POST into a GET. The
+  decision uses the identity Kronn issued at launch (the bridge token carries
+  the agent and its model; a native agent's tools are told the model the
+  runner actually sends), never the request; a call without a token is an
+  agent with no identity. "Local only" means an Ollama model on a loopback host
+  that is not a cloud model, in a discussion whose agents are all local (a
+  joined CLI counts as remote), or a workflow whose Agent steps all are,
+  rollback steps included, read from the definition the run pinned (a run
+  with no readable pin counts as an unknown, hence remote, audience; so does
+  any step type that may hand data to an agent Kronn cannot name, including
+  ones added later). Requests and rules are compared in one canonical form:
+  an encoded unreserved character is decoded (`/users/%6De` is `/users/me`),
+  other escapes take uppercase hex, an ASCII character the URL escapes in a
+  path (space, quote, angle brackets, backtick, braces) is escaped, and a
+  non-ASCII character (a Unicode space included, never trimmed) is its UTF-8
+  escapes, as the request URL is sent. A rule holding a control character
+  (which the URL drops or escapes) is refused, and a stored one makes the
+  plugin refuse every call until it is fixed. A rule is stored in that form, and two rules that reach the same
+  form are refused. Workflow ApiCall, BatchApiCall and
+  CollectApiData steps, Quick API runs and the MCP `api_call` all pass the same
+  gate, before any token exchange or outbound request; a refusal names the
+  rule and no secret. The API context, `mcp_list` and `api_endpoints` show each
+  plugin's and endpoint's rule. Only a person sets or widens a policy
+  (`PUT /api/mcps/servers/{id}/access-policy` is not open to bridge tokens). A
+  plugin without a policy behaves as before. The `api_call` description no
+  longer claims undeclared paths are refused when they are not. Database
+  exports move to v7 and carry the policies; an older export keeps the local
+  ones. On a hybrid plugin the panel says its MCP connection keeps its own
+  access, outside this restriction.
 
+- A Live Page action can run without its validation card once a human has
+  approved it from the Page's details (KT-1029), for example moving a card
+  between columns of a Todo page. Only workflow actions whose steps are all of
+  a type known to run no agent (any other or future type is refused), without skills,
+  profiles, directives or Quick Exec data sources, without a typed or
+  project-environment value and in the Page's own project are eligible; the
+  panel says why the others are not. The approval is bound to a fingerprint of
+  the action block, the Page's project and the workflow's shared revision
+  identity, and falls for good, with a visible notice, as soon as the block
+  changes or leaves the Page, or the moment its workflow or one of its Quick
+  APIs is written, disabled or deleted, even if the change is undone. Each
+  trusted launch needs a proven live click, runs only under the approval it
+  was claimed with, and its run is admitted, created and pinned to the
+  approved definition in one transaction, so a later edit or revocation never
+  makes it execute anything else; it is rate-limited per row and per action
+  and appears in the button's history. Withdrawing an approval is one click and applies to the next click.
+  Neither the Page nor an agent can approve: the routes are outside the
+  bridge-token list and refuse an agent identity; `page_get` shows agents which
+  actions are trusted.
 - The waiting reply bubble now shows what the agent is doing from the first
   message on, for every agent (KT-1108). Before the first word it lists the
   real startup phases with their times: a native ACP runtime being launched,
@@ -183,8 +240,20 @@ Release notes for 0.9.3 and earlier are available in the
   older step's data after a step that produced no envelope (KT-1105). To read
   an earlier producer, name it with `steps.<producer>.data`, which works as
   long as that producer has not been re-run without an envelope.
+- The "Run without confirmation" panel of a Page is now one collapsed summary
+  line, for example "4 to approve · 1 approved · 22 not eligible" (KT-1141).
+  "Details" opens the list: eligible actions first, with their approve and
+  withdraw controls, then the others grouped by reason, each group collapsed
+  with its count. The browser remembers whether you left it open. Approving
+  and withdrawing work as before.
 
 ### Fixed
+
+- The header of a Page in the Artifacts view no longer puts the Page id under
+  the "Open in new tab" button (KT-1141). The id stays with the title and
+  ends in an ellipsis when space runs out; the buttons share one height and
+  wrap onto their own row when the view is narrow, and below 480 px "Open in
+  new tab" shows only its icon.
 
 - A CLI listening in a room with `disc_wait_for_peer` no longer goes deaf
   between polls (KT-703). The bridge slept the server's pacing delay after

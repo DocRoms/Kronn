@@ -405,6 +405,7 @@ mod audit_status_tests {
                         project: Some("p1".into()),
                         own_discussions: Vec::new(),
                         own_run: None,
+                        agent: None,
                     })
                 });
                 audit_status(State(state), Path("p1".into()), caller)

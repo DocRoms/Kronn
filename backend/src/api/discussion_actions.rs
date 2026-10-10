@@ -216,6 +216,7 @@ async fn execute_claimed_action(
                     workflow_run_id: None,
                     agent: None,
                     launch: Some(launch.clone()),
+                    caller: None,
                 }),
             )
             .await

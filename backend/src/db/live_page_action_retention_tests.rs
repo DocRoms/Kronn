@@ -27,6 +27,7 @@ fn seed_history(conn: &Connection, offer: &LivePageAction, count: i64, prefix: &
             offer,
             &format!("row-{i}"),
             states[(i % 4) as usize],
+            None,
             "2026-09-21T00:00:00Z",
         )
         .unwrap();
@@ -134,7 +135,7 @@ fn retention_reconciles_completed_async_runs_but_preserves_active_claims_and_res
             None,
         ),
     ] {
-        insert_launch(&conn, id, offer, binding, state, &now).unwrap();
+        insert_launch(&conn, id, offer, binding, state, None, &now).unwrap();
         conn.execute(
             "UPDATE live_page_action_launches SET shared_run_id=?2,launched_at=?3 WHERE id=?1",
             params![id, run, now],

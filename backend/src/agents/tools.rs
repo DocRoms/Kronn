@@ -100,6 +100,10 @@ pub trait ToolExecutor: Send + Sync {
         CeilingAllowance::default()
     }
 
+    /// The agent and model this launch actually runs, stamped by the runner
+    /// once it has resolved them; API access policies decide on it.
+    fn bind_launch_identity(&self, _identity: crate::core::api_access::AgentIdentity) {}
+
     /// Run one call. Implementations must not panic: a tool failure is
     /// reported through `ToolOutcome`, never by unwinding into the stream.
     async fn execute(&self, call: &ToolCall) -> ToolOutcome;

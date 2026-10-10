@@ -2033,6 +2033,33 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
+    fn build_api_context_block_shows_the_access_policy_instead_of_open_paths() {
+        use crate::models::*;
+        let (server, env) = api_server("custom-notion", "https://api.notion.com/v1");
+        let plugins = [(server, "cfg-1".to_string(), env)];
+        let open = build_api_context_block(&plugins);
+        assert!(open.contains("INDICATIVE"), "{open}");
+        let policies = [ApiAccessPolicyEntry {
+            server_id: "custom-notion".into(),
+            policy: ApiAccessPolicy {
+                access: ApiAccessRule::LocalOnly,
+                endpoints: vec![ApiEndpointAccess {
+                    method: "GET".into(),
+                    path: "/users/me".into(),
+                    access: ApiAccessRule::All,
+                }],
+            },
+        }];
+        let out = build_api_context_block_with_policies(&plugins, &policies);
+        assert!(!out.contains("INDICATIVE"), "{out}");
+        assert!(
+            out.contains("Access policy: local models only; strict"),
+            "{out}"
+        );
+        assert!(out.contains("GET /users/me: all agents"), "{out}");
+    }
+
+    #[test]
     fn build_api_context_block_does_not_offer_auth_keys_as_query_params() {
         let (server, env) = api_server("api-test", "https://api.example.com");
         let mut server = server;

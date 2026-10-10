@@ -85,6 +85,11 @@ pub struct LivePageAction {
     /// U+001F, empty for an unbound CTA. `None` on a declaration, which belongs
     /// to every row at once.
     pub binding_key: Option<String>,
+    /// `Some(true)` for a launch a human-approved trust started without its
+    /// card (KT-1029); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trusted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -106,6 +111,11 @@ pub struct LaunchLivePageActionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub step_agents: Option<crate::models::StepAgents>,
+    /// Launch without a card, under the action's human approval (KT-1029).
+    /// Refused unless that approval matches the action as it stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trusted: Option<bool>,
 }
 
 pub enum LivePageActionClaimOutcome {
@@ -262,7 +272,7 @@ pub fn ingest_page_actions(
     html: &str,
 ) -> Result<()> {
     if !html.contains("application/kronn-action") {
-        return Ok(());
+        return super::live_page_action_trusts::revalidate_page(conn, live_page_id);
     }
     let page_project: Option<String> = conn.query_row(
         "SELECT project_id FROM live_pages WHERE id = ?1",
@@ -380,7 +390,7 @@ pub fn ingest_page_actions(
             &now,
         )?;
     }
-    Ok(())
+    super::live_page_action_trusts::revalidate_page(conn, live_page_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -448,7 +458,7 @@ const SELECT_DECLARATION: &str = "SELECT a.id, a.live_page_id, a.live_page_revis
     a.action_ref, a.kind, a.target_id, a.target_name, a.project_id, a.state, a.values_json,
     NULL, NULL, NULL, a.diagnostic, NULL, NULL, a.created_at, a.updated_at,
     (a.live_page_revision_id != p.current_revision_id) AS stale_source,
-    proj.name, NULL
+    proj.name, NULL, 0
     -- LEFT for the project: one deleted after the proposal must still return
     -- the card, with no name rather than no card.
     FROM live_page_actions a JOIN live_pages p ON p.id = a.live_page_id
@@ -464,7 +474,7 @@ const SELECT_LAUNCH: &str = "SELECT l.id, a.live_page_id, l.live_page_revision_i
     l.shared_run_id, l.result_discussion_id, l.deep_link, l.diagnostic, l.launched_at,
     l.finished_at, l.created_at, l.updated_at,
     (l.live_page_revision_id != p.current_revision_id) AS stale_source,
-    proj.name, l.binding_key
+    proj.name, l.binding_key, l.trusted
     FROM live_page_action_launches l
     JOIN live_page_actions a ON a.id = l.action_id
     JOIN live_pages p ON p.id = a.live_page_id
@@ -514,6 +524,7 @@ fn map_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<LivePageAction> {
         stale_source: row.get(18)?,
         project_name: row.get(19)?,
         binding_key: row.get(20)?,
+        trusted: row.get::<_, bool>(21)?.then_some(true),
     })
 }
 
@@ -558,6 +569,11 @@ fn launch_by_id(
         reconcile(mode, conn, action)?;
     }
     Ok(action)
+}
+
+/// The offer itself, never one of its launches.
+pub(crate) fn declaration(conn: &Connection, action_id: &str) -> Result<Option<LivePageAction>> {
+    declaration_by_id(conn, action_id)
 }
 
 fn declaration_by_id(conn: &Connection, action_id: &str) -> Result<Option<LivePageAction>> {
@@ -727,6 +743,7 @@ pub fn cancel(conn: &Connection, id: &str) -> Result<Option<LivePageAction>> {
         &declaration,
         "",
         DiscussionActionState::Cancelled,
+        None,
         &now,
     )?;
     retain_launch_history(&transaction, &declaration.id, &launch_id)?;
@@ -747,6 +764,7 @@ fn insert_launch(
     declaration: &LivePageAction,
     binding_key: &str,
     state: DiscussionActionState,
+    trust: Option<&super::live_page_action_trusts::LivePageActionTrust>,
     now: &str,
 ) -> Result<()> {
     let finished_at = (state == DiscussionActionState::Cancelled).then_some(now);
@@ -754,8 +772,8 @@ fn insert_launch(
         "INSERT INTO live_page_action_launches (
              id, action_id, binding_key, live_page_revision_id, kind, target_id,
              target_name, project_id, state, values_json, finished_at,
-             created_at, updated_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12)",
+             created_at, updated_at, trusted, trust_approval_id, trust_fingerprint
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12,?13,?14,?15)",
         params![
             launch_id,
             declaration.id,
@@ -769,6 +787,9 @@ fn insert_launch(
             serde_json::to_string(&declaration.values)?,
             finished_at,
             now,
+            trust.is_some(),
+            trust.map(|trust| trust.approval_id.as_str()),
+            trust.map(|trust| trust.fingerprint.as_str()),
         ],
     )?;
     Ok(())
@@ -1015,6 +1036,26 @@ pub fn claim_launch(
     supplied: &HashMap<String, String>,
     bindings: &HashMap<String, String>,
 ) -> Result<Option<LivePageActionClaimOutcome>> {
+    claim(conn, id, supplied, bindings, false)
+}
+
+/// Launch one row without a card, under the action's human approval. Nothing
+/// typed is accepted: the approved values and the row's bindings are all it runs.
+pub fn claim_trusted_launch(
+    conn: &Connection,
+    id: &str,
+    bindings: &HashMap<String, String>,
+) -> Result<Option<LivePageActionClaimOutcome>> {
+    claim(conn, id, &HashMap::new(), bindings, true)
+}
+
+fn claim(
+    conn: &Connection,
+    id: &str,
+    supplied: &HashMap<String, String>,
+    bindings: &HashMap<String, String>,
+    trusted: bool,
+) -> Result<Option<LivePageActionClaimOutcome>> {
     let transaction = conn.unchecked_transaction()?;
     let Some(mut action) = declaration_by_id(&transaction, id)? else {
         let existing = launch_by_id(kronn_action_engine::Reconcile::Persisted, &transaction, id)?;
@@ -1053,6 +1094,17 @@ pub fn claim_launch(
         transaction.commit()?;
         return Ok(Some(LivePageActionClaimOutcome::Existing(running)));
     }
+    let mut admitted = None;
+    if trusted {
+        match super::live_page_action_trusts::admit_launch(&transaction, &action, &binding_key)? {
+            Ok(trust) => admitted = Some(trust),
+            Err(refusal) => {
+                // Commit what the gate recorded (an invalidation), never a launch.
+                transaction.commit()?;
+                return Err(refusal.into());
+            }
+        }
+    }
     // Resolve every `dynamic_binding` value server-side before the shared
     // engine ever sees it. Any value the caller placed in `supplied` for one
     // of these variables is ignored: the resolved value always comes from
@@ -1085,6 +1137,7 @@ pub fn claim_launch(
         &action,
         &binding_key,
         DiscussionActionState::Proposed,
+        admitted.as_ref(),
         &now,
     )?;
     let mut core = kronn_action_engine::ActionCore {
@@ -1111,6 +1164,7 @@ pub fn claim_launch(
     retain_launch_history(&transaction, &action.id, &launch_id)?;
     action.id = launch_id;
     action.binding_key = Some(binding_key);
+    action.trusted = trusted.then_some(true);
     action.created_at = now;
     action.state = core.state;
     action.values = core.values;

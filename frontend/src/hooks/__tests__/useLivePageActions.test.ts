@@ -1,8 +1,11 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { LivePageAction } from '../../types/generated';
+import type { LivePageAction, LivePageActionTrustState } from '../../types/generated';
 
-vi.mock('../../lib/api', () => ({ pages: { actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), actionPrefill: vi.fn() } }));
+vi.mock('../../lib/api', () => ({ pages: {
+  actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), actionPrefill: vi.fn(),
+  actionTrusts: vi.fn(() => Promise.resolve([])), launchAction: vi.fn(),
+} }));
 
 import { pages as pagesApi } from '../../lib/api';
 import { useLivePageActions } from '../useLivePageActions';
@@ -25,6 +28,104 @@ beforeEach(() => {
   vi.mocked(pagesApi.actions).mockReset();
   vi.mocked(pagesApi.actionLaunches).mockReset().mockResolvedValue([]);
   vi.mocked(pagesApi.actionPrefill).mockReset().mockResolvedValue({});
+  vi.mocked(pagesApi.actionTrusts).mockReset().mockResolvedValue([]);
+  vi.mocked(pagesApi.launchAction).mockReset();
+});
+
+function trustState(overrides: Partial<LivePageActionTrustState> = {}): LivePageActionTrustState {
+  return {
+    action_id: 'page-action:page-1:refresh', action_ref: 'refresh', target_name: 'Refresh report',
+    fingerprint: 'fp-1', refusal: null, active: true,
+    trust: {
+      action_id: 'page-action:page-1:refresh', live_page_id: 'page-1', action_ref: 'refresh',
+      project_id: null, target_id: 'wf-1', fingerprint: 'fp-1', approval_id: 'a-1', approved_at: '2026-10-09T08:00:00Z',
+      invalidated_at: null, invalidated_reason: null,
+    },
+    ...overrides,
+  };
+}
+
+describe('useLivePageActions trusted actions (KT-1029)', () => {
+  it('launches an approved action without a card, with nothing typed', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    const launched = action({ id: 'page-launch:1', state: 'launching', binding_key: 'ticket=T-1', trusted: true });
+    vi.mocked(pagesApi.launchAction).mockResolvedValue(launched);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: { ticket: 'T-1' }, anchor }));
+
+    expect(pagesApi.launchAction).toHaveBeenCalledWith(action().id, {
+      variables: {}, bindings: { ticket: 'T-1' }, trusted: true,
+    });
+    expect(result.current.activeAction).toBeNull();
+    await waitFor(() => expect(result.current.launches).toEqual([launched]));
+    expect(result.current.activeAction).toBeNull();
+  });
+
+  it('opens the card when the action has no approval', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState({ active: false, trust: null })]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    expect(pagesApi.launchAction).not.toHaveBeenCalled();
+    expect(result.current.selectedAction).toEqual(action());
+  });
+
+  it('opens the card with the reason when an approval was invalidated', async () => {
+    const invalidated = trustState({ active: false });
+    invalidated.trust = { ...invalidated.trust!, invalidated_at: '2026-10-09T09:00:00Z', invalidated_reason: 'changed' };
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([invalidated]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    expect(pagesApi.launchAction).not.toHaveBeenCalled();
+    expect(result.current.activeAction?.trustNotice).toBe('changed');
+  });
+
+  it('falls back to the card when the server refuses, and re-reads the approvals', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    vi.mocked(pagesApi.launchAction).mockRejectedValue(new Error('Preflight failed: trusted launch refused: not_trusted'));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    vi.mocked(pagesApi.actionTrusts).mockClear();
+
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+
+    await waitFor(() => expect(result.current.activeAction?.trustNotice).toBe('not_trusted'));
+    expect(result.current.selectedAction).toEqual(action());
+    expect(pagesApi.actionTrusts).toHaveBeenCalledWith('page-1');
+  });
+
+  it('drops a rate-limited double gesture without opening a card', async () => {
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    vi.mocked(pagesApi.launchAction).mockRejectedValue(new Error('Preflight failed: trusted launch refused: rate_limited'));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    await act(async () => {
+      result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(pagesApi.launchAction).toHaveBeenCalledOnce());
+    expect(result.current.activeAction).toBeNull();
+  });
+
+  it('reopens a running row on its run instead of launching it again', async () => {
+    const running = action({ id: 'page-launch:1', state: 'running', binding_key: '', trusted: true });
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionLaunches).mockResolvedValue([running]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    expect(pagesApi.launchAction).not.toHaveBeenCalled();
+    expect(result.current.selectedAction).toEqual(running);
+  });
 });
 
 describe('useLivePageActions', () => {
@@ -248,5 +349,56 @@ describe('useLivePageActions', () => {
     act(() => result.current.handleChanged(action({ id: 'page-launch:7706', state: 'running' }), firstClick));
 
     expect(result.current.selectedAction).toEqual(action());
+  });
+});
+
+// Codex r1 P2-b: a delayed trusted response belongs to the Page that launched it.
+describe('trusted launch response scope', () => {
+  it('does not open the previous Page action after navigation and a late refusal', async () => {
+    let reject!: (reason: Error) => void;
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    vi.mocked(pagesApi.launchAction).mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    vi.mocked(pagesApi.actions).mockResolvedValue([action({ id: 'page-action:page-2:refresh', live_page_id: 'page-2', target_id: 'wf-2' })]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([]);
+    await act(() => result.current.reload('page-2'));
+    await act(async () => { reject(new Error('Preflight failed: trusted launch refused: not_trusted')); });
+    expect(result.current.activeAction).toBeNull();
+    expect(result.current.selectedAction).toBeNull();
+  });
+
+  it('does not insert the previous Page run into the new Page history', async () => {
+    let resolve!: (value: LivePageAction) => void;
+    vi.mocked(pagesApi.actions).mockResolvedValue([action()]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    vi.mocked(pagesApi.launchAction).mockImplementation(() => new Promise(done => { resolve = done; }));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    vi.mocked(pagesApi.actions).mockResolvedValue([action({ id: 'page-action:page-2:refresh', live_page_id: 'page-2', target_id: 'wf-2' })]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([]);
+    await act(() => result.current.reload('page-2'));
+    await act(async () => { resolve(action({ id: 'page-launch:page-1-run', state: 'running', binding_key: '', trusted: true })); });
+    expect(result.current.launches).toEqual([]);
+  });
+});
+
+describe('trusted launch answers never replace a newer card', () => {
+  it('keeps the card the reader opened while the trusted launch was pending', async () => {
+    let reject!: (reason: Error) => void;
+    vi.mocked(pagesApi.actions).mockResolvedValue([action(), action({ id: 'page-action:page-1:other', action_ref: 'other' })]);
+    vi.mocked(pagesApi.actionTrusts).mockResolvedValue([trustState()]);
+    vi.mocked(pagesApi.launchAction).mockImplementation(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const { result } = renderHook(() => useLivePageActions(vi.fn()));
+    await act(() => result.current.reload('page-1'));
+    act(() => result.current.handleIntent({ actionRef: 'refresh', bindings: {}, anchor }));
+    act(() => result.current.handleIntent({ actionRef: 'other', bindings: {}, anchor }));
+    const opened = result.current.activeAction;
+    await act(async () => { reject(new Error('Preflight failed: trusted launch refused: changed')); });
+    expect(result.current.activeAction).toBe(opened);
+    expect(result.current.activeAction?.actionRef).toBe('other');
   });
 });

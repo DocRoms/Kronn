@@ -1099,27 +1099,23 @@ async fn stopping_during_startup_ends_the_start_and_kills_the_runtime() {
     );
 }
 
-/// The delay a reasoning-only turn must outlive. The fixtures beat as soon as
-/// they start, then every 0.5 s for 12 s: the start (adapter, shell, a fresh
-/// script) gets the whole delay, each gap a 10x margin, and the turn still
-/// lasts more than twice the delay. A 3 s delay was cut on 4 loaded cores.
-#[cfg(unix)]
-const REASONING_DELAY: Duration = Duration::from_secs(5);
+/// The delay a reasoning-only turn must outlive: twelve thoughts 0.5 s apart
+/// last twice as long.
+const REASONING_DELAY: Duration = Duration::from_secs(3);
 
-/// An adapted turn that only reasons — thinking deltas, reasoning items —
-/// for longer than the delay is alive, not silent: it is not cut.
-#[cfg(unix)]
-async fn a_reasoning_only_adapted_turn_outlives_the_delay(
-    agent: &AgentType,
-    transport: Arc<dyn crate::acp::AcpTransport>,
-    project: &tempfile::TempDir,
-    answer: &str,
-) {
-    let started = std::time::Instant::now();
-    let mut running = run_acp_session(
+/// Runs one scripted ACP turn on the inactivity watchdog, as an adapted
+/// runtime's prompt would.
+async fn run_scripted_turn(turn: Turn, idle: Duration) -> AgentProcess {
+    let project = tempfile::tempdir().unwrap();
+    let transport = Arc::new(ScriptedAcp {
+        turn,
+        cancelled: AtomicUsize::new(0),
+        shut_down: AtomicUsize::new(0),
+    });
+    run_acp_session(
         AcpSessionRequest {
             step_tools: None,
-            agent_type: agent,
+            agent_type: &AgentType::OpenCode,
             work_dir: project.path(),
             prompt: "think",
             system_context: "",
@@ -1133,26 +1129,89 @@ async fn a_reasoning_only_adapted_turn_outlives_the_delay(
             fallback_prompt: None,
             provenance: None,
             activity: None,
-            idle_timeout: Some(REASONING_DELAY),
+            idle_timeout: Some(idle),
             run_progress: None,
         },
         transport,
     )
     .await
-    .expect("the adapted turn starts");
+    .expect("the scripted turn starts")
+}
+
+/// A turn that only reasons for twice the delay is alive, not silent. The
+/// paused clock makes every gap exact, so machine load cannot decide it.
+#[tokio::test(start_paused = true)]
+async fn a_turn_that_only_thinks_outlives_the_delay() {
+    let started = tokio::time::Instant::now();
+    let mut running = run_scripted_turn(
+        Turn::Thinks {
+            thoughts: 12,
+            gap: Duration::from_millis(500),
+        },
+        REASONING_DELAY,
+    )
+    .await;
     let text = drain(&mut running).await;
-    // A cut ends the turn without its answer; the stall reason in stderr
-    // says after how many beats.
-    assert_eq!(text, answer, "{agent:?}: {}", stderr_of(&running));
-    assert!(
-        started.elapsed() > REASONING_DELAY * 2,
-        "{agent:?}: reasoned well past the delay, {:?}",
-        started.elapsed()
-    );
-    assert!(
-        running.child.wait().await.expect("lifeline").success(),
-        "{agent:?}"
-    );
+    assert_eq!(text, "the answer", "{}", stderr_of(&running));
+    assert_eq!(started.elapsed(), Duration::from_secs(6), "twice the delay");
+    assert!(running.child.wait().await.expect("lifeline").success());
+}
+
+/// The control: the same turn with its thoughts spaced past the delay is cut
+/// on the delay exactly, so the test above can fail.
+#[tokio::test(start_paused = true)]
+async fn thoughts_spaced_past_the_delay_are_cut_on_the_delay() {
+    let started = tokio::time::Instant::now();
+    let mut running = run_scripted_turn(
+        Turn::Thinks {
+            thoughts: 2,
+            gap: Duration::from_millis(3_500),
+        },
+        REASONING_DELAY,
+    )
+    .await;
+    assert_eq!(drain(&mut running).await, "");
+    assert_eq!(started.elapsed(), REASONING_DELAY);
+    assert!(!running.child.wait().await.expect("lifeline").success());
+    let reason = stderr_of(&running);
+    assert!(reason.contains(idle_watchdog::NO_FIRST_TOKEN), "{reason}");
+}
+
+/// Every reasoning frame of an adapted CLI reaches the host as a `Thought`,
+/// the event the watchdog counts as progress. No clock is involved.
+#[cfg(unix)]
+async fn reasoning_frames_become_thoughts(
+    transport: Arc<dyn crate::acp::AcpTransport>,
+    project: &tempfile::TempDir,
+    answer: &str,
+) {
+    use crate::acp::AcpSessionEvent;
+    let mut host = crate::acp::AcpHost::new(1, transport);
+    host.negotiate(crate::acp::AcpInitialize {
+        protocol_version: 1,
+        cwd: project.path().to_string_lossy().into(),
+        mcp_servers: vec![],
+    })
+    .await
+    .expect("the adapter negotiates");
+    let target = host.create_session().await.expect("a session");
+    let (tx, mut rx) = mpsc::channel(64);
+    host.prompt(&target, "think", tx)
+        .await
+        .expect("the turn ends");
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    let answered = events
+        .iter()
+        .position(|event| *event == AcpSessionEvent::TextDelta(answer.into()))
+        .unwrap_or_else(|| panic!("the answer arrives: {events:?}"));
+    let thoughts = events[..answered]
+        .iter()
+        .filter(|event| **event == AcpSessionEvent::Thought)
+        .count();
+    assert_eq!(thoughts, 12, "one proof of life per frame: {events:?}");
 }
 
 #[cfg(unix)]
@@ -1164,11 +1223,8 @@ async fn a_claude_turn_that_only_thinks_is_not_cut() {
         project.path(),
         r#"
 cat >/dev/null
-i=0
-while [ "$i" -le 24 ]; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}}}'
-  sleep 0.5
-  i=$((i + 1))
 done
 printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thought it through"}}}'
 printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2}}'
@@ -1182,13 +1238,7 @@ printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":1,"o
         crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
     )
     .with_program(&fixture);
-    a_reasoning_only_adapted_turn_outlives_the_delay(
-        &AgentType::ClaudeCode,
-        Arc::new(adapter),
-        &project,
-        "thought it through",
-    )
-    .await;
+    reasoning_frames_become_thoughts(Arc::new(adapter), &project, "thought it through").await;
 }
 
 #[cfg(unix)]
@@ -1201,11 +1251,8 @@ async fn a_codex_turn_that_only_reasons_is_not_cut() {
         r#"
 cat >/dev/null
 printf '%s\n' '{"type":"thread.started","thread_id":"th-reasoning"}'
-i=0
-while [ "$i" -le 24 ]; do
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
   printf '%s\n' "{\"type\":\"item.updated\",\"item\":{\"id\":\"r1\",\"type\":\"reasoning\",\"text\":\"step $i\"}}"
-  sleep 0.5
-  i=$((i + 1))
 done
 printf '%s\n' '{"type":"item.completed","item":{"id":"m1","type":"agent_message","text":"reasoned it out"}}'
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2}}'
@@ -1220,13 +1267,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_
         crate::acp::AcpSessionScope::new(Some(project.path().to_path_buf()), "reasoning"),
     )
     .with_program(&fixture);
-    a_reasoning_only_adapted_turn_outlives_the_delay(
-        &AgentType::Codex,
-        Arc::new(adapter),
-        &project,
-        "reasoned it out",
-    )
-    .await;
+    reasoning_frames_become_thoughts(Arc::new(adapter), &project, "reasoned it out").await;
 }
 
 /// The prompt half: a session that opens, then never says a word. The run
@@ -1479,6 +1520,8 @@ enum Turn {
     /// silent for ever: the model's own (narrower) delay must be what ends
     /// the turn this time, not the tool bound.
     ToolEndsThenModelGoesSilent { name: &'static str },
+    /// `thoughts` reasoning events `gap` apart, then the answer.
+    Thinks { thoughts: usize, gap: Duration },
 }
 
 struct ScriptedAcp {
@@ -1548,6 +1591,18 @@ impl crate::acp::AcpTransport for ScriptedAcp {
                 for _ in 0..beats {
                     tokio::time::sleep(gap).await;
                     events.send(AcpSessionEvent::Activity).await.unwrap();
+                }
+                events
+                    .send(AcpSessionEvent::TextDelta("the answer".into()))
+                    .await
+                    .unwrap();
+                events.send(AcpSessionEvent::Completed).await.unwrap();
+                Ok(())
+            }
+            Turn::Thinks { thoughts, gap } => {
+                for _ in 0..thoughts {
+                    tokio::time::sleep(gap).await;
+                    events.send(AcpSessionEvent::Thought).await.unwrap();
                 }
                 events
                     .send(AcpSessionEvent::TextDelta("the answer".into()))

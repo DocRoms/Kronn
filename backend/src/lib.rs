@@ -1060,6 +1060,7 @@ async fn bridge_gate(
         project: project.clone(),
         own_discussions: grant.own_discussions(),
         own_run: grant.scope.workflow_run_id.clone(),
+        agent: grant.scope.agent.clone(),
     });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))
@@ -1425,6 +1426,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/live-page-actions/{id}/prefill",
             post(api::live_page_actions::prefill),
+        )
+        // KT-1029: human approvals, deliberately absent from the bridge-token list.
+        .route(
+            "/api/pages/{id}/action-trusts",
+            get(api::live_page_actions::trusts_for_live_page),
+        )
+        .route(
+            "/api/live-page-actions/{id}/trust",
+            post(api::live_page_actions::trust).delete(api::live_page_actions::revoke_trust),
         )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
@@ -2130,6 +2140,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/mcps/configs/{id}/probe",
             post(api::mcps::probe_config),
+        )
+        .route(
+            "/api/mcps/servers/{server_id}/access-policy",
+            put(api::mcps::set_access_policy),
         )
         // 0.8.6 — Custom API plugin spec edit. Lets the user fix a
         // typo / add endpoints / change docs_url WITHOUT delete+recreate.

@@ -433,6 +433,11 @@ pub async fn run_qa(
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
     let mut launch = req.launch.clone().unwrap_or_default();
+    let api_caller = match (&bridge, &req.caller) {
+        (Some(axum::Extension(caller)), _) => caller.api_caller(),
+        (None, Some(native)) => native.clone(),
+        (None, None) => crate::core::api_access::ApiCaller::Human,
+    };
     // A Kronn-launched agent runs a shared Quick API for its own project only,
     // with a config that project can see (never the config's own project).
     if let Some(axum::Extension(caller)) = &bridge {
@@ -754,6 +759,7 @@ pub async fn run_qa(
         &ctx,
         crate::workflows::api_call_executor::SecurityPolicy::production(),
         log_context,
+        &api_caller,
     )
     .await;
 
@@ -1222,6 +1228,7 @@ pub async fn batch_run_qa(
         &state,
         &ctx,
         crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
+        &crate::core::api_access::ApiCaller::Human,
     )
     .await;
 

@@ -950,6 +950,7 @@ mod tests {
                         project: None,
                         own_discussions: vec![],
                         own_run: None,
+                        agent: None,
                     })
                 });
                 import(
@@ -1052,6 +1053,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }))
     }
 

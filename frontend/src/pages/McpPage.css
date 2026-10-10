@@ -2062,3 +2062,63 @@
 .mcp-portability-args-diff span { color: var(--kr-text-muted); font-size: var(--kr-fs-xs); }
 .mcp-portability-args-diff code { overflow-wrap: anywhere; }
 .mcp-portability-args-diff label { display: flex; align-items: center; gap: var(--kr-sp-3); }
+
+/* KT-1026 — agent access policy */
+.mcp-access-policy .mcp-access-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+}
+.mcp-access-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--kr-border-light);
+  font-size: var(--kr-fs-sm);
+}
+.mcp-access-row code {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  overflow-wrap: anywhere;
+}
+.mcp-access-subtitle {
+  margin: 10px 0 2px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  text-transform: uppercase;
+}
+.mcp-access-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.mcp-access-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+.mcp-access-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+.mcp-access-model {
+  width: 9rem;
+  max-width: 100%;
+  font-size: var(--kr-fs-xs);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+}
+.mcp-access-add input[type='text'] {
+  flex: 1 1 10rem;
+  min-width: 0;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+}

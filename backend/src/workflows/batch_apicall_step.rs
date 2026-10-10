@@ -75,6 +75,7 @@ pub async fn execute_batch_apicall_step(
     state: &crate::AppState,
     ctx: &TemplateContext,
     log_ctx: ApiCallLogContext,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     execute_batch_apicall_step_with_policy(
         step,
@@ -83,6 +84,7 @@ pub async fn execute_batch_apicall_step(
         ctx,
         log_ctx,
         SecurityPolicy::production(),
+        caller,
     )
     .await
 }
@@ -95,6 +97,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
     ctx: &TemplateContext,
     log_ctx: ApiCallLogContext,
     policy: SecurityPolicy,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -205,6 +208,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
         let state_clone = state.clone();
 
         let log_ctx_clone = log_ctx.clone();
+        let caller = caller.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
             // 0.8.6 (#59) — one api_call_logs row per batch item.
@@ -217,6 +221,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
                 &child_ctx,
                 policy,
                 log_ctx_clone,
+                &caller,
             )
             .await;
             (idx, item, outcome)

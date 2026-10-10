@@ -485,7 +485,13 @@ pub struct Outbound<'a> {
     pub has_body: bool,
     /// Every hop must keep this host and scheme (ApiCall's plugin base).
     pub pinned_base: Option<&'a Url>,
+    /// Checks each redirect hop's method and URL before it is sent (an API
+    /// access policy); `Err` refuses the hop.
+    pub hop_guard: Option<&'a HopGuard<'a>>,
 }
+
+/// A per-hop check on the method and URL a redirect would send.
+pub type HopGuard<'a> = dyn Fn(&Method, &Url) -> Result<(), String> + Sync + 'a;
 
 /// Headers that may cross to another origin, unless declared secret.
 const CROSS_ORIGIN_HEADERS: [HeaderName; 3] = [
@@ -513,6 +519,7 @@ pub async fn send_following(
         attach_body,
         has_body,
         pinned_base,
+        hop_guard,
     } = outbound;
     let refuse = |reason: String| SendError::Blocked(reason);
     let mut with_body = true;
@@ -553,6 +560,10 @@ pub async fn send_following(
                 with_body = false;
             }
             _ => {}
+        }
+        if let Some(guard) = hop_guard {
+            guard(&method, &next)
+                .map_err(|reason| refuse(format!("redirect refused: {reason}")))?;
         }
         if cross_origin && with_body && has_body {
             return Err(refuse(format!(

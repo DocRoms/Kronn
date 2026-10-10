@@ -29,6 +29,7 @@ import { CopyIdPill } from '../components/CopyIdPill';
 import { LivePageSlugEditor } from '../components/LivePageSlugEditor';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
+import { LivePageTrustedActions } from '../components/LivePageTrustedActions';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -221,6 +222,8 @@ export function PagesPage({
     selectedAction: pageSelectedAction,
     selectedOffer: pageSelectedOffer,
     launches: pageLaunches,
+    trusts: pageActionTrusts,
+    reloadTrusts: reloadPageActionTrusts,
     close: closePageAction,
     handleIntent: handlePageActionIntent,
     moveAnchor: movePageActionAnchor,
@@ -977,7 +980,7 @@ export function PagesPage({
                       setDetail(current => current?.id === updated.id ? updated : current);
                     }}
                   />
-                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} />
+                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />
                 </div>
               </div>
               <div className="live-pages-header-actions">
@@ -990,7 +993,7 @@ export function PagesPage({
                   title={t('pages.openInNewTab', detail.title)}
                 >
                   <ExternalLink size={13} />
-                  <span>{t('pages.openInNewTabLabel')}</span>
+                  <span className="live-pages-open-tab-label">{t('pages.openInNewTabLabel')}</span>
                 </a>
                 <button type="button" className="live-pages-header-icon" onClick={() => void updatePage(detail, { pinned: !detail.pinned })} title={detail.pinned ? t('pages.unfavorite') : t('pages.favorite')}>
                   <Star size={14} fill={detail.pinned ? 'currentColor' : 'none'} />
@@ -1174,6 +1177,7 @@ export function PagesPage({
               </div>
             </header>
             <div className="live-pages-relations">
+              <LivePageTrustedActions trusts={pageActionTrusts} onChanged={reloadPageActionTrusts} />
               {linkedDiscussions.length > 0 && (
                 <div className="live-pages-workflows">
                   <div><MessageSquare size={13} /><strong>{t('pages.linkedDiscussions')}</strong></div>

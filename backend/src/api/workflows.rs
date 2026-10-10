@@ -4014,6 +4014,34 @@ pub(crate) async fn create_manual_run_with_id(
     launch: crate::core::launch_context::LaunchContext,
     run_id: String,
 ) -> Result<(Workflow, WorkflowRun), String> {
+    create_manual_run_admitted(
+        state,
+        workflow_id,
+        provided_vars,
+        initial_state,
+        launch,
+        run_id,
+        None,
+    )
+    .await
+}
+
+/// A last check run in the transaction that inserts and pins the run, against
+/// the workflow as read for it (before project resolution): what will execute.
+pub(crate) type RunAdmission =
+    Box<dyn FnOnce(&rusqlite::Connection, &Workflow) -> anyhow::Result<Result<(), String>> + Send>;
+
+/// [`create_manual_run_with_id`] with an admission: when given, the check, the
+/// insert and the KT-1096 pin of that exact definition commit together (KT-1029).
+pub(crate) async fn create_manual_run_admitted(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
+    launch: crate::core::launch_context::LaunchContext,
+    run_id: String,
+    admission: Option<RunAdmission>,
+) -> Result<(Workflow, WorkflowRun), String> {
     validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
@@ -4025,6 +4053,7 @@ pub(crate) async fn create_manual_run_with_id(
     if !wf.enabled {
         return Err("Workflow is disabled — enable it before triggering".into());
     }
+    let as_read = wf.clone();
     crate::workflows::template::refuse_reserved_names(
         wf.variables
             .iter()
@@ -4139,11 +4168,37 @@ pub(crate) async fn create_manual_run_with_id(
         parent_run_started_at: None,
     };
     let persisted = run.clone();
-    let admission = wf.clone();
+    let admitted_workflow = wf.clone();
     state
         .db
         .with_conn(move |conn| {
-            crate::workflows::concurrency::insert_run_within_limit(conn, &admission, &persisted)
+            let Some(admission) = admission else {
+                return crate::workflows::concurrency::insert_run_within_limit(
+                    conn,
+                    &admitted_workflow,
+                    &persisted,
+                );
+            };
+            let tx = conn.unchecked_transaction()?;
+            if let Err(reason) = admission(&tx, &as_read)? {
+                // Keep what the check recorded (an invalidation); no run exists.
+                tx.commit()?;
+                return Ok(Err(reason));
+            }
+            if let Err(reason) = crate::workflows::concurrency::insert_run_within_limit(
+                &tx,
+                &admitted_workflow,
+                &persisted,
+            )? {
+                return Ok(Err(reason));
+            }
+            if let Err(reason) =
+                crate::workflows::run_pins::pin_within(&tx, &admitted_workflow, &persisted)?
+            {
+                return Ok(Err(reason));
+            }
+            tx.commit()?;
+            Ok(Ok(()))
         })
         .await
         .map_err(|error| format!("DB error: {error}"))??;
@@ -6481,6 +6536,7 @@ pub async fn test_collect_api_data(
         ApiCallLogContext::manual_test(),
         &req.exec_allowlist,
         &work_dir,
+        &crate::core::api_access::ApiCaller::Human,
     )
     .await;
     let success = outcome.result.status == RunStatus::Success;
@@ -6545,6 +6601,7 @@ pub async fn test_api_call(
         &ctx,
         SecurityPolicy::production(),
         ApiCallLogContext::manual_test(),
+        &crate::core::api_access::ApiCaller::Human,
     )
     .await;
 
@@ -7754,6 +7811,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -7833,6 +7891,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(by_bridge) = create(
             State(state.clone()),
@@ -8848,6 +8907,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(refused) = reenable(
             State(state.clone()),
@@ -9417,6 +9477,7 @@ mod tests {
                         project: None,
                         own_discussions: vec![],
                         own_run: None,
+                        agent: None,
                     })
                 });
                 import_workflow(

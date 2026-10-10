@@ -37,6 +37,7 @@ import type {
   DetectedRepo,
   McpDefinition,
   McpOverview,
+  ApiAccessPolicy,
   McpConfigDisplay,
   McpProbeResponse,
   McpRescanReport,
@@ -70,6 +71,8 @@ import type {
   LaunchDiscussionActionRequest,
   LaunchLivePageActionRequest,
   LivePageAction,
+  LivePageActionTrust,
+  LivePageActionTrustState,
   DiscussionMeta,
   WsMessage,
   DiscussionSession,
@@ -1657,6 +1660,9 @@ export const mcps = {
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),
   updateConfig: (id: string, req: UpdateMcpConfigRequest) => api<McpConfigDisplay>('PATCH', `/mcps/configs/${id}`, req),
   probeConfig: (id: string) => api<McpProbeResponse>('POST', `/mcps/configs/${id}/probe`),
+  /** KT-1026 — set (or remove, with `null`) which agents may call a plugin. */
+  setAccessPolicy: (serverId: string, policy: ApiAccessPolicy | null) =>
+    api<ApiAccessPolicy | null>('PUT', `/mcps/servers/${encodeURIComponent(serverId)}/access-policy`, { policy }),
   /** 0.8.6 — update an existing Custom API plugin's spec
    *  (name/base_url/description/docs_url/fields/endpoints). Server_id
    *  is preserved so configs and workflow `ApiCall` refs stay valid.
@@ -2799,6 +2805,12 @@ export const pages = {
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
   actionPrefill: (actionId: string, bindings: Record<string, string>) =>
     api<Record<string, string>>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/prefill`, { bindings }),
+  actionTrusts: (id: string) =>
+    api<LivePageActionTrustState[]>('GET', `/pages/${encodeURIComponent(id)}/action-trusts`),
+  trustAction: (actionId: string, fingerprint: string) =>
+    api<LivePageActionTrust>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/trust`, { fingerprint }),
+  revokeActionTrust: (actionId: string) =>
+    api<boolean>('DELETE', `/live-page-actions/${encodeURIComponent(actionId)}/trust`),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

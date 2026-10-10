@@ -853,6 +853,11 @@ pub struct RunQuickApiRequest {
     #[serde(skip)]
     #[ts(skip)]
     pub launch: Option<crate::core::launch_context::LaunchContext>,
+    /// Server-owned identity of a native agent running this Quick API
+    /// (KT-1026); `None` with no bridge token = a person in the UI.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub caller: Option<crate::core::api_access::ApiCaller>,
 }
 
 /// Response from `POST /api/quick-apis/:id/run`. Mirrors the

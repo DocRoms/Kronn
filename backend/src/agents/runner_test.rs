@@ -6009,6 +6009,70 @@ fi
             .is_some_and(|context| context.contains("@openrouter")));
     }
 
+    /// KT-1026: the tools are told the model this launch really sends, not one
+    /// re-read later from the discussion or the defaults.
+    #[tokio::test]
+    async fn the_tools_learn_the_model_the_launch_really_runs() {
+        use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+        struct Recorder(Mutex<Option<crate::core::api_access::AgentIdentity>>);
+        #[async_trait::async_trait]
+        impl crate::agents::tools::ToolExecutor for Recorder {
+            fn catalogue(&self) -> Vec<serde_json::Value> {
+                Vec::new()
+            }
+            fn bind_launch_identity(&self, identity: crate::core::api_access::AgentIdentity) {
+                *self.0.lock().unwrap() = Some(identity);
+            }
+            async fn execute(
+                &self,
+                call: &crate::agents::tools::ToolCall,
+            ) -> crate::agents::tools::ToolOutcome {
+                crate::agents::tools::ToolOutcome {
+                    call: call.clone(),
+                    content: serde_json::Value::Null,
+                    ok: false,
+                }
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let tokens = crate::models::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let runtime = ExternalHttpRuntime {
+            display_name: "Router".into(),
+            mention_alias: "router".into(),
+            endpoint: server.uri(),
+            api_key: None,
+        };
+        let recorder = Arc::new(Recorder(Mutex::new(None)));
+        // The provider fails; what matters is what the tools were told first.
+        if let Ok(mut process) = start_agent_with_config(AgentStartConfig {
+            external_http: Some(&runtime),
+            model_override: Some("model-b"),
+            tools: Some(recorder.clone()),
+            ..AgentStartConfig::new(&AgentType::Custom, "", "hello", &tokens)
+        })
+        .await
+        {
+            while process.next_line().await.is_some() {}
+        }
+        assert_eq!(
+            recorder.0.lock().unwrap().clone(),
+            Some(crate::core::api_access::AgentIdentity {
+                agent_type: AgentType::Custom,
+                model: Some("model-b".into()),
+            })
+        );
+    }
+
     /// The whole point of the feature: a model that asks for a tool gets the
     /// result and answers from it, without the caller doing anything.
     #[tokio::test]

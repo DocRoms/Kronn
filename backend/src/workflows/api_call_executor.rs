@@ -165,10 +165,24 @@ pub async fn execute_api_call_step_core(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
+    execute_core_gated(step, plugin, env, ctx, policy, None).await
+}
+
+/// [`execute_api_call_step_core`] with an access-policy gate checked on
+/// every request the call sends.
+async fn execute_core_gated(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    gate: Option<crate::core::api_access::EndpointGate>,
+) -> StepOutcome {
     let mut secrets = call_secrets(plugin, env);
     // The inner call adds what it resolves (default headers) to the same set,
     // so errors, the summary and the success output share one complete set.
-    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets).await;
+    let mut outcome =
+        execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets, gate).await;
     // Every byte the step hands on (success JSON, summary, error) loses the
     // credentials this call resolved, in every wire form.
     outcome.result.output = secrets.scrub(&outcome.result.output);
@@ -241,6 +255,7 @@ async fn execute_core_unscrubbed(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
     secrets: &mut crate::core::secret_scrub::SecretSet,
+    gate: Option<crate::core::api_access::EndpointGate>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -313,33 +328,9 @@ async fn execute_core_unscrubbed(
     // unescaped — workflow-step values are typically URL-safe (issue
     // keys, project slugs, etc.); if you need percent-encoding, use the
     // explicit `{key}` + `path_params` form which encodes per RFC 3986.
-    let templated_endpoint = match ctx.render_strict(endpoint_path) {
-        Ok(s) => s,
-        Err(e) => return fail(step, start, format!("Endpoint template render error: {e}")),
-    };
-    // 0.8.6 — also substitute `${ENV.X}` placeholders so plugin specs
-    // can reference encrypted config values directly in the endpoint
-    // path (e.g. Didomi's `/consents/users/${ENV.ORGANIZATION_ID}`)
-    // without forcing the agent to know the value. The agent calls
-    // the path as-declared, Kronn injects. Same pattern in query +
-    // headers + body below. Missing env var surfaces a clean error
-    // naming the missing key (no silent `undefined` strings hitting
-    // the vendor API — caught 2026-05-20 on Didomi 403 "organization
-    // undefined").
-    let templated_endpoint =
-        match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
-            Ok(s) => s,
-            Err(e) => return fail(step, start, format!("Endpoint env-substitution error: {e}")),
-        };
-    // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
-    // Values are rendered through TemplateContext FIRST so a previous
-    // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
-    // The resolver validates the declared and supplied keys in both
-    // directions before any HTTP request, so a typo or missing segment
-    // produces an actionable local error instead of an opaque vendor 404.
-    let resolved_path = match resolve_path_params(&templated_endpoint, &step.api_path_params, ctx) {
+    let resolved_path = match render_endpoint(endpoint_path, step, env, ctx) {
         Ok(p) => p,
-        Err(e) => return fail(step, start, format!("Path param render error: {e}")),
+        Err(e) => return fail(step, start, e),
     };
 
     // Resolve `{ENV_KEY}` placeholders in `base_url` against the
@@ -418,6 +409,7 @@ async fn execute_core_unscrubbed(
     add_resolved_auth(secrets, &auth);
     let transport = ApiTransport {
         client,
+        gate,
         secrets: secrets.clone(),
         pinned_base: if policy.enforce_host_match {
             Url::parse(&resolved_base_url).ok()
@@ -553,6 +545,82 @@ async fn execute_core_unscrubbed(
     }
 }
 
+/// The endpoint path as the request sends it: `{{var}}` rendered, `${ENV.X}`
+/// substituted, `{key}` path params encoded. The access gate decides on this
+/// same path, so the two can never disagree.
+fn render_endpoint(
+    endpoint_path: &str,
+    step: &WorkflowStep,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+) -> Result<String, String> {
+    let templated_endpoint = match ctx.render_strict(endpoint_path) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Endpoint template render error: {e}")),
+    };
+    // 0.8.6 — also substitute `${ENV.X}` placeholders so plugin specs
+    // can reference encrypted config values directly in the endpoint
+    // path (e.g. Didomi's `/consents/users/${ENV.ORGANIZATION_ID}`)
+    // without forcing the agent to know the value. The agent calls
+    // the path as-declared, Kronn injects. Same pattern in query +
+    // headers + body below. Missing env var surfaces a clean error
+    // naming the missing key (no silent `undefined` strings hitting
+    // the vendor API — caught 2026-05-20 on Didomi 403 "organization
+    // undefined").
+    let templated_endpoint =
+        match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("Endpoint env-substitution error: {e}")),
+        };
+    // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
+    // Values are rendered through TemplateContext FIRST so a previous
+    // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
+    // The resolver validates the declared and supplied keys in both
+    // directions before any HTTP request, so a typo or missing segment
+    // produces an actionable local error instead of an opaque vendor 404.
+    resolve_path_params(&templated_endpoint, &step.api_path_params, ctx)
+        .map_err(|e| format!("Path param render error: {e}"))
+}
+
+/// The path of the plugin's base URL, without its trailing slash.
+pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
+    let base = interpolate_env(&spec.base_url, env);
+    Url::parse(base.trim_end_matches('/'))
+        .map(|u| u.path().trim_end_matches('/').to_string())
+        .map_err(|e| format!("URL parse error: {e}"))
+}
+
+/// The method and the path relative to the plugin's base URL that this step
+/// would send, computed without any network access (KT-1026 access gate).
+pub(crate) fn request_target(
+    step: &WorkflowStep,
+    spec: &ApiSpec,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+) -> Result<crate::core::api_access::Target, String> {
+    let Some(endpoint_path) = step.api_endpoint_path.as_ref() else {
+        return Err("ApiCall step missing `api_endpoint_path`".into());
+    };
+    let resolved_path = render_endpoint(endpoint_path, step, env, ctx)?;
+    let base = interpolate_env(&spec.base_url, env);
+    let url = build_url(&base, &resolved_path, &HashMap::new(), &HashMap::new())?;
+    let base_path = base_path(spec, env)?;
+    // A path that climbs out of the base URL's path is no endpoint of it.
+    let path = match url.path().strip_prefix(base_path.as_str()) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.to_string(),
+        _ => {
+            return Err(format!(
+                "Access policy: `{endpoint_path}` leaves the plugin's base URL, call refused."
+            ))
+        }
+    };
+    let method = resolve_method(&step.api_method, endpoint_path, spec)?;
+    Ok(crate::core::api_access::Target {
+        method: method.as_str().to_string(),
+        path,
+    })
+}
+
 /// Runner dispatch helper — loads the plugin + decrypted env from the
 /// database based on the step's `api_plugin_slug` / `api_config_id`, then
 /// forwards to [`execute_api_call_step_core`] under production security.
@@ -569,6 +637,7 @@ pub async fn execute_api_call_step_with_db(
     state: &crate::AppState,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     // 0.8.6 (#59) — default entry point logs as a workflow call. For
     // wizard "Test the call" + standalone Quick API runs, callers use
@@ -580,6 +649,7 @@ pub async fn execute_api_call_step_with_db(
         ctx,
         policy,
         ApiCallLogContext::workflow(),
+        caller,
     )
     .await
 }
@@ -620,6 +690,7 @@ pub async fn execute_api_call_step_with_db_as(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
     log_ctx: ApiCallLogContext,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let outcome = execute_api_call_step_with_db_inner(
         step,
@@ -628,6 +699,7 @@ pub async fn execute_api_call_step_with_db_as(
         ctx,
         policy,
         log_ctx.pinned_run_id.as_deref(),
+        caller,
     )
     .await;
     record_api_call_log(state, step, project_id, &outcome, &log_ctx).await;
@@ -641,6 +713,7 @@ async fn execute_api_call_step_with_db_inner(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
     pinned_run_id: Option<&str>,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -805,9 +878,16 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
+    // Before token minting: a refused call sends nothing anywhere.
+    let gate = match crate::core::api_access::enforce(state, &plugin, step, &env, ctx, caller).await
+    {
+        Ok(gate) => gate,
+        Err(refusal) => return fail(step, start, call_secrets(&plugin, &env).scrub(&refusal)),
+    };
+
     resolve_dynamic_auth(&plugin, config_id, state, &mut env, policy).await;
 
-    execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
+    execute_core_gated(step, &plugin, &env, ctx, policy, gate).await
 }
 
 /// Resolve OAuth2/token-exchange/CLI credentials only at request time.
@@ -1899,6 +1979,14 @@ async fn send_with_retry(
     } else {
         0
     };
+    // Every page is re-decided under a policy; every redirect hop too.
+    if let Some(gate) = &transport.gate {
+        gate.check(method.as_str(), url.path())?;
+    }
+    let hop_guard = |hop_method: &Method, hop_url: &Url| match &transport.gate {
+        Some(gate) => gate.check(hop_method.as_str(), hop_url.path()),
+        None => Ok(()),
+    };
     let mut attempt: u8 = 0;
     loop {
         let attach_body = |req: safe_http::SafeRequest| match body {
@@ -1916,6 +2004,7 @@ async fn send_with_retry(
                 attach_body: &attach_body,
                 has_body: body.is_some(),
                 pinned_base: transport.pinned_base.as_ref(),
+                hop_guard: Some(&hop_guard),
             },
         )
         .await
@@ -2032,6 +2121,8 @@ pub(crate) async fn read_body_capped(
 /// guarded client and, when the host is enforced, the plugin's base.
 struct ApiTransport {
     client: SafeClient,
+    /// Under an access policy, every page and redirect hop is re-decided.
+    gate: Option<crate::core::api_access::EndpointGate>,
     /// Applied to error text before it is truncated.
     secrets: crate::core::secret_scrub::SecretSet,
     pinned_base: Option<Url>,
@@ -5412,6 +5503,7 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::workflow_for_run("run-001"),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
@@ -5441,6 +5533,7 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::manual_test(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         let rows = state
@@ -5469,6 +5562,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::production(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         let rows = state
@@ -5504,6 +5598,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::production(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
 
@@ -5566,6 +5661,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
 

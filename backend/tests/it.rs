@@ -26,6 +26,8 @@ mod anti_hallu_tiers_and_counts;
 mod anti_hallu_utf8_unicode;
 #[path = "anti_hallu_verify_outcomes.rs"]
 mod anti_hallu_verify_outcomes;
+#[path = "api_access_policy_scope.rs"]
+mod api_access_policy_scope;
 #[path = "api_tests.rs"]
 mod api_tests;
 #[path = "bridge_token_effect_log.rs"]

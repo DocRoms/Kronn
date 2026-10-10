@@ -84,6 +84,9 @@ pub struct KronnToolExecutor {
     audit_workspace: Option<std::path::PathBuf>,
     /// The audit step's own target file, to refuse writing another step's.
     audit_step_target: Option<String>,
+    /// The agent and model the runner resolved for this launch, for API
+    /// access policies; never re-read from the discussion afterwards.
+    launch_identity: std::sync::Mutex<Option<crate::core::api_access::AgentIdentity>>,
 }
 
 impl KronnToolExecutor {
@@ -101,6 +104,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         }
     }
 
@@ -126,6 +130,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -154,6 +159,7 @@ impl KronnToolExecutor {
             worker_scope,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -179,6 +185,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -250,6 +257,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: Some(workspace),
             audit_step_target: step_target.map(str::to_string),
+            launch_identity: Default::default(),
         })
     }
 }
@@ -1492,6 +1500,12 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
 
 #[async_trait::async_trait]
 impl ToolExecutor for KronnToolExecutor {
+    fn bind_launch_identity(&self, identity: crate::core::api_access::AgentIdentity) {
+        if let Ok(mut bound) = self.launch_identity.lock() {
+            *bound = Some(identity);
+        }
+    }
+
     fn catalogue(&self) -> Vec<Value> {
         if self.audit_workspace.is_some() {
             return audit_tool_catalogue();
@@ -1971,6 +1985,7 @@ impl ToolExecutor for KronnToolExecutor {
                         workflow_run_id: self.workflow_run_id.clone(),
                         agent: Some(self.actor_id.clone()),
                         launch: None,
+                        caller: Some(self.api_caller().await),
                     }),
                 )
                 .await;
@@ -2005,6 +2020,7 @@ impl ToolExecutor for KronnToolExecutor {
                 req.project_id = self.project_id.clone();
                 req.workflow_run_id = self.workflow_run_id.clone();
                 req.agent = Some(self.actor_id.clone());
+                req.caller = Some(self.api_caller().await);
                 let Json(res) = crate::api::agent_api::agent_api_call(
                     State(self.state.clone()),
                     None,
@@ -3645,6 +3661,29 @@ impl KronnToolExecutor {
         }
     }
 
+    /// This run as an API broker caller: the identity the runner bound at
+    /// launch. Unbound, the agent type alone (an unknown model).
+    async fn api_caller(&self) -> crate::core::api_access::ApiCaller {
+        let bound = self
+            .launch_identity
+            .lock()
+            .ok()
+            .and_then(|bound| bound.clone());
+        let identity = bound.or_else(|| {
+            self.actor_type
+                .clone()
+                .map(|agent_type| crate::core::api_access::AgentIdentity {
+                    agent_type,
+                    model: None,
+                })
+        });
+        crate::core::api_access::ApiCaller::Agent {
+            identity,
+            discussion_ids: self.disc_id.iter().cloned().collect(),
+            workflow_run_id: self.workflow_run_id.clone(),
+        }
+    }
+
     async fn effective_project_id(&self) -> Option<String> {
         if self.project_id.is_some() {
             return self.project_id.clone();
@@ -3952,12 +3991,17 @@ fn compact_plugin_list(overview: &Value, project_id: Option<&str>) -> Value {
                 // called; listing it would only invite a failing api_call.
                 .filter_map(|s| {
                     let config_id = config_for(&s["id"])?;
-                    Some(json!({
+                    let mut plugin = json!({
                         "slug": s["id"],
                         "api_config_id": config_id,
                         "name": s["name"],
                         "purpose": brief(&s["description"], 160),
-                    }))
+                    });
+                    if let Some(policy) = access_policy_for(overview, &s["id"]) {
+                        plugin["access"] =
+                            json!(crate::core::api_access::describe_rule(&policy.access));
+                    }
+                    Some(plugin)
                 })
                 .collect()
         })
@@ -3969,6 +4013,15 @@ fn compact_plugin_list(overview: &Value, project_id: Option<&str>) -> Value {
     })
 }
 
+/// A plugin's access policy from the overview (KT-1026), if it has one.
+fn access_policy_for(overview: &Value, slug: &Value) -> Option<crate::models::ApiAccessPolicy> {
+    overview["access_policies"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["server_id"] == *slug)
+        .and_then(|entry| serde_json::from_value(entry["policy"].clone()).ok())
+}
+
 /// Endpoint paths for a single plugin. Method + path + a short summary is
 /// what `api_call` actually needs; the rest of the spec is noise to a model.
 fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
@@ -3976,21 +4029,52 @@ fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
         .as_array()?
         .iter()
         .find(|s| s["id"] == slug && !s["api_spec"].is_null())?;
-    let endpoints: Vec<Value> = server["api_spec"]["endpoints"]
+    let policy = access_policy_for(overview, &json!(slug));
+    let mut endpoints: Vec<Value> = server["api_spec"]["endpoints"]
         .as_array()
         .map(|eps| {
             eps.iter()
                 .map(|e| {
-                    json!({
-                        "method": e["method"].as_str().unwrap_or("GET"),
+                    let method = e["method"].as_str().unwrap_or("GET");
+                    let mut endpoint = json!({
+                        "method": method,
                         "path": e["path"],
                         "summary": brief(&e["description"], 120),
-                    })
+                    });
+                    if let Some(policy) = &policy {
+                        let rule = crate::core::api_access::endpoint_rule(
+                            policy,
+                            method,
+                            e["path"].as_str().unwrap_or(""),
+                        );
+                        endpoint["access"] = json!(crate::core::api_access::describe_rule(rule));
+                    }
+                    endpoint
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Some(json!({ "slug": slug, "endpoints": endpoints }))
+    let Some(policy) = policy else {
+        return Some(json!({ "slug": slug, "endpoints": endpoints }));
+    };
+    for extra in &policy.endpoints {
+        let listed = endpoints
+            .iter()
+            .any(|e| e["method"] == extra.method.as_str() && e["path"] == extra.path.as_str());
+        if !listed {
+            endpoints.push(json!({
+                "method": extra.method,
+                "path": extra.path,
+                "access": crate::core::api_access::describe_rule(&extra.access),
+            }));
+        }
+    }
+    Some(json!({
+        "slug": slug,
+        "access": crate::core::api_access::describe_rule(&policy.access),
+        "strict": "only these endpoints can be called",
+        "endpoints": endpoints,
+    }))
 }
 
 /// Quick APIs, minus the machinery. `variables`, extraction specs and
@@ -4364,6 +4448,7 @@ fn api_call_request(
         extract: api_call_extract(arguments)?,
         workflow_run_id: None,
         agent: None,
+        caller: None,
     })
 }
 
@@ -5662,6 +5747,45 @@ mod tests {
         // An unknown slug must fail loudly, not return an empty list the model
         // would read as "this plugin has no endpoints".
         assert!(compact_endpoints(&overview, "nope").is_none());
+    }
+
+    #[test]
+    fn plugin_list_and_endpoints_show_the_access_policy() {
+        let overview = json!({
+            "servers": [{
+                "id": "custom-notion", "name": "Notion", "description": "Notes",
+                "api_spec": { "endpoints": [
+                    { "method": "GET", "path": "/users/me", "description": "me" },
+                    { "method": "GET", "path": "/pages/{id}", "description": "page" },
+                ] },
+            }],
+            "configs": [{ "id": "cfg", "server_id": "custom-notion", "is_global": true }],
+            "access_policies": [{
+                "server_id": "custom-notion",
+                "policy": {
+                    "access": { "kind": "local_only" },
+                    "endpoints": [
+                        { "method": "GET", "path": "/users/me", "access": { "kind": "all" } },
+                        { "method": "POST", "path": "/search", "access": { "kind": "blocked" } },
+                    ],
+                },
+            }],
+        });
+        let list = compact_plugin_list(&overview, None);
+        assert_eq!(list["plugins"][0]["access"], "local models only");
+        let out = compact_endpoints(&overview, "custom-notion").expect("known slug");
+        assert_eq!(out["access"], "local models only");
+        assert!(out["strict"]
+            .as_str()
+            .unwrap()
+            .contains("only these endpoints"));
+        assert_eq!(out["endpoints"][0]["access"], "all agents");
+        assert_eq!(out["endpoints"][1]["access"], "local models only");
+        assert_eq!(out["endpoints"][2]["path"], "/search");
+        assert_eq!(out["endpoints"][2]["access"], "blocked");
+        // A plugin without a policy keeps the plain shape.
+        let open = json!({ "servers": overview["servers"].clone() });
+        assert!(compact_endpoints(&open, "custom-notion").unwrap()["access"].is_null());
     }
 
     #[test]

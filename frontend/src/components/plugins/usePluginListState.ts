@@ -5,7 +5,7 @@ import { useAsyncGuard } from '../../hooks/useAsyncGuard';
 import { usePersistentIdSet } from '../../hooks/usePersistentIdSet';
 import { usePersistentSidebarOpen } from '../../hooks/usePersistentSidebarOpen';
 import { userError } from '../../lib/userError';
-import type { McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, McpRescanReport, HostSyncMode, PluginInterface, PluginKind, Project } from '../../types/generated';
+import type { ApiAccessPolicy, McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, McpRescanReport, HostSyncMode, PluginInterface, PluginKind, Project } from '../../types/generated';
 import { compactPluginCredentials } from '../../lib/pluginCredentials';
 import { hasAgentScope, slugify } from './mcpPageHelpers';
 import { configHealth, isAvailableLocally, visibleToPluginProject, type PluginHealthState } from './pluginHealth';
@@ -284,6 +284,18 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
 
   /** Update host_sync (CLI scope: None/GlobalOnly/MirrorAll). UX#2 — single
    *  source of edit; the SettingsPage section delegates here via deeplink. */
+  const handleSaveAccessPolicy = async (serverId: string, policy: ApiAccessPolicy | null): Promise<boolean> => {
+    try {
+      await mcpsApi.setAccessPolicy(serverId, policy);
+      refetchMcps();
+      toast(t('mcp.access.saved'), 'success');
+      return true;
+    } catch (e) {
+      toast(t('common.actionFailed', userError(e)), 'error');
+      return false;
+    }
+  };
+
   const handleSetHostSync = async (configId: string, mode: HostSyncMode) => {
     try {
       await mcpsApi.updateConfig(configId, { host_sync: mode });
@@ -529,6 +541,7 @@ export function usePluginListState({ projects, mcpOverview, mcpRegistry, refetch
 
     handleDeleteMcpConfig, handleDeleteSelectedMcpConfigs,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleSetHostSync, handleToggleConfigProject,
+    handleSaveAccessPolicy,
 
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, visibleFields, setVisibleFields, editingEnvError,
     handleStartEditSecrets, handleSaveSecrets, toggleFieldVisibility,

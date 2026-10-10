@@ -125,6 +125,11 @@ pub struct DbExport {
     /// Older archives have none: their discussions import as ordinary ones.
     #[serde(default)]
     pub assistant_conversations: Vec<crate::db::assistant_conversations::AssistantConversationLink>,
+    /// v7 (KT-1026) — plugin access policies. `None` (an older export) keeps
+    /// the local policies; `Some` replaces them, an empty list included.
+    #[serde(default)]
+    #[ts(optional)]
+    pub api_access_policies: Option<Vec<crate::models::ApiAccessPolicyEntry>>,
     /// KT-1017 — a MAC, under this instance's key, over the workflows and
     /// Quick Execs: a restore keeps their approvals only when it verifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
