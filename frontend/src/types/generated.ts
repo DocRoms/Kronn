@@ -6664,9 +6664,15 @@ dod_verifications: Array<ReviewDodVerification>, comment: string | null, finding
 export type ReviewDodVerification = { dod_id: string, met: boolean, evidence: string, };
 
 /**
+ * A structured review finding (ADR §5). `issue` is required; `path` / `line`
+ * locate it when applicable.
+ */
+export type ReviewFinding = { path: string | null, line: number | null, issue: string, };
+
+/**
  * One finding: a cause, where it lives, and what is known about it.
  */
-export type ReviewFinding = { id: string, repo: string, pr_number: number,
+export type ReviewLedgerFinding = { id: string, repo: string, pr_number: number,
 /**
  * The head the evidence was gathered against. A finding settled at one SHA
  * is not automatically settled at the next.
