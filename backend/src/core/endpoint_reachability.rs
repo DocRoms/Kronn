@@ -194,24 +194,93 @@ impl ReachabilityCache {
 
     pub async fn observe(&self, endpoint: &str, budget: ProbeBudget) -> EndpointObservation {
         let key = endpoint.trim().to_string();
-        if let Ok(entries) = self.entries.lock() {
-            if let Some((at, observation)) = entries.get(&key) {
-                if at.elapsed() < self.ttl {
-                    return *observation;
-                }
-            }
+        if let Some(observation) = self.fresh(&key) {
+            return observation;
         }
         let observation = EndpointObservation {
             outcome: probe_endpoint(&key, budget).await,
             checked_at: Utc::now(),
         };
+        self.store(key, observation);
+        observation
+    }
+
+    /// Why a launch on `endpoint` would not reach it, or `None` when it may
+    /// go. Only a transport failure refuses: a timeout under a short budget
+    /// says slow, not down, so it neither refuses nor enters the cache.
+    pub async fn start_refusal(&self, endpoint: &str, budget: ProbeBudget) -> Option<StartRefusal> {
+        let key = endpoint.trim().to_string();
+        let observation = match self.fresh(&key) {
+            Some(observation) => observation,
+            None => {
+                let observation = EndpointObservation {
+                    outcome: probe_endpoint(&key, budget).await,
+                    checked_at: Utc::now(),
+                };
+                if !matches!(
+                    observation.outcome,
+                    ProbeOutcome::Unreachable {
+                        reason: UnreachableReason::Timeout,
+                        ..
+                    }
+                ) {
+                    self.store(key, observation);
+                }
+                observation
+            }
+        };
+        match observation.outcome {
+            ProbeOutcome::Unreachable { reason, .. } if refuses_start(reason) => {
+                Some(StartRefusal {
+                    reason,
+                    checked_at: observation.checked_at,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn fresh(&self, key: &str) -> Option<EndpointObservation> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .get(key)
+            .filter(|(at, _)| at.elapsed() < self.ttl)
+            .map(|(_, observation)| *observation)
+    }
+
+    fn store(&self, key: String, observation: EndpointObservation) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.retain(|_, (at, _)| at.elapsed() < self.ttl);
             entries.insert(key, (Instant::now(), observation));
         }
-        observation
     }
 }
+
+/// A failure no request to that address can get past. A timeout or a 5xx
+/// leaves the run to its own call: something may still answer.
+fn refuses_start(reason: UnreachableReason) -> bool {
+    matches!(
+        reason,
+        UnreachableReason::Dns
+            | UnreachableReason::Refused
+            | UnreachableReason::Tls
+            | UnreachableReason::InvalidEndpoint
+            | UnreachableReason::Connect
+    )
+}
+
+/// The transport verdict that stops a launch before any call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartRefusal {
+    pub reason: UnreachableReason,
+    pub checked_at: DateTime<Utc>,
+}
+
+/// What a launch waits at most when no fresh observation is cached.
+pub const START_BUDGET: ProbeBudget = ProbeBudget {
+    connect: Duration::from_millis(600),
+    total: Duration::from_millis(800),
+};
 
 /// How long a cached observation is served.
 pub const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -466,6 +535,74 @@ mod tests {
         task.abort();
         assert_eq!(up.outcome, ProbeOutcome::Reachable { http_status: 200 });
         assert!(up.checked_at > down.checked_at);
+    }
+
+    /// Port 1 is closed on any developer machine or CI runner: dialing it
+    /// needs no bind, which some sandboxes forbid.
+    const CLOSED: &str = "http://127.0.0.1:1";
+
+    #[tokio::test]
+    async fn a_launch_on_a_closed_port_is_refused_fast_and_remembered() {
+        let cache = ReachabilityCache::new(Duration::from_secs(30));
+        let started = Instant::now();
+        let refusal = cache.start_refusal(CLOSED, START_BUDGET).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(refusal.map(|r| r.reason), Some(UnreachableReason::Refused));
+        // Served from the cache: the same observation, not a second probe.
+        assert_eq!(cache.start_refusal(CLOSED, START_BUDGET).await, refusal);
+    }
+
+    #[tokio::test]
+    async fn a_launch_on_an_unresolvable_host_is_refused() {
+        let cache = ReachabilityCache::new(Duration::from_secs(30));
+        let refusal = cache
+            .start_refusal("http://kt1154-no-such-host.invalid", START_BUDGET)
+            .await;
+        assert_eq!(refusal.map(|r| r.reason), Some(UnreachableReason::Dns));
+    }
+
+    #[test]
+    fn only_transport_failures_refuse_a_launch() {
+        for reason in [
+            UnreachableReason::Dns,
+            UnreachableReason::Refused,
+            UnreachableReason::Tls,
+            UnreachableReason::InvalidEndpoint,
+            UnreachableReason::Connect,
+        ] {
+            assert!(refuses_start(reason), "{reason:?}");
+        }
+        for reason in [UnreachableReason::Timeout, UnreachableReason::HttpStatus] {
+            assert!(!refuses_start(reason), "{reason:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_endpoint_neither_refuses_a_launch_nor_enters_the_cache() {
+        // Accepts at the kernel level, never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let cache = ReachabilityCache::new(Duration::from_secs(30));
+        assert_eq!(cache.start_refusal(&endpoint, START_BUDGET).await, None);
+        assert_eq!(cache.fresh(&endpoint), None);
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn a_launch_is_not_refused_on_a_cached_answer() {
+        let cache = ReachabilityCache::new(Duration::from_secs(30));
+        cache.store(
+            CLOSED.to_string(),
+            EndpointObservation {
+                outcome: ProbeOutcome::Reachable { http_status: 401 },
+                checked_at: Utc::now(),
+            },
+        );
+        assert_eq!(cache.start_refusal(CLOSED, START_BUDGET).await, None);
     }
 
     #[tokio::test]

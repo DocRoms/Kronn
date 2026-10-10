@@ -26,6 +26,7 @@ pub mod orchestration;
 pub(crate) mod routing;
 pub mod runtime;
 pub mod slash_markers;
+pub(crate) mod start_refusal;
 pub mod streaming;
 
 pub use context::*;

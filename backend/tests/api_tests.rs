@@ -15176,6 +15176,34 @@ async fn agent_readiness_reports_each_selected_agent() {
     assert_eq!(json["error"], "Project not found");
 }
 
+/// KT-1154 — the composer reads the transport state of the HTTP agents a
+/// draft names: a named connection on a closed port is unreachable, refused;
+/// a CLI agent has no address to probe.
+#[tokio::test]
+async fn agent_reachability_reports_a_closed_connection_and_skips_cli_agents() {
+    // Port 1 is closed everywhere and dialing it needs no bind.
+    let state = litellm_saved_connection_state("http://127.0.0.1:1".into()).await;
+    let (status, json) = post_json(
+        build_router_with_auth(state, false),
+        "/api/agents/reachability",
+        serde_json::json!({ "targets": [
+            { "agent_type": "LiteLlm", "connection_id": "litellm-saved" },
+            { "agent_type": "ClaudeCode" }
+        ] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "{json}");
+    let results = json["data"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["connection_id"], "litellm-saved");
+    assert_eq!(results[0]["connectivity"]["state"], "unreachable", "{json}");
+    assert_eq!(results[0]["connectivity"]["unreachable_reason"], "refused");
+    assert!(results[0]["connectivity"]["checked_at"].is_string());
+    assert!(!json.to_string().contains("127.0.0.1"), "{json}");
+    assert_eq!(results[1]["connectivity"], serde_json::Value::Null);
+}
+
 // ─── Compare-agents mode (POST /api/quick-prompts/:id/compare-agents) ───
 //
 // Pinned regression for the new fan-out-across-agents endpoint. We

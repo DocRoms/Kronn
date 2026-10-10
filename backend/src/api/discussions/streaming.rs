@@ -1009,7 +1009,7 @@ fn agent_start_failure_outcome(agent_type: &AgentType, error: &str) -> AgentExec
     }
 }
 
-fn persist_agent_start_error(
+pub(super) fn persist_agent_start_error(
     conn: &rusqlite::Connection,
     discussion_id: &str,
     message: &DiscussionMessage,
@@ -1073,26 +1073,6 @@ fn lite_llm_model_unreachable_summary(language: &str, model: &str, status: Optio
             code(": ")
         ),
     }
-}
-
-/// The readable refusal for a launch the catalogue stopped because the proxy
-/// lists the model but cannot serve it. `None` for any other agent or reason,
-/// which keep their existing diagnostics.
-fn lite_llm_preflight_refusal_message(
-    agent_type: &AgentType,
-    language: &str,
-    failure: &CatalogPreflightFailure,
-) -> Option<String> {
-    if *agent_type != AgentType::LiteLlm
-        || !matches!(
-            failure.reason,
-            ModelUnavailableReason::NotFound | ModelUnavailableReason::AccessDenied
-        )
-    {
-        return None;
-    }
-    let model = failure.model_id.as_deref()?;
-    Some(lite_llm_model_unreachable_summary(language, model, None))
 }
 
 /// A model-routing failure is useful to operators in full, but dumping a
@@ -2374,7 +2354,7 @@ async fn http_context_images(
     }
 }
 
-async fn make_agent_stream_inner(
+pub(super) async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
@@ -3648,6 +3628,49 @@ async fn make_agent_stream_inner(
     let catalog_target_id = runtime_target_id
         .clone()
         .unwrap_or_else(|| crate::db::model_catalog::agent_runtime_target_id(&agent_type));
+    let refused_start = |model: Option<String>| super::start_refusal::RefusedStart {
+        discussion_id: &discussion_id,
+        agent_type: &agent_type,
+        model,
+        tier: disc_tier,
+        dispatch_id: dispatch_job_id.as_deref(),
+        tracked_dispatch,
+        reply_to: dispatch_trigger_message_id.clone(),
+    };
+    // KT-1154 — an endpoint nothing answers at is refused here, within the
+    // start budget, before the catalogue or the runner's retries speak for it.
+    let external_endpoint = external_http_runtime.as_ref().map(|r| r.endpoint.as_str());
+    if let Some(refusal) =
+        super::start_refusal::unreachable_endpoint(&agent_type, external_endpoint, &http_endpoints)
+            .await
+    {
+        let label = external_http_runtime
+            .as_ref()
+            .map_or_else(|| format!("{agent_type:?}"), |r| r.display_name.clone());
+        let content = super::start_refusal::unreachable_card(
+            &label,
+            &disc.language,
+            disc_tier,
+            &refusal,
+            dispatch_job_id.as_deref(),
+        );
+        super::start_refusal::record_refusal_card(
+            &state,
+            refused_start(requested_model.clone()),
+            content,
+        )
+        .await;
+        let diagnostic = super::start_refusal::unreachable_diagnostic(&refusal);
+        finish_tracked_preflight(&mut completion_tx, &diagnostic);
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "error": diagnostic }).to_string()),
+            )
+        }));
+        return Sse::new(prepend_initial_event(stream, initial_event.take()));
+    }
     let preflight = match crate::core::model_catalog::preflight_resolve(
         &state.db,
         runtime_target_id.as_deref(),
@@ -3660,12 +3683,26 @@ async fn make_agent_stream_inner(
     {
         Ok(resolution) => resolution,
         Err(failure) => {
-            // A flagged LiteLLM model is refused here before any call. The
-            // opaque code would reach the user as-is, so it is replaced by the
-            // sentence that names the model and says where to change it; the
-            // code and the structured failure stay in the payload.
-            let message = lite_llm_preflight_refusal_message(&agent_type, &disc.language, &failure)
-                .unwrap_or_else(|| "model_catalog_preflight_failed".to_string());
+            // Refused before any call: the System card and the toast say which
+            // model, why and since when; the code and the structured failure
+            // stay in the payload.
+            let message = super::start_refusal::preflight_refusal_summary(
+                &agent_type,
+                &disc.language,
+                &failure,
+            );
+            let content = super::start_refusal::preflight_refusal_card(
+                &message,
+                disc_tier,
+                &failure,
+                dispatch_job_id.as_deref(),
+            );
+            super::start_refusal::record_refusal_card(
+                &state,
+                refused_start(failure.model_id.clone()),
+                content,
+            )
+            .await;
             let payload = serde_json::json!({
                 "error": message,
                 "code": "model_catalog_preflight_failed",
@@ -6223,8 +6260,8 @@ mod agent_lifecycle_tests {
         auth_required_system_message, cap_agent_response, child_run_counts_as_success,
         configured_agent_global_timeout, connection_mismatch, effective_global_timeout,
         effective_stall_timeout, finish_tracked_preflight, forwards_to_log_panel,
-        lift_acp_tool_calls, lite_llm_preflight_refusal_message, AgentExecutionOutcome,
-        ConnectionMismatch, NON_STREAMING_STALL_TIMEOUT,
+        lift_acp_tool_calls, AgentExecutionOutcome, ConnectionMismatch,
+        NON_STREAMING_STALL_TIMEOUT,
     };
     use crate::models::{AgentType, MessageRole};
     use std::time::Duration;
@@ -7041,46 +7078,6 @@ mod agent_lifecycle_tests {
         let summary = ollama["summary"].as_str().unwrap();
         assert!(!summary.contains("LiteLLM"), "{summary}");
         assert!(summary.contains("Ollama returned HTTP 404"), "{summary}");
-    }
-
-    #[test]
-    fn a_flagged_model_refused_at_launch_is_explained_not_coded() {
-        use crate::models::{CatalogPreflightFailure, ModelUnavailableReason};
-        let failure = |reason| CatalogPreflightFailure {
-            runtime_target_id: "http:conn".into(),
-            agent_type: AgentType::LiteLlm,
-            model_id: Some("vertex_ai/claude-sonnet-5".into()),
-            reason,
-            detail: "Not found or access denied (HTTP 404)".into(),
-            last_checked_at: chrono::Utc::now(),
-            recommended_action: "choose_another_model".into(),
-            replacement: None,
-        };
-
-        for reason in [
-            ModelUnavailableReason::NotFound,
-            ModelUnavailableReason::AccessDenied,
-        ] {
-            let message =
-                lite_llm_preflight_refusal_message(&AgentType::LiteLlm, "en", &failure(reason))
-                    .expect("a flagged model has a readable refusal");
-            assert!(message.contains("vertex_ai/claude-sonnet-5"), "{message}");
-            assert!(message.contains("Config › Agents › LiteLLM"), "{message}");
-            assert!(!message.contains("preflight"), "{message}");
-        }
-        // Every other agent / reason keeps its existing diagnostic.
-        assert!(lite_llm_preflight_refusal_message(
-            &AgentType::LiteLlm,
-            "en",
-            &failure(ModelUnavailableReason::Disappeared)
-        )
-        .is_none());
-        assert!(lite_llm_preflight_refusal_message(
-            &AgentType::Ollama,
-            "en",
-            &failure(ModelUnavailableReason::NotFound)
-        )
-        .is_none());
     }
 
     #[test]
