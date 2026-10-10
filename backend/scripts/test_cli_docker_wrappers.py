@@ -17,6 +17,7 @@ COMPOSE = ROOT / "docker-compose.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci-test.yml"
 BUILD_WORKFLOW = ROOT / ".github/workflows/ci-build.yml"
 VERDICT_WORKFLOW = ROOT / ".github/workflows/ci-verdict.yml"
+CACHE_WORKFLOW = ROOT / ".github/workflows/ci-cache.yml"
 WORKFLOWS = ROOT / ".github/workflows"
 # Each test workflow, its label, the job that reads it live, and its aggregate.
 TEST_WORKFLOWS = (
@@ -41,6 +42,61 @@ def job_sections(workflow: str) -> dict[str, str]:
             re.MULTILINE | re.DOTALL,
         )
     }
+
+
+def job_steps(section: str) -> list[str]:
+    """Each step of a job section, as its raw text."""
+    if "\n    steps:\n" not in section:
+        return []
+    body = section.split("\n    steps:\n", 1)[1]
+    return re.split(r"(?m)^      - ", body)[1:]
+
+
+def step_inputs(step: str) -> dict[str, str]:
+    """The `with:` inputs of a step; a block scalar keeps one line per entry."""
+    inputs: dict[str, str] = {}
+    current = None
+    inside = False
+    for line in step.splitlines():
+        if line == "        with:":
+            inside = True
+        elif not inside:
+            continue
+        elif line.startswith("            ") and current:
+            inputs[current] += line.strip() + "\n"
+        elif line.startswith("          ") and not line.startswith("           "):
+            current, _, value = line.strip().partition(":")
+            value = value.strip()
+            inputs[current] = "" if value == "|" else value
+        else:
+            break
+    return inputs
+
+
+def cache_steps(workflow: str) -> list[dict[str, str]]:
+    """Every actions/cache step, with its inputs and the runner its job uses."""
+    found = []
+    for job, section in job_sections(workflow).items():
+        runner = tuple(
+            (re.search(pattern, section, re.MULTILINE) or [None, None])[1]
+            for pattern in (r"^    runs-on: (.*)$", r"^      image: (.*)$", r"^        os: (.*)$")
+        )
+        for step in job_steps(section):
+            uses = re.search(r"(?m)^(?:        )?uses: (\S+)$", step)
+            if uses and uses.group(1).startswith("actions/cache"):
+                found.append({
+                    "job": job,
+                    "uses": uses.group(1),
+                    "if": (re.search(r"(?m)^        if: (.*)$", step) or [None, ""])[1],
+                    "runner": runner,
+                    **step_inputs(step),
+                })
+    return found
+
+
+def cache_identity(step: dict[str, str]) -> tuple:
+    """What GitHub matches a cache on: its key, restore keys and paths."""
+    return step["key"], step.get("restore-keys", ""), step.get("path", "")
 
 
 def pull_request_types(workflow: str) -> list[str]:
@@ -117,6 +173,11 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-backend-portability", "build-release", "ci-build-gates",
             ),
             VERDICT_WORKFLOW: ("ci-quality-gates", "ci-build-gates"),
+            CACHE_WORKFLOW: (
+                "warm-test-backend", "warm-test-backend-quality", "warm-test-e2e",
+                "warm-security-scan", "warm-test-backend-portability",
+                "warm-build-release", "warm-test-docs-sidecar-windows",
+            ),
         }
         for path, job in ((path, job) for path, names in jobs.items() for job in names):
             workflow = path.read_text()
@@ -133,7 +194,7 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "test-e2e": 45,
                 "build-release": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 45 || 30 }}",
-            }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
+            }.get(job.removeprefix("warm-"), 60 if path == VERDICT_WORKFLOW else 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
     def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):
@@ -316,7 +377,8 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         for path, label, route, gate in TEST_WORKFLOWS:
             workflow = path.read_text()
             jobs = job_sections(workflow)
-            self.assertIn("  push:\n    branches: [main]", workflow)
+            # A push to main warms caches instead (ci-cache.yml).
+            self.assertNotIn("  push:", workflow)
             self.assertIn("workflow_call:", workflow)
             self.assertNotIn("github.event.label", workflow)
             self.assertNotIn("github.event.action", workflow)
@@ -355,6 +417,86 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         desktop = (WORKFLOWS / "desktop-build.yml").read_text()
         for name in ("ci-test.yml", "ci-build.yml"):
             self.assertIn(f"      pull-requests: read\n    uses: ./.github/workflows/{name}", desktop)
+
+    def test_a_push_to_main_only_warms_the_caches_pull_requests_read(self):
+        cache = CACHE_WORKFLOW.read_text()
+        self.assertIn("on:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\n", cache)
+        self.assertNotIn("pull_request", cache)
+        self.assertNotIn("workflow_call", cache)
+        self.assertIn("\npermissions:\n  contents: read\n", cache)
+        # Nothing else that builds or tests starts on main; the site deploy is
+        # filtered on site/.
+        pushed = sorted(
+            path.name for path in WORKFLOWS.glob("*.yml")
+            if re.search(r"(?m)^  push:\n    branches: \[main\]", path.read_text())
+        )
+        self.assertEqual(pushed, ["ci-cache.yml", "deploy-site.yml"])
+        self.assertIn("      - 'site/**'", (WORKFLOWS / "deploy-site.yml").read_text())
+
+        shared = [
+            step
+            for path in (CI_WORKFLOW, BUILD_WORKFLOW)
+            for step in cache_steps(path.read_text())
+            # The cold measurement cache belongs to its own run.
+            if "github.run_id" not in step["key"]
+        ]
+        self.assertEqual(len(shared), 6)
+        warm = cache_steps(cache)
+        saves = [step for step in warm if step["uses"] != "actions/cache/restore@v4"]
+        lookups = [step for step in warm if step["uses"] == "actions/cache/restore@v4"]
+        self.assertEqual(
+            sorted(map(cache_identity, saves)), sorted(map(cache_identity, shared))
+        )
+        for step in shared:
+            twin = next(save for save in saves if cache_identity(save) == cache_identity(step))
+            # Same action and runner (OS, container, matrix): GitHub's cache
+            # version hashes the paths and the archive format.
+            self.assertEqual(twin["uses"], step["uses"], step["key"])
+            self.assertEqual(twin["runner"], step["runner"], step["key"])
+            self.assertEqual(twin["job"], f"warm-{step['job']}")
+            self.assertEqual(twin["if"], "steps.lookup.outputs.cache-hit != 'true'")
+        # A lookup per cache, on main only, that never downloads.
+        self.assertEqual(sorted(step["job"] for step in lookups), sorted(step["job"] for step in saves))
+        for lookup in lookups:
+            twin = next(save for save in saves if save["job"] == lookup["job"])
+            self.assertEqual(lookup["lookup-only"], "true")
+            self.assertEqual((lookup["key"], lookup["path"]), (twin["key"], twin["path"]))
+            self.assertNotIn("restore-keys", lookup)
+            self.assertEqual(lookup["if"], "")
+
+        jobs = job_sections(cache)
+        for name, section in jobs.items():
+            steps = job_steps(section)
+            gate = "steps.python.outputs.cache-hit" if name.endswith("docs-sidecar-windows") else "steps.lookup.outputs.cache-hit"
+            probe = next(i for i, step in enumerate(steps) if f"id: {gate.split('.')[1]}" in step)
+            # Every step after the probe runs only on a miss.
+            for step in steps[probe + 1:]:
+                self.assertIn(f"        if: {gate} != 'true'\n", step, name)
+        # It builds what the jobs build; it runs no suite.
+        self.assertIn(
+            "cargo llvm-cov nextest-archive --workspace", jobs["warm-test-backend"]
+        )
+        code = "\n".join(line for line in cache.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotRegex(code, r"llvm-cov nextest(?!-archive)|nextest run|\bpnpm |\bmake |smoke_bundle")
+        self.assertEqual(
+            re.findall(r"cargo test[^\n]*", code), ["cargo test --doc", "cargo test --lib --no-run"]
+        )
+        self.assertIn("cargo clippy --all-targets -- -D warnings", jobs["warm-test-backend-quality"])
+        self.assertIn("cargo build --locked --bin kronn", jobs["warm-test-e2e"])
+        self.assertIn("cargo build --release --locked --bin kronn", jobs["warm-build-release"])
+        self.assertIn("cargo install cargo-audit --locked", jobs["warm-security-scan"])
+        marker = "echo 'schema=3' > ../target/llvm-cov-target/debug/.kronn-backend-cache-v3"
+        self.assertIn(marker, jobs["warm-test-backend"])
+        self.assertIn(marker, job_sections(CI_WORKFLOW.read_text())["test-backend"])
+        # The tool-managed pip and MSYS2 caches of the Windows exporter job.
+        sidecar = job_sections(BUILD_WORKFLOW.read_text())["test-docs-sidecar-windows"]
+        warm_sidecar = jobs["warm-test-docs-sidecar-windows"]
+        for action in ("actions/setup-python@", "msys2/setup-msys2@"):
+            pr_step = next(step for step in job_steps(sidecar) if action in step)
+            warm_step = next(step for step in job_steps(warm_sidecar) if action in step)
+            self.assertEqual(step_inputs(warm_step), step_inputs(pr_step), action)
+            self.assertEqual(re.search(r"uses: (\S+)", warm_step)[1], re.search(r"uses: (\S+)", pr_step)[1])
+        self.assertIn("node desktop/scripts/build-docs-sidecar.mjs", warm_sidecar)
 
     def test_e2e_serves_the_dev_build_and_ci_build_the_release(self):
         e2e = re.search(

@@ -6,13 +6,12 @@ name: CI Build
 # and `ci-build-gates` is required to merge. Label and edit events never start
 # this workflow: its skipped jobs would hide the real results. CI Verdict
 # (ci-verdict.yml) answers them, re-running this run once when the label
-# arrived after it.
+# arrived after it. Pushes to main and release tags: see ci-test.yml.
 on:
   pull_request:
     types: [opened, reopened, synchronize]
-  push:
-    branches: [main]
-  # Called by Desktop Build with the release commit: every job then runs.
+  # Called by Desktop Build with the release commit when no pull-request run
+  # proves its tree: every job then runs.
   workflow_call:
     inputs:
       ref:

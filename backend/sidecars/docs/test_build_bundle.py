@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -148,8 +150,11 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("verify_artifacts.py artifacts", workflow)
         self.assertIn("verify-installers:", workflow)
         self.assertIn(
-            "needs: [release-checks, build-desktop, verify-installers, quality-gates, build-gates]",
+            "needs: [release-checks, build-desktop, verify-installers, release-gates]",
             workflow,
+        )
+        self.assertIn(
+            "needs: [release-checks, tested-tree, quality-gates, build-gates]", workflow
         )
 
     def test_version_gate_runs_first_and_checks_the_tag(self) -> None:
@@ -217,9 +222,82 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("uses: ./.github/workflows/ci-build.yml", workflow)
         self.assertIn("uses: ./.github/workflows/dependency-review.yml", workflow)
         release_job = workflow[workflow.index("\n  release:\n"):]
-        self.assertIn("quality-gates", release_job.split("steps:")[0])
-        self.assertIn("build-gates", release_job.split("steps:")[0])
+        self.assertIn("release-gates", release_job.split("steps:")[0])
         self.assertIn("release-checks", release_job.split("steps:")[0])
+
+    @staticmethod
+    def _desktop_job(name: str) -> str:
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "desktop-build.yml"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            rf"^  {re.escape(name)}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|^  # |\Z)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match, name
+        return match.group("section")
+
+    def test_a_tag_reruns_a_test_workflow_only_without_a_tested_tree(self) -> None:
+        checks = self._desktop_job("release-checks")
+        self.assertIn("tree: ${{ steps.resolve.outputs.tree }}", checks)
+        self.assertIn("echo \"tree=$(git rev-parse 'HEAD^{tree}')\"", checks)
+        tested = self._desktop_job("tested-tree")
+        self.assertIn("needs: release-checks", tested)
+        self.assertIn("actions: read", tested)
+        self.assertIn("RELEASE_TREE: ${{ needs.release-checks.outputs.tree }}", tested)
+        self.assertIn(
+            "for spec in ci_test:ci-test.yml:ci-quality-gates ci_build:ci-build.yml:ci-build-gates; do",
+            tested,
+        )
+        self.assertIn('if scripts/ci/tested_tree_proof.sh "$workflow" "$gate"; then', tested)
+        self.assertIn('echo "$output=proven"', tested)
+        self.assertIn('echo "$output=missing"', tested)
+        for job, output in (("quality-gates", "ci_test"), ("build-gates", "ci_build")):
+            section = self._desktop_job(job)
+            self.assertIn("    needs: [release-checks, tested-tree]\n", section)
+            # A failed lookup leaves the output empty: the workflow reruns.
+            self.assertIn(
+                "    if: ${{ !cancelled() && needs.release-checks.result == 'success' "
+                f"&& needs.tested-tree.outputs.{output} != 'proven' }}}}\n",
+                section,
+            )
+        release = self._desktop_job("release")
+        self.assertIn("!cancelled()", release)
+        for need in ("release-checks", "build-desktop", "verify-installers", "release-gates"):
+            self.assertIn(f"&& needs.{need}.result == 'success'", release)
+        self.assertIn("    if: ${{ !cancelled() }}\n", self._desktop_job("release-gates"))
+
+    def test_release_gates_accept_only_a_proof_or_a_green_rerun(self) -> None:
+        section = self._desktop_job("release-gates")
+        script = textwrap.dedent(section.split("        run: |\n", 1)[1])
+        cases = {
+            ("proven", "skipped", "proven", "skipped"): 0,
+            ("missing", "success", "", "success"): 0,
+            ("proven", "skipped", "missing", "success"): 0,
+            ("missing", "skipped", "proven", "skipped"): 1,
+            ("", "skipped", "proven", "skipped"): 1,
+            ("proven", "failure", "proven", "skipped"): 1,
+            ("proven", "cancelled", "proven", "skipped"): 1,
+            ("missing", "failure", "proven", "skipped"): 1,
+            ("proven", "skipped", "proven", "failure"): 1,
+            ("proven", "skipped", "", "skipped"): 1,
+        }
+        for (test_proof, test_rerun, build_proof, build_rerun), expected in cases.items():
+            env = {
+                **os.environ,
+                "CI_TEST_PROOF": test_proof,
+                "CI_TEST_RERUN": test_rerun,
+                "CI_BUILD_PROOF": build_proof,
+                "CI_BUILD_RERUN": build_rerun,
+            }
+            result = subprocess.run(
+                ["bash", "-e", "-c", script], env=env, capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(
+                result.returncode, expected,
+                f"{test_proof}/{test_rerun} {build_proof}/{build_rerun}: {result.stdout}",
+            )
 
     def test_reusable_workflow_callers_grant_every_permission_their_jobs_declare(self) -> None:
         workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"

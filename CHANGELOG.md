@@ -11,6 +11,18 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Changed
+
+- CI no longer reruns the whole suite on a tree a pull request already
+  tested green (KT-1170). A push to `main` now runs only **CI Cache**, which
+  fills the caches pull requests read from `main`, under the same keys and
+  paths, without running a test, and stops at once when `main` already holds
+  them. A release tag first looks for a green CI Tests and CI Build
+  pull-request run on the same tree (the base an ancestor of the head) and
+  reruns a workflow only without that proof; the release still requires one
+  or the other for each. A flaky test can no longer turn `main` red after a
+  green merge, and a release saves two full passes.
+
 ### Fixed
 
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
