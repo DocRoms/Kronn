@@ -14,6 +14,7 @@ pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
+pub mod delegate_subtasks_step;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
@@ -559,6 +560,7 @@ mod tests {
                 StepType::PublishPageData => "PublishPageData",
                 StepType::SubWorkflow => "SubWorkflow",
                 StepType::TriggerWorkflow => "TriggerWorkflow",
+                StepType::DelegateSubtasks => "DelegateSubtasks",
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
@@ -575,6 +577,7 @@ mod tests {
             StepType::PublishPageData,
             StepType::SubWorkflow,
             StepType::TriggerWorkflow,
+            StepType::DelegateSubtasks,
         ]
         .iter()
         .map(variant_name)
@@ -999,6 +1002,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

@@ -2120,3 +2120,38 @@ describe('ProjectRepositoryResourcesPanel', () => {
     });
   });
 });
+
+// KT-1140 — the project's skills split into Kronn's and the user's, with the
+// same groups, labels and badges as the Automation page.
+describe('ProjectRepositoryResourcesPanel — Kronn skills apart from the user\'s (KT-1140)', () => {
+  const group = (key: string) => screen.getByRole('rowgroup', { name: `skills.group.${key}` });
+  const names = (scope: HTMLElement) => within(scope).getAllByRole('row').map(row => row.querySelector('.rr-name-button')?.textContent);
+  const badges = (name: string) => Array.from(rowOf(name).querySelectorAll('.skill-group-badge')).map(badge => badge.textContent);
+
+  it('lists the built-in skills under « Skills Kronn » and the custom, project and repository ones under « Mes skills », with their badges', async () => {
+    await show(listing({
+      skills_present: [
+        skill({ id: 'rust', name: 'Rust', is_builtin: true, status: 'up_to_date', repository_paths: ['.agents/skills/rust/SKILL.md'] }),
+        skill({ id: 'go', name: 'Go', is_builtin: true, status: 'conflict', repository_paths: ['.agents/skills/go/SKILL.md'] }),
+        skill({ id: 'custom-team', name: 'Team review', provenance: 'kronn', status: 'kronn_only', project_owned: true }),
+        skill({ id: 'custom-kept', name: 'Kept', status: 'repository_newer', repository_paths: ['.agents/skills/kept/SKILL.md'] }),
+        skill({ id: 'repository:project-1:block', name: 'block', provenance: 'repository', status: 'native_skill', referenced: true, repository_paths: ['.agents/skills/block/SKILL.md'] }),
+      ],
+    }));
+    openTab('skills');
+
+    const sections = Array.from(document.querySelectorAll('[role="rowgroup"]')).map(section => section.getAttribute('aria-label'));
+    expect(sections.slice(0, 2)).toEqual(['skills.group.kronn', 'skills.group.mine']);
+    expect(names(group('kronn'))).toEqual(expect.arrayContaining(['Rust', 'Go']));
+    expect(names(group('kronn'))).toHaveLength(2);
+    expect(names(group('mine'))).toEqual(expect.arrayContaining(['Team review', 'Kept', 'block']));
+    expect(names(group('mine'))).toHaveLength(3);
+    expect(screen.queryByRole('rowgroup', { name: `${R}skills.present` })).toBeNull();
+
+    expect(badges('Rust')).toEqual([]);
+    expect(badges('Go')).toEqual(['skills.group.badge.unsynced']);
+    expect(badges('Team review')).toEqual(['skills.group.badge.project']);
+    expect(badges('Kept')).toEqual(['skills.group.badge.unsynced']);
+    expect(badges('block')).toEqual(['skills.group.badge.repository']);
+  });
+});

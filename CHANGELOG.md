@@ -54,6 +54,47 @@ Release notes for 0.9.3 and earlier are available in the
   used by the project, or a launch outside a run) stops the step by name. The
   step editor offers the workflow project's repository skills.
 
+- Repository profile `kronn/project.toml` (KT-920, ADR-005 slice 7).
+  Workflows read what is specific to a repository (validation targets, forge
+  labels and rules, tracker statuses and transitions, delivery workflows) as
+  `{{project.<path>}}` instead of hard-coding it. Kronn reads the file at the
+  commit of the main checkout's default-branch ref, never from a run's
+  worktree, so a pull request cannot change the rules of its own run, and
+  pins what it read with the run tree, one snapshot per project: a resume or
+  any child run sees the same values even if the file changes during a
+  pause, and the pinned revision fingerprint covers them, as does a trusted
+  Page action's approval: changing a profile value invalidates it, and the
+  run it admits pins the snapshot that was checked. The schema is typed and
+  refuses unknown keys, malformed files and anything that looks like a
+  secret, without ever quoting the file in its error; a run that needs a
+  missing key fails before its first step, naming it, and projects without a
+  profile are unaffected. A completed Full audit drafts a starter profile
+  when the repository has none and keeps it with the audit run, without
+  writing into the checkout; the audit view shows it read-only with a Copy
+  button. Schema and an example:
+  `docs/guides/project-profile.md`.
+- A workflow step now delegates a plan's subtasks without an orchestrator
+  agent (KT-909). `DelegateSubtasks` takes a parent task, launches each ready
+  subtask with the worker named by its `worker:<key>` tag, in plan order,
+  within the step's concurrency and the plan's blockers, and waits on the
+  executions' durable state with no model call. Each delivery is reviewed by
+  the step's agent in one fresh, short session that sees the DoD, the diff and
+  the worker's report, and answers approve, request changes, reassign or
+  escalate. The diff is cut at 40,000 characters: an HTTP reviewer has no
+  tool to read the worktree, so past that cut it does not review the whole
+  change; Kronn applies the verdict and integrates approved work into the
+  run's branch, validations included, through the existing review and
+  integration code. The step ends with OK, or with ESCALATED, CONFLICT,
+  BLOCKED, FAILED or TIMEOUT for `on_result` to route, and lists per subtask
+  its status, integrated SHA, review rounds and cost. The step timeout also
+  bounds a review in flight: a verdict that comes back late is kept, never
+  applied or integrated past the deadline. Each review is recorded in the run's
+  durable LLM-call count before it starts, so a restart keeps the cap, and
+  a refused write ends the run before another review. A restarted step picks
+  its campaign back up: nothing is launched twice, a verdict already recorded
+  is applied without a new review, a reassignment interrupted midway is
+  applied once instead of escalating, and boot recovery no longer wakes a paid
+  principal turn in the step's room.
 - Multi-agent discussions now say who is launched and how (KT-1109). While a
   draft names several agents, the composer shows "N agents launched in
   parallel" with one chip per agent, and the sent message's routing line adds
@@ -246,6 +287,13 @@ Release notes for 0.9.3 and earlier are available in the
   withdraw controls, then the others grouped by reason, each group collapsed
   with its count. The browser remembers whether you left it open. Approving
   and withdrawing work as before.
+- Kronn's built-in skills are now listed apart from the user's (KT-1140). On
+  the Automation page's Skills cards and on a project's AI & automation tab,
+  the skills in use split into "Skills Kronn" and "Mes skills" (custom,
+  project and repository skills). Both screens use one shared rule and the
+  same badges: "Projet", "Dépôt" and "Pas synchro". "Pas synchro" shows only
+  on the project tab, the one screen that knows the sync state. Unused skills
+  stay folded below, as before.
 
 ### Fixed
 

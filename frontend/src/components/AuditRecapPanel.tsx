@@ -30,6 +30,8 @@ type AuditRun = {
   status: string;
   td_total: number;
   health_score?: number | null;
+  /** Starter `kronn/project.toml` the audit drafted; never written to the repo. */
+  project_profile_draft?: string | null;
 };
 
 type SortKey = 'step_index' | 'duration_ms' | 'step_tokens';
@@ -55,6 +57,39 @@ interface StepsResult {
 }
 
 const EMPTY_AUDIT_RUNS: AuditRun[] = [];
+
+/** Read-only view of the drafted repository profile: a human copies it into a PR. */
+function ProfileDraft({ draft }: { draft: string }) {
+  const { t } = useT();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(draft);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div className="arp-profile-draft" data-testid="audit-recap-profile-draft">
+      <div className="arp-profile-draft-header">
+        <strong>{t('projects.docAi.auditRecap.profileDraftTitle')}</strong>
+        <button
+          type="button"
+          className="arp-profile-draft-copy"
+          onClick={copy}
+          data-testid="audit-recap-profile-draft-copy"
+        >
+          {copied
+            ? t('projects.docAi.auditRecap.profileDraftCopied')
+            : t('projects.docAi.auditRecap.profileDraftCopy')}
+        </button>
+      </div>
+      <p className="arp-profile-draft-hint">{t('projects.docAi.auditRecap.profileDraftHint')}</p>
+      <pre className="arp-profile-draft-text">{draft}</pre>
+    </div>
+  );
+}
 const EMPTY_AUDIT_STEPS: Step[] = [];
 
 function fmtDuration(ms: number | null | undefined): string {
@@ -329,6 +364,10 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
               </span>
             )}
           </div>
+
+          {latestRun.project_profile_draft && (
+            <ProfileDraft draft={latestRun.project_profile_draft} />
+          )}
 
           <div className="arp-latest-steps">
             {loadingLatestSteps && <p>{t('common.loading')}</p>}

@@ -338,12 +338,13 @@ describe('WorkflowsPage — skills (KT-914)', () => {
 
     const viewer = document.querySelector('.automation-viewer') as HTMLElement;
     expect(within(viewer).queryByTestId('skill-sheet')).toBeNull();
-    expect(openButtons(viewer)).toEqual(['Ouvrir Review', 'Ouvrir Rust']);
+    // Kronn's skills first, then the user's (KT-1140).
+    expect(openButtons(viewer)).toEqual(['Ouvrir Rust', 'Ouvrir Review']);
     // The cards fold the unused skills away as the list does.
     const toggle = availableToggle(2, viewer);
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await act(async () => { fireEvent.click(toggle); });
-    expect(openButtons(viewer)).toEqual(['Ouvrir Review', 'Ouvrir Rust', 'Ouvrir Orphan', 'Ouvrir Spare']);
+    expect(openButtons(viewer)).toEqual(['Ouvrir Rust', 'Ouvrir Review', 'Ouvrir Orphan', 'Ouvrir Spare']);
     await act(async () => { fireEvent.click(within(viewer).getByRole('button', { name: 'Ouvrir Rust' })); });
     expect(screen.getByRole('heading', { level: 2, name: 'Rust' })).toBeInTheDocument();
   });
@@ -615,5 +616,71 @@ describe('WorkflowsPage — skills used from a repository (KT-921)', () => {
     mockProjectsApi.usedSkills.mockRejectedValue(new Error('offline'));
     await wrap(page());
     expect(openButtons(group('kind:skills'))).toEqual(['Ouvrir Review', 'Ouvrir Rust']);
+  });
+});
+
+// KT-1140 — the cards split Kronn's built-in skills from the user's, with the
+// project card's groups, labels and badges.
+describe('WorkflowsPage — Kronn skills apart from the user\'s (KT-1140)', () => {
+  const PROJECT_SKILL = skill({ id: 'custom-beta-only', name: 'Beta only', project_id: 'p-beta' });
+  const REPOSITORY_SKILL: ProjectUsedSkill = {
+    project_id: 'p-alpha', slug: 'block-migration', name: 'block-migration',
+    root: '.agents/skills', relative_path: '.agents/skills/block-migration/SKILL.md', referenced: true, published: false,
+  };
+
+  const showCards = async () => {
+    await wrap(page());
+    const skillsOption = within(typeList()).getByRole('option', { name: /^Skills \(/ });
+    await act(async () => { fireEvent.click(skillsOption); });
+    return document.querySelector('.automation-viewer') as HTMLElement;
+  };
+  const skillGroup = (viewer: HTMLElement, name: string) => within(viewer).getByRole('region', { name });
+  const cardOf = (scope: HTMLElement, name: string) => (
+    within(scope).getByRole('button', { name: `Ouvrir ${name}` }).closest('.skill-card') as HTMLElement
+  );
+
+  beforeEach(() => {
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, PROJECT_SKILL]);
+    mockProjectsApi.usedSkills.mockResolvedValue([REPOSITORY_SKILL]);
+  });
+
+  it('lists the built-in skills under « Skills Kronn » and the custom, project and repository ones under « Mes skills »', async () => {
+    const viewer = await showCards();
+    const groups = Array.from(viewer.querySelectorAll('.skill-group-title')).map(title => title.textContent);
+    expect(groups).toEqual(['Skills Kronn 1', 'Mes skills 3']);
+    expect(openButtons(skillGroup(viewer, 'Skills Kronn'))).toEqual(['Ouvrir Rust']);
+    expect(openButtons(skillGroup(viewer, 'Mes skills'))).toEqual(['Ouvrir Beta only', 'Ouvrir block-migration', 'Ouvrir Review']);
+  });
+
+  it('badges a project skill « Projet » and a repository skill « Dépôt », and a built-in one with neither', async () => {
+    const viewer = await showCards();
+    const mine = skillGroup(viewer, 'Mes skills');
+    expect(within(cardOf(mine, 'Beta only')).getByTestId('skill-group-badge-project')).toHaveTextContent('Projet');
+    expect(within(cardOf(mine, 'block-migration')).getByTestId('skill-group-badge-repository')).toHaveTextContent('Dépôt');
+    expect(within(cardOf(mine, 'Review')).queryByTestId(/^skill-group-badge-/)).toBeNull();
+    expect(within(cardOf(skillGroup(viewer, 'Skills Kronn'), 'Rust')).queryByTestId(/^skill-group-badge-/)).toBeNull();
+  });
+
+  it('badges « Pas synchro » a skill a project reports in conflict or moved in the repository', async () => {
+    mockProjectsApi.usedSkills.mockResolvedValue([
+      REPOSITORY_SKILL,
+      { project_id: 'p-alpha', skill_id: 'rust', slug: 'rust', name: 'Rust', root: '.agents/skills',
+        relative_path: '.agents/skills/rust/SKILL.md', referenced: false, published: false, sync_status: 'repository_newer' },
+      { project_id: 'p-alpha', skill_id: 'review', slug: 'review', name: 'Review', root: '.agents/skills',
+        relative_path: '.agents/skills/review/SKILL.md', referenced: false, published: true, sync_status: 'up_to_date' },
+      { project_id: 'p-beta', skill_id: 'review', slug: 'review', name: 'Review', root: '.agents/skills',
+        relative_path: '.agents/skills/review/SKILL.md', referenced: false, published: true, sync_status: 'conflict' },
+    ] satisfies ProjectUsedSkill[]);
+    const viewer = await showCards();
+    expect(within(cardOf(skillGroup(viewer, 'Skills Kronn'), 'Rust')).getByTestId('skill-group-badge-unsynced')).toHaveTextContent('Pas synchro');
+    expect(within(cardOf(skillGroup(viewer, 'Mes skills'), 'Review')).getByTestId('skill-group-badge-unsynced')).toHaveTextContent('Pas synchro');
+    expect(within(cardOf(skillGroup(viewer, 'Mes skills'), 'block-migration')).queryByTestId('skill-group-badge-unsynced')).toBeNull();
+  });
+
+  it('keeps the unused skills folded below both groups, and opens a card from either group', async () => {
+    const viewer = await showCards();
+    expect(availableToggle(2, viewer)).toHaveAttribute('aria-expanded', 'false');
+    await act(async () => { fireEvent.click(within(skillGroup(viewer, 'Mes skills')).getByRole('button', { name: 'Ouvrir Review' })); });
+    expect(screen.getByRole('heading', { level: 2, name: 'Review' })).toBeInTheDocument();
   });
 });

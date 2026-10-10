@@ -85,6 +85,36 @@ beforeEach(() => {
 });
 
 describe('AuditRecapPanel (0.8.4 #332 drawer)', () => {
+  it('shows the drafted repository profile read-only and copies it', async () => {
+    const draft = 'schema_version = 1\n\n[forge]\nbase_branch = "main"\n';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { ...fullRun, project_profile_draft: draft },
+    ]);
+    (projectsApi.auditRunSteps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleSteps);
+
+    wrap(<AuditRecapPanel projectId="p1" />);
+
+    const panel = await screen.findByTestId('audit-recap-profile-draft');
+    expect(panel).toHaveTextContent('kronn/project.toml');
+    expect(panel.querySelector('pre')?.textContent).toBe(draft);
+    expect(panel.querySelector('textarea, input')).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('audit-recap-profile-draft-copy'));
+    });
+    expect(writeText).toHaveBeenCalledWith(draft);
+    expect(screen.getByTestId('audit-recap-profile-draft-copy')).toHaveTextContent('Copié');
+  });
+
+  it('shows no profile draft when the audit drafted none', async () => {
+    (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([fullRun]);
+    (projectsApi.auditRunSteps as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleSteps);
+    wrap(<AuditRecapPanel projectId="p1" />);
+    await screen.findByTestId('audit-recap-latest');
+    expect(screen.queryByTestId('audit-recap-profile-draft')).toBeNull();
+  });
+
   it('renders nothing when audit history is empty', async () => {
     (projectsApi.auditHistory as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
     const { container } = wrap(<AuditRecapPanel projectId="p1" />);

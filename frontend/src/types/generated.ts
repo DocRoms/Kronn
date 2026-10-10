@@ -1046,7 +1046,12 @@ head_sha?: string | null, branch?: string | null, source_fingerprint?: string | 
 /**
  * The model the run's agent used, when known.
  */
-model?: string | null, };
+model?: string | null,
+/**
+ * Starter `kronn/project.toml` drafted for a repository without one
+ * (KT-920); never written into the checkout.
+ */
+project_profile_draft?: string | null, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -2225,6 +2230,49 @@ export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
  * agent reads it, so an empty refusal still has to be actionable.
  */
 reason?: string | null, };
+
+/**
+ * KT-909 — what a `DelegateSubtasks` step delegates and how.
+ */
+export type DelegateSubtasksConfig = {
+/**
+ * Parent task reference or id; templated (`{{steps.guard.data.taskId}}`).
+ */
+parent_task: string,
+/**
+ * `worker:<key>` subtask tag → worker. The first tag found here wins.
+ */
+worker_map?: { [key in string]: DelegateWorker },
+/**
+ * Worker for a subtask whose tags match no `worker_map` entry.
+ */
+default_worker?: DelegateWorker,
+/**
+ * Executions in flight at once. Default 1, maximum 8.
+ */
+concurrency?: number,
+/**
+ * Review rounds per subtask before it escalates. Default 3, maximum 10.
+ */
+max_review_rounds?: number,
+/**
+ * Commands run on each approved candidate before it is integrated.
+ */
+validations?: Array<ValidationSpec>,
+/**
+ * Integration branch; templated. Default: the branch checked out in the
+ * run's working directory.
+ */
+target_branch?: string,
+/**
+ * Bound on the whole step. Default 6 h. Executions survive it.
+ */
+timeout_secs?: number, };
+
+/**
+ * A native worker identity for delegated subtasks (CLI sessions excluded).
+ */
+export type DelegateWorker = { agent: AgentType, tier?: ModelTier, model?: string, };
 
 export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
@@ -6120,7 +6168,8 @@ export type ProjectUsage = { project_id: string, project_name: string, tokens_us
  * A skill a project uses that its `default_skill_ids` do not tell: a native
  * `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
  * because Kronn published it into the repository. The Automation page reads
- * these for every project at once, so nothing here renders or compares.
+ * these for every project at once; the route also lists an attached skill the
+ * repository holds a file for, so each Kronn skill carries its sync state.
  */
 export type ProjectUsedSkill = { project_id: string,
 /**
@@ -6143,7 +6192,12 @@ referenced: boolean,
 /**
  * `kronn.lock` lists it: Kronn wrote it into the repository.
  */
-published: boolean, };
+published: boolean,
+/**
+ * A Kronn skill's sync state with this repository, as the project card
+ * shows it. `None` for a skill only the repository holds.
+ */
+sync_status?: ProjectRepositoryResourceStatus, };
 
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them
@@ -8180,7 +8234,7 @@ cli: Array<string>,
  */
 kronn_internal: Array<string>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -9945,7 +9999,12 @@ room_id?: string | null,
  * Agent step. Supported by Claude Code and Codex only; empty preserves
  * the existing launch policy. Paths are validated again before launch.
  */
-read_only_repos?: Array<string>, };
+read_only_repos?: Array<string>,
+/**
+ * KT-909 — `DelegateSubtasks` steps only. The step's `agent` and
+ * `agent_settings` are the reviewer's.
+ */
+delegate_subtasks?: DelegateSubtasksConfig, };
 
 /**
  * Durable identity of an Agent step that joined a discussion room.

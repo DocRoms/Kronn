@@ -1364,12 +1364,20 @@ async fn wake_recovered_worker(db: &Database, exec_id: &str) -> Result<String> {
     .await
 }
 
-async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<String> {
+pub(crate) async fn wake_recovered_principal(db: &Database, exec_id: &str) -> Result<String> {
     let id = exec_id.to_string();
     db.with_conn(move |conn| {
         let tx = conn.unchecked_transaction()?;
         let execution = crate::db::orchestration::get_task_execution(&tx, &id)?
             .context("execution vanished before principal wake")?;
+        // A delegation step reviews on its own resume; an agent turn here would
+        // be the paid orchestrator KT-909 removes, deciding in its place.
+        if crate::workflows::delegate_subtasks_step::is_delegation_discussion(
+            &execution.parent_discussion_id,
+        ) {
+            tx.commit()?;
+            return Ok("left to the delegating workflow step".into());
+        }
         if crate::db::agent_dispatch::has_active_for_discussion(
             &tx,
             &execution.parent_discussion_id,
@@ -5423,6 +5431,30 @@ pub(crate) async fn decide_native_review(
         decision_json,
     )
     .await
+}
+
+/// Review entry point for a `DelegateSubtasks` workflow step (KT-909). The step
+/// owns its principal room, so it decides as that room's principal, with no session.
+pub(crate) async fn decide_review_as_delegation_step(
+    db: &Database,
+    task_execution_id: &str,
+    decision_json: &str,
+    alias: &str,
+) -> Result<ReviewOutcome, ProvisionError> {
+    let execution_id = task_execution_id.to_string();
+    let execution = db
+        .with_conn(move |conn| crate::db::orchestration::get_task_execution(conn, &execution_id))
+        .await
+        .map_err(|error| ProvisionError::Internal(error.to_string()))?;
+    let Some(execution) = execution else {
+        return Ok(ReviewOutcome::NotAddressed);
+    };
+    if !crate::workflows::delegate_subtasks_step::is_delegation_discussion(
+        &execution.parent_discussion_id,
+    ) {
+        return Ok(ReviewOutcome::NotAddressed);
+    }
+    decide_authorized_review(db, execution, alias, None, true, decision_json).await
 }
 
 /// Pin a native worker call to the exact durable dispatch that launched it.
@@ -12437,7 +12469,7 @@ pub async fn human_review(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::models::{
         AgentType, AiAuditStatus, AiConfigStatus, CreatePlanningDodItem, CreatePlanningTaskRequest,
@@ -14506,7 +14538,7 @@ mod tests {
         );
     }
 
-    fn git(repo: &Path, args: &[&str]) -> std::process::Output {
+    pub(crate) fn git(repo: &Path, args: &[&str]) -> std::process::Output {
         Command::new("git")
             .args(args)
             .current_dir(repo)
@@ -14514,7 +14546,7 @@ mod tests {
             .unwrap()
     }
 
-    fn init_repo() -> tempfile::TempDir {
+    pub(crate) fn init_repo() -> tempfile::TempDir {
         let dir = tempfile::Builder::new()
             .prefix("kronn-t3-")
             .tempdir()
@@ -14528,12 +14560,12 @@ mod tests {
         dir
     }
 
-    fn git_rev(repo: &Path, rev: &str) -> String {
+    pub(crate) fn git_rev(repo: &Path, rev: &str) -> String {
         let out = git(repo, &["rev-parse", rev]);
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    fn test_actor() -> PlanningActor {
+    pub(crate) fn test_actor() -> PlanningActor {
         PlanningActor {
             kind: PlanningActorKind::Backend,
             id: Some("test".into()),
@@ -14546,7 +14578,7 @@ mod tests {
         MessageTarget::agent(AgentType::ClaudeCode)
     }
 
-    fn test_project(id: &str, path: &str) -> Project {
+    pub(crate) fn test_project(id: &str, path: &str) -> Project {
         let now = chrono::Utc::now();
         Project {
             id: id.into(),
@@ -14575,7 +14607,7 @@ mod tests {
         }
     }
 
-    fn plain_discussion(id: &str, project_id: &str) -> Discussion {
+    pub(crate) fn plain_discussion(id: &str, project_id: &str) -> Discussion {
         let now = chrono::Utc::now();
         Discussion {
             connection_id: None,
@@ -23397,7 +23429,7 @@ mod tests {
         )
     }
 
-    async fn projected_manifest_for_execution(db: &Database, exec_id: &str) -> String {
+    pub(crate) async fn projected_manifest_for_execution(db: &Database, exec_id: &str) -> String {
         let execution_id = exec_id.to_string();
         let dod_count = db
             .with_conn(move |conn| {
@@ -26010,7 +26042,7 @@ mod tests {
         .expect("canonical path")
     }
 
-    async fn exec_of(db: &Database, exec_id: &str) -> TaskExecution {
+    pub(crate) async fn exec_of(db: &Database, exec_id: &str) -> TaskExecution {
         let e = exec_id.to_string();
         db.with_conn(move |conn| {
             Ok(crate::db::orchestration::get_task_execution(conn, &e)?.expect("execution"))

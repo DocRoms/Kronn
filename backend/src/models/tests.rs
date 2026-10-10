@@ -860,6 +860,7 @@ fn workflow_step_api_call_roundtrip() {
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        delegate_subtasks: None,
         exec_script_files: vec![],
         exec_unmodelled_args_approved: None,
         exec_agent_written: None,

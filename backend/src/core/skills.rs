@@ -2059,9 +2059,9 @@ body"#;
         );
     }
 
-    /// The architect must enumerate the same thirteen types as `StepType`.
+    /// The architect must enumerate the same fourteen types as `StepType`.
     #[test]
-    fn workflow_architect_skill_counts_thirteen_step_types() {
+    fn workflow_architect_skill_counts_fourteen_step_types() {
         let skills = list_all_skills();
         let arch = skills
             .iter()
@@ -2069,8 +2069,8 @@ body"#;
             .expect("workflow-architect skill must exist");
         let c = &arch.content;
         assert!(
-            c.contains("thirteen step types") || c.contains("13 step types"),
-            "skill must say 'thirteen step types'"
+            c.contains("fourteen step types") || c.contains("14 step types"),
+            "skill must say 'fourteen step types'"
         );
         for step_type in [
             "Agent",
@@ -2086,6 +2086,7 @@ body"#;
             "PublishPageData",
             "SubWorkflow",
             "TriggerWorkflow",
+            "DelegateSubtasks",
         ] {
             assert!(c.contains(step_type), "skill must teach {step_type}");
         }
@@ -2100,6 +2101,8 @@ body"#;
             "9 step types",
             "twelve step types",
             "12 step types",
+            "thirteen step types",
+            "13 step types",
         ] {
             assert!(
                 !c.contains(stale_count),

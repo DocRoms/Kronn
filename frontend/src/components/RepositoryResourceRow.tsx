@@ -4,6 +4,8 @@ import { useT } from '../lib/I18nContext';
 import { formatResourceDate } from '../lib/formatResourceDate';
 import { linkedCount } from '../lib/repositoryResourceLinks';
 import { splitPath, writesRepository, type ResourceRow } from '../lib/repositoryResourceRows';
+import { resourceRowSkillTraits } from '../lib/skillGroups';
+import { SkillGroupBadges } from './SkillGroupBadges';
 
 export type RowMenuAction = 'view' | 'compare' | 'copy_native';
 
@@ -168,6 +170,7 @@ export function RepositoryResourceRow({ row, checked, busy, canWrite, onToggle, 
           <button type="button" className="rr-name-button" onClick={onOpen}>{row.name}</button>
           {row.origins.map(origin => <span key={origin} className="rr-origin">{origin}</span>)}
           <LinkedBadge row={row} />
+          {row.kind === 'skill' && <SkillGroupBadges traits={resourceRowSkillTraits(row)} />}
         </span>
         <PathLine row={row} />
         {row.pathsDiverge && (

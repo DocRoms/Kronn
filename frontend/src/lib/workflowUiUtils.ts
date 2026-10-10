@@ -178,3 +178,10 @@ export function withStepTools(
   const tools = step.agent_settings?.tools ?? { cli: [], kronn_internal: [] };
   return { ...step.agent_settings, tools: { ...tools, ...patch } };
 }
+
+/** KT-909 — a DelegateSubtasks step needs a parent task and a worker; its review guidance is optional. */
+export function isDelegateSubtasksIncomplete(step: WorkflowStep): boolean {
+  const config = step.delegate_subtasks;
+  if (!config?.parent_task?.trim()) return true;
+  return Object.keys(config.worker_map ?? {}).length === 0 && !config.default_worker;
+}

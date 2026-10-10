@@ -245,7 +245,9 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         | StepType::Gate
         | StepType::JsonData
         | StepType::TransformData
-        | StepType::SubWorkflow => None,
+        | StepType::SubWorkflow
+        // Re-entry reads the campaign back; nothing launches twice.
+        | StepType::DelegateSubtasks => None,
     }
 }
 
@@ -808,11 +810,16 @@ async fn execute_run_with_notify_policy(
 ) -> Result<()> {
     // KT-1096 — every execution of a run, resumes included, runs the
     // revision pinned at its first one.
+    // KT-920 — the repository profiles the tree reads are resolved first,
+    // outside any connection; the pin stores and hashes those snapshots.
+    let profiles = resolve_pin_profiles(&state, workflow, run).await?;
     let pinned = {
         let (definition, snapshot) = (workflow.clone(), run.clone());
         state
             .db
-            .with_conn(move |conn| super::run_pins::pin_or_load(conn, &definition, &snapshot))
+            .with_conn(move |conn| {
+                super::run_pins::pin_or_load_with_profiles(conn, &definition, &snapshot, &profiles)
+            })
             .await?
     };
     let pinned = match pinned {
@@ -831,7 +838,8 @@ async fn execute_run_with_notify_policy(
     };
     let workflow = &pinned;
     let is_inherited_workspace = inherited_workspace.is_some();
-    let result = execute_run_body(
+    // Boxed: the run body's state machine is too large for a caller's stack.
+    let result = Box::pin(execute_run_body(
         state.clone(),
         workflow,
         run,
@@ -841,7 +849,7 @@ async fn execute_run_with_notify_policy(
         shared_budget,
         inherited_workspace,
         notify_security_policy,
-    )
+    ))
     .await;
     // KT-910 — the artifacts directory goes with the run once it can no
     // longer execute; a paused or interrupted run keeps it.
@@ -911,6 +919,23 @@ pub(crate) async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun
 
 /// Removes the worktree a run owns once it will not execute again, keeping its
 /// branch when it holds commits no known base has (recorded on the run).
+/// The repository profile of every project the run tree will read and has
+/// not pinned yet, read from git now.
+async fn resolve_pin_profiles(
+    state: &AppState,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> Result<crate::core::project_profile::ProfileSnapshots> {
+    let (definition, snapshot) = (workflow.clone(), run.clone());
+    let keys = state
+        .db
+        .with_read_conn(move |conn| {
+            super::run_pins::profile_projects_to_resolve(conn, &definition, &snapshot)
+        })
+        .await?;
+    crate::core::project_profile::snapshots_for_keys(&state.db, keys).await
+}
+
 async fn reclaim_run_worktree(
     state: &AppState,
     workflow: &Workflow,
@@ -1646,6 +1671,59 @@ async fn execute_run_body(
         .await?;
     for (reference, id) in references {
         ctx.set(reference, id);
+    }
+    // KT-920 — `{{project.<path>}}` comes from the main checkout's default
+    // branch, read once and pinned: no worktree, PR or pause changes it.
+    let profile_repo = (!project_path.is_empty())
+        .then(|| crate::core::scanner::resolve_host_path(&project_path))
+        .filter(|path| path.exists());
+    let profile_reads = crate::core::project_profile::workflow_placeholders(workflow);
+    let (profile_run, profile_project) = (run.id.clone(), workflow.project_id.clone());
+    let pinned_profile = {
+        let (run_id, project) = (profile_run.clone(), profile_project.clone());
+        db.with_read_conn(move |conn| {
+            super::run_pins::pinned_project_profile(conn, &run_id, project.as_deref())
+        })
+        .await?
+    };
+    let pinned_profile = match pinned_profile {
+        Some(pinned) => pinned,
+        None => {
+            let read = tokio::task::spawn_blocking(move || {
+                crate::core::project_profile::snapshot(profile_repo.as_deref())
+            })
+            .await?;
+            db.with_conn(move |conn| {
+                super::run_pins::record_project_profile(
+                    conn,
+                    &profile_run,
+                    profile_project.as_deref(),
+                    read,
+                )
+            })
+            .await?
+        }
+    };
+    let profile = crate::core::project_profile::values_for(&pinned_profile, &profile_reads);
+    match profile {
+        Ok(values) => {
+            for (key, value) in values {
+                ctx.set_builtin(key, value);
+            }
+        }
+        Err(msg) => {
+            run.status = RunStatus::Failed;
+            run.finished_at = Some(Utc::now());
+            let mut result = workspace_failure_result(&msg);
+            result.step_name = "__project_profile__".to_string();
+            run.step_results.push(result);
+            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+            db.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                .await?;
+            emit(RunEvent::RunError { error: msg });
+            broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+            return Ok(());
+        }
     }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
@@ -2646,6 +2724,25 @@ async fn execute_run_body(
                     )
                     .await
                 }
+                StepType::DelegateSubtasks => {
+                    // Boxed: inlined, its state machine overflows the run's stack.
+                    Box::pin(
+                        super::delegate_subtasks_step::execute_delegate_subtasks_step(
+                            &state,
+                            step,
+                            &run.id,
+                            run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                            &project_path,
+                            &work_dir,
+                            &ctx,
+                            tokens_config,
+                            agents_config,
+                            &ollama_context_overrides,
+                            budget.clone(),
+                        ),
+                    )
+                    .await
+                }
             }
         };
 
@@ -2875,7 +2972,9 @@ async fn execute_run_body(
             | StepType::TransformData
             | StepType::PublishPageData
             // A triggered run has its own budget.
-            | StepType::TriggerWorkflow => {}
+            | StepType::TriggerWorkflow
+            // Counts each review call itself, as it happens.
+            | StepType::DelegateSubtasks => {}
             // SubWorkflow itself spawns no LLM directly; its child run's
             // Agent steps consume LLM calls. Phase 1b aggregates the child's
             // count into the SHARED budget so the parent quota isn't bypassed
@@ -3664,6 +3763,10 @@ async fn execute_run_body(
                     )
                     .await
                 }
+                // Forbidden in on_failure (save-validated); a hand-edited JSON fails here.
+                StepType::DelegateSubtasks => {
+                    super::delegate_subtasks_step::forbidden_in_rollback(rb_step)
+                }
             };
 
             ctx.set_step_output(&rb_step.name, &rb_outcome.result.output);
@@ -4138,7 +4241,7 @@ async fn root_llm_calls_spent(
 
 /// Raises the root's durable count to the shared total: a child's calls must
 /// survive a crash before its parent's step returns (KT-1046).
-async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
+pub(crate) async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
     let Some(root) = budget.root_run_id().map(str::to_string) else {
         return Ok(());
     };
@@ -4151,6 +4254,36 @@ async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Resul
         .recorded
         .fetch_max(total, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+}
+
+/// Takes back one call counted before launch that the provider refused for
+/// quota: a refused call spent nothing (KT-1046). Interrupted calls stay counted.
+pub(crate) async fn release_quota_refused_llm_call(
+    state: &AppState,
+    budget: &SharedBudget,
+) -> Result<()> {
+    if let Some(root) = budget.root_run_id().map(str::to_string) {
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::release_tree_llm_call(conn, &root))
+            .await?;
+    }
+    decrement_saturating(&budget.llm_calls);
+    decrement_saturating(&budget.recorded);
+    Ok(())
+}
+
+/// Lowers a counter by one, never below zero. A plain CAS loop: `fetch_update`
+/// is deprecated on newer toolchains and `try_update` is missing on older ones.
+fn decrement_saturating(counter: &std::sync::atomic::AtomicU32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut current = counter.load(SeqCst);
+    while current > 0 {
+        match counter.compare_exchange_weak(current, current - 1, SeqCst, SeqCst) {
+            Ok(_) => return,
+            Err(seen) => current = seen,
+        }
+    }
 }
 
 /// The row that stops a run whose tree spent calls the database did not take.
@@ -4582,6 +4715,7 @@ pub(crate) fn apply_step_snapshot(
         StepType::PublishPageData => "PublishPageData",
         StepType::SubWorkflow => "SubWorkflow",
         StepType::TriggerWorkflow => "TriggerWorkflow",
+        StepType::DelegateSubtasks => "DelegateSubtasks",
     };
     result.step_kind = Some(kind.into());
     if matches!(step.step_type, StepType::Agent) {
@@ -4673,7 +4807,10 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
 /// reported; only step kinds that run no model can claim a measured zero.
 fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
     match step_type {
-        StepType::Agent | StepType::BatchQuickPrompt | StepType::SubWorkflow => None,
+        StepType::Agent
+        | StepType::BatchQuickPrompt
+        | StepType::SubWorkflow
+        | StepType::DelegateSubtasks => None,
         _ => Some(0),
     }
 }
@@ -4977,6 +5114,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -5328,6 +5466,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -8058,6 +8197,679 @@ mod tests {
         let output = &run.step_results.last().unwrap().output;
         assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
         assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    // ─── KT-920 — repository profile ─────────────────────────────────────
+
+    const PROFILE_MAIN: &str =
+        "schema_version = 1\n[validation.targets.lint]\ncommand = \"make lint-from-main\"\n";
+
+    #[tokio::test]
+    async fn an_exec_step_reads_the_profile_of_the_default_branch_not_of_its_worktree() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-profile").await;
+        let root = repo.path();
+        std::fs::create_dir_all(root.join("kronn")).unwrap();
+        std::fs::write(root.join("kronn/project.toml"), PROFILE_MAIN).unwrap();
+        git_in(root, &["add", "."]).await;
+        git_in(root, &["commit", "-q", "-m", "profile"]).await;
+        // The checkout sits on a branch that rewrites the profile: the run's
+        // worktree starts from it, the profile must not.
+        git_in(root, &["checkout", "-q", "-b", "pr-branch"]).await;
+        std::fs::write(
+            root.join("kronn/project.toml"),
+            PROFILE_MAIN.replace("lint-from-main", "lint-from-pr"),
+        )
+        .unwrap();
+        git_in(root, &["commit", "-q", "-am", "pr rewrites its rules"]).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-profile".into();
+        workflow.name = "profile".into();
+        workflow.project_id = Some("proj-profile".into());
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["cat".into(), "echo".into()];
+        workflow.steps = vec![
+            exec_step("worktree_copy", "cat", &["kronn/project.toml"]),
+            exec_step(
+                "profile_value",
+                "echo",
+                &["lint={{project.validation.targets.lint.command}}"],
+            ),
+        ];
+        let mut run = pending_run("run-profile", &workflow.id);
+        run.project_id = Some("proj-profile".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(run.workspace_path.is_some(), "the run is isolated");
+        assert!(
+            run.step_results[0].output.contains("lint-from-pr"),
+            "{}",
+            run.step_results[0].output
+        );
+        let read = &run.step_results[1].output;
+        assert!(read.contains("lint=make lint-from-main"), "{read}");
+        assert!(!read.contains("lint-from-pr"), "{read}");
+    }
+
+    #[tokio::test]
+    async fn a_run_reading_a_profile_its_project_lacks_fails_before_its_first_step() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-no-profile").await;
+        let marker = repo.path().join("launched");
+        let marker_arg = marker.to_string_lossy().to_string();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-no-profile".into();
+        workflow.project_id = Some("proj-no-profile".into());
+        workflow.exec_allowlist = vec!["touch".into()];
+        workflow.steps = vec![exec_step(
+            "launch",
+            "touch",
+            &[marker_arg.as_str(), "{{project.forge.base_branch}}"],
+        )];
+        let mut run = pending_run("run-no-profile", &workflow.id);
+        run.project_id = Some("proj-no-profile".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        let result = run.step_results.last().unwrap();
+        assert_eq!(result.step_name, "__project_profile__");
+        assert!(
+            result.output.contains("kronn/project.toml")
+                && result.output.contains("project.forge.base_branch"),
+            "{}",
+            result.output
+        );
+        assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    #[tokio::test]
+    async fn a_project_without_a_profile_runs_a_workflow_that_does_not_read_one() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo = git_project(&state, "proj-plain").await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-plain".into();
+        workflow.project_id = Some("proj-plain".into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step(
+            "hello",
+            "echo",
+            &["branch={{project.forge.base_branch ?? \"none\"}}"],
+        )];
+        let mut run = pending_run("run-plain", &workflow.id);
+        run.project_id = Some("proj-plain".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(run.step_results[0].output.contains("branch=none"));
+    }
+
+    /// Commits `content` as the profile on main (or removes it when `None`).
+    async fn commit_profile(root: &std::path::Path, content: Option<&str>) {
+        let file = root.join("kronn/project.toml");
+        match content {
+            Some(text) => {
+                std::fs::create_dir_all(root.join("kronn")).unwrap();
+                std::fs::write(&file, text).unwrap();
+                git_in(root, &["add", "."]).await;
+            }
+            None => {
+                git_in(root, &["rm", "-q", "kronn/project.toml"]).await;
+            }
+        }
+        git_in(root, &["commit", "-q", "-m", "profile"]).await;
+    }
+
+    fn restarted(state: &crate::AppState) -> crate::AppState {
+        let cfg = crate::core::config::default_config();
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
+        crate::AppState::new_defaults(
+            config,
+            state.db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    /// Runs `echo before`, a Gate, `echo after`; `pause` edits the repository
+    /// while the run waits, then a restarted Kronn approves the Gate.
+    async fn profile_across_a_gate(
+        id: &str,
+        initial: Option<&str>,
+        pause: Option<Option<&str>>,
+        read: &str,
+    ) -> WorkflowRun {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, id).await;
+        if let Some(text) = initial {
+            commit_profile(repo.path(), Some(text)).await;
+        }
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{id}");
+        workflow.project_id = Some(id.into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![
+            exec_step("before", "echo", &[read]),
+            gate,
+            exec_step("after", "echo", &[read]),
+        ];
+        let mut run = pending_run(&format!("run-{id}"), &workflow.id);
+        run.project_id = Some(id.into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        assert_eq!(
+            run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        if let Some(change) = pause {
+            commit_profile(repo.path(), change).await;
+        }
+        // As the approval endpoint does: claim the waiting run, then resume.
+        let claimed_id = run.id.clone();
+        let claimed = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap();
+        assert!(claimed);
+        run.status = RunStatus::Running;
+        resume_run(
+            restarted(&state),
+            &workflow,
+            &mut run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        run
+    }
+
+    fn step_output<'a>(run: &'a WorkflowRun, name: &str) -> &'a str {
+        &run.step_results
+            .iter()
+            .rfind(|step| step.step_name == name)
+            .unwrap_or_else(|| panic!("{name} ran: {:?}", run.step_results))
+            .output
+    }
+
+    #[tokio::test]
+    async fn a_resumed_run_keeps_the_profile_it_started_with() {
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let modified = PROFILE_MAIN.replace("lint-from-main", "lint-changed-in-pause");
+        for (id, pause) in [
+            ("proj-pin-modified", Some(modified.as_str())),
+            ("proj-pin-deleted", None),
+        ] {
+            let run = profile_across_a_gate(id, Some(PROFILE_MAIN), Some(pause), read).await;
+            for step in ["before", "after"] {
+                let output = step_output(&run, step);
+                assert!(
+                    output.contains("lint=make lint-from-main"),
+                    "{id} {step}: {output}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_profile_added_during_a_pause_does_not_reach_the_resumed_run() {
+        let read = "lint={{project.validation.targets.lint.command ?? \"none\"}}";
+        let run =
+            profile_across_a_gate("proj-pin-added", None, Some(Some(PROFILE_MAIN)), read).await;
+        assert!(step_output(&run, "before").contains("lint=none"));
+        let after = step_output(&run, "after");
+        assert!(after.contains("lint=none"), "{after}");
+    }
+
+    #[tokio::test]
+    async fn a_child_run_reads_the_profile_its_parent_pinned() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-pin-child").await;
+        commit_profile(repo.path(), Some(PROFILE_MAIN)).await;
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = "wf-pin-parent".into();
+        parent.project_id = Some("proj-pin-child".into());
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        parent.steps = vec![gate];
+        let mut parent_run = pending_run("run-pin-parent", &parent.id);
+        parent_run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &parent_run).await;
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut parent_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent");
+        assert_eq!(parent_run.status, RunStatus::WaitingApproval);
+        commit_profile(
+            repo.path(),
+            Some(&PROFILE_MAIN.replace("lint-from-main", "lint-after-parent")),
+        )
+        .await;
+
+        let mut child = make_workflow_with_artifacts(Default::default());
+        child.id = "wf-pin-child".into();
+        child.project_id = parent.project_id.clone();
+        child.exec_allowlist = vec!["echo".into()];
+        child.steps = vec![exec_step(
+            "item",
+            "echo",
+            &["lint={{project.validation.targets.lint.command}}"],
+        )];
+        let mut child_run = pending_run("run-pin-child", &child.id);
+        child_run.project_id = child.project_id.clone();
+        child_run.parent_run_id = Some(parent_run.id.clone());
+        insert_wf_and_run(&state, &child, &child_run).await;
+        execute_run(
+            state.clone(),
+            &child,
+            &mut child_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("child");
+        assert_eq!(
+            child_run.status,
+            RunStatus::Success,
+            "{:?}",
+            child_run.step_results
+        );
+        let output = step_output(&child_run, "item");
+        assert!(output.contains("lint=make lint-from-main"), "{output}");
+    }
+
+    /// Parent in project A paused at a Gate; child B1 (project B) runs, B's
+    /// profile changes, then child B2 runs, pauses at a Gate and resumes on a
+    /// restarted Kronn. Returns what B1 and B2 (before and after) read.
+    async fn two_children_of_another_project(
+        tag: &str,
+        initial_b: Option<&str>,
+        changed_b: Option<&str>,
+        read: &str,
+    ) -> (String, String, String) {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo_a = git_project(&state, &format!("proj-{tag}-a")).await;
+        let repo_b = git_project(&state, &format!("proj-{tag}-b")).await;
+        if let Some(text) = initial_b {
+            commit_profile(repo_b.path(), Some(text)).await;
+        }
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = format!("wf-{tag}-parent");
+        parent.project_id = Some(format!("proj-{tag}-a"));
+        let mut gate = fake_step("hold");
+        gate.step_type = StepType::Gate;
+        parent.steps = vec![gate];
+        let mut parent_run = pending_run(&format!("run-{tag}-parent"), &parent.id);
+        parent_run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &parent_run).await;
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut parent_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent");
+        assert_eq!(parent_run.status, RunStatus::WaitingApproval);
+
+        let child_run_of = |id: &str, workflow: &Workflow| {
+            let mut run = pending_run(id, &workflow.id);
+            run.project_id = workflow.project_id.clone();
+            run.parent_run_id = Some(parent_run.id.clone());
+            run
+        };
+        let mut b1 = make_workflow_with_artifacts(Default::default());
+        b1.id = format!("wf-{tag}-b1");
+        b1.project_id = Some(format!("proj-{tag}-b"));
+        b1.exec_allowlist = vec!["echo".into()];
+        b1.steps = vec![exec_step("item", "echo", &[read])];
+        let mut b1_run = child_run_of(&format!("run-{tag}-b1"), &b1);
+        insert_wf_and_run(&state, &b1, &b1_run).await;
+        execute_run(
+            state.clone(),
+            &b1,
+            &mut b1_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("b1");
+        assert_eq!(
+            b1_run.status,
+            RunStatus::Success,
+            "{:?}",
+            b1_run.step_results
+        );
+
+        commit_profile(repo_b.path(), changed_b).await;
+
+        let mut b2 = make_workflow_with_artifacts(Default::default());
+        b2.id = format!("wf-{tag}-b2");
+        b2.project_id = Some(format!("proj-{tag}-b"));
+        b2.exec_allowlist = vec!["echo".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        b2.steps = vec![
+            exec_step("before", "echo", &[read]),
+            gate,
+            exec_step("after", "echo", &[read]),
+        ];
+        let mut b2_run = child_run_of(&format!("run-{tag}-b2"), &b2);
+        insert_wf_and_run(&state, &b2, &b2_run).await;
+        execute_run(
+            state.clone(),
+            &b2,
+            &mut b2_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("b2");
+        assert_eq!(
+            b2_run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            b2_run.step_results
+        );
+        let claimed_id = b2_run.id.clone();
+        assert!(state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap());
+        b2_run.status = RunStatus::Running;
+        resume_run(
+            restarted(&state),
+            &b2,
+            &mut b2_run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("b2 resumes");
+        assert_eq!(
+            b2_run.status,
+            RunStatus::Success,
+            "{:?}",
+            b2_run.step_results
+        );
+        (
+            step_output(&b1_run, "item").to_string(),
+            step_output(&b2_run, "before").to_string(),
+            step_output(&b2_run, "after").to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn children_of_another_project_share_one_profile_snapshot() {
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let changed = PROFILE_MAIN.replace("lint-from-main", "lint-changed-between-children");
+        let (b1, before, after) =
+            two_children_of_another_project("share", Some(PROFILE_MAIN), Some(&changed), read)
+                .await;
+        for output in [&b1, &before, &after] {
+            assert!(output.contains("lint=make lint-from-main"), "{output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn children_of_another_project_share_its_absence_of_profile() {
+        let read = "lint={{project.validation.targets.lint.command ?? \"none\"}}";
+        let (b1, before, after) =
+            two_children_of_another_project("absent", None, Some(PROFILE_MAIN), read).await;
+        for output in [&b1, &before, &after] {
+            assert!(output.contains("lint=none"), "{output}");
+        }
+    }
+
+    /// A workflow whose single Gate pauses its run, keeping its pin alive.
+    fn paused_workflow(id: &str, project: &str) -> Workflow {
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = id.into();
+        workflow.project_id = Some(project.into());
+        let mut gate = fake_step("hold");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![gate];
+        workflow
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_shares_its_profile_read_with_the_whole_tree() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo_a = git_project(&state, "proj-tree-a").await;
+        let repo_b = git_project(&state, "proj-tree-b").await;
+        commit_profile(repo_b.path(), Some(PROFILE_MAIN)).await;
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let echo = |id: &str| {
+            let mut workflow = make_workflow_with_artifacts(Default::default());
+            workflow.id = id.into();
+            workflow.project_id = Some("proj-tree-b".into());
+            workflow.exec_allowlist = vec!["echo".into()];
+            workflow.steps = vec![exec_step("item", "echo", &[read])];
+            workflow
+        };
+        let start = |id: &str, workflow: &Workflow, parent: Option<&str>| {
+            let mut run = pending_run(id, &workflow.id);
+            run.project_id = workflow.project_id.clone();
+            run.parent_run_id = parent.map(str::to_string);
+            run
+        };
+        let mut finished = Vec::new();
+        for (run_id, workflow, parent) in [
+            (
+                "run-tree-root",
+                paused_workflow("wf-tree-root", "proj-tree-a"),
+                None,
+            ),
+            (
+                "run-tree-c",
+                paused_workflow("wf-tree-c", "proj-tree-a"),
+                Some("run-tree-root"),
+            ),
+            ("run-tree-b1", echo("wf-tree-b1"), Some("run-tree-c")),
+            ("run-tree-b2", echo("wf-tree-b2"), Some("run-tree-root")),
+        ] {
+            if run_id == "run-tree-b2" {
+                commit_profile(
+                    repo_b.path(),
+                    Some(&PROFILE_MAIN.replace("lint-from-main", "lint-changed-in-tree")),
+                )
+                .await;
+            }
+            let mut run = start(run_id, &workflow, parent);
+            insert_wf_and_run(&state, &workflow, &run).await;
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect(run_id);
+            finished.push(run);
+        }
+        assert_eq!(finished[0].status, RunStatus::WaitingApproval);
+        assert_eq!(finished[1].status, RunStatus::WaitingApproval);
+        for run in &finished[2..] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            let output = step_output(run, "item");
+            assert!(
+                output.contains("lint=make lint-from-main"),
+                "{}: {output}",
+                run.id
+            );
+        }
+    }
+
+    const SECRET: &str = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+
+    #[tokio::test]
+    async fn a_profile_refusal_stores_no_value_from_the_file() {
+        refusal_stores_no_secret(
+            "proj-profile-secret",
+            &format!(
+                "schema_version = 1\n[forge]\nrequired_approvals = \"{SECRET}\"\napi_token = \"{SECRET}\"\n"
+            ),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_dynamic_key_reaches_neither_the_result_nor_the_pin() {
+        refusal_stores_no_secret(
+            "proj-profile-key",
+            &format!(
+                "schema_version = 1\n[tracker]\nkind = \"jira\"\n[tracker.statuses]\n\"{SECRET}\" = \"To Review\"\n"
+            ),
+        )
+        .await;
+    }
+
+    async fn refusal_stores_no_secret(project: &str, profile: &str) {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, project).await;
+        let token = SECRET;
+        commit_profile(repo.path(), Some(profile)).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{project}");
+        workflow.project_id = Some(project.into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step("x", "echo", &["{{project.forge.base_branch}}"])];
+        let run_id = format!("run-{project}");
+        let mut run = pending_run(&run_id, &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        assert_eq!(run.status, RunStatus::Failed);
+        let result = run.step_results.last().unwrap();
+        assert_eq!(result.step_name, "__project_profile__");
+        assert!(
+            result.output.contains("kronn/project.toml"),
+            "{}",
+            result.output
+        );
+        assert!(!result.output.contains(token), "{}", result.output);
+        let persisted = state
+            .db
+            .with_conn(move |conn| {
+                let run = crate::db::workflows::get_run(conn, &run_id)?;
+                let pins: Vec<String> = conn
+                    .prepare("SELECT content_json FROM workflow_run_pins")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok((serde_json::to_string(&run)?, pins.join("\n")))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !persisted.0.contains(token),
+            "the durable run holds the value"
+        );
+        assert!(!persisted.1.contains(token), "the pin holds the value");
     }
 
     // ─── KT-910 — the run's artifacts directory ──────────────────────────

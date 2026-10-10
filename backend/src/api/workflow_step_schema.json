@@ -13,7 +13,8 @@
     "TransformData",
     "PublishPageData",
     "SubWorkflow",
-    "TriggerWorkflow"
+    "TriggerWorkflow",
+    "DelegateSubtasks"
   ],
   "fields_by_type": {
     "Agent": {
@@ -329,6 +330,55 @@
           }
         ]
       }
+    },
+    "DelegateSubtasks": {
+      "required": [
+        "agent (the reviewer)",
+        "delegate_subtasks.parent_task",
+        "delegate_subtasks.worker_map or delegate_subtasks.default_worker"
+      ],
+      "optional": [
+        "agent_settings (reviewer model/tier/effort)",
+        "prompt_template (extra review guidance)",
+        "delegate_subtasks.concurrency (1-8, default 1)",
+        "delegate_subtasks.max_review_rounds (1-10, default 3)",
+        "delegate_subtasks.validations ([{command}])",
+        "delegate_subtasks.target_branch (default: the run's branch)",
+        "delegate_subtasks.timeout_secs (default 21600)"
+      ],
+      "note": "Runs the parent task's subtasks without an orchestrator agent: launches each ready subtask (plan order, blockers, concurrency) with the worker of its first `worker:<key>` tag found in worker_map ({key: {agent, tier?, model?}}, native workers only), else default_worker; waits on the executions' durable state with no model call; reviews each delivery in ONE fresh session of `agent` (DoD, diff, worker report) whose verdict is approve | request_changes | reassign | escalate; integrates approved work into the target branch, validations included. Output data: discussion_id, campaign_id, target_branch, review_calls, subtasks[{task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, tokens}]. Signals: OK (all integrated, success) or, as a failed step routable by on_result, ESCALATED (round cap or reviewer escalation), CONFLICT (a subtask conflicted twice on integration), BLOCKED (human hold, dirty target, nothing launchable, LLM budget), FAILED, TIMEOUT. Executions are never cancelled by a stop; re-running the step resumes them. Forbidden in on_failure.",
+      "example": {
+        "name": "Implement",
+        "step_type": {
+          "type": "DelegateSubtasks"
+        },
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "tier": "default"
+        },
+        "delegate_subtasks": {
+          "parent_task": "{{steps.guard.data.taskId}}",
+          "worker_map": {
+            "haiku": {
+              "agent": "ClaudeCode",
+              "tier": "economy"
+            },
+            "ollama": {
+              "agent": "Ollama"
+            }
+          },
+          "concurrency": 2
+        },
+        "on_result": [
+          {
+            "contains": "ESCALATED",
+            "action": {
+              "type": "Goto",
+              "step_name": "arbitrate"
+            }
+          }
+        ]
+      }
     }
   },
   "discovery_rule": "Do not infer the available step types from one workflow: step_types_closed_set is the complete taxonomy. To adapt an existing workflow, call workflow_list and then workflow_get with an id actually returned by that list; no named example is guaranteed to exist.",
@@ -347,8 +397,9 @@
       "run.id": "id of the current workflow run (a SubWorkflow child run has its own).",
       "run.artifacts_dir": "absolute path of a directory Kronn creates for this run, outside every checkout (each run has its own; a SubWorkflow child too). Exec steps write files there (screenshots, logs, large reports); a Claude Code or Codex Agent step whose prompt names this path reads it read-only (same policy as read_only_repos: --add-dir, Edit denied, mandatory sandbox). Removed when the run ends; kept while it waits for approval or is interrupted.",
       "ref:<kind>:<slug>": "local id of another resource, kind one of workflow, qe, qa, prompt, skill, plugin, artifact; resolved at run start in the run's project, then the global scope (identity of a kronn/ import, else the slug of the resource's name). Unknown or ambiguous fails the step before launch. Structured id fields (sub_workflow_id, quick_prompt_id, quick_api_id, batch_quick_prompt_id, CollectApiData quick_api_id/quick_exec_id) also accept `ref:<kind>:<slug>`, stored as the local id at save. Scripts: GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>.",
+      "project.<path>": "the run's project profile `kronn/project.toml` (schema v1: validation.targets.<name>.command, forge.{base_branch,merge_method,required_approvals,pr_template,labels.<name>.{name,triggers}}, tracker.{kind,project_key,statuses.<name>,transitions.<name>.{from,to}}, delivery.workflows.<name>.{workflow,inputs.<input>}). Read once at run start at the commit of the main checkout's default-branch ref (origin/HEAD's branch, else main, else master; local branch first), never from the run's worktree, and pinned with the run: resumes and child runs see the same values. A table or array renders as JSON, items by index. A read without `??` fails the run before its first step when the profile or key is missing; use it for repository-specific values instead of hard-coding them. Reserved name.",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
-      "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand; `run.*`, `time.*`, `now*` are reserved names.",
+      "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand; `run.*`, `time.*`, `now*`, `project.*` are reserved names.",
       "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value."
     },
     "time_expressions": {

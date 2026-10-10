@@ -71,8 +71,10 @@ import {
   isRepositorySkillId,
   readSkillFavorites,
   writeSkillFavorites,
+  type AutomationSkillEntry,
   type RepositorySkillOrigin,
 } from '../lib/automationSkills';
+import { catalogSkillTraits, groupSkills, skillGroupLabelKey } from '../lib/skillGroups';
 import {
   AUTOMATION_KIND_LABEL_KEYS,
   NO_AUTOMATION_FILTERS,
@@ -920,8 +922,25 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     () => [...skillEntries].sort((a, b) => a.skill.name.localeCompare(b.skill.name, undefined, { sensitivity: 'base', numeric: true })),
     [skillEntries],
   );
-  const usedSkillEntries = sortedSkillEntries.filter(entry => entry.used);
+  // The used skills split into Kronn's and the user's, like the project card
+  // (KT-1140); the unused ones stay folded below, as there.
+  const skillGroups = groupSkills(
+    sortedSkillEntries.filter(entry => entry.used),
+    entry => catalogSkillTraits(entry.skill, entry.repository, entry.syncStates),
+  );
   const availableSkillEntries = sortedSkillEntries.filter(entry => !entry.used);
+  const renderSkillCard = (entry: AutomationSkillEntry) => (
+    <SkillCard
+      key={entry.id}
+      skill={entry.skill}
+      pinned={skillFavorites.has(entry.id)}
+      onTogglePinned={() => toggleSkillFavorite(entry.id)}
+      projectCount={entry.projectIds.length}
+      repository={entry.repository}
+      syncStates={entry.syncStates}
+      onOpen={() => openSkill(entry.skill)}
+    />
+  );
   useEffect(() => {
     if (!invalidWorkflowSelection && !invalidQuickPromptSelection
       && !invalidQuickApiSelection && !invalidQuickExecSelection && !invalidSkillSelection) return;
@@ -4348,16 +4367,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             </div>
           ) : (
             <div className="qp-list">
-              {usedSkillEntries.map(entry => (
-                <SkillCard
-                  key={entry.id}
-                  skill={entry.skill}
-                  pinned={skillFavorites.has(entry.id)}
-                  onTogglePinned={() => toggleSkillFavorite(entry.id)}
-                  projectCount={entry.projectIds.length}
-                  repository={entry.repository}
-                  onOpen={() => openSkill(entry.skill)}
-                />
+              {skillGroups.map(({ group, items }) => (
+                <section key={group} className="skill-group" data-skill-group={group} aria-label={t(skillGroupLabelKey(group))}>
+                  <h3 className="skill-group-title">
+                    {t(skillGroupLabelKey(group))} <span>{items.length}</span>
+                  </h3>
+                  {items.map(renderSkillCard)}
+                </section>
               ))}
               {availableSkillEntries.length > 0 && (
                 <div className="skill-available" data-group="skills:available">
@@ -4370,16 +4386,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     <ChevronRight size={10} className="disc-chevron" data-expanded={availableSkillsOpen || searching} aria-hidden="true" />
                     <span className="automation-group-name">{t('automation.skill.availableToggle', availableSkillEntries.length)}</span>
                   </button>
-                  {(availableSkillsOpen || searching) && availableSkillEntries.map(entry => (
-                    <SkillCard
-                      key={entry.id}
-                      skill={entry.skill}
-                      pinned={skillFavorites.has(entry.id)}
-                      onTogglePinned={() => toggleSkillFavorite(entry.id)}
-                      projectCount={entry.projectIds.length}
-                      onOpen={() => openSkill(entry.skill)}
-                    />
-                  ))}
+                  {(availableSkillsOpen || searching) && availableSkillEntries.map(renderSkillCard)}
                 </div>
               )}
             </div>

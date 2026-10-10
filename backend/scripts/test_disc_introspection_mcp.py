@@ -6661,13 +6661,13 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_thirteen_set(self):
+    def test_step_schema_lists_the_closed_fourteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
-             "PublishPageData", "SubWorkflow", "TriggerWorkflow"},
+             "PublishPageData", "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:

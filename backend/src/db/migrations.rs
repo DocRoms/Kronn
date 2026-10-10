@@ -893,6 +893,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "231_api_access_policies",
         include_str!("sql/231_api_access_policies.sql"),
     ),
+    (
+        "234_project_profile",
+        include_str!("sql/234_project_profile.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

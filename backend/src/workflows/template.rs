@@ -15,7 +15,8 @@ use chrono::{DateTime, Datelike, Duration, SecondsFormat, TimeZone, Timelike, Ut
 use chrono_tz::Tz;
 use std::collections::HashMap;
 
-/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`).
+/// Whether `name` belongs to Kronn's built-ins (`run.*`, `time.*`, `now*`,
+/// and the repository profile's `project.*`).
 /// No declared variable, trigger field or launch value may use it, since a
 /// built-in is trusted for what produced it, not for its name.
 pub fn is_reserved_name(name: &str) -> bool {
@@ -25,13 +26,14 @@ pub fn is_reserved_name(name: &str) -> bool {
         || base == "time"
         || base.starts_with("time.")
         || base.starts_with("now")
+        || base.starts_with("project.")
 }
 
 /// The first reserved name among `names`, as a user-facing refusal.
 pub fn refuse_reserved_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
     match names.into_iter().find(|name| is_reserved_name(name)) {
         Some(name) => Err(format!(
-            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`) ; choisis un autre nom.",
+            "Le nom de variable `{}` est réservé à Kronn (`run.*`, `time.*`, `now*`, `project.*`) ; choisis un autre nom.",
             name.trim()
         )),
         None => Ok(()),
@@ -855,7 +857,8 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             // SubWorkflow's output is the child run's final envelope
             // (standardised) → `{{steps.<subwf>.data}}` is valid.
             | StepType::SubWorkflow
-            | StepType::TriggerWorkflow => true,
+            | StepType::TriggerWorkflow
+            | StepType::DelegateSubtasks => true,
         }
     }
 
@@ -2061,11 +2064,20 @@ mod tests {
             "now",
             "now+1d",
             "nowhere",
+            "project.forge.base_branch",
         ] {
             assert!(is_reserved_name(name), "{name}");
             assert!(refuse_reserved_names([name]).is_err(), "{name}");
         }
-        for name in ["ticket", "runner", "timeout", "known", "steps.run.id"] {
+        for name in [
+            "ticket",
+            "runner",
+            "timeout",
+            "known",
+            "steps.run.id",
+            "project",
+            "project_key",
+        ] {
             assert!(!is_reserved_name(name), "{name}");
         }
     }
@@ -2615,6 +2627,7 @@ mod tests {
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

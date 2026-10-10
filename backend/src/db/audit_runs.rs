@@ -220,7 +220,7 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model
+                head_sha, branch, source_fingerprint, model, project_profile_draft
          FROM audit_runs
          WHERE project_id = ?1
          ORDER BY started_at DESC, rowid DESC
@@ -244,7 +244,7 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model
+                head_sha, branch, source_fingerprint, model, project_profile_draft
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
@@ -322,7 +322,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
                 td_resolved_since_last, td_new_since_last, td_carried_over,
                 health_score, report_path, recommendations_json, last_completed_step,
                 validation_discussion_id, step_outcomes_json,
-                head_sha, branch, source_fingerprint, model
+                head_sha, branch, source_fingerprint, model, project_profile_draft
          FROM audit_runs
          WHERE id = ?1
          LIMIT 1",
@@ -374,7 +374,17 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         branch: row.get(23)?,
         source_fingerprint: row.get(24)?,
         model: row.get(25)?,
+        project_profile_draft: row.get(26)?,
     })
+}
+
+/// The starter repository profile a Full audit drafted (KT-920).
+pub fn set_project_profile_draft(conn: &Connection, id: &str, draft: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET project_profile_draft = ?2 WHERE id = ?1",
+        params![id, draft],
+    )?;
+    Ok(())
 }
 
 /// What the run audits: commit, branch, source fingerprint and model at its
@@ -1074,7 +1084,8 @@ mod tests {
                 head_sha TEXT,
                 branch TEXT,
                 source_fingerprint TEXT,
-                model TEXT
+                model TEXT,
+                project_profile_draft TEXT
             );
             CREATE TABLE audit_run_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

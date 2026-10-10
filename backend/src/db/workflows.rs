@@ -2150,6 +2150,16 @@ pub fn raise_tree_llm_calls(conn: &Connection, root_run_id: &str, total: u32) ->
     Ok(())
 }
 
+/// Takes back one call recorded before a provider refused it for quota: a
+/// relative step down, so a concurrent raise is never erased.
+pub fn release_tree_llm_call(conn: &Connection, root_run_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE workflow_runs SET tree_llm_calls = MAX(tree_llm_calls - 1, 0) WHERE id = ?1",
+        params![root_run_id],
+    )?;
+    Ok(())
+}
+
 /// The LLM calls the root run's tree has durably recorded (0 when unknown).
 pub fn tree_llm_calls(conn: &Connection, root_run_id: &str) -> Result<u32> {
     Ok(conn

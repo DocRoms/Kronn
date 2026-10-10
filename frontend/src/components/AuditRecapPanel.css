@@ -513,3 +513,48 @@
   outline: 2px solid var(--kr-accent-ink);
   outline-offset: 1px;
 }
+
+/* KT-920 — drafted repository profile, read-only with a copy button. */
+.arp-profile-draft {
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+}
+
+.arp-profile-draft-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-2);
+}
+
+.arp-profile-draft-copy {
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+}
+
+.arp-profile-draft-hint {
+  margin: var(--kr-sp-2) 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.arp-profile-draft-text {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--kr-sp-2);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  white-space: pre;
+}

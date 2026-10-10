@@ -2,7 +2,7 @@
 // it has no run, no variables and no server-side favorite or modification date.
 // What the page needs from it lives here, pure, so the sidebar, the sheet and
 // the tests read one definition.
-import type { Project, ProjectUsedSkill, Skill } from '../types/generated';
+import type { Project, ProjectRepositoryResourceStatus, ProjectUsedSkill, Skill } from '../types/generated';
 
 export const SKILL_FAVORITES_STORAGE_KEY = 'kronn:automationSkillFavorites';
 
@@ -133,7 +133,8 @@ export interface AutomationSkillEntry {
   repository?: RepositorySkillOrigin;
   /** Used by at least one project. The others are only *available*: the
    *  sidebar folds them away instead of listing the whole catalog. */
-  used: boolean;
+  used: boolean;  /** Its sync state on each project the backend reported one for. */
+  syncStates: ProjectRepositoryResourceStatus[];
 }
 
 function repositorySkill(used: ProjectUsedSkill): Skill {
@@ -168,6 +169,7 @@ export function automationSkillEntries(
 ): AutomationSkillEntry[] {
   const known = new Set(projects.map(project => project.id));
   const publishedBy = new Map<string, Set<string>>();
+  const syncStatesOf = new Map<string, ProjectRepositoryResourceStatus[]>();
   const repositoryOnly: ProjectUsedSkill[] = [];
   for (const used of usedSkills) {
     if (!known.has(used.project_id)) continue;
@@ -175,6 +177,7 @@ export function automationSkillEntries(
       const ids = publishedBy.get(used.skill_id) ?? new Set<string>();
       ids.add(used.project_id);
       publishedBy.set(used.skill_id, ids);
+      if (used.sync_status) syncStatesOf.set(used.skill_id, [...(syncStatesOf.get(used.skill_id) ?? []), used.sync_status]);
     } else {
       repositoryOnly.push(used);
     }
@@ -187,7 +190,7 @@ export function automationSkillEntries(
     ]);
     // Kept in the order the page received the projects.
     const projectIds = projects.filter(project => using.has(project.id)).map(project => project.id);
-    return { id: skill.id, skill, projectIds, used: projectIds.length > 0 };
+    return { id: skill.id, skill, projectIds, used: projectIds.length > 0, syncStates: syncStatesOf.get(skill.id) ?? [] };
   });
   for (const used of repositoryOnly) {
     const skill = repositorySkill(used);
@@ -203,6 +206,7 @@ export function automationSkillEntries(
         published: used.published,
       },
       used: true,
+      syncStates: used.sync_status ? [used.sync_status] : [],
     });
   }
   return entries;

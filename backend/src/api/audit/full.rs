@@ -2392,7 +2392,15 @@ pub async fn full_audit(
                 Err(join_err) => Err(format!("baseline task panicked: {join_err}")),
             };
             match baseline_outcome {
-                Ok(n) => tracing::info!("Wrote docs/checksums.json with {n} mappings"),
+                Ok(n) => {
+                    tracing::info!("Wrote docs/checksums.json with {n} mappings");
+                    // KT-920 — the draft stays with the run; the checkout is not touched.
+                    if let Err(e) = crate::core::project_profile::record_audit_draft(
+                        &db, &audit_run_id, project_path.clone(),
+                    ).await {
+                        tracing::warn!("Repository profile draft not recorded: {e}");
+                    }
+                }
                 Err(msg) => {
                     // Drift detection is contractual for a Full audit: a run
                     // without a baseline must not read as a clean success —
