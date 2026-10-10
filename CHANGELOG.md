@@ -70,6 +70,22 @@ Release notes for 0.9.3 and earlier are available in the
   (KT-1172). It compared the first line with the template heading, but the v2
   file opens with `<!-- kronn:doc-version -->` comments, so a Kronn-managed
   `docs/` was taken for hand-written docs.
+- After a Full audit, the central tech-debt index lists every TD sheet,
+  including the ones the seven sub-audits wrote (KT-949). Bench runs had
+  indexed 7 of 35, 6 of 37 and 13 of 57. Kronn now rewrites the
+  `## Current list` table of `docs/inconsistencies-tech-debt.md` from
+  `docs/tech-debt/TD-*.md`, without a model. Each active sheet gets one row
+  with its title, area, severity and status, the dimension index that lists
+  it, and a link to the sheet. Rejected sheets and accepted trade-offs are
+  counted but left out of the table. A row written by hand for a TD that
+  has no sheet is kept, and no sheet is deleted or merged. The table is
+  rewritten the same way after each TD validation card. A
+  `Dimension coverage` row that says `N/A` or `scanned — nothing
+  substantiable` while sheets exist for that dimension now reads `findings`.
+  The row names the TDs and keeps its previous outcome. A new `unindexed_td`
+  warning reports an active sheet the index does not reach. The audit
+  summary now counts the TDs of every sub-audit, not only the central rows.
+  The sheets in `docs/tech-debt/` stay the source of truth.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

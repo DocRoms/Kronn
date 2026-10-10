@@ -2223,6 +2223,23 @@ pub async fn full_audit(
             }
         }
 
+        // ── Phase 2.55: Tech-debt index resync (KT-949) ──
+        // Lists every TD sheet, sub-audits included, in the central index.
+        if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
+            let docs = project_path.join("docs");
+            match tokio::task::spawn_blocking(move || crate::core::td_index::resync(&docs)).await {
+                Ok(Ok(td)) => {
+                    yield Event::default().event("td_index").data(serde_json::json!({
+                        "changed": td.changed, "listed": td.listed, "settled": td.settled,
+                        "kept_without_sheet": td.kept_without_sheet,
+                        "reconciled_dimensions": td.reconciled_dimensions, "skipped": td.skipped,
+                    }).to_string());
+                }
+                Ok(Err(e)) => tracing::warn!("Tech-debt index resync failed: {e} — audit continues"),
+                Err(e) => tracing::warn!("Tech-debt index resync panicked: {e} — audit continues"),
+            }
+        }
+
         // ── Phase 2.6: Documentary optimization ──
         // Deterministic and token-free. It runs after generation/reconciliation
         // and before validation. Broken links and invalid file citations

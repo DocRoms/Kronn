@@ -90,6 +90,7 @@ pub mod skills;
 pub mod sse_limits;
 pub mod static_context;
 pub mod tailscale;
+pub mod td_index;
 pub mod timezone;
 pub mod usage;
 pub mod user_context;

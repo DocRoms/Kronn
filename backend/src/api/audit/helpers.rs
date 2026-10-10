@@ -105,43 +105,69 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // Parse tech-debt items from the "Current list" table in inconsistencies-tech-debt.md
-    let mut tech_debt_items = Vec::new();
-    let tech_debt_file = docs_dir.join("inconsistencies-tech-debt.md");
-    let tech_debt_dir = docs_dir.join("tech-debt");
-    if let Ok(content) = std::fs::read_to_string(&tech_debt_file) {
-        // Parse markdown table rows: | ID | Problem | Area | Severity |
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with('|')
-                || trimmed.starts_with("| ID")
-                || is_table_separator_line(trimmed)
-                || scanner::has_unfilled_placeholder(trimmed)
-            {
+    // KT-949 — every active sheet under tech-debt/, whichever audit (Full or
+    // one of the seven sub-audits) wrote it. Index rows only fill in what a
+    // sheet leaves blank; a row without a sheet is never surfaced.
+    let mut rows: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&docs_dir) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with("inconsistencies-") && n.ends_with(".md"))
+            .collect();
+        // The central index wins over the dimension indexes.
+        names.sort_by_key(|n| (n != crate::core::td_index::CENTRAL_INDEX, n.clone()));
+        for name in names {
+            let Ok(content) = std::fs::read_to_string(docs_dir.join(&name)) else {
                 continue;
-            }
-            let cols: Vec<&str> = trimmed.split('|').map(|c| c.trim()).collect();
-            // cols[0] is empty (before first |), cols[1]=ID, cols[2]=Problem, cols[3]=Area, cols[4]=Severity
-            if cols.len() >= 5 && cols[1].starts_with("TD-") {
-                // 0.8.2 — only surface a TD if its detail file actually
-                // exists on disk. Without this, a stale row in the
-                // index table makes the validation discussion's Phase 3
-                // ask questions about phantom TDs (the agent tries to
-                // `Read docs/tech-debt/<id>.md` and the tool returns
-                // empty, leading to a zero-length reply).
-                let detail_path = tech_debt_dir.join(format!("{}.md", cols[1]));
-                if !detail_path.is_file() {
+            };
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('|') || scanner::has_unfilled_placeholder(trimmed) {
                     continue;
                 }
-                tech_debt_items.push(TechDebtItem {
-                    id: cols[1].to_string(),
-                    problem: cols[2].to_string(),
-                    area: cols[3].to_string(),
-                    severity: cols[4].to_string(),
-                });
+                let cols: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
+                let id: String = cols
+                    .get(1)
+                    .map(|c| c.trim_start_matches(['[', '`']))
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                if cols.len() >= 5 && crate::core::td_index::is_td_id(&id) {
+                    rows.entry(id).or_insert(cols);
+                }
             }
         }
     }
+    let known = |value: &str, row: Option<&Vec<String>>, col: usize| -> String {
+        if value != "Unknown" {
+            return value.to_string();
+        }
+        row.and_then(|r| r.get(col))
+            .cloned()
+            .unwrap_or_else(|| value.to_string())
+    };
+    let tech_debt_items = crate::core::td_index::read_sheets(&docs_dir)
+        .into_iter()
+        .filter(|sheet| sheet.is_active())
+        .map(|sheet| {
+            let row = rows.get(&sheet.id);
+            let problem = if sheet.title == sheet.id {
+                row.and_then(|r| r.get(2))
+                    .cloned()
+                    .unwrap_or(sheet.title.clone())
+            } else {
+                sheet.title.clone()
+            };
+            TechDebtItem {
+                area: known(&sheet.area, row, 3),
+                severity: known(&sheet.severity, row, 4),
+                id: sheet.id,
+                problem,
+            }
+        })
+        .collect();
 
     AuditInfo {
         files,
@@ -1203,6 +1229,84 @@ mod compute_audit_info_tests {
 
         let info = compute_audit_info_sync(dir.path().to_str().unwrap());
         assert_eq!(info.tech_debt_items.len(), 2);
+    }
+
+    // KT-949 — the seven sub-audits write their TDs into their own index;
+    // audit-info counts every active sheet, not only the central rows.
+    #[test]
+    fn tech_debt_items_count_every_sub_audit_sheet() {
+        let dir = tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let td = docs.join("tech-debt");
+        fs::create_dir_all(&td).unwrap();
+        fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | TD-20261001-full | Full row | Backend | High |\n\
+             | TD-20261001-phantom | No sheet | Backend | High |\n",
+        )
+        .unwrap();
+        fs::write(
+            docs.join("inconsistencies-security.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | TD-20261002-sec | Secret row | Security | Critical |\n",
+        )
+        .unwrap();
+        fs::write(
+            docs.join("inconsistencies-rgaa.md"),
+            "| ID | Problem | Area | Severity |\n|---|---|---|---|\n\
+             | [TD-20261003-rgaa](tech-debt/TD-20261003-rgaa.md) | Alt row | A11y | Low |\n",
+        )
+        .unwrap();
+        fs::write(td.join("TD-20261001-full.md"), "x").unwrap();
+        fs::write(td.join("TD-20261002-sec.md"), "x").unwrap();
+        fs::write(
+            td.join("TD-20261003-rgaa.md"),
+            "---\ndescription: Images without alt\n---\n# TD-20261003-rgaa\n- **Severity**: Medium\n",
+        )
+        .unwrap();
+        fs::write(
+            td.join("TD-20261004-unlisted.md"),
+            "# TD-20261004-unlisted\n- **Area**: CI\n",
+        )
+        .unwrap();
+        fs::write(
+            td.join("TD-20261005-rejected.md"),
+            "# R\n- **Status**: Rejected\n",
+        )
+        .unwrap();
+        fs::write(td.join("_reconciliation-2026-10-05.md"), "# report\n").unwrap();
+
+        let info = compute_audit_info_sync(dir.path().to_str().unwrap());
+        let ids: Vec<&str> = info.tech_debt_items.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "TD-20261001-full",
+                "TD-20261002-sec",
+                "TD-20261003-rgaa",
+                "TD-20261004-unlisted",
+            ]
+        );
+        let sec = &info.tech_debt_items[1];
+        assert_eq!(
+            (
+                sec.problem.as_str(),
+                sec.area.as_str(),
+                sec.severity.as_str()
+            ),
+            ("Secret row", "Security", "Critical")
+        );
+        // The sheet wins over its index row.
+        let rgaa = &info.tech_debt_items[2];
+        assert_eq!(
+            (
+                rgaa.problem.as_str(),
+                rgaa.area.as_str(),
+                rgaa.severity.as_str()
+            ),
+            ("Images without alt", "A11y", "Medium")
+        );
     }
 
     // ── "filled" detector — no false negative on Twig / `${{ }}` / table-only docs ──

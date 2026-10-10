@@ -375,6 +375,56 @@ fn inspect_docs(
             ));
         }
     }
+    unindexed_tds(project, docs, out);
+}
+
+/// KT-949 — an active TD sheet must be linked from the central index, or
+/// from a dimension index the central index links. Settled sheets
+/// (rejected, accepted decision) leave the index on purpose.
+fn unindexed_tds(project: &Path, docs: &[PathBuf], out: &mut Vec<Diagnostic>) {
+    let central = project
+        .join("docs")
+        .join(crate::core::td_index::CENTRAL_INDEX);
+    let mut linked = BTreeSet::new();
+    if let Ok(content) = read(&central) {
+        collect_valid_links(project, &central, &content, &mut linked, None);
+    }
+    let dimension_indexes: Vec<PathBuf> = linked
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("inconsistencies-") && n.ends_with(".md"))
+        })
+        .cloned()
+        .collect();
+    for index in dimension_indexes {
+        if let Ok(content) = read(&index) {
+            collect_valid_links(project, &index, &content, &mut linked, None);
+        }
+    }
+    for path in docs {
+        let rel = relative(project, path);
+        let Some(id) = rel
+            .strip_prefix("docs/tech-debt/")
+            .and_then(|name| name.strip_suffix(".md"))
+            .filter(|id| crate::core::td_index::is_td_id(id))
+        else {
+            continue;
+        };
+        let active = read(path)
+            .is_ok_and(|content| crate::core::td_index::parse_sheet(id, &content).is_active());
+        if active && !linked.contains(&normalize(path)) {
+            out.push(diag(
+                "unindexed_td",
+                &rel,
+                format!(
+                    "tech-debt sheet is not listed in docs/{}",
+                    crate::core::td_index::CENTRAL_INDEX
+                ),
+            ));
+        }
+    }
 }
 
 fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Diagnostic>) {
@@ -1522,5 +1572,53 @@ mod tests {
         let messages: Vec<_> = out.iter().map(|d| d.message.clone()).collect();
         assert_eq!(messages.len(), 3, "{messages:#?}");
         assert!(messages.iter().all(|m| m.starts_with("broken link target")));
+    }
+
+    #[test]
+    fn a_td_sheet_missing_from_the_central_index_is_reported_until_resync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("docs/AGENTS.md"),
+            "# Projet\n\n[debt](inconsistencies-tech-debt.md)\n",
+        );
+        write(
+            &root.join("docs/inconsistencies-tech-debt.md"),
+            "# Debt\n\n## Current list\n\n| ID | Problem | Area | Severity |\n|---|---|---|---|\n| TD-20261001-listed | [x](tech-debt/TD-20261001-listed.md) | Backend | High |\n| TD-20261002-via-dim | see [security](inconsistencies-security.md) | Security | High |\n",
+        );
+        write(
+            &root.join("docs/inconsistencies-security.md"),
+            "| ID |\n|---|\n| [TD-20261002-via-dim](tech-debt/TD-20261002-via-dim.md) |\n",
+        );
+        for id in [
+            "TD-20261001-listed",
+            "TD-20261002-via-dim",
+            "TD-20261003-missing",
+        ] {
+            write(
+                &root.join(format!("docs/tech-debt/{id}.md")),
+                "# T\n- **Status**: Inferred\n",
+            );
+        }
+        write(
+            &root.join("docs/tech-debt/TD-20261004-rejected.md"),
+            "# T\n- **Status**: Rejected\n",
+        );
+        let unindexed = |root: &Path| -> Vec<String> {
+            analyze(root)
+                .unwrap()
+                .diagnostics
+                .into_iter()
+                .filter(|d| d.code == "unindexed_td")
+                .inspect(|d| assert!(!d.blocking, "a gap in the index is a warning"))
+                .map(|d| d.path)
+                .collect()
+        };
+        assert_eq!(
+            unindexed(root),
+            vec!["docs/tech-debt/TD-20261003-missing.md"]
+        );
+        crate::core::td_index::resync(&root.join("docs")).unwrap();
+        assert!(unindexed(root).is_empty());
     }
 }
