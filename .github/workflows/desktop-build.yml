@@ -57,10 +57,12 @@ jobs:
     name: CI quality gates on the release commit
     needs: release-checks
     # A called workflow gets no more than its caller grants: cover every
-    # permission its jobs declare (the timing observer reads Actions runs).
+    # permission its jobs declare (the timing observer reads Actions runs, the
+    # label route job reads the pull request).
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci-test.yml
     with:
       ref: ${{ needs.release-checks.outputs.sha }}
@@ -70,9 +72,11 @@ jobs:
   build-gates:
     name: CI build gates on the release commit
     needs: release-checks
+    # Same rule: the label route job reads the pull request.
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci-build.yml
     with:
       ref: ${{ needs.release-checks.outputs.sha }}

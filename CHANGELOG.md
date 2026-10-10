@@ -438,6 +438,13 @@ Release notes for 0.9.3 and earlier are available in the
   same badges: "Projet", "Dépôt" and "Pas synchro". "Pas synchro" shows only
   on the project tab, the one screen that knows the sync state. Unused skills
   stay folded below, as before.
+- A pull request page now lists only real CI results (KT-1159). Adding a
+  label or editing the description no longer starts CI Tests and CI Build,
+  whose skipped jobs used to hide the results of the run that really tested
+  the change. Those events start CI Verdict instead, which publishes only
+  `ci-quality-gates` and `ci-build-gates`, repeating the verdict of the run
+  for the same head and base. A label added after a push re-runs that run, so
+  its real results appear. CONTRIBUTING explains which checks to read.
 
 ### Fixed
 
