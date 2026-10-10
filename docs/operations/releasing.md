@@ -23,12 +23,18 @@ and the update banner led users to empty release pages (KT-970).
 Desktop Build resolves the release commit once (`release-checks`, output
 `sha`) and every checkout, the dependency review and the CI gate use that SHA,
 so a manual dispatch whose branch and tag differ still tests what it ships.
-`ci-test.yml` has no push trigger, so a tag carries no check run; the release
-instead calls it as a reusable workflow (`quality-gates`) on that SHA, with
-every label-gated job enabled, and `release` needs it green. A
+`ci-test.yml` and `ci-build.yml` do not run on a tag push, so a tag carries no
+check run; the release instead calls both as reusable workflows
+(`quality-gates`, `build-gates`) on that SHA, with every label-gated job
+enabled, and `release` needs both green. The release-profile backend build,
+portability, desktop-crate and Windows-exporter gates therefore stay mandatory
+before a tag even though pull requests run them only under the `ci-build`
+label. The browser E2E suite in `ci-test.yml` runs against the dev profile, as
+`make dev-backend` does locally; `ci-build.yml` builds the `release` profile
+itself, and only a tag builds and verifies the installers. A
 `workflow_dispatch` with an empty `release_tag` runs the same gates as a
-build-only dry run; do one before tagging. The called `ci-test.yml` and
-`dependency-review.yml` are the versions of the tagged (or dispatched) ref.
+build-only dry run; do one before tagging. The called `ci-test.yml`,
+`ci-build.yml` and `dependency-review.yml` are the versions of the tagged (or dispatched) ref.
 
 ## A release that already exists without installers
 

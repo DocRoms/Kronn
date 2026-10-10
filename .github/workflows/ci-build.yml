@@ -1,0 +1,263 @@
+name: CI Build
+
+# The app builds: the release backend, platform portability tests, the
+# desktop crate and the Windows document exporter. Slower than the `ci-test` loop and only needed
+# once a pull request is ready, so they hang off their own label, `ci-build`,
+# and `ci-build-gates` is required to merge. Adding one label never re-runs the
+# other workflow's jobs: a run started by an unrelated label repeats the
+# verdict of the run that did test the commit.
+on:
+  pull_request:
+    # `edited` re-runs only when the base branch changed; a title edit, like
+    # another workflow's label, repeats the verdict already given.
+    types: [opened, reopened, labeled, unlabeled, synchronize, edited]
+  push:
+    branches: [main]
+  # Called by Desktop Build with the release commit: every job then runs.
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit SHA to test"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit, tag or branch to test (empty: the selected ref)"
+        required: false
+        default: ""
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # onnxruntime-node's postinstall downloads CUDA binaries CI never uses, from
+  # a host that times out on GitHub runners (see ci-test.yml).
+  ONNXRUNTIME_NODE_INSTALL: skip
+
+jobs:
+  test-desktop-compile:
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Linux deps for desktop compile check
+        run: |
+          sudo add-apt-repository -y universe
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libappindicator3-dev librsvg2-dev libssl-dev patchelf file
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Enable corepack
+        run: corepack enable
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend (produces frontend/dist/)
+        working-directory: frontend
+        run: pnpm build
+      # Clippy type-checks the crate: a separate check step compiled the
+      # backend and the Tauri tree a second time for nothing.
+      # desktop/src-tauri/clippy.toml holds the desktop to the spawn rule.
+      - name: cargo clippy — desktop crate
+        working-directory: desktop/src-tauri
+        run: cargo clippy --locked -- -D warnings
+
+
+  # A Linux unit test cannot prove that CPython can load MSYS2's DLL graph.
+  # Exercise the exact Windows release-sidecar path on every tested PR so a
+  # broken installer cannot remain hidden until the next version tag.
+  test-docs-sidecar-windows:
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Windows document-rendering libraries
+        id: msys2
+        uses: msys2/setup-msys2@v2.32.0
+        with:
+          update: false
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-pango
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/sidecars/docs/pyproject.toml
+
+      - name: Build frozen document exporter
+        id: docs-sidecar
+        run: node desktop/scripts/build-docs-sidecar.mjs
+        env:
+          KRONN_DOCS_NATIVE_LIB_DIRS: ${{ format('{0}/ucrt64/bin', steps.msys2.outputs.msys2-location) }}
+
+      - name: Smoke-test frozen PDF and DOCX exports
+        id: docs-smoke
+        run: >-
+          python backend/sidecars/docs/smoke_bundle.py
+          desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs.exe
+          --diagnostics target/docs-sidecar-smoke.log
+
+      - name: Upload sidecar diagnostics on failure
+        if: always() && (steps.docs-sidecar.outcome == 'failure' || steps.docs-smoke.outcome == 'failure')
+        uses: actions/upload-artifact@v7
+        with:
+          name: docs-sidecar-windows-diagnostics
+          path: |
+            target/docs-sidecar-bootstrap.log
+            target/docs-sidecar-pyinstaller/*.spec
+            target/docs-sidecar-pyinstaller/work/warn-*.txt
+            target/docs-sidecar-pyinstaller/work/xref-*.html
+            target/docs-sidecar-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ── KT-373 — portability of the disk-maintenance surface ────────────────────
+  #
+  # `test-backend` (ci-test.yml) proves this code on Linux only. The guards it contains are
+  # path- and filesystem-shaped — symlinks vs. reparse points, permission
+  # semantics, free-space reporting — which is exactly the class of behaviour a
+  # single OS cannot vouch for. `desktop-build.yml` compiles for all three, but
+  # compiling is not executing, and after the 2026-08-21 disk incident this gate
+  # is not one to relax.
+  #
+  # Deliberately NOT the whole backend suite duplicated three times: only the
+  # modules whose behaviour actually differs per platform. Linux stays covered by
+  # `test-backend`; this adds the two hosts nothing else runs on.
+  test-backend-portability:
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # The macOS lib-test rebuild alone took 29m13s in run 36912793272.
+    # Leave room for all three required suites and the post-job cache save.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: portability-${{ matrix.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: portability-${{ matrix.os }}-
+
+      - name: Worktree lifecycle and disk guards
+        run: cargo test --lib core::worktree
+
+      - name: Disk maintenance surface
+        run: cargo test --lib api::maintenance
+
+      - name: Cleanup authorisation from durable state
+        run: cargo test --lib db::orchestration
+
+      - name: Windows to WSL agent launches
+        run: cargo test --lib agents::wsl
+
+  # The release profile the installers ship (thin LTO, one codegen unit). The
+  # ci-test e2e job serves a cheaper build, so this is where every pull request
+  # proves the real release build still compiles; tags build the installers.
+  build-release:
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and release dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+          key: release-v1-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+      - name: Build backend (release)
+        working-directory: backend
+        run: cargo build --release --locked --bin kronn
+
+  ci-build-gates:
+    # The one check branch protection requires for this workflow. Red until
+    # the pull request carries the `ci-build` label and every build passed.
+    if: always()
+    needs:
+      - build-release
+      - test-desktop-compile
+      - test-docs-sidecar-windows
+      - test-backend-portability
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      # An unrelated label or a title edit tested nothing: repeat the verdict
+      # of the run that tested this pull request, head and base.
+      - name: Repeat the verdict already given for this pull request
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-build') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci/previous_gate_verdict.sh ci-build.yml ci-build-gates
+      # The name records what this run tested; the step above reads it back.
+      - name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"
+        if: "!(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-build') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-build') }}
+          RESULTS: ${{ toJson(needs.*.result) }}
+        run: |
+          echo "Gate results: $RESULTS"
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HAS_LABEL" != "true" ]; then
+            echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
+            exit 1
+          fi
+          echo "$RESULTS" | jq -e 'all(.[]; . == "success")'

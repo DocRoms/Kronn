@@ -99,55 +99,37 @@ TERM at this boundary for both the backend and the watcher.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job: formatting and the
-Rust test suite. Its hot cache targets the three reusable Cargo debug
-directories directly; a warmup only validates them and writes a versioned
-marker before the cache action's post-job save. Clippy, coverage,
-generated-type drift and project-specific
-lint/budget checks run in `test-backend-quality` and `test-backend-coverage`;
-the frontend build and desktop compilation run in `test-desktop-compile`.
-Those jobs execute in parallel and all remain blocking through
-`ci-quality-gates`. Clippy previously ran inside `test-backend` itself, but a
-real warm run still measured 17m41 against the 15-minute SLO with it inline
-([run 33368662050](https://github.com/DocRoms/Kronn/actions/runs/33368662050));
-moving it to the parallel, still-required `test-backend-quality` gate keeps
-the lint blocking without holding it on the measured path. After that move, a
-real cache-hit run still measured 17m32 (`cargo test` 11m58, ~4m13 of overhead
-before the test step, 1m17 staging the cache back after it) — a further 2m32
-over the 15-minute SLO
-([cold 33378197164](https://github.com/DocRoms/Kronn/actions/runs/33378197164),
-[hot cache-hit 33378199511](https://github.com/DocRoms/Kronn/actions/runs/33378199511)).
-The first review warmup proved that conditioning cleanup and staging only on
-a cache hit was insufficient: there is no hit until a warmup survives its
-post-job save. That run spent 6m48 deleting unrelated runner toolchains, then
-copied the debug tree after a successful 21m54 test step and hit the 30-minute
-timeout before the cache could be saved. The measured job therefore performs
-neither operation in any mode. It caches `.fingerprint`, `build` and `deps`
-in place, which removes the second full copy and its temporary disk doubling;
-coverage and desktop jobs retain their own cleanup where they need it.
-The first direct-layout warmup then completed its 27m55 test step and wrote the
-v2 marker, but GitHub cancelled the cache upload 1m41 later at the job's former
-30-minute ceiling. `test-backend` therefore has a 35-minute one-time seeding
-budget. This does not relax the hot-path target: only a verified restored cache
-is an SLO sample, and that sample must still fit within 15 minutes.
-[src: file: .github/workflows/ci-test.yml:52-265] [src: file: .github/workflows/ci-test.yml:750-778]
+`test-backend` is the measured backend critical-path job and the only backend
+test pass: formatting, then every library, binary and integration test once
+under cargo-nextest with coverage instrumentation
+(`NEXTEST_PROFILE=ci cargo llvm-cov nextest`), the 83 % floors and the
+key-management per-file floors on that same run, then the generated-type drift
+check and the raw-command lint on the build it already made. `make
+test-backend-cov` runs the same command locally. Before this layout the suite ran
+twice, once in `test-backend` (`cargo test`) and once instrumented in
+`test-backend-coverage`; the history below measures that older layout.
+Clippy and the project-specific budget checks run in `test-backend-quality`,
+in parallel, and stay blocking through `ci-quality-gates`.
+Its hot cache targets the three reusable directories of the instrumented
+tree (`target/llvm-cov-target/debug/{.fingerprint,build,deps}`); a warmup only
+validates them and writes a versioned marker (`.kronn-backend-cache-v3`)
+before the cache action's post-job save. Profraw files, the nextest store and
+other transient trees are never archived.
+[src: file: .github/workflows/ci-test.yml:71-228]
 
 The backend performance observer publishes the duration for every eligible run
-and reports a warning rather than failing a green functional run when the hot
-cache SLO exceeds 15 minutes. Hot measurements restore only bounded ordinary
-Cargo debug artifacts alongside Cargo downloads; coverage,
-incremental, temporary, and other target trees are not archived. Cargo's
-repository-level `target-dir` means these artifacts are copied to and from the
-root `target/debug` tree, not `backend/target/debug`. A versioned sentinel and
-the three required artifact directories must be present before an Actions
-cache hit is accepted. A hot request that misses that cache is published as
-`warmup/miss` and excluded from historical hot statistics. Cold measurements
-use a unique cache key per run attempt, restore no compiled artifacts, and are
-reported only for their current run. Historical hot statistics use only
-successful same-branch pull-request runs whose job records a verified restored
-compiled cache. The v2 cache key cannot restore the former staging layout, so
-the first run is an explicit warmup rather than an ambiguous hit.
-[src: file: .cargo/config.toml:1-2] [src: file: .github/workflows/ci-test.yml:84-188] [src: file: scripts/ci/backend_ci_slo.mjs:47-150]
+and reports a warning rather than failing a green functional run when a hot
+run exceeds the 10-minute SLO. Cargo's repository-level `target-dir` means
+these artifacts live under the root `target/`, not `backend/target/`. A
+versioned sentinel and the three required artifact directories must be present
+before an Actions cache hit is accepted. A hot request that misses that cache
+is published as `warmup/miss` and excluded from historical hot statistics.
+Cold measurements use a unique cache key per run attempt, restore no compiled
+artifacts, and are reported only for their current run. Historical hot
+statistics use only successful same-branch pull-request runs whose job records
+a verified restored compiled cache. The v3 key cannot restore the former
+debug layout, so the first run is an explicit warmup.
+[src: file: .cargo/config.toml:1-6] [src: file: scripts/ci/backend_ci_slo.mjs:1-153]
 The observer's Node unit test runs in the blocking `test-python` gate.
 [src: file: .github/workflows/ci-test.yml:299-324]
 
