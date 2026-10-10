@@ -222,7 +222,7 @@ fn strip_line_suffix(target: &str) -> &str {
     path
 }
 
-fn percent_decode(raw: &str) -> Option<String> {
+pub(crate) fn percent_decode(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

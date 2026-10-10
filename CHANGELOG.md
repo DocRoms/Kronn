@@ -79,6 +79,15 @@ Release notes for 0.9.3 and earlier are available in the
   `docs/.kronn-citation-originals/` move there on the next audit, after a
   sha256 check of each one, and the old `docs/.kronn-document-optimization.json`
   is removed, as each audit writes it again.
+- A full audit can now pass on a project made of documents (KT-1164, #226).
+  A binary file (.docx, .pdf, image) has no lines, so it is cited by its bare
+  path, `[src: file: Budget 2026.docx]`, and the documentary gate accepts that
+  form. Kronn tells a binary file from a text file by its content, not its
+  extension. A line on a binary file is refused with a message that says to
+  drop the line; a text file still needs one. Percent-encoded links and
+  citations (`My%20File.docx`) are decoded before they are resolved, and a
+  path that leaves the project stays refused. The audit prompts, the repair
+  messages and the citation spec now describe the same form.
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and

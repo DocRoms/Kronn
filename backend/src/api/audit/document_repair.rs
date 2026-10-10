@@ -51,7 +51,7 @@ pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     for d in diagnostics {
         text.push_str(&format!("- `{}`: {}\n", d.path, d.message));
     }
-    text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. Preserve human-owned sections. A resolvable citation proves existence, not the truth of its claim.\n");
+    text.push_str("\nRead and correct EACH named document, including auxiliary findings. Use ONE `[src: file: path:line]` or `[src: file: path:start-end]` marker per reference; never bundle paths with commas. A binary file (.docx, .pdf, image) has no lines: cite it by bare path, `[src: file: path]`. Read the actual source before correcting a missing path or invalid line. If the evidence cannot be established, remove the unsupported claim entirely; do not invent a path or merely hide the citation. Preserve human-owned sections. A resolvable citation proves existence, not the truth of its claim.\n");
     text
 }
 

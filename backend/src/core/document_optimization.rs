@@ -408,6 +408,7 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
                 format!("malformed file citation `{raw}`: use one [src: file: path:line] marker per reference")));
             continue;
         }
+        // A bare path is the citation form of a binary file, which has no lines.
         let Some((path_part, line_part)) = raw.rsplit_once(':') else {
             let detail = if is_project_dir(project, raw) {
                 format!(
@@ -415,20 +416,41 @@ fn inspect_citations(project: &Path, rel: &str, content: &str, out: &mut Vec<Dia
                     directory_citation_message(raw)
                 )
             } else {
-                format!("malformed file citation `{raw}`: expected [src: file: path:line]")
+                match cited_file(project, raw) {
+                    Some(path) if crate::core::anti_halluc::is_binary_file(&path) => continue,
+                    Some(_) => format!(
+                        "malformed file citation `{raw}`: a text file is cited with the line \
+                         that supports the claim, [src: file: {raw}:<line>]"
+                    ),
+                    None => format!(
+                        "malformed file citation `{raw}`: expected [src: file: path:line], \
+                         or a bare path for an existing binary file"
+                    ),
+                }
             };
             out.push(diag("broken_citation", rel, detail));
             continue;
         };
-        let path = project.join(path_part.trim());
-        if outside_project(project, &path) || !path.is_file() {
+        let path_part = path_part.trim();
+        let Some(path) = cited_file(project, path_part) else {
             // Run O7: `helpers/hbs/:1` was reported as a path that does not exist.
-            let detail = if is_project_dir(project, path_part.trim()) {
-                directory_citation_message(path_part.trim())
+            let detail = if is_project_dir(project, path_part) {
+                directory_citation_message(path_part)
             } else {
-                format!("citation path does not exist `{}`", path_part.trim())
+                format!("citation path does not exist `{path_part}`")
             };
             out.push(diag("broken_citation", rel, detail));
+            continue;
+        };
+        if crate::core::anti_halluc::is_binary_file(&path) {
+            out.push(diag(
+                "broken_citation",
+                rel,
+                format!(
+                    "`{path_part}` is a binary file and has no lines: cite it as \
+                     [src: file: {path_part}] and name the page or section outside the brackets"
+                ),
+            ));
             continue;
         }
         let max_line = read(&path).map(|s| s.lines().count()).unwrap_or(0);
@@ -670,8 +692,17 @@ fn collect_valid_links(
             continue;
         }
         let clean = target.split('#').next().unwrap_or("");
-        let resolved = source.parent().unwrap_or(project).join(clean);
-        if outside_project(project, &resolved) || !contained_path(project, &resolved) {
+        let base = source.parent().unwrap_or(project);
+        let unresolved =
+            |path: &Path| outside_project(project, path) || !contained_path(project, path);
+        let mut resolved = base.join(clean);
+        if unresolved(&resolved) {
+            // Markdown encodes spaces in link targets: `My%20File.docx`.
+            if let Some(decoded) = crate::core::anti_halluc::percent_decoded_relative(clean) {
+                resolved = base.join(decoded);
+            }
+        }
+        if unresolved(&resolved) {
             if let Some(out) = diagnostics.as_deref_mut() {
                 out.push(diag(
                     "broken_link",
@@ -705,6 +736,16 @@ fn root_relative_fix(project: &Path, source: &Path, clean: &str) -> Option<Strin
     }
     let ups = "../".repeat(dir.components().count());
     Some(format!("{ups}{}", target.to_string_lossy()))
+}
+
+/// The project file a citation names, as written or percent-decoded; both
+/// forms stay inside the project root.
+fn cited_file(project: &Path, cited: &str) -> Option<PathBuf> {
+    let candidates = std::iter::once(cited.to_string())
+        .chain(crate::core::anti_halluc::percent_decoded_relative(cited));
+    candidates
+        .map(|c| project.join(c))
+        .find(|path| !outside_project(project, path) && path.is_file())
 }
 
 fn is_project_dir(project: &Path, path: &str) -> bool {
@@ -1359,5 +1400,127 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.path.contains("outside")));
+    }
+
+    /// A real .docx (a ZIP archive) and an all-ASCII PDF: one is caught by its
+    /// bytes, the other by its header, neither by its extension.
+    fn document_project() -> tempfile::TempDir {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("proj");
+        let mut docx = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        docx.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        docx.write_all(b"<w:document><w:body><w:p>Budget</w:p></w:body></w:document>")
+            .unwrap();
+        let docx = docx.finish().unwrap().into_inner();
+        fs::create_dir_all(project.join("docs")).unwrap();
+        fs::write(project.join("Budget 2026.docx"), docx).unwrap();
+        fs::write(
+            project.join("brief.pdf"),
+            "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n",
+        )
+        .unwrap();
+        write(&project.join("notes.md"), "one\ntwo\n");
+        write(&project.join("fake.docx"), "plain text in disguise\n");
+        fs::write(tmp.path().join("secret.bin"), b"\x00\x01binary outside").unwrap();
+        tmp
+    }
+
+    fn citation_messages(project: &Path, text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        inspect_citations(project, "docs/AGENTS.md", text, &mut out);
+        out.into_iter().map(|d| d.message).collect()
+    }
+
+    #[test]
+    fn a_binary_file_is_cited_by_bare_path() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(
+            &project,
+            "Budget [src: file: Budget 2026.docx], encoded [src: file: Budget%202026.docx] \
+             and brief [src: file: brief.pdf].",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_line_on_a_binary_file_says_to_cite_the_bare_path() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let messages = citation_messages(
+            &project,
+            "[src: file: Budget 2026.docx:1] [src: file: brief.pdf:2]",
+        );
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        for (message, path) in messages.iter().zip(["Budget 2026.docx", "brief.pdf"]) {
+            assert!(
+                message.contains("is a binary file and has no lines")
+                    && message.contains(&format!("[src: file: {path}]")),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_file_still_needs_a_line() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        // `fake.docx` is text whatever its extension says.
+        let messages = citation_messages(&project, "[src: file: notes.md] [src: file: fake.docx]");
+        assert_eq!(messages.len(), 2, "{messages:#?}");
+        assert!(
+            messages[0].contains("a text file is cited with the line")
+                && messages[0].contains("[src: file: notes.md:<line>]"),
+            "{}",
+            messages[0]
+        );
+        assert!(messages[1].contains("[src: file: fake.docx:<line>]"));
+        assert!(
+            citation_messages(&project, "[src: file: notes.md:2] [src: file: fake.docx:1]")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn traversal_and_absolute_citations_stay_refused() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let outside = tmp.path().join("secret.bin");
+        let text = format!(
+            "[src: file: ../secret.bin] [src: file: ..%2Fsecret.bin] [src: file: {}] \
+             [src: file: %2F{}] [src: file: ../secret.bin:1] [src: file: %2E%2E/secret.bin:1]",
+            outside.display(),
+            outside.display().to_string().trim_start_matches('/'),
+        );
+        let messages = citation_messages(&project, &text);
+        assert_eq!(messages.len(), 6, "{messages:#?}");
+    }
+
+    #[test]
+    fn percent_encoded_links_resolve_inside_the_project_only() {
+        let tmp = document_project();
+        let project = tmp.path().join("proj");
+        let source = project.join("docs/AGENTS.md");
+        write(&source, "x\n");
+        let mut out = Vec::new();
+        let mut linked = BTreeSet::new();
+        collect_valid_links(
+            &project,
+            &source,
+            "[budget](../Budget%202026.docx) [brief](<../brief.pdf>) \
+             [up](..%2F..%2Fsecret.bin) [abs](%2Fetc%2Fhosts) [raw](../../secret.bin)",
+            &mut linked,
+            Some(&mut out),
+        );
+        assert!(linked.contains(&normalize(&project.join("Budget 2026.docx"))));
+        assert!(linked.contains(&normalize(&project.join("brief.pdf"))));
+        let messages: Vec<_> = out.iter().map(|d| d.message.clone()).collect();
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert!(messages.iter().all(|m| m.starts_with("broken link target")));
     }
 }
