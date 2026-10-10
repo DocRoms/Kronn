@@ -5143,6 +5143,14 @@ fn isolate_config_dir() {
         std::fs::create_dir_all(&host_home).expect("create API host fixture");
         kronn::core::child_env::set_var("KRONN_DATA_DIR", data_dir);
         kronn::core::child_env::set_var("KRONN_HOST_HOME", host_home);
+        // The binary-relative lookup misses when CARGO_TARGET_DIR is outside
+        // the repository; pin the repo templates unless already set.
+        if kronn::core::child_env::var("KRONN_TEMPLATES_DIR").is_err() {
+            kronn::core::child_env::set_var(
+                "KRONN_TEMPLATES_DIR",
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates"),
+            );
+        }
         root
     });
 }
