@@ -37,6 +37,9 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The `db-backup.md` cron recipe now creates the backup folder as `0700` and
+  the copies as `0600` (`umask 077;`), with the `ls -la` result to expect
+  (KT-1075). A copy holds the conversation history in clear.
 - The release body no longer mentions GitHub accounts by accident (KT-1179).
   Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
   agent alias) were read by GitHub as mentions of real accounts, listed under

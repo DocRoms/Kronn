@@ -161,12 +161,15 @@ left after retention depends on how much history is younger than the window.
 
 SQLite's `.backup` command produces a consistent file even while the
 backend has the DB open (it uses the SQLite online-backup API). One
-line in cron is enough:
+line in cron is enough. A copy holds the whole conversation history in
+clear and the credentials as AES-GCM ciphertexts (the key lives outside the
+DB), so the `umask 077;` keeps each copy at `0600` and the directory below
+is `0700`, like Kronn's own database and boot backups:
 
 ```bash
 # crontab -e
 # Hourly Kronn DB snapshot — keeps last 24 (truncated by find -mmin)
-0 * * * * sqlite3 ~/.config/kronn/kronn.db ".backup '/var/backups/kronn/kronn-$(date +\%Y\%m\%d-\%H).db'" && find /var/backups/kronn -name 'kronn-*.db' -mmin +1500 -delete
+0 * * * * umask 077; sqlite3 ~/.config/kronn/kronn.db ".backup '/var/backups/kronn/kronn-$(date +\%Y\%m\%d-\%H).db'" && find /var/backups/kronn -name 'kronn-*.db' -mmin +1500 -delete
 ```
 
 Steps:
@@ -175,10 +178,12 @@ Steps:
 # 1. Pick a backup destination on a different disk if possible
 sudo mkdir -p /var/backups/kronn
 sudo chown $USER:$USER /var/backups/kronn
+sudo chmod 700 /var/backups/kronn
 
 # 2. Test the command manually first
-sqlite3 ~/.config/kronn/kronn.db ".backup '/var/backups/kronn/kronn-test.db'"
-ls -la /var/backups/kronn/kronn-test.db   # should match size of source within a few KB
+(umask 077; sqlite3 ~/.config/kronn/kronn.db ".backup '/var/backups/kronn/kronn-test.db'")
+ls -la /var/backups/kronn/kronn-test.db   # size of source within a few KB, mode -rw-------
+ls -ld /var/backups/kronn                 # drwx------
 
 # 3. Wire the crontab
 crontab -e
