@@ -62,8 +62,10 @@ impl FindingStatus {
 }
 
 /// One finding: a cause, where it lives, and what is known about it.
+// Exported under its own name: `models::orchestration::ReviewFinding` is the
+// other `ReviewFinding.ts`, and two exports of one file overwrite each other.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[ts(export, rename = "ReviewLedgerFinding")]
 pub struct ReviewFinding {
     pub id: String,
     pub repo: String,
