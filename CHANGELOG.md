@@ -19,6 +19,14 @@ Release notes for 0.9.3 and earlier are available in the
   also waited for a long initial build to finish before honouring the signal.
   It now uses no command substitution once its traps are set and runs the
   build in the background, so the signal stops the build at once.
+- In a multi-agent room, an agent launched in parallel on the same message now
+  knows who it is and who the message is for (KT-1153). Its prompt gives its
+  room alias (`@codex`), the main addressee (the message's first target), and
+  the sentences of the message that name it. It is told to answer in its own
+  role, without taking over the main agent's or speaking for it, instead of
+  "reply directly to the user". It also sees the whole agent thread under the
+  message, replies to replies included, not only the direct replies. The
+  deeper replies are capped at the 24 most recent and 24 000 bytes.
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and

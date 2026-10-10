@@ -1283,8 +1283,11 @@ mod awaiting_terminal_tests {
 #[cfg(test)]
 mod dispatch_prompt_snapshot_tests {
     use super::{
-        discussion_at_dispatch_trigger, independent_sibling_notice, load_quick_prompt_snapshot,
+        discussion_at_dispatch_trigger, excerpt_naming, independent_sibling_notice,
+        load_quick_prompt_snapshot, parallel_turn_notice, root_user_message, ParallelTurnRole,
+        MAX_THREAD_DESCENDANTS,
     };
+    use crate::models::AgentType;
     use crate::{
         core::execution_variables::VariableProvenance,
         models::{Discussion, PromptVariableSource},
@@ -1367,12 +1370,227 @@ mod dispatch_prompt_snapshot_tests {
 
     #[test]
     fn sibling_notice_encourages_complement_without_relaunch() {
-        let notice = independent_sibling_notice("fr", "@codex, @ollama");
+        let role = ParallelTurnRole {
+            own: "@codex",
+            principal: "@claude",
+            excerpt: None,
+        };
+        let notice = independent_sibling_notice("fr", "@claude, @ollama", &role);
 
-        assert!(notice.contains("complète-les utilement"));
+        assert!(notice.contains("complète utilement"));
         assert!(notice.contains("ne le relance pas"));
-        assert!(notice.contains("@codex, @ollama"));
-        assert!(independent_sibling_notice("fr", "").is_empty());
+        assert!(notice.contains("@claude, @ollama"));
+        assert!(independent_sibling_notice("fr", "", &role).is_empty());
+    }
+
+    /// The room of discussion cd317e4b: the human names a judge and two
+    /// contestants in one message, and each agent is launched in parallel.
+    fn joke_contest_room() -> super::Discussion {
+        serde_json::from_value(serde_json::json!({
+            "id": "d-jokes",
+            "project_id": null,
+            "title": "Joke contest",
+            "agent": "OpenCode",
+            "language": "fr",
+            "participants": ["OpenCode", "Codex", "LiteLlm"],
+            "messages": [{
+                "id": "u1",
+                "role": "User",
+                "content": "Bonjour à tous. @opencode tu es juge des blagues de @codex et @litellm. Soyez drôles !",
+                "agent_type": null,
+                "timestamp": "2026-10-10T12:25:43Z"
+            }],
+            "message_count": 1,
+            "non_system_message_count": 1,
+            "created_at": "2026-10-10T12:25:43Z",
+            "updated_at": "2026-10-10T12:25:43Z"
+        }))
+        .expect("valid discussion fixture")
+    }
+
+    #[test]
+    fn a_parallel_contestant_knows_its_alias_the_addressee_and_its_role() {
+        let room = joke_contest_room();
+        let scheduled = [AgentType::OpenCode, AgentType::Codex, AgentType::LiteLlm];
+        let notice = parallel_turn_notice(&room, Some("u1"), &AgentType::Codex, &scheduled);
+
+        assert!(notice.contains("Tu es @codex dans cette room."), "{notice}");
+        assert!(notice.contains("s'adresse d'abord à @opencode"), "{notice}");
+        assert!(
+            notice.contains(
+                "Passage qui te nomme : « @opencode tu es juge des blagues de @codex et @litellm. »"
+            ),
+            "{notice}"
+        );
+        assert!(notice.contains("sans prendre celui de @opencode ni parler en son nom"));
+        assert!(notice.contains(": @opencode, @litellm."), "{notice}");
+        assert!(!notice.contains("Réponds directement à l'utilisateur"));
+        assert!(!notice.contains("Bonjour à tous"));
+    }
+
+    #[test]
+    fn the_principal_is_told_it_is_the_main_addressee() {
+        let room = joke_contest_room();
+        let scheduled = [AgentType::OpenCode, AgentType::Codex, AgentType::LiteLlm];
+        let notice = parallel_turn_notice(&room, Some("u1"), &AgentType::OpenCode, &scheduled);
+
+        assert!(notice.contains("Tu es @opencode dans cette room, destinataire principal"));
+        assert!(!notice.contains("sans prendre celui de"));
+        assert!(notice.contains(": @codex, @litellm."), "{notice}");
+    }
+
+    #[test]
+    fn an_agent_alone_on_the_turn_gets_no_parallel_notice() {
+        let room = joke_contest_room();
+        let notice =
+            parallel_turn_notice(&room, Some("u1"), &AgentType::Codex, &[AgentType::Codex]);
+        assert!(notice.is_empty());
+    }
+
+    #[test]
+    fn an_agent_added_without_a_mention_is_told_so() {
+        let room = joke_contest_room();
+        let scheduled = [AgentType::OpenCode, AgentType::Ollama];
+        let notice = parallel_turn_notice(&room, Some("u1"), &AgentType::Ollama, &scheduled);
+        assert!(notice.contains("Ton alias n'y figure pas"), "{notice}");
+
+        let english = independent_sibling_notice(
+            "en",
+            "@opencode",
+            &ParallelTurnRole {
+                own: "@codex",
+                principal: "@opencode",
+                excerpt: Some("judge @codex"),
+            },
+        );
+        assert!(english.contains("You are @codex in this room."));
+        assert!(english.contains("addressed first to @opencode"));
+        assert!(english.contains("Passage naming you: \"judge @codex\""));
+        assert!(english.contains("without taking over @opencode's role"));
+        assert!(!english.contains("Reply directly to the user"));
+    }
+
+    #[test]
+    fn naming_excerpt_matches_whole_aliases_and_stays_bounded() {
+        assert_eq!(
+            excerpt_naming("Salut.\n@Codex, relis ceci ! Merci", "@codex").as_deref(),
+            Some("@Codex, relis ceci !")
+        );
+        assert_eq!(excerpt_naming("@codexbis et me@codex", "@codex"), None);
+        assert_eq!(
+            excerpt_naming("@codex d'abord. Puis rien. Enfin @codex.", "@codex").as_deref(),
+            Some("@codex d'abord. … Enfin @codex.")
+        );
+        let long = format!("@codex {}", "é".repeat(500));
+        let excerpt = excerpt_naming(&long, "@codex").expect("named");
+        assert_eq!(excerpt.chars().count(), 301);
+        assert!(excerpt.ends_with('…'));
+    }
+
+    #[test]
+    fn a_handoff_trigger_finds_the_user_message_it_descends_from() {
+        let mut room = joke_contest_room();
+        room.messages.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "a-judge",
+                "role": "Agent",
+                "content": "@codex, à toi.",
+                "agent_type": "OpenCode",
+                "timestamp": "2026-10-10T12:26:00Z",
+                "reply_to_message_id": "u1"
+            }))
+            .expect("valid message"),
+        );
+        let root = root_user_message(&room, Some("a-judge")).expect("root");
+        assert_eq!(root.id, "u1");
+        assert!(root_user_message(&room, Some("missing")).is_none());
+    }
+
+    fn message(id: &str, role: &str, reply_to: Option<&str>) -> crate::models::DiscussionMessage {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "role": role,
+            "content": format!("contenu {id}"),
+            "agent_type": if role == "User" { None } else { Some("Codex") },
+            "timestamp": "2026-10-10T12:00:00Z",
+            "reply_to_message_id": reply_to
+        }))
+        .expect("valid message")
+    }
+
+    #[test]
+    fn frozen_view_keeps_the_whole_thread_under_the_trigger() {
+        let mut room = joke_contest_room();
+        room.messages = vec![
+            message("u0", "User", None),
+            message("a-old", "Agent", Some("u0")),
+            message("u1", "User", None),
+            message("a-judge", "Agent", Some("u1")),
+            message("a-joke", "Agent", Some("a-judge")),
+            message("trace", "System", Some("a-judge")),
+            message("a-verdict", "Agent", Some("a-joke")),
+            message("a-elsewhere", "Agent", Some("a-old")),
+            message("orphan", "Agent", None),
+            message("u2", "User", None),
+            message("a-later", "Agent", Some("u2")),
+        ];
+        let snapshot = discussion_at_dispatch_trigger(&room, Some("u1"));
+        let ids = snapshot
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            ["u0", "a-old", "u1", "a-judge", "a-joke", "a-verdict"],
+            "descendants of the trigger only, in transcript order"
+        );
+        assert_eq!(snapshot.message_count, 6);
+    }
+
+    #[test]
+    fn frozen_view_bounds_deep_replies_but_keeps_every_direct_one() {
+        let mut room = joke_contest_room();
+        let mut messages = vec![
+            message("u1", "User", None),
+            message("a-direct", "Agent", Some("u1")),
+        ];
+        let mut parent = "a-direct".to_string();
+        for depth in 0..MAX_THREAD_DESCENDANTS + 6 {
+            let id = format!("a-deep-{depth}");
+            messages.push(message(&id, "Agent", Some(&parent)));
+            parent = id;
+        }
+        messages.push(message("a-direct-2", "Agent", Some("u1")));
+        room.messages = messages;
+
+        let snapshot = discussion_at_dispatch_trigger(&room, Some("u1"));
+        let ids = snapshot
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids.len(), 1 + 2 + MAX_THREAD_DESCENDANTS);
+        assert!(ids.contains(&"a-direct") && ids.contains(&"a-direct-2"));
+        assert!(
+            !ids.contains(&"a-deep-5"),
+            "oldest deep replies are dropped"
+        );
+        assert!(ids.contains(&"a-deep-6"));
+        assert!(ids.contains(&format!("a-deep-{}", MAX_THREAD_DESCENDANTS + 5).as_str()));
+
+        // A single oversized deep reply stops the deeper part, not the direct ones.
+        let last = room.messages.len() - 2;
+        room.messages[last].content = "x".repeat(super::MAX_THREAD_DESCENDANT_BYTES + 1);
+        let snapshot = discussion_at_dispatch_trigger(&room, Some("u1"));
+        let ids = snapshot
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["u1", "a-direct", "a-direct-2"]);
     }
 
     #[test]
@@ -1610,9 +1828,10 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
 /// Freeze the conversational view at the message that owns this dispatch.
 ///
 /// Plural targets are executed one at a time inside a discussion so their
-/// file operations cannot race. A responder sees completed direct siblings so
-/// it can complement them, but never later User turns or unrelated handoff
-/// branches. The durable transcript itself remains untouched.
+/// file operations cannot race. A responder sees the completed agent thread
+/// under the trigger (direct replies and their descendants) so it can
+/// complement it, but never later User turns or unrelated branches. The
+/// durable transcript itself remains untouched.
 fn discussion_at_dispatch_trigger(
     disc: &Discussion,
     trigger_message_id: Option<&str>,
@@ -1634,16 +1853,16 @@ fn discussion_at_dispatch_trigger(
     let mut snapshot = disc.clone();
     let trigger = &disc.messages[trigger_index];
     snapshot.messages = if matches!(trigger.role, MessageRole::User) {
-        // A later responder can complement an earlier sibling or answer its
-        // concrete question without creating another dispatch. Later User
-        // turns and unrelated/handoff branches remain invisible.
+        let later = &disc.messages[trigger_index + 1..];
+        let keep = thread_under_trigger(later, trigger_message_id);
         disc.messages[..=trigger_index]
             .iter()
-            .chain(disc.messages[trigger_index + 1..].iter().filter(|message| {
-                matches!(message.role, MessageRole::Agent)
-                    && matches!(message.channel, MessageChannel::Main)
-                    && message.reply_to_message_id.as_deref() == Some(trigger_message_id)
-            }))
+            .chain(
+                later
+                    .iter()
+                    .zip(keep)
+                    .filter_map(|(message, kept)| kept.then_some(message)),
+            )
             .cloned()
             .collect()
     } else {
@@ -1663,39 +1882,290 @@ fn discussion_at_dispatch_trigger(
     snapshot
 }
 
-fn independent_sibling_notice(language: &str, aliases: &str) -> String {
+/// Bounds on the replies deeper than the trigger's direct ones; direct replies
+/// are always kept, as there is at most one per scheduled agent.
+const MAX_THREAD_DESCENDANTS: usize = 24;
+const MAX_THREAD_DESCENDANT_BYTES: usize = 24_000;
+
+/// Which of `later` belong to the agent thread under the trigger. Later User
+/// turns and unrelated branches stay out; deeper replies are kept newest first
+/// within the bounds.
+fn thread_under_trigger(later: &[DiscussionMessage], trigger_message_id: &str) -> Vec<bool> {
+    let mut thread_ids = std::collections::HashSet::from([trigger_message_id]);
+    let mut keep = vec![false; later.len()];
+    let mut deeper = Vec::new();
+    for (index, message) in later.iter().enumerate() {
+        if !matches!(message.role, MessageRole::Agent)
+            || !matches!(message.channel, MessageChannel::Main)
+        {
+            continue;
+        }
+        let Some(parent) = message.reply_to_message_id.as_deref() else {
+            continue;
+        };
+        if !thread_ids.contains(parent) {
+            continue;
+        }
+        thread_ids.insert(message.id.as_str());
+        if parent == trigger_message_id {
+            keep[index] = true;
+        } else {
+            deeper.push(index);
+        }
+    }
+    let mut bytes = 0;
+    for index in deeper.into_iter().rev().take(MAX_THREAD_DESCENDANTS) {
+        bytes += later[index].content.len();
+        if bytes > MAX_THREAD_DESCENDANT_BYTES {
+            break;
+        }
+        keep[index] = true;
+    }
+    keep
+}
+
+/// Who a parallel responder is in the room and what the human asked of it.
+struct ParallelTurnRole<'a> {
+    own: &'a str,
+    principal: &'a str,
+    /// The passage of the user message that names `own`, if any.
+    excerpt: Option<&'a str>,
+}
+
+fn independent_sibling_notice(language: &str, aliases: &str, role: &ParallelTurnRole) -> String {
     if aliases.is_empty() {
         return String::new();
     }
+    let ParallelTurnRole {
+        own,
+        principal,
+        excerpt,
+    } = *role;
+    let is_principal = own == principal;
     match language {
-        "fr" => format!(
-            "--- Réponses multi-agents complémentaires ---\n\
-             Les agents suivants ont chacun un tour déjà programmé pour ce même message : {aliases}. \
-             Les réponses déjà terminées sont visibles dans le contexte. Réponds directement à \
-             l'utilisateur et complète-les utilement sans lancer de débat automatique. Tu peux \
-             répondre brièvement à une demande concrète d'un autre agent, mais ne le relance pas.\n\n"
-        ),
-        "es" => format!(
-            "--- Respuestas multiagente complementarias ---\n\
-             Cada uno de estos agentes ya tiene un turno programado para el mismo mensaje: {aliases}. \
-             Las respuestas ya terminadas aparecen en el contexto. Responde directamente al usuario \
-             y complétalas de forma útil sin iniciar un debate automático. Puedes responder brevemente \
-             a una petición concreta de otro agente, pero no vuelvas a iniciarlo.\n\n"
-        ),
-        "zh" => format!(
-            "--- 多智能体互补回复 ---\n\
-             以下智能体都已为同一条消息安排了一次回复：{aliases}。已完成的回复会显示在上下文中。\
-             请直接回复用户并提供有价值的补充，不要自动展开辩论。你可以简短回应另一个智能体的\
-             具体请求，但不要再次启动它。\n\n"
-        ),
-        _ => format!(
-            "--- Complementary multi-agent replies ---\n\
-             Each of these agents already has one turn scheduled for the same message: {aliases}. \
-             Completed replies are visible in the context. Reply directly to the user and add useful \
-             complementary points without starting an automatic debate. You may briefly answer a \
-             concrete request from another agent, but do not launch it again.\n\n"
-        ),
+        "fr" => {
+            let identity = if is_principal {
+                format!("Tu es {own} dans cette room, destinataire principal de ce message.")
+            } else {
+                format!("Tu es {own} dans cette room. Ce message s'adresse d'abord à {principal}.")
+            };
+            let named = match excerpt {
+                Some(excerpt) => format!(" Passage qui te nomme : « {excerpt} »."),
+                None => " Ton alias n'y figure pas : tu as été ajouté comme destinataire.".into(),
+            };
+            let own_role = if is_principal {
+                String::new()
+            } else {
+                format!(", sans prendre celui de {principal} ni parler en son nom")
+            };
+            format!(
+                "--- Réponses multi-agents complémentaires ---\n\
+                 {identity}{named}\n\
+                 Les agents suivants ont chacun un tour déjà programmé pour ce même message : {aliases}. \
+                 Les réponses déjà terminées sont visibles dans le contexte. Réponds dans ton propre \
+                 rôle, tel que le message le définit pour toi{own_role}, et complète utilement les \
+                 autres réponses sans lancer de débat automatique. Tu peux répondre brièvement à une \
+                 demande concrète d'un autre agent, mais ne le relance pas.\n\n"
+            )
+        }
+        "es" => {
+            let identity = if is_principal {
+                format!("Eres {own} en esta sala, destinatario principal de este mensaje.")
+            } else {
+                format!("Eres {own} en esta sala. Este mensaje se dirige ante todo a {principal}.")
+            };
+            let named = match excerpt {
+                Some(excerpt) => format!(" Pasaje que te nombra: «{excerpt}»."),
+                None => " Tu alias no aparece: se te añadió como destinatario.".into(),
+            };
+            let own_role = if is_principal {
+                String::new()
+            } else {
+                format!(", sin asumir el de {principal} ni hablar en su nombre")
+            };
+            format!(
+                "--- Respuestas multiagente complementarias ---\n\
+                 {identity}{named}\n\
+                 Cada uno de estos agentes ya tiene un turno programado para el mismo mensaje: {aliases}. \
+                 Las respuestas ya terminadas aparecen en el contexto. Responde en tu propio papel, tal \
+                 como el mensaje lo define para ti{own_role}, y complementa de forma útil las demás \
+                 respuestas sin iniciar un debate automático. Puedes responder brevemente a una \
+                 petición concreta de otro agente, pero no vuelvas a iniciarlo.\n\n"
+            )
+        }
+        "zh" => {
+            let identity = if is_principal {
+                format!("你在此讨论室中是 {own}，也是这条消息的主要对象。")
+            } else {
+                format!("你在此讨论室中是 {own}。这条消息首先是发给 {principal} 的。")
+            };
+            let named = match excerpt {
+                Some(excerpt) => format!("提到你的段落：「{excerpt}」。"),
+                None => "消息中没有你的别名：你是被添加为接收者的。".into(),
+            };
+            let own_role = if is_principal {
+                String::new()
+            } else {
+                format!("，不要承担 {principal} 的角色，也不要代其发言")
+            };
+            format!(
+                "--- 多智能体互补回复 ---\n\
+                 {identity}{named}\n\
+                 以下智能体都已为同一条消息安排了一次回复：{aliases}。已完成的回复会显示在上下文中。\
+                 请按消息为你设定的角色作答{own_role}，为其他回复提供有价值的补充，不要自动展开辩论。\
+                 你可以简短回应另一个智能体的具体请求，但不要再次启动它。\n\n"
+            )
+        }
+        _ => {
+            let identity = if is_principal {
+                format!("You are {own} in this room, the main addressee of this message.")
+            } else {
+                format!(
+                    "You are {own} in this room. This message is addressed first to {principal}."
+                )
+            };
+            let named = match excerpt {
+                Some(excerpt) => format!(" Passage naming you: \"{excerpt}\"."),
+                None => " Your alias does not appear in it: you were added as a recipient.".into(),
+            };
+            let own_role = if is_principal {
+                String::new()
+            } else {
+                format!(", without taking over {principal}'s role or speaking for it")
+            };
+            format!(
+                "--- Complementary multi-agent replies ---\n\
+                 {identity}{named}\n\
+                 Each of these agents already has one turn scheduled for the same message: {aliases}. \
+                 Completed replies are visible in the context. Answer in your own role, as the message \
+                 defines it for you{own_role}, and add useful complementary points without starting \
+                 an automatic debate. You may briefly answer a concrete request from another agent, \
+                 but do not launch it again.\n\n"
+            )
+        }
     }
+}
+
+/// The notice for an agent sharing this root User turn with others: who it is,
+/// who the message is addressed to first (the first target), and the passage
+/// that names it. Empty when the agent answers alone.
+fn parallel_turn_notice(
+    disc: &Discussion,
+    trigger_message_id: Option<&str>,
+    agent_type: &AgentType,
+    scheduled_agents: &[AgentType],
+) -> String {
+    let sibling_aliases = scheduled_agents
+        .iter()
+        .filter(|agent| *agent != agent_type)
+        .filter_map(agent_alias)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if sibling_aliases.is_empty() {
+        return String::new();
+    }
+    let own = room_handle(agent_type);
+    let principal = room_handle(scheduled_agents.first().unwrap_or(agent_type));
+    let excerpt = root_user_message(disc, trigger_message_id)
+        .and_then(|root| excerpt_naming(&root.content, &own));
+    independent_sibling_notice(
+        &disc.language,
+        &sibling_aliases,
+        &ParallelTurnRole {
+            own: &own,
+            principal: &principal,
+            excerpt: excerpt.as_deref(),
+        },
+    )
+}
+
+/// The agent's handle in the room: its `@alias`, or its display name when it
+/// has none.
+fn room_handle(agent: &AgentType) -> String {
+    agent_alias(agent)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::api::disc_helpers::agent_display_name(agent))
+}
+
+/// The User message a dispatch descends from: the trigger itself, or the end of
+/// its reply chain, or else the latest User message before it.
+fn root_user_message<'a>(
+    disc: &'a Discussion,
+    trigger_message_id: Option<&str>,
+) -> Option<&'a DiscussionMessage> {
+    let trigger_index = disc
+        .messages
+        .iter()
+        .position(|message| Some(message.id.as_str()) == trigger_message_id)?;
+    let mut current = &disc.messages[trigger_index];
+    for _ in 0..disc.messages.len() {
+        if matches!(current.role, MessageRole::User) {
+            return Some(current);
+        }
+        let Some(parent) = current
+            .reply_to_message_id
+            .as_deref()
+            .and_then(|parent| disc.messages.iter().find(|message| message.id == parent))
+        else {
+            break;
+        };
+        current = parent;
+    }
+    disc.messages[..trigger_index]
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, MessageRole::User))
+}
+
+const MAX_NAMING_EXCERPT_CHARS: usize = 300;
+
+/// The sentences of `content` that mention `alias`, joined and bounded.
+fn excerpt_naming(content: &str, alias: &str) -> Option<String> {
+    let mut sentences = Vec::new();
+    for line in content.lines() {
+        let mut start = 0;
+        let mut chars = line.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            let ends_sentence = matches!(ch, '.' | '!' | '?')
+                && chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+            if ends_sentence {
+                let end = index + ch.len_utf8();
+                sentences.push(&line[start..end]);
+                start = end;
+            }
+        }
+        sentences.push(&line[start..]);
+    }
+    let naming = sentences
+        .into_iter()
+        .map(str::trim)
+        .filter(|sentence| mentions_alias(sentence, alias))
+        .collect::<Vec<_>>()
+        .join(" … ");
+    if naming.is_empty() {
+        return None;
+    }
+    if naming.chars().count() <= MAX_NAMING_EXCERPT_CHARS {
+        return Some(naming);
+    }
+    let mut bounded = naming
+        .chars()
+        .take(MAX_NAMING_EXCERPT_CHARS)
+        .collect::<String>();
+    bounded.push('…');
+    Some(bounded)
+}
+
+/// `@codex` in "@codex," but not in "@codexbis" nor in "me@codex".
+fn mentions_alias(text: &str, alias: &str) -> bool {
+    let text = text.to_lowercase();
+    let alias = alias.to_lowercase();
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '-';
+    text.match_indices(&alias).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + alias.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
 }
 
 /// The messages written since the agent last saw the discussion.
@@ -2884,17 +3354,16 @@ async fn make_agent_stream_inner(
             .await
             .unwrap_or_default()
     };
-    let sibling_aliases = root_turn_scheduled_agents
-        .iter()
-        .filter(|agent| **agent != agent_type)
-        .filter_map(agent_alias)
-        .collect::<Vec<_>>()
-        .join(", ");
     // These agents already own a dispatch for the same root User turn. Do not
     // advertise them as handoff targets to this runner, and explain why so the
     // generated answer does not wait for a redundant acknowledgement.
     attached_handoff_agents.retain(|agent| !root_turn_scheduled_agents.contains(agent));
-    let sibling_notice = independent_sibling_notice(&disc.language, &sibling_aliases);
+    let sibling_notice = parallel_turn_notice(
+        &disc,
+        dispatch_trigger_message_id.as_deref(),
+        &agent_type,
+        &root_turn_scheduled_agents,
+    );
     let context_files_prompt = format!("{context_files_prompt}{sibling_notice}");
     let ollama_handoff_available = attached_handoff_agents.iter().any(|agent| {
         *agent == AgentType::Ollama
