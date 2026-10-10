@@ -627,11 +627,12 @@ pub fn carry_over_steps(
             "INSERT OR IGNORE INTO audit_run_steps
                 (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
                  step_tokens, cli_success, input_tokens, output_tokens, cache_read_tokens,
-                 cache_write_tokens, cost_usd_micros, carried_from_run_id, token_accounting)
+                 cache_write_tokens, cost_usd_micros, carried_from_run_id, token_accounting,
+                 unchanged)
              SELECT ?1, step_index, ?3, started_at, COALESCE(ended_at, ?4), duration_ms,
                     step_tokens, 1, input_tokens, output_tokens, cache_read_tokens,
                     cache_write_tokens, cost_usd_micros, COALESCE(carried_from_run_id, ?5),
-                    token_accounting
+                    token_accounting, unchanged
                FROM audit_run_steps WHERE audit_run_id = ?5 AND step_index = ?2",
             params![
                 audit_run_id,
@@ -864,7 +865,7 @@ pub(crate) fn invalidate_documentary_steps(
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     for (step, warning) in warnings {
-        tx.execute("UPDATE audit_run_steps SET cli_success = 0,
+        tx.execute("UPDATE audit_run_steps SET cli_success = 0, unchanged = 0,
             step_warning = CASE WHEN step_warning IS NULL THEN ?3 ELSE step_warning || char(10) || ?3 END
             WHERE audit_run_id = ?1 AND step_index = ?2", params![run_id, step, warning])?;
     }
@@ -893,6 +894,37 @@ pub fn finalize_audit_step(
     step_warning: Option<&str>,
     repaired: bool,
 ) -> Result<()> {
+    finalize_audit_step_with_outcome(
+        conn,
+        audit_run_id,
+        step_index,
+        ended_at,
+        duration_ms,
+        tokens,
+        cumulative_tokens,
+        cli_success,
+        step_warning,
+        repaired,
+        false,
+    )
+}
+
+/// `finalize_audit_step`, also recording whether the step ended `unchanged`:
+/// its target was already up to date and every gate passed (KT-1130).
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_audit_step_with_outcome(
+    conn: &Connection,
+    audit_run_id: &str,
+    step_index: u32,
+    ended_at: DateTime<Utc>,
+    duration_ms: u64,
+    tokens: &StepTokens,
+    cumulative_tokens: Option<u64>,
+    cli_success: bool,
+    step_warning: Option<&str>,
+    repaired: bool,
+    unchanged: bool,
+) -> Result<()> {
     let as_sql = |value: Option<u64>| value.map(|value| value as i64);
     conn.execute(
         "UPDATE audit_run_steps SET
@@ -907,7 +939,8 @@ pub fn finalize_audit_step(
             output_tokens = ?11,
             cache_read_tokens = ?12,
             cache_write_tokens = ?13,
-            token_accounting = ?14
+            token_accounting = ?14,
+            unchanged = ?15
          WHERE audit_run_id = ?1 AND step_index = ?2",
         params![
             audit_run_id,
@@ -924,6 +957,7 @@ pub fn finalize_audit_step(
             as_sql(tokens.cache_read),
             as_sql(tokens.cache_write),
             tokens.accounting.as_str(),
+            unchanged as i32,
         ],
     )?;
     Ok(())
@@ -937,7 +971,7 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
                 step_warning, step_repaired_from_template,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                cost_usd_micros, carried_from_run_id, token_accounting
+                cost_usd_micros, carried_from_run_id, token_accounting, unchanged
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -973,6 +1007,7 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             cost_unknown_reason: None,
             breakdown: None,
             token_accounting: row.get(17)?,
+            unchanged: row.get::<_, i64>(18)? != 0,
         })
     })?;
     let mut out = Vec::new();
@@ -1107,6 +1142,7 @@ mod tests {
                 cost_usd_micros INTEGER,
                 carried_from_run_id TEXT,
                 token_accounting TEXT,
+                unchanged INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -1220,6 +1256,52 @@ mod tests {
         assert_eq!(missing.step_tokens, None);
         assert_eq!(missing.cost_usd_micros, None);
         assert_eq!(missing.carried_from_run_id.as_deref(), Some("run-b"));
+    }
+
+    #[test]
+    fn an_unchanged_step_is_recorded_carried_and_cleared_by_a_documentary_reopen() {
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "run-a", "p1", "Full", "ClaudeCode", start).unwrap();
+        for (step, unchanged) in [(1, true), (2, false)] {
+            insert_audit_step_start(&conn, "run-a", step, "docs/x.md", start).unwrap();
+            finalize_audit_step_with_outcome(
+                &conn,
+                "run-a",
+                step,
+                start,
+                10,
+                &StepTokens::UNKNOWN,
+                None,
+                true,
+                None,
+                false,
+                unchanged,
+            )
+            .unwrap();
+        }
+        let steps = list_audit_steps(&conn, "run-a").unwrap();
+        assert!(steps[0].unchanged && steps[0].cli_success);
+        assert!(!steps[1].unchanged);
+
+        // A resume carries the flag with the step.
+        insert_running(&conn, "run-b", "p1", "Full", "ClaudeCode", start).unwrap();
+        carry_over_steps(
+            &conn,
+            "run-b",
+            "run-a",
+            &[(1, "docs/x.md".into()), (2, "docs/x.md".into())],
+            Utc::now(),
+        )
+        .unwrap();
+        let carried = list_audit_steps(&conn, "run-b").unwrap();
+        assert!(carried[0].unchanged);
+        assert!(!carried[1].unchanged);
+
+        // A later documentary blocker reopens it: failed, no longer unchanged.
+        invalidate_documentary_steps(&conn, "run-b", &[(1, "broken link".into())]).unwrap();
+        let reopened = &list_audit_steps(&conn, "run-b").unwrap()[0];
+        assert!(!reopened.cli_success && !reopened.unchanged);
     }
 
     #[test]

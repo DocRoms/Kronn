@@ -357,6 +357,41 @@ pub(crate) fn partial_run_block(
     block
 }
 
+/// KT-1130 — the steps that verified their document and had nothing to
+/// change, listed apart so the human confirms them. Empty when there is none.
+pub(crate) fn unchanged_steps_block(
+    unchanged: &[(u32, String)],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if unchanged.is_empty() {
+        return String::new();
+    }
+    let list = unchanged
+        .iter()
+        .map(|(step, file)| format!("- {step}/{total_steps} — `{file}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## UNCHANGED STEPS — to confirm",
+            "These steps checked their document and had nothing to fix: the file was already up to date and every check passed.",
+            "List them to the user in a separate section of your first message so they can confirm these documents still hold. They did not fail and have nothing to redo.",
+        ),
+        "es" => (
+            "## PASOS SIN CAMBIOS — por confirmar",
+            "Estos pasos verificaron su documento y no tuvieron nada que corregir: el archivo ya estaba al dia y todas las comprobaciones pasaron.",
+            "Enumeralos al usuario en una seccion aparte de tu primer mensaje para que confirme que esos documentos siguen siendo correctos. No fallaron y no hay nada que rehacer.",
+        ),
+        _ => (
+            "## ÉTAPES INCHANGÉES — à confirmer",
+            "Ces étapes ont vérifié leur document et n'avaient rien à corriger : le fichier était déjà à jour et toutes les vérifications sont passées.",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message, pour qu'il confirme que ces documents restent justes. Elles ne sont pas en échec et n'ont rien à refaire.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
 /// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
 /// version: a sub-audit only writes ONE index file + a handful of TD
 /// detail files, so Phase 1 (autonomous doc fix-up across 10 files)

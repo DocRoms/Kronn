@@ -1084,6 +1084,11 @@ cli_success: boolean, step_warning?: string | null,
  */
 step_repaired_from_template: boolean,
 /**
+ * The target was already up to date: every gate passed and the agent had
+ * nothing to change (KT-1130). Neither a success that wrote nor a failure.
+ */
+unchanged: boolean,
+/**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
 cost_usd_micros?: number | null,

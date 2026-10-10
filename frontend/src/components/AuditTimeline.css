@@ -38,6 +38,7 @@
 .audit-tl-dot.is-done { background: var(--kr-success); border-color: var(--kr-success); }
 .audit-tl-dot.is-failed, .audit-tl-dot.is-todo { background: var(--kr-error); border-color: var(--kr-error); }
 .audit-tl-dot.is-warned { background: var(--kr-warning); border-color: var(--kr-warning); }
+.audit-tl-dot.is-unchanged { background: var(--kr-text-muted); border-color: var(--kr-text-muted); }
 .audit-tl-dot.is-running { border-color: var(--kr-accent); box-shadow: 0 0 0 4px var(--kr-accent-bg-strong); }
 
 .audit-tl-tag { font-size: var(--kr-fs-sm); font-weight: 600; border-radius: 999px; padding: 2px var(--kr-sp-4); white-space: nowrap;

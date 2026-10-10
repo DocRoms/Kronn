@@ -1477,6 +1477,9 @@ export const projects = {
        * surfaces the warning. Optional for backwards-compat.
        */
       onStepWarning?: (step: number, file: string, reason: string, repaired: boolean) => void;
+      /** KT-1130 — the step checked its target and found it already up to
+       * date: neither written nor failed. Its `step_done` follows. */
+      onStepUnchanged?: (step: number, file: string) => void;
       /** NON-terminal per-step failure (spawn error): the step closes with
        * its own `step_done success=false` and the loop continues. */
       onStepError?: (error: string, step?: number) => void;
@@ -1586,6 +1589,9 @@ export const projects = {
                   p.repaired_from_template ?? false,
                 );
               }
+              break;
+            case 'step_unchanged':
+              if (typeof p.step === 'number' && typeof p.file === 'string') handlers.onStepUnchanged?.(p.step, p.file);
               break;
             // NON-terminal: the step closes with its own `step_done
             // success=false` and the pipeline continues — terminal cleanup

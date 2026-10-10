@@ -14,6 +14,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[path = "coverage_repair_tests.rs"]
 mod coverage_repair_tests;
 
+#[cfg(unix)]
+#[path = "reaudit_unchanged_tests.rs"]
+mod reaudit_unchanged_tests;
+
 fn sse(frames: &[String]) -> String {
     frames
         .iter()

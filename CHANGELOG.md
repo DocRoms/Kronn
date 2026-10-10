@@ -86,6 +86,20 @@ Release notes for 0.9.3 and earlier are available in the
   warning reports an active sheet the index does not reach. The audit
   summary now counts the TDs of every sub-audit, not only the central rows.
   The sheets in `docs/tech-debt/` stay the source of truth.
+- A second Full audit of a repository whose documentation is already up to
+  date no longer fails in a loop (KT-1130). A step whose agent had nothing to
+  change used to fail with "rewrote nothing", and "Reprendre" replayed it into
+  the same failure, so the run never reached Completed. When every other check
+  passes, the step now ends **Inchangé**: it counts as done, the run completes,
+  a resume skips it, and the validation discussion lists these steps in their
+  own section for the human to confirm. The timeline shows a neutral
+  "Inchangé" badge and an info toast instead of a red failure. A target that
+  still holds a placeholder, or that cannot be read, still fails. The outcome
+  is stored on the step (`audit_run_steps.unchanged`, migration 245) and in the
+  run's `step_outcomes_json`. A first audit of a blank repository also gets the
+  anti-hallucination spec its `docs/AGENTS.md` links to, so the documentary
+  check no longer blocks step 1. The outdated "no template to restore" advice
+  is gone from the step-failure toast.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

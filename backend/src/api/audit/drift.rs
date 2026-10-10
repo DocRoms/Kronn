@@ -980,8 +980,11 @@ pub async fn partial_audit(
                         let run_id = audit_run_id.clone();
                         let recorded_usage = step_usage;
                         let recorded_total = run_tokens.total();
+                        // The timeline shows it `unchanged`; the partial run
+                        // itself still counts it as no refresh.
+                        let step_unchanged = outcome == "unchanged";
                         if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::audit_runs::finalize_audit_step(
+                            crate::db::audit_runs::finalize_audit_step_with_outcome(
                                 conn,
                                 &run_id,
                                 step as u32,
@@ -992,6 +995,7 @@ pub async fn partial_audit(
                                 step_succeeded,
                                 None,
                                 false,
+                                step_unchanged,
                             )
                         }).await {
                             tracing::error!("Failed to finalize partial audit step {step} for run {audit_run_id}: {e}");

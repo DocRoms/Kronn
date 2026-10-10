@@ -1150,6 +1150,10 @@ pub struct AuditRunStep {
     /// Mirrors the `step_warning.repaired` field from #292.
     #[serde(default)]
     pub step_repaired_from_template: bool,
+    /// The target was already up to date: every gate passed and the agent had
+    /// nothing to change (KT-1130). Neither a success that wrote nor a failure.
+    #[serde(default)]
+    pub unchanged: bool,
     /// The step's cost in millionths of a dollar, when its agent reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
