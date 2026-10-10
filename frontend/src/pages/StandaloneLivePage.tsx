@@ -17,6 +17,7 @@ import {
   useLivePageTheme,
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
+import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import { useT } from '../lib/I18nContext';
@@ -89,6 +90,13 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
     };
   }, [pageId, reloadPageActions]);
 
+  // A publish reaches the open tab at once, without waiting for the poll.
+  useLivePageDataPush(pageId, () => {
+    Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([page]) => {
+      setDetail(current => (current && current.id !== page.id ? current : page));
+    }).catch(() => { /* the poll retries */ });
+  });
+
   useEffect(() => {
     if (!detail) return undefined;
     const previousTitle = document.title;
@@ -122,8 +130,12 @@ export function StandaloneLivePage({ pageId, params }: { pageId: string; params?
   // applies to the document that reported it.
   const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
   const pageEmbeds = embedsReport && embedsReport.doc === sandboxDocument ? embedsReport.embeds : NO_EMBEDS;
+  // Display preferences a Page asks to keep are stored for the Page shown.
+  const shownPageIdRef = useRef<string | null>(null);
+  useEffect(() => { shownPageIdRef.current = detail?.id ?? null; }, [detail]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      pageId: () => shownPageIdRef.current,
       onAction: intent => {
         setActionUnavailable(false);
         handlePageActionIntent(intent);

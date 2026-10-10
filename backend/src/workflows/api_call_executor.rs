@@ -716,29 +716,53 @@ async fn execute_api_call_step_with_db_inner(
     caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let start = Instant::now();
+    let (step_owned, plugin, mut env) =
+        match load_broker_target(step, project_id, state, pinned_run_id).await {
+            Ok(target) => target,
+            Err(msg) => return fail(step, start, msg),
+        };
+    let step = &step_owned;
 
+    // Before token minting: a refused call sends nothing anywhere.
+    let gate = match crate::core::api_access::enforce(state, &plugin, step, &env, ctx, caller).await
+    {
+        Ok(gate) => gate,
+        Err(refusal) => return fail(step, start, call_secrets(&plugin, &env).scrub(&refusal)),
+    };
+
+    let config_id = step.api_config_id.clone().unwrap_or_default();
+    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
+    execute_core_gated(step, &plugin, &env, ctx, policy, gate).await
+}
+
+/// The step hydrated from its Quick API, its plugin and its decrypted env:
+/// what every broker call sends from. Dynamic credentials are not minted yet,
+/// so an access decision can run before any token exists.
+async fn load_broker_target(
+    step: &WorkflowStep,
+    project_id: Option<&str>,
+    state: &crate::AppState,
+    pinned_run_id: Option<&str>,
+) -> Result<(WorkflowStep, McpServer, HashMap<String, String>), String> {
     // 0.7+ — référence optionnelle vers un QuickApi. Hydrate les champs
     // `api_*` manquants depuis le QA (per-field override, le step gagne).
     // Même règle que pour `BatchApiCall`. Permet à l'utilisateur de définir
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+    crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
         &mut step_owned,
         &state.db,
         pinned_run_id,
     )
-    .await
-    {
-        return fail(step, start, e);
-    }
+    .await?;
     let step = &step_owned;
 
     let Some(slug) = step.api_plugin_slug.as_ref() else {
-        return fail(step, start, "ApiCall step missing `api_plugin_slug`".into());
+        return Err("ApiCall step missing `api_plugin_slug`".into());
     };
     let Some(config_id) = step.api_config_id.as_ref() else {
-        return fail(step, start, "ApiCall step missing `api_config_id`".into());
+        return Err("ApiCall step missing `api_config_id`".into());
     };
 
     // Read the encryption secret under the short-lived config read lock,
@@ -746,11 +770,7 @@ async fn execute_api_call_step_with_db_inner(
     // every other config reader for no reason.
     let secret_opt = { state.config.read().await.encryption_secret.clone() };
     let Some(secret) = secret_opt else {
-        return fail(
-            step,
-            start,
-            "Encryption secret not configured — cannot decrypt plugin env".into(),
-        );
+        return Err("Encryption secret not configured — cannot decrypt plugin env".into());
     };
 
     // Scope resolution. A projectless call really is a General-discussion
@@ -771,15 +791,11 @@ async fn execute_api_call_step_with_db_inner(
                 Some(c) if c.is_global || c.include_general => None,
                 Some(c) if !c.project_ids.is_empty() => Some(c.project_ids[0].clone()),
                 _ => {
-                    return fail(
-                        step,
-                        start,
-                        format!(
-                            "API plugin config `{config_id}` is not linked to any project. \
+                    return Err(format!(
+                        "API plugin config `{config_id}` is not linked to any project. \
                              Open Settings → APIs and tick at least one project on this config, \
                              or attach the workflow to a project."
-                        ),
-                    );
+                    ));
                 }
             }
         }
@@ -808,7 +824,7 @@ async fn execute_api_call_step_with_db_inner(
     let found = plugins
         .into_iter()
         .find(|(server, cid, _env)| server.id == *slug && cid == config_id);
-    let Some((plugin, _cid, mut env)) = found else {
+    let Some((plugin, _cid, env)) = found else {
         let pid_label = resolved_scope
             .clone()
             .unwrap_or_else(|| "(general)".to_string());
@@ -869,25 +885,13 @@ async fn execute_api_call_step_with_db_inner(
             })
             .await
             .unwrap_or_else(|error| format!("diagnostic lookup failed: {error}"));
-        return fail(
-            step,
-            start,
-            format!(
+        return Err(format!(
                 "API plugin `{slug}` / config `{config_id}` unavailable in scope `{pid_label}`: {diagnostic}"
             ),
         );
     };
 
-    // Before token minting: a refused call sends nothing anywhere.
-    let gate = match crate::core::api_access::enforce(state, &plugin, step, &env, ctx, caller).await
-    {
-        Ok(gate) => gate,
-        Err(refusal) => return fail(step, start, call_secrets(&plugin, &env).scrub(&refusal)),
-    };
-
-    resolve_dynamic_auth(&plugin, config_id, state, &mut env, policy).await;
-
-    execute_core_gated(step, &plugin, &env, ctx, policy, gate).await
+    Ok((step_owned, plugin, env))
 }
 
 /// Resolve OAuth2/token-exchange/CLI credentials only at request time.
@@ -1568,6 +1572,246 @@ fn resolve_method(
         );
     }
     Ok(Method::GET)
+}
+
+// ─── Watch trigger poll ─────────────────────────────────────────────────
+
+/// One conditional GET a `Watch` trigger sends from the scheduler (KT-1099).
+pub(crate) struct WatchPollRequest<'a> {
+    /// A synthetic ApiCall step naming the source (API + endpoint, or a Quick API).
+    pub source: &'a WorkflowStep,
+    /// The workflow whose runs receive the response: the audience an API
+    /// access policy decides for.
+    pub workflow: &'a Workflow,
+    /// Scope the source's config is resolved in.
+    pub project_id: Option<&'a str>,
+    pub if_none_match: Option<&'a str>,
+    pub if_modified_since: Option<&'a str>,
+    pub max_body_bytes: u64,
+    pub timeout: Duration,
+}
+
+/// What a poll returned; every text field has had the call's credentials removed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WatchPollResponse {
+    pub status: u16,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    /// `None` on a 304.
+    pub body: Option<String>,
+}
+
+/// Sends a Watch poll through the broker: the source's stored credentials,
+/// the API's default headers and the guarded transport, a GET only, no
+/// retry (the next poll is the retry) and no `api_call_logs` row.
+pub(crate) async fn execute_watch_poll(
+    state: &crate::AppState,
+    policy: SecurityPolicy,
+    request: WatchPollRequest<'_>,
+) -> Result<WatchPollResponse, String> {
+    let (step, plugin, mut env) =
+        load_broker_target(request.source, request.project_id, state, None).await?;
+    // Before token minting: a poll the workflow's audience may not make
+    // sends nothing; the gate then re-decides the request and every hop.
+    let caller = crate::core::api_access::workflow_caller(state, request.workflow).await;
+    let gate = crate::core::api_access::enforce(
+        state,
+        &plugin,
+        &step,
+        &env,
+        &TemplateContext::new(),
+        &caller,
+    )
+    .await
+    .map_err(|refusal| call_secrets(&plugin, &env).scrub(&refusal))?;
+    let config_id = step.api_config_id.clone().unwrap_or_default();
+    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
+    tracing::debug!(
+        workflow_id = %request.workflow.id,
+        plugin = %plugin.id,
+        "Watch poll"
+    );
+    let mut secrets = call_secrets(&plugin, &env);
+    let outcome = watch_poll_unscrubbed(
+        &step,
+        &plugin,
+        &env,
+        policy,
+        &request,
+        gate.as_ref(),
+        &mut secrets,
+    )
+    .await;
+    match outcome {
+        Ok(response) => Ok(WatchPollResponse {
+            status: response.status,
+            etag: response.etag.map(|v| secrets.scrub(&v)),
+            last_modified: response.last_modified.map(|v| secrets.scrub(&v)),
+            body: response.body.map(|v| secrets.scrub(&v)),
+        }),
+        Err(error) => Err(secrets.scrub(&error)),
+    }
+}
+
+async fn watch_poll_unscrubbed(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    policy: SecurityPolicy,
+    request: &WatchPollRequest<'_>,
+    gate: Option<&crate::core::api_access::EndpointGate>,
+    secrets: &mut crate::core::secret_scrub::SecretSet,
+) -> Result<WatchPollResponse, String> {
+    let spec = plugin
+        .api_spec
+        .as_ref()
+        .ok_or("Plugin has no `api_spec` — not an API plugin")?;
+    let endpoint_path = step
+        .api_endpoint_path
+        .as_ref()
+        .ok_or("Watch source missing `api_endpoint_path`")?;
+    let method = resolve_method(&step.api_method, endpoint_path, spec)?;
+    if method != Method::GET {
+        return Err(format!(
+            "A Watch trigger only sends GET requests; this source uses {method}."
+        ));
+    }
+    let ctx = TemplateContext::new();
+    let mut auth = resolve_auth(&spec.auth, env)?;
+    let query = render_map(&step.api_query, &ctx)
+        .and_then(|m| substitute_env_in_map(m, env))
+        .map_err(|e| format!("Template render error (query): {e}"))?;
+    let mut extra_headers = render_map(&step.api_headers, &ctx)
+        .and_then(|m| substitute_env_in_map(m, env))
+        .map_err(|e| format!("Template render error (headers): {e}"))?;
+    apply_default_headers(&mut auth, &spec.default_headers, &extra_headers, env)?;
+    if let Some(etag) = request.if_none_match {
+        extra_headers.insert("If-None-Match".into(), etag.to_string());
+    }
+    if let Some(date) = request.if_modified_since {
+        extra_headers.insert("If-Modified-Since".into(), date.to_string());
+    }
+    let templated = ctx
+        .render_strict(endpoint_path)
+        .map_err(|e| format!("Endpoint template render error: {e}"))?;
+    let templated = crate::core::oauth2_cache::substitute_env_in_string(&templated, env)
+        .map_err(|e| format!("Endpoint env-substitution error: {e}"))?;
+    let path = resolve_path_params(&templated, &step.api_path_params, &ctx)
+        .map_err(|e| format!("Path param render error: {e}"))?;
+    let base_url = interpolate_env(&spec.base_url, env);
+    if base_url.contains("<NOT_CONFIGURED:") {
+        return Err(format!(
+            "Plugin base URL has unresolved env placeholder(s): `{base_url}`. \
+             Open Settings → APIs and fill in every required config key for this plugin."
+        ));
+    }
+    let url = build_url(&base_url, &path, &auth.query, &query)?;
+    if policy.enforce_host_match {
+        assert_host_matches_base(&url, &base_url).map_err(|e| format!("Security: {e}"))?;
+    }
+    if policy.enforce_public_ip {
+        assert_public_ip(&url)
+            .await
+            .map_err(|e| format!("Security: {e}"))?;
+    }
+    let client = safe_http::client(
+        policy.destinations(),
+        ClientOptions::new(Redirects::Manual)
+            .timeout(request.timeout)
+            .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION"))),
+    )?;
+    add_resolved_auth(secrets, &auth);
+    let headers = build_request_headers(&auth, &extra_headers)?;
+    let (secret_headers, secret_query_keys) = secret_slots(&auth, &extra_headers, &url);
+    let pinned_base = if policy.enforce_host_match {
+        Url::parse(&base_url).ok()
+    } else {
+        None
+    };
+    if let Some(gate) = gate {
+        gate.check(Method::GET.as_str(), url.path())?;
+    }
+    let hop_guard = |hop_method: &Method, hop_url: &Url| match gate {
+        Some(gate) => gate.check(hop_method.as_str(), hop_url.path()),
+        None => Ok(()),
+    };
+    let no_body = |req: safe_http::SafeRequest| req;
+    let response = match safe_http::send_following(
+        &client,
+        Outbound {
+            method: Method::GET,
+            url: url.clone(),
+            headers,
+            secret_headers: &secret_headers,
+            secret_query_keys: &secret_query_keys,
+            attach_body: &no_body,
+            has_body: false,
+            pinned_base: pinned_base.as_ref(),
+            hop_guard: Some(&hop_guard),
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(SendError::Blocked(reason)) => return Err(format!("Security: {reason}")),
+        Err(error @ SendError::Transport(_)) => {
+            return Err(format!("HTTP request failed: {error}"))
+        }
+    };
+    let status = response.status();
+    let header = |name: reqwest::header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    };
+    let etag = header(reqwest::header::ETAG);
+    let last_modified = header(reqwest::header::LAST_MODIFIED);
+    if status == StatusCode::NOT_MODIFIED {
+        return Ok(WatchPollResponse {
+            status: status.as_u16(),
+            etag,
+            last_modified,
+            body: None,
+        });
+    }
+    if !status.is_success() {
+        let head = match read_body_capped(response, ERROR_BODY_READ_BYTES).await {
+            Ok(CappedBody::Whole(bytes)) => bytes,
+            _ => Vec::new(),
+        };
+        let excerpt = secrets.scrub(&String::from_utf8_lossy(&head));
+        return Err(format!(
+            "HTTP {} on GET {} — {}",
+            status.as_u16(),
+            redact_url_query(&url),
+            truncate(&excerpt, 512),
+        ));
+    }
+    let bytes = match read_body_capped(response, request.max_body_bytes).await {
+        Ok(CappedBody::Whole(bytes)) => bytes,
+        Ok(CappedBody::TooLarge(seen)) => {
+            return Err(format!(
+                "Response refused ({}): the body exceeds {} bytes ({seen} read); \
+                 watch a narrower endpoint",
+                status.as_u16(),
+                request.max_body_bytes
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "Response body read failed ({}): {e}",
+                status.as_u16()
+            ))
+        }
+    };
+    Ok(WatchPollResponse {
+        status: status.as_u16(),
+        etag,
+        last_modified,
+        body: Some(String::from_utf8_lossy(&bytes).into_owned()),
+    })
 }
 
 // ─── Pagination walk ────────────────────────────────────────────────────
@@ -2477,6 +2721,7 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,

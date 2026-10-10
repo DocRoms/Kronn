@@ -25,6 +25,7 @@ import {
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
   PlugZap, MessageSquareText, TerminalSquare, Sparkles,
 } from 'lucide-react';
+import { WatchStatusLine } from '../components/workflows/WatchStatusLine';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
@@ -349,6 +350,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   cron: 'Cron',
   tracker: 'Tracker',
   manual: 'Manuel',
+  watch: 'Watch',
 };
 
 /** How a workflow's last run reads in its sidebar row. */
@@ -2848,6 +2850,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         {wf.trigger_type === 'cron' && <Clock size={10} />}
                         {wf.trigger_type === 'tracker' && <GitBranch size={10} />}
                         {wf.trigger_type === 'manual' && <Zap size={10} />}
+                        {wf.trigger_type === 'watch' && <Eye size={10} />}
                         {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
                       </span>
                       <span className="wf-card-step-count">
@@ -2873,6 +2876,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </span>
                       )}
                     </div>
+                    {wf.watch && <WatchStatusLine status={wf.watch} />}
 
                     <div className="wf-card-footer">
                       <div className="wf-card-run-summary">

@@ -14,7 +14,8 @@
     "PublishPageData",
     "SubWorkflow",
     "TriggerWorkflow",
-    "DelegateSubtasks"
+    "DelegateSubtasks",
+    "TaskBoard"
   ],
   "fields_by_type": {
     "Agent": {
@@ -379,9 +380,44 @@
           }
         ]
       }
+    },
+    "TaskBoard": {
+      "required": [
+        "task_board.tag"
+      ],
+      "optional": [
+        "task_board.operation",
+        "task_board.task",
+        "task_board.before",
+        "task_board.column",
+        "task_board.title",
+        "task_board.description",
+        "task_board.tags",
+        "task_board.done_limit"
+      ],
+      "note": "Zero-token board over the planning tasks sharing one tag, columns todo|in_progress|done. operation: read|add (title, description, tags comma-separated)|toggle (task)|move (task, before = a task id or __col_<column>__, column)|edit (task, title, description)|discuss (task; the step's agent). Never touches a task without the tag. data.rows = open cards in board order, recent done ones, then one __col_<column>__ marker per column: publish it with PublishPageData value_from steps.<name>.data.rows.",
+      "example": {
+        "name": "board",
+        "step_type": {
+          "type": "TaskBoard"
+        },
+        "task_board": {
+          "tag": "todo",
+          "operation": "move",
+          "task": "{{task}}",
+          "before": "{{before}}",
+          "column": "{{column}}"
+        }
+      }
     }
   },
   "discovery_rule": "Do not infer the available step types from one workflow: step_types_closed_set is the complete taxonomy. To adapt an existing workflow, call workflow_list and then workflow_get with an id actually returned by that list; no named example is guaranteed to exist.",
+  "triggers": {
+    "Manual": "{\"type\":\"Manual\"}",
+    "Cron": "{\"type\":\"Cron\",\"schedule\":\"0 7 * * 1-5\",\"timezone\":\"Europe/Paris\"}: five-field cron; `timezone` (IANA) is optional, absent = UTC.",
+    "Tracker": "{\"type\":\"Tracker\",\"source\":{\"type\":\"GitHub\",\"owner\":\"o\",\"repo\":\"r\"},\"query\":\"\",\"labels\":[],\"interval\":\"*/10 * * * *\"}: one run per new issue (UTC interval).",
+    "Watch": "{\"type\":\"Watch\",\"api_plugin_slug\":\"github\",\"api_config_id\":\"<config>\",\"api_endpoint_path\":\"/repos/o/r/commits\",\"api_query\":{},\"interval\":\"*/5 * * * *\",\"timezone\":null,\"detection\":{\"type\":\"Validators\"}} (or `quick_api_id` instead of the api_* fields). Polls the source with a GET through the API broker (stored credentials, default headers) and creates a run ONLY when it changed; a poll creates no run. Detection: the stored ETag/Last-Modified go out as If-None-Match/If-Modified-Since (304 = unchanged); on a 200, `Validators` compares ETag/Last-Modified (body fingerprint when absent), `Body` the body fingerprint, `{\"type\":\"JsonPath\",\"path\":\"$.items[*].id\"}` the fingerprint of that extract. The first poll records a baseline without a run. Interval: five fields, at most once a minute. An unadmitted change (concurrency limit, preflight) is detected again next poll. The run reads `{{trigger.*}}`."
+  },
   "template_vars": {
     "syntax": "`{{namespace.path}}` in any string field (prompt_template, api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, gate_message, notify_config, …). Dotted nested access works incl. array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref is left VERBATIM in previews and rejected before execution, so a typo never reaches an agent, command or external API. `{{path|sh}}` renders the value as one POSIX single-quoted shell word (a quoting helper, never accepted inside Exec inline code). The one explicit fallback is `{{path ?? \"text\"}}` (or `'text'`, no escapes): it renders the literal when the path is absent or JSON null, e.g. `{{steps.check.data.stdout ?? \"\"}}` after a Goto skipped `check`; such a ref may name a later step but never an unknown one.",
     "namespaces": {
@@ -399,6 +435,7 @@
       "ref:<kind>:<slug>": "local id of another resource, kind one of workflow, qe, qa, prompt, skill, plugin, artifact; resolved at run start in the run's project, then the global scope (identity of a kronn/ import, else the slug of the resource's name). Unknown or ambiguous fails the step before launch. Structured id fields (sub_workflow_id, quick_prompt_id, quick_api_id, batch_quick_prompt_id, CollectApiData quick_api_id/quick_exec_id) also accept `ref:<kind>:<slug>`, stored as the local id at save. Scripts: GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>.",
       "project.<path>": "the run's project profile `kronn/project.toml` (schema v1: validation.targets.<name>.command, forge.{base_branch,merge_method,required_approvals,pr_template,labels.<name>.{name,triggers}}, tracker.{kind,project_key,statuses.<name>,transitions.<name>.{from,to}}, delivery.workflows.<name>.{workflow,inputs.<input>}). Read once at run start at the commit of the main checkout's default-branch ref (origin/HEAD's branch, else main, else master; local branch first), never from the run's worktree, and pinned with the run: resumes and child runs see the same values. A table or array renders as JSON, items by index. A read without `??` fails the run before its first step when the profile or key is missing; use it for repository-specific values instead of hard-coding them. Reserved name.",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
+      "trigger.{body,body_truncated,status,etag,last_modified,fingerprint,extract}": "Watch-trigger fields: the response that changed, credentials removed, body cut at 64 KiB (`body_truncated`); `extract` only in JsonPath mode, `etag`/`last_modified` only when the server sent them (use `?? \"\"`).",
       "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand; `run.*`, `time.*`, `now*`, `project.*` are reserved names.",
       "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value."
     },

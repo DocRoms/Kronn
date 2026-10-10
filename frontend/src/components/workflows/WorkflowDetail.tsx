@@ -1393,6 +1393,7 @@ function compactStepMeta(step: WorkflowStep): {
     case 'CollectApiData': return { kind: 'collect-data', Icon: Database, usesTokens: false, labelKey: 'wiz.stepTypeCollectApiData' };
     case 'TransformData': return { kind: 'transform-data', Icon: Shuffle, usesTokens: false, labelKey: 'wiz.stepTypeTransformData' };
     case 'PublishPageData': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypePublishPage' };
+    case 'TaskBoard': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypeTaskBoard' };
     case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
     case 'TriggerWorkflow': return { kind: 'triggerworkflow', Icon: Play, usesTokens: false, labelKey: 'wiz.stepTypeTriggerWorkflow' };
     case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
@@ -1808,7 +1809,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
 
   const triggerLabel = (() => {
     switch (workflow.trigger.type) {
-      case 'Cron': return `Cron: ${workflow.trigger.schedule}`;
+      case 'Cron': return `Cron: ${workflow.trigger.schedule} (${workflow.trigger.timezone ?? 'UTC'})`;
+      case 'Watch': {
+        const w = workflow.trigger;
+        const source = w.quick_api_id ? `Quick API ${w.quick_api_id.slice(0, 8)}` : `${w.api_plugin_slug ?? '?'} ${w.api_endpoint_path ?? ''}`;
+        return `Watch: ${source} · ${w.interval} (${w.timezone ?? 'UTC'})`;
+      }
       case 'Tracker': {
         const src = workflow.trigger.source;
         return `Tracker: ${src.owner}/${src.repo}`;

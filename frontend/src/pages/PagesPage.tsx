@@ -30,6 +30,7 @@ import { LivePageSlugEditor } from '../components/LivePageSlugEditor';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
 import { LivePageTrustedActions } from '../components/LivePageTrustedActions';
+import { DefaultTodoOffer } from '../components/DefaultTodoOffer';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -49,6 +50,7 @@ import {
   useLivePageTheme,
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
+import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -327,6 +329,15 @@ export function PagesPage({
     const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [editingHtml]);
+
+  // A publish reaches the open Page at once; HTML edits in progress are kept.
+  useLivePageDataPush(selectedId, () => {
+    const pageId = selectedId;
+    if (!pageId) return;
+    void Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([next]) => {
+      setDetail(current => (current && current.id === next.id ? next : current));
+    }).catch(() => { /* the poll retries */ });
+  });
 
   const select = useCallback(async (page: LivePage) => {
     setSelectedId(page.id);
@@ -655,8 +666,12 @@ export function PagesPage({
   // applies to the document that reported it.
   const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
   const pageEmbeds = embedsReport && embedsReport.doc === document ? embedsReport.embeds : NO_EMBEDS;
+  // Display preferences a Page asks to keep are stored for the Page shown.
+  const shownPageIdRef = useRef<string | null>(null);
+  useEffect(() => { shownPageIdRef.current = detail?.id ?? null; }, [detail]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      pageId: () => shownPageIdRef.current,
       onAction: intent => {
         setError(null);
         handlePageActionIntent(intent);
@@ -908,6 +923,7 @@ export function PagesPage({
             </div>
           )}
 
+          <DefaultTodoOffer refreshKey={pages} onInstalled={pageId => { void refresh(pageId); }} />
           {visibleItems.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
             </div>;
           },

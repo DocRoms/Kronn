@@ -1427,6 +1427,15 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/live-page-actions/{id}/prefill",
             post(api::live_page_actions::prefill),
         )
+        // KT-1030: Kronn's default todo board; reinstalling is a human's call.
+        .route(
+            "/api/defaults/todo",
+            get(api::default_contents::todo_status),
+        )
+        .route(
+            "/api/defaults/todo/install",
+            post(api::default_contents::install_todo),
+        )
         // KT-1029: human approvals, deliberately absent from the bridge-token list.
         .route(
             "/api/pages/{id}/action-trusts",

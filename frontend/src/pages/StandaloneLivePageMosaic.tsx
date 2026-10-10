@@ -92,8 +92,12 @@ function MosaicLivePageFrame({ pageId }: { pageId: string }) {
   // applies to the document that reported it.
   const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
   const pageEmbeds = embedsReport && embedsReport.doc === sandboxDocument ? embedsReport.embeds : NO_EMBEDS;
+  // Display preferences a Page asks to keep are stored for the Page shown.
+  const shownPageIdRef = useRef<string | null>(null);
+  useEffect(() => { shownPageIdRef.current = detail?.id ?? null; }, [detail]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      pageId: () => shownPageIdRef.current,
       onAction: intent => {
         setActionUnavailable(false);
         handlePageActionIntent(intent);

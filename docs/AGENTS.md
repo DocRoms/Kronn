@@ -1,6 +1,6 @@
 # Project documentation index — Single entry point
 
-**Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, and manual triggers.
+**Project:** Kronn — Self-hosted CLI + web UI for managing AI coding agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro) across git repositories. Unified workflow engine for cron, multi-step pipelines, tracker-driven automation, source watches, and manual triggers.
 
 > **All files under `docs/` are in English by default.** Project documentation must be written in English.
 > **ATTENTION — This is the reference file for all AI agents.**

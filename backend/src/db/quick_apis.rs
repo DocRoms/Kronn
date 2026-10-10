@@ -284,7 +284,23 @@ fn workflow_step_references(conn: &Connection, id: &str) -> Result<Vec<String>> 
             if rollback { "on_failure " } else { "" }
         ))
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut references = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    // A Watch trigger polling this API depends on it like a step does.
+    let mut stmt = conn.prepare(
+        "SELECT id, name FROM workflows
+          WHERE json_extract(trigger_json, '$.type') = 'Watch'
+            AND json_extract(trigger_json, '$.quick_api_id') = ?1
+          ORDER BY name, id",
+    )?;
+    let triggers = stmt.query_map(params![id], |row| {
+        let workflow_id: String = row.get(0)?;
+        let workflow_name: String = row.get(1)?;
+        Ok(format!(
+            "workflow {workflow_name:?} ({workflow_id}), Watch trigger"
+        ))
+    })?;
+    references.extend(triggers.collect::<rusqlite::Result<Vec<_>>>()?);
+    Ok(references)
 }
 
 /// Inserts `item`; when an `agent` (or "import") created it, also disables

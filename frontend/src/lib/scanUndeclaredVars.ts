@@ -65,14 +65,15 @@ export interface UndeclaredVar {
  *  - `currentStepIdx` lets us check that `steps.X.Y` references only
  *    point to STRICTLY earlier steps.
  *  - `inRollback` enables `failed_step.*` (only valid in on_failure).
- *  - `triggerType` enables tracker-only fields (`issue.*`).  */
+ *  - `triggerType` enables tracker-only fields (`issue.*`) and the
+ *    Watch trigger's `trigger.*` response fields.  */
 export function scanUndeclaredVars(
   prompt: string,
   opts: {
     allSteps: WorkflowStep[];
     currentStepIdx: number;
     inRollback: boolean;
-    triggerType: 'Manual' | 'Cron' | 'Tracker';
+    triggerType: 'Manual' | 'Cron' | 'Tracker' | 'Watch';
     workflowVariables: PromptVariable[];
     artifacts: Record<string, ArtifactSpec>;
   },
@@ -137,6 +138,9 @@ export function scanUndeclaredVars(
       }
       continue;
     }
+
+    // The triggering response exists only for a Watch trigger's runs.
+    if (raw.startsWith('trigger.') && opts.triggerType === 'Watch') continue;
 
     // 4) Trigger-context prefixes (issue.*) — accept broadly since
     // tracker triggers inject many fields.

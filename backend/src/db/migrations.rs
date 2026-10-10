@@ -897,6 +897,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "234_project_profile",
         include_str!("sql/234_project_profile.sql"),
     ),
+    (
+        "237_workflow_watch_state",
+        include_str!("sql/237_workflow_watch_state.sql"),
+    ),
+    (
+        "240_task_boards_and_default_contents",
+        include_str!("sql/240_task_boards_and_default_contents.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

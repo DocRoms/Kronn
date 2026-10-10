@@ -37,7 +37,7 @@ import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Layers, Send,
-  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network, Eye,
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
@@ -46,6 +46,8 @@ import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import { ExecScriptFilesEditor } from './ExecScriptFilesEditor';
 import { UnmodelledApproval } from './UnmodelledApproval';
 import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
+import { WatchTriggerEditor, TimezoneField } from './WatchTriggerEditor';
+import { watchDraftFrom, buildWatchTrigger, buildCronTrigger } from '../../lib/watchTrigger';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
@@ -349,7 +351,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
   const [projectScope, setProjectScope] = useState<WorkflowProjectScope | null>(editWorkflow?.project_scope ?? null);
-  const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
+  const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual' | 'Watch'>(initTrigger?.type ?? 'Manual');
+  const [cronTimezone, setCronTimezone] = useState(initTrigger?.type === 'Cron' ? initTrigger.timezone ?? '' : '');
+  const [watchDraft, setWatchDraft] = useState(() => watchDraftFrom(initTrigger));
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
   const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
@@ -758,9 +762,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const applySuggestion = (s: WorkflowSuggestion) => {
     setName(s.title);
     setSteps(s.steps);
-    setTriggerType(s.trigger.type as 'Cron' | 'Tracker' | 'Manual');
+    setTriggerType(s.trigger.type);
+    if (s.trigger.type === 'Watch') setWatchDraft(watchDraftFrom(s.trigger));
     if (s.trigger.type === 'Cron') {
-      const parsed = parseCronExpr((s.trigger as { schedule: string }).schedule);
+      setCronTimezone(s.trigger.timezone ?? '');
+      const parsed = parseCronExpr(s.trigger.schedule);
       setCronEvery(parsed.every);
       setCronUnit(parsed.unit);
       setCronAt(parsed.at);
@@ -1210,7 +1216,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   const buildTrigger = (): WorkflowTrigger => {
     switch (triggerType) {
-      case 'Cron': return { type: 'Cron', schedule: buildCronExpr() };
+      case 'Cron': return buildCronTrigger(buildCronExpr(), cronTimezone);
+      case 'Watch': return buildWatchTrigger(watchDraft);
       case 'Tracker': return {
         type: 'Tracker',
         source: { type: 'GitHub', owner: trackerOwner, repo: trackerRepo },
@@ -1739,6 +1746,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               )}
             </>
           ))}
+          {triggerType === 'Cron' && (
+            <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} />
+          )}
         </div>
       )}
 
@@ -1749,12 +1759,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.triggerWhenLabel')} <HelpTip hint={t('wiz.helpTriggerAdvanced')} />
           </label>
           <div className="flex-row gap-4 mb-6">
-            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => {
+            {(['Manual', 'Cron', 'Tracker', 'Watch'] as const).map(tt => {
               const tooltipKey = tt === 'Manual' ? 'wiz.helpTriggerManual'
                 : tt === 'Cron' ? 'wiz.helpTriggerCron'
+                : tt === 'Watch' ? 'wiz.helpTriggerWatch'
                 : 'wiz.helpTriggerTracker';
               const labelKey = tt === 'Manual' ? 'wiz.triggerManual'
                 : tt === 'Cron' ? 'wiz.triggerScheduled'
+                : tt === 'Watch' ? 'wiz.triggerWatch'
                 : 'wiz.triggerTracker';
               return (
                 <button
@@ -1767,6 +1779,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {tt === 'Manual' && <Zap size={12} />}
                   {tt === 'Cron' && <Clock size={12} />}
                   {tt === 'Tracker' && <GitBranch size={12} />}
+                  {tt === 'Watch' && <Eye size={12} />}
                   {t(labelKey)}
                 </button>
               );
@@ -1893,6 +1906,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {buildCronExpr()}
                 </span>
               </div>
+              <div className="mt-4">
+                <TimezoneField id="wf-cron-timezone" value={cronTimezone} onChange={setCronTimezone} />
+              </div>
             </>
           )}
 
@@ -1913,6 +1929,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <label className="wf-label mt-4">{t('wiz.pollInterval')}</label>
               <input className="wf-input" value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" aria-label={t('wiz.pollInterval')} />
             </>
+          )}
+
+          {triggerType === 'Watch' && (
+            <WatchTriggerEditor
+              value={watchDraft}
+              onChange={setWatchDraft}
+              availableQuickApis={availableQuickApis}
+              availableApiPlugins={availableApiPlugins}
+            />
           )}
         </div>
       )}
@@ -1973,6 +1998,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     ['{{issue.number}}', t('wiz.issueNumber')],
                     ['{{issue.url}}', t('wiz.issueUrl')],
                     ['{{issue.labels}}', t('wiz.issueLabels')],
+                    ...(triggerType === 'Watch' ? [
+                      ['{{trigger.body}}', t('wiz.watchVarBody')],
+                      ['{{trigger.extract}}', t('wiz.watchVarExtract')],
+                      ['{{trigger.status}}', t('wiz.watchVarStatus')],
+                      ['{{trigger.etag}}', t('wiz.watchVarEtag')],
+                      ['{{trigger.last_modified}}', t('wiz.watchVarLastModified')],
+                      ['{{trigger.fingerprint}}', t('wiz.watchVarFingerprint')],
+                      ['{{trigger.body_truncated}}', t('wiz.watchVarTruncated')],
+                    ] : []),
                   ] as Array<[string, string]>).map(([v, d]) => (
                     <div key={v} className="wf-help-row">
                       <code
@@ -3632,7 +3666,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       <p className="text-2xs text-ghost mt-2">{t('wiz.jsonDataNoTemplating')}</p>
                     </div>
                   );
-                })() : step.step_type?.type === 'PublishPageData' ? (() => {
+                })() : step.step_type?.type === 'TaskBoard' ? (
+                  <div className="wf-json-data-form" data-testid="task-board-form">
+                    <div className="wf-batch-intro">
+                      <FileText size={14} />
+                      <span>{t('wiz.stepTypeTaskBoardHint')}</span>
+                    </div>
+                    <code className="text-2xs">{`${step.task_board?.operation ?? 'read'} · ${step.task_board?.tag ?? ''}`}</code>
+                  </div>
+                ) : step.step_type?.type === 'PublishPageData' ? (() => {
                   const config = step.page_publish ?? { page_id: '', writes: [] };
                   const selectedPage = availablePages.find(page => page.id === config.page_id);
                   const setConfig = (page_publish: typeof config) => updateStep(i, { page_publish });
@@ -5187,7 +5229,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <div className="wf-summary-row"><span className="wf-summary-label">Projet</span> {projects.find(p => p.id === projectId)?.name ?? 'Aucun'}</div>
           <div className="wf-summary-row">
             <span className="wf-summary-label">Trigger</span>
-            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()})` : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}` : 'Manuel'}
+            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()}${cronTimezone.trim() ? `, ${cronTimezone.trim()}` : ', UTC'})`
+              : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}`
+              : triggerType === 'Watch' ? `Watch: ${watchDraft.interval}${watchDraft.timezone.trim() ? ` (${watchDraft.timezone.trim()})` : ' (UTC)'}`
+              : 'Manuel'}
           </div>
           {concurrencyLimit && (
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
@@ -5214,6 +5259,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'TransformData' ? 'TRANSFORM'
               : typeKind === 'JsonData' ? 'JSON'
               : typeKind === 'PublishPageData' ? 'PAGE'
+              : typeKind === 'TaskBoard' ? 'BOARD'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
               : typeKind === 'TriggerWorkflow' ? 'TRIGGER'
               : typeKind === 'DelegateSubtasks' ? 'DELEGATE'
@@ -5228,6 +5274,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'TransformData' ? 'transform-data'
               : typeKind === 'JsonData' ? 'json-data'
               : typeKind === 'PublishPageData' ? 'page-data'
+              : typeKind === 'TaskBoard' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
               : typeKind === 'TriggerWorkflow' ? 'trigger-workflow'
               : typeKind === 'DelegateSubtasks' ? 'delegate-subtasks'

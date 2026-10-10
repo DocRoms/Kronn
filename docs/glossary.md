@@ -126,10 +126,13 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Workflow** — Unified automation unit: `Trigger → Steps`. Replaces the old scheduled tasks concept. Created via the dashboard wizard and portable through Kronn's versioned JSON export/import envelope. `WORKFLOW.md` import is not implemented. Post-step operations (create PR, comment issue, etc.) are handled by agents using the tools available within steps.
 
-**WorkflowTrigger** — What starts a workflow run. Three types:
+**WorkflowTrigger** — What starts a workflow run. Four types:
 - **Cron** — time-based schedule. 1 tick = 1 run, always same prompt.
 - **Tracker** — polls an issue tracker API at intervals. Each new matching issue = 1 run with issue context injected. Pull-based (polling, not webhooks).
 - **Manual** — triggered from dashboard or CLI on demand.
+- **Watch** — polls an API source through the broker at intervals and creates a run only when the source changed (304 / ETag / body or JSONPath fingerprint). A poll creates no run.
+
+Cron and Watch take an optional IANA `timezone`; without one they run in UTC.
 
 **WorkflowStep** — A single unit of work within a workflow. Has an agent, optional per-step capabilities, a prompt using Kronn's purpose-built `{{variable}}` syntax (not Liquid; no filters), optional debate mode, optional `on_result` conditions, and optional `AgentSettings` override.
 

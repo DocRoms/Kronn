@@ -269,6 +269,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         tracing::error!("Model catalog migration failed: {e}");
     }
 
+    // KT-1030: Kronn's default todo board, installed once.
+    kronn::core::default_todo::install_on_boot(&database, &app_config.language).await;
+
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
     let config_arc = Arc::new(RwLock::new(app_config));

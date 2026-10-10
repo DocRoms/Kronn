@@ -1,0 +1,5 @@
+.default-todo-offer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 8px 6px; padding: 7px 9px; border: 1px dashed var(--kr-border-medium); border-radius: var(--kr-r-md); color: var(--kr-text-muted); font-size: 11px; }
+.default-todo-offer span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.default-todo-offer button { padding: 3px 7px; border: 1px solid var(--kr-border-medium); border-radius: 6px; background: var(--kr-bg-surface); color: var(--kr-text-secondary); font-size: 11px; cursor: pointer; }
+.default-todo-offer button:hover { border-color: rgba(var(--kr-accent-rgb), .45); background: var(--kr-bg-hover); }
+.default-todo-offer__error { flex-basis: 100%; margin: 0; color: var(--kr-error); }

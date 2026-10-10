@@ -8026,7 +8026,7 @@ def call_workflow_create_draft(args):
     # tick while a run is active) unless the agent set it explicitly. To allow
     # overlap, pass a higher concurrency_limit on purpose.
     trig_type = (args.get("trigger") or {}).get("type")
-    if trig_type in ("Cron", "Tracker") and args.get("concurrency_limit") is None:
+    if trig_type in ("Cron", "Tracker", "Watch") and args.get("concurrency_limit") is None:
         body["concurrency_limit"] = 1
     # 0.8.8 — fill PromptVariable's required label/placeholder (see
     # _normalize_variables) so launch-time vars don't 422 on `{name}` alone.

@@ -11,7 +11,11 @@ export interface ExecutionSummary {
 const PROMPT_EXCERPT = 400;
 
 function triggerLabel(trigger: Workflow['trigger']): string {
-  if (trigger.type === 'Cron') return `cron ${trigger.schedule}`;
+  if (trigger.type === 'Cron') return `cron ${trigger.schedule}${trigger.timezone ? ` ${trigger.timezone}` : ''}`;
+  if (trigger.type === 'Watch') {
+    const source = trigger.quick_api_id ? `quick api ${trigger.quick_api_id}` : `${trigger.api_plugin_slug ?? ''} GET ${trigger.api_endpoint_path ?? ''}`;
+    return `watch ${source} (${trigger.interval}${trigger.timezone ? ` ${trigger.timezone}` : ''})`;
+  }
   if (trigger.type === 'Tracker') {
     return `${trigger.source.owner}/${trigger.source.repo} · ${trigger.query} (${trigger.interval})`;
   }

@@ -131,7 +131,8 @@ pub fn audience_slot(step: &WorkflowStep) -> Option<Option<&WorkflowStep>> {
         | StepType::Exec
         | StepType::JsonData
         | StepType::TransformData
-        | StepType::PublishPageData => None,
+        | StepType::PublishPageData
+        | StepType::TaskBoard => None,
         // Any other step (sub-workflows, Quick Prompt batches, and every
         // step type added later) may hand the data to an agent Kronn
         // cannot name: unknown, hence remote.

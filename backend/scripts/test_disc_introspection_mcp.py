@@ -6422,6 +6422,19 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         self.assertEqual(body["concurrency_limit"], 1,
                          "Cron with no concurrency_limit must default to 1 (no self-overlap)")
 
+    def test_create_draft_defaults_concurrency_1_for_watch(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "On change", "trigger": {"type": "Watch", "quick_api_id": "qa",
+                                                 "interval": "*/5 * * * *"},
+                "steps": [{"name": "s", "step_type": "Notify", "notify_config": {}}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["concurrency_limit"], 1)
+        self.assertEqual(body["trigger"]["type"], "Watch", "the trigger is forwarded as given")
+
     def test_create_draft_respects_explicit_concurrency(self):
         fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
         with mock.patch.object(self.mod, "_http", fake), \
@@ -6661,13 +6674,14 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_fourteen_set(self):
+    def test_step_schema_lists_the_closed_fifteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
-             "PublishPageData", "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks"},
+             "PublishPageData", "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks",
+             "TaskBoard"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:

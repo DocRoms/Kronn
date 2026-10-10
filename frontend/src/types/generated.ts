@@ -2231,6 +2231,22 @@ export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
  */
 reason?: string | null, };
 
+export type DefaultTodoState = "installed" | "removed" | "kept_existing" | "not_installed";
+
+export type DefaultTodoStatus = { state: DefaultTodoState,
+/**
+ * Kronn's board page, while it exists.
+ */
+page_id: string | null,
+/**
+ * Kronn's board workflows that still exist.
+ */
+workflow_ids: Array<string>,
+/**
+ * A todo page of the user's own, if one is recognised.
+ */
+own_page_id: string | null, };
+
 /**
  * KT-909 — what a `DelegateSubtasks` step delegates and how.
  */
@@ -8234,7 +8250,7 @@ cli: Array<string>,
  */
 kronn_internal: Array<string>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -8283,6 +8299,30 @@ tokens_used: number, };
  * from the agent or from a human reopening a long room — writes into it.
  */
 export type SummaryStrategy = "OnDemand" | "Off";
+
+export type TaskBoardConfig = {
+/**
+ * The tag every task of the board carries. A step never touches a task
+ * without it.
+ */
+tag: string, operation: TaskBoardOperation,
+/**
+ * Runtime templates, each read only by the operations that name it.
+ */
+task: string, before: string, column: string, title: string, description: string,
+/**
+ * Extra tags for `add`, comma separated.
+ */
+tags: string,
+/**
+ * Recently done tasks the board shows (default 15, at most 100).
+ */
+done_limit?: number, };
+
+/**
+ * What a `TaskBoard` step does before returning the board's rows.
+ */
+export type TaskBoardOperation = "read" | "add" | "toggle" | "move" | "edit" | "discuss";
 
 /**
  * The durable unit of work (ADR §1, §3, §4bis).
@@ -9280,6 +9320,41 @@ withheld_by_routing: number, };
  */
 export type WakeMode = "native_dispatch" | "external_poll";
 
+/**
+ * How a `Watch` poll decides the source changed. Every mode sends the
+ * stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
+ */
+export type WatchDetection = { "type": "Validators" } | { "type": "Body" } | { "type": "JsonPath", path: string, };
+
+/**
+ * Outcome of the latest `Watch` poll.
+ */
+export type WatchPollResult = "baseline" | "unchanged" | "changed" | "deferred" | "error";
+
+/**
+ * Poll history of a `Watch` workflow, shown on its card.
+ */
+export type WatchStatus = { last_poll_at: string | null, last_result: WatchPollResult | null, last_http_status: number | null, last_error: string | null, last_change_at: string | null, unchanged_count: number, changed_count: number, error_count: number, consecutive_failures: number,
+/**
+ * `consecutive_failures` reached the alert threshold.
+ */
+failing: boolean, };
+
+/**
+ * What a `Watch` trigger polls, how often, and how it detects a change.
+ * The source is an API configured in Kronn, or a saved Quick API whose
+ * fields fill the ones left empty here; the request is always a GET.
+ */
+export type WatchTrigger = { quick_api_id?: string, api_plugin_slug?: string, api_config_id?: string, api_endpoint_path?: string, api_query?: { [key in string]: string },
+/**
+ * Cron expression of the poll cadence.
+ */
+interval: string,
+/**
+ * IANA timezone `interval` is read in; absent means UTC.
+ */
+timezone?: string, detection: WatchDetection, };
+
 export type WeightLevel = "green" | "amber" | "red";
 
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
@@ -9954,6 +10029,10 @@ transform_data?: TransformDataConfig | null,
  */
 page_publish?: PublishPageDataConfig | null,
 /**
+ * KT-1030 — for `StepType::TaskBoard`.
+ */
+task_board?: TaskBoardConfig,
+/**
  * 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
  * workflow to run as a nested child. Required for that step type
  * (enforced at save). `None` for every other step type. Mirrors the
@@ -10032,9 +10111,18 @@ unsafe_step_count: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */
-pinned: boolean, last_run: WorkflowRunSummary | null, created_at: string, };
+pinned: boolean, last_run: WorkflowRunSummary | null,
+/**
+ * Poll history of a `Watch` trigger; absent for other triggers.
+ */
+watch?: WatchStatus, created_at: string, };
 
-export type WorkflowTrigger = { "type": "Cron", schedule: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" };
+export type WorkflowTrigger = { "type": "Cron", schedule: string,
+/**
+ * IANA timezone the schedule is read in; absent means UTC, so
+ * workflows saved before the field keep their hours.
+ */
+timezone?: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" } | { "type": "Watch" } & WatchTrigger;
 
 export type WorkspaceConfig = { hooks: WorkspaceHooks,
 /**
@@ -10156,4 +10244,4 @@ started_at: string,
 /**
  * Increases with every frame of one run.
  */
-seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" };
+seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };

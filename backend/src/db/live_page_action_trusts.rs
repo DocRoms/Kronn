@@ -161,6 +161,7 @@ const AGENTLESS_STEP_TYPES: &[&str] = &[
     "CollectApiData",
     "TransformData",
     "PublishPageData",
+    "TaskBoard",
 ];
 
 fn agentless_step_type(name: &str) -> bool {
