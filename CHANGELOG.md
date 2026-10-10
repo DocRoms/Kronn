@@ -97,6 +97,23 @@ Release notes for 0.9.3 and earlier are available in the
   are stopped when an audit starts and held while it runs, so they never
   write `docs/` at the same time as the audit.
 
+- A file cited by an agent that exists only in an unmerged worktree of the
+  project no longer shows as "not found" (KT-1184). Citation checks look in
+  the main checkout first, then in the project's own worktrees (the folders
+  under `.kronn/worktrees/` and the worktrees git registers for the repo,
+  most recently modified first, symlinked entries ignored), with the same
+  path jail and line checks. A path written with
+  `.kronn/worktrees/<lane>/` always resolves in that lane, however many
+  worktrees the project has. A path into another
+  project's worktree is refused. Each stored source check gains an optional
+  `origin` (`{kind: "checkout"}` or `{kind: "worktree", name}`); older rows
+  without it read as checkout. In the message, a lane file gets its own
+  neutral blue chip tagged with the worktree name, and its tooltip says it is
+  present in that worktree but not merged yet. The footer counts it apart
+  ("in a worktree"), and the detail panel lists it under its worktree. Red
+  stays reserved for a file found nowhere. Lane files no longer count as
+  fabricated in the lint report, so the `disc_append` receipt stops warning
+  about them.
 - The release body no longer mentions GitHub accounts by accident (KT-1179).
   Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
   agent alias) were read by GitHub as mentions of real accounts, listed under

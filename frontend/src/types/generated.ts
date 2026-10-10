@@ -8137,7 +8137,12 @@ raw: string, kind: SourceKind, status: SourceStatus,
 /**
  * Human-readable reason (shown in the pill drawer).
  */
-detail: string, };
+detail: string,
+/**
+ * Tree the cited file was found in. Absent on non-file sources, on
+ * unresolved files and on rows stored before it existed: read as checkout.
+ */
+origin?: SourceOrigin, };
 
 /**
  * One directory of the project source browser, and whether it is all of it.
@@ -8168,6 +8173,17 @@ export type SourceFileNode = { path: string, name: string, is_dir: boolean, chil
  * What kind of source a `[src: …]` marker points at.
  */
 export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comment" | "inferred" | "hypothesis" | "training_data" | "other";
+
+export type SourceOrigin = { kind: SourceOriginKind,
+/**
+ * Worktree directory name; absent for the checkout.
+ */
+name?: string, };
+
+/**
+ * Which tree held a cited file.
+ */
+export type SourceOriginKind = "checkout" | "worktree";
 
 /**
  * "Sources clean" badge, recomputed on every read. Distinct from the dated

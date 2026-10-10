@@ -274,6 +274,55 @@ pub struct SourceCheck {
     pub status: SourceStatus,
     /// Human-readable reason (shown in the pill drawer).
     pub detail: String,
+    /// Tree the cited file was found in. Absent on non-file sources, on
+    /// unresolved files and on rows stored before it existed: read as checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<SourceOrigin>,
+}
+
+/// Which tree held a cited file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOriginKind {
+    /// The project's main checkout (or the discussion's own working tree).
+    Checkout,
+    /// An unmerged worktree of the same project.
+    Worktree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct SourceOrigin {
+    pub kind: SourceOriginKind,
+    /// Worktree directory name; absent for the checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
+}
+
+impl SourceOrigin {
+    pub fn checkout() -> Self {
+        Self {
+            kind: SourceOriginKind::Checkout,
+            name: None,
+        }
+    }
+
+    pub fn worktree(name: &str) -> Self {
+        Self {
+            kind: SourceOriginKind::Worktree,
+            name: Some(name.to_string()),
+        }
+    }
+}
+
+/// A worktree of the discussion's own project, consulted after the checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneRoot {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 /// The lint result attached to an agent message.
@@ -1342,7 +1391,14 @@ pub fn verify_source_marker(raw: &str, project_root: Option<&Path>) -> SourceChe
 /// exist (worktree before main checkout). `Option`-based [`verify_source_marker`]
 /// delegates here with a 0-or-1 element slice.
 pub fn verify_source_marker_roots(raw: &str, roots: &[&Path]) -> SourceCheck {
+    verify_source_marker_lanes(raw, roots, &[])
+}
+
+/// [`verify_source_marker_roots`], then the project's own worktrees for a file
+/// the roots do not hold. The verdict carries which tree held it.
+pub fn verify_source_marker_lanes(raw: &str, roots: &[&Path], lanes: &[LaneRoot]) -> SourceCheck {
     let (kind, reference) = classify_source(raw);
+    let mut origin = None;
 
     let status_detail = match kind {
         SourceKind::Url | SourceKind::Api => (
@@ -1375,13 +1431,18 @@ pub fn verify_source_marker_roots(raw: &str, roots: &[&Path]) -> SourceCheck {
         ),
         // A code comment still gets existence-verified, but is flagged LOW trust.
         SourceKind::CodeComment => {
-            let (st, detail) = verify_file_ref(&reference, roots);
+            let (st, detail, found_in) = verify_file_ref_located(&reference, roots, lanes);
+            origin = found_in;
             (
                 st,
                 format!("code comment (not authoritative — verify): {}", detail),
             )
         }
-        SourceKind::File => verify_file_ref(&reference, roots),
+        SourceKind::File => {
+            let (st, detail, found_in) = verify_file_ref_located(&reference, roots, lanes);
+            origin = found_in;
+            (st, detail)
+        }
     };
 
     SourceCheck {
@@ -1389,6 +1450,7 @@ pub fn verify_source_marker_roots(raw: &str, roots: &[&Path]) -> SourceCheck {
         kind,
         status: status_detail.0,
         detail: status_detail.1,
+        origin,
     }
 }
 
@@ -1609,13 +1671,18 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
 /// - Bare basename (no separator) unresolved at root level → unique-match walk
 ///   (`resolve_unique_basename`) before NotFound.
 fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
-    let verdict = verify_file_ref_as_written(reference, roots);
+    verify_file_ref_walk(reference, roots, true)
+}
+
+/// `walk: false` skips the basename / suffix tree walks (direct paths only).
+fn verify_file_ref_walk(reference: &str, roots: &[&Path], walk: bool) -> (SourceStatus, String) {
+    let verdict = verify_file_ref_as_written(reference, roots, walk);
     if verdict.0 != SourceStatus::NotFound {
         return verdict;
     }
     // `My%20File.docx` names `My File.docx`; the decoded form is relative only.
     match percent_decoded_relative(clean_reference(reference)) {
-        Some(decoded) => match verify_file_ref_as_written(&decoded, roots) {
+        Some(decoded) => match verify_file_ref_as_written(&decoded, roots, walk) {
             decoded_verdict if decoded_verdict.0 != SourceStatus::NotFound => decoded_verdict,
             _ => verdict,
         },
@@ -1623,7 +1690,11 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
     }
 }
 
-fn verify_file_ref_as_written(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
+fn verify_file_ref_as_written(
+    reference: &str,
+    roots: &[&Path],
+    walk: bool,
+) -> (SourceStatus, String) {
     let reference = clean_reference(reference);
     if reference.is_empty() {
         return (SourceStatus::EmptyRef, "empty source reference".into());
@@ -1701,7 +1772,9 @@ fn verify_file_ref_as_written(reference: &str, roots: &[&Path]) -> (SourceStatus
     // `Foo.ts:42` without the full path was flagged "unverified" even though the
     // file exists. Only a UNIQUE match is green-lit; 2+ stays unresolved (we
     // never claim a fact we can't pin), but with an actionable reason.
-    if !path_str.is_empty() && !path_str.contains('/') && !path_str.contains('\\') {
+    if !walk {
+        // Direct resolution only.
+    } else if !path_str.is_empty() && !path_str.contains('/') && !path_str.contains('\\') {
         match resolve_unique_basename(path_str, roots) {
             BasenameResolution::Unique(found) => {
                 let (status, detail) = line_bounds_status(&found, line_spec);
@@ -1758,6 +1831,193 @@ fn verify_file_ref_as_written(reference: &str, roots: &[&Path]) -> (SourceStatus
         SourceStatus::NotFound,
         format!("file not found: {}", path_str),
     )
+}
+
+/// Cap on the worktrees scanned for an unresolved citation (one stat each,
+/// at lint finalisation). Lanes come most recent first, so the cap drops the
+/// stale ones; an explicit `.kronn/worktrees/<lane>/` path ignores it.
+const MAX_LANE_ROOTS: usize = 256;
+
+/// Resolve a file citation and say which tree held it. Order, first match
+/// wins: an explicit `.kronn/worktrees/<lane>/` (or absolute lane) path goes to
+/// that lane only; otherwise the checkout roots are tried first, and the lanes
+/// only for a path the checkout lacks (or holds with fewer lines). Lanes use
+/// direct paths only (no tree walk) and the same jail and line checks.
+fn verify_file_ref_located(
+    reference: &str,
+    roots: &[&Path],
+    lanes: &[LaneRoot],
+) -> (SourceStatus, String, Option<SourceOrigin>) {
+    let cleaned = clean_reference(reference);
+    if let Some((lane, rest)) = explicit_lane_ref(cleaned, lanes) {
+        let (status, detail) = verify_file_ref_walk(&rest, &[lane.path.as_path()], false);
+        if located(status) {
+            let detail = format!("{detail} — in worktree {}", lane.name);
+            return (status, detail, Some(SourceOrigin::worktree(&lane.name)));
+        }
+        return (
+            status,
+            format!("{detail} — looked in worktree {}", lane.name),
+            None,
+        );
+    }
+    if let Some(detail) = foreign_worktree_path(cleaned, roots) {
+        return (SourceStatus::OutsideProject, detail, None);
+    }
+
+    let (status, detail) = verify_file_ref(reference, roots);
+    let checkout_origin = located(status).then(SourceOrigin::checkout);
+    if lanes.is_empty() || !matches!(status, SourceStatus::NotFound | SourceStatus::OutOfBounds) {
+        return (status, detail, checkout_origin);
+    }
+    let mut lane_out_of_bounds: Option<(String, &LaneRoot)> = None;
+    for lane in lanes.iter().take(MAX_LANE_ROOTS) {
+        let (lane_status, lane_detail) =
+            verify_file_ref_walk(reference, &[lane.path.as_path()], false);
+        match lane_status {
+            SourceStatus::Verified => {
+                let note = if status == SourceStatus::OutOfBounds {
+                    "the checkout copy is shorter"
+                } else {
+                    "not in the checkout"
+                };
+                return (
+                    SourceStatus::Verified,
+                    format!("{lane_detail} — found in worktree {} ({note})", lane.name),
+                    Some(SourceOrigin::worktree(&lane.name)),
+                );
+            }
+            SourceStatus::OutOfBounds if lane_out_of_bounds.is_none() => {
+                lane_out_of_bounds = Some((lane_detail, lane));
+            }
+            _ => {}
+        }
+    }
+    if status == SourceStatus::NotFound {
+        if let Some((lane_detail, lane)) = lane_out_of_bounds {
+            return (
+                SourceStatus::OutOfBounds,
+                format!(
+                    "{lane_detail} — in worktree {}, not in the checkout",
+                    lane.name
+                ),
+                Some(SourceOrigin::worktree(&lane.name)),
+            );
+        }
+        let n = lanes.len().min(MAX_LANE_ROOTS);
+        return (
+            status,
+            format!("{detail} — not in the checkout nor in the project's {n} active worktree(s)"),
+            None,
+        );
+    }
+    (status, detail, checkout_origin)
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => normalize_lexical(a) == normalize_lexical(b),
+    }
+}
+
+/// A verdict that means the file was found (even if the lines were not).
+fn located(status: SourceStatus) -> bool {
+    matches!(status, SourceStatus::Verified | SourceStatus::OutOfBounds)
+}
+
+/// `.kronn/worktrees/<lane>/rest[:lines]`, or an absolute path under a lane,
+/// rewritten as `rest[:lines]` relative to that lane.
+fn explicit_lane_ref<'a>(cleaned: &str, lanes: &'a [LaneRoot]) -> Option<(&'a LaneRoot, String)> {
+    let relative = cleaned.strip_prefix("./").unwrap_or(cleaned);
+    if let Some(tail) = relative.strip_prefix(".kronn/worktrees/") {
+        let (name, rest) = tail.split_once('/')?;
+        let lane = lanes.iter().find(|lane| lane.name == name)?;
+        return (!rest.is_empty()).then(|| (lane, rest.to_string()));
+    }
+    let (path_part, line_spec) = split_path_and_lines(cleaned);
+    let path_part = clean_reference(path_part);
+    if !Path::new(path_part).is_absolute() {
+        return None;
+    }
+    let absolute = normalize_lexical(&crate::core::scanner::resolve_host_path(path_part));
+    lanes.iter().find_map(|lane| {
+        let rest = absolute.strip_prefix(normalize_lexical(&lane.path)).ok()?;
+        let rest = rest.to_str().filter(|r| !r.is_empty())?;
+        let lines = match line_spec {
+            Some((start, end)) if start == end => format!(":{start}"),
+            Some((start, end)) => format!(":{start}-{end}"),
+            None => String::new(),
+        };
+        Some((lane, format!("{rest}{lines}")))
+    })
+}
+
+/// An absolute path inside some `.kronn/worktrees/` that is neither one of
+/// this project's lanes nor under its roots belongs to another project.
+fn foreign_worktree_path(cleaned: &str, roots: &[&Path]) -> Option<String> {
+    let (path_part, _) = split_path_and_lines(cleaned);
+    let path_part = clean_reference(path_part);
+    if !Path::new(path_part).is_absolute() {
+        return None;
+    }
+    let absolute = normalize_lexical(&crate::core::scanner::resolve_host_path(path_part));
+    let names: Vec<&std::ffi::OsStr> = absolute.iter().collect();
+    let in_worktrees = names
+        .windows(2)
+        .any(|pair| pair[0] == ".kronn" && pair[1] == "worktrees");
+    let under_root = roots
+        .iter()
+        .any(|root| absolute.starts_with(normalize_lexical(root)));
+    (in_worktrees && !under_root)
+        .then(|| format!("{path_part} is in a worktree of another project — refused"))
+}
+
+/// The worktrees of the project checked out at `checkout`: every directory
+/// under its `.kronn/worktrees/`, plus the worktrees git registers for it
+/// (`.git/worktrees/*/gitdir`). Read from disk, no subprocess; symlinked
+/// entries are not lanes. Most recently modified first, uncapped: callers
+/// cap the scan, never the lookup of a lane named explicitly.
+pub fn project_lane_roots(checkout: &Path) -> Vec<LaneRoot> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(checkout.join(".kronn").join("worktrees")) {
+        paths.extend(entries.filter_map(|e| e.ok()).map(|e| e.path()));
+    }
+    if let Ok(entries) = std::fs::read_dir(checkout.join(".git").join("worktrees")) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let Ok(gitdir) = std::fs::read_to_string(entry.path().join("gitdir")) else {
+                continue;
+            };
+            let dot_git = crate::core::scanner::resolve_host_path(gitdir.trim());
+            if let Some(worktree) = dot_git.parent() {
+                paths.push(worktree.to_path_buf());
+            }
+        }
+    }
+    let checkout_canon = checkout.canonicalize().ok();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut lanes: Vec<(std::time::SystemTime, LaneRoot)> = Vec::new();
+    for path in paths {
+        // No follow: a symlink under `.kronn/worktrees` may point anywhere.
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if checkout_canon.as_ref() == Some(&canon) || seen.contains(&canon) {
+            continue;
+        }
+        seen.push(canon);
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let name = name.to_string();
+            lanes.push((modified, LaneRoot { name, path }));
+        }
+    }
+    lanes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    lanes.into_iter().map(|(_, lane)| lane).collect()
 }
 
 /// Full P2 analysis: niveau 0 heuristic + niveau 1 mechanical source
@@ -1836,6 +2096,12 @@ fn file_path_key(raw: &str) -> String {
 /// `[src:]` — could be a typo / cross-repo / wrong line). It's surfaced as
 /// "couldn't verify", honestly.
 pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
+    analyze_roots_lanes(text, roots, &[])
+}
+
+/// [`analyze_roots`] that also resolves file citations in the project's own
+/// worktrees (`lanes`), after the roots. A lane-found file is not fabricated.
+pub fn analyze_roots_lanes(text: &str, roots: &[&Path], lanes: &[LaneRoot]) -> LintReport {
     let mut report = lint_assertions(text);
     let mut fabricated = 0u32;
     let mut unverified = 0u32;
@@ -1845,7 +2111,7 @@ pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
         .into_iter()
         .take(MAX_SOURCES_VERIFIED)
     {
-        let check = verify_source_marker_roots(&raw, roots);
+        let check = verify_source_marker_lanes(&raw, roots, lanes);
         if check.status.is_fabricated() {
             fabricated += 1;
         }
@@ -1870,13 +2136,14 @@ pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
                 continue;
             }
             seen.insert(key);
-            let (status, detail) = verify_file_ref(&anchor, roots);
+            let (status, detail, origin) = verify_file_ref_located(&anchor, roots, lanes);
             if status == SourceStatus::Verified {
                 sources.push(SourceCheck {
                     raw: anchor,
                     kind: SourceKind::File,
                     status,
                     detail: format!("inline anchor (auto-verified): {}", detail),
+                    origin,
                 });
             } else {
                 // Didn't resolve: honest soft signal, not a red fabrication.
@@ -1888,6 +2155,7 @@ pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
                     kind: SourceKind::File,
                     status: SourceStatus::Unchecked,
                     detail: format!("inline anchor (couldn't verify): {}", detail),
+                    origin: None,
                 });
             }
         }
@@ -1922,11 +2190,31 @@ pub fn finalize_lint_report(
         return None;
     }
     let mut roots: Vec<PathBuf> = Vec::new();
+    let checkout =
+        (!project_path.is_empty()).then(|| crate::core::scanner::resolve_host_path(project_path));
+    let mut lanes = checkout
+        .as_deref()
+        .map(project_lane_roots)
+        .unwrap_or_default();
     if let Some(wp) = workspace_path.filter(|w| !w.is_empty()) {
-        roots.push(crate::core::scanner::resolve_host_path(wp));
+        let workspace = crate::core::scanner::resolve_host_path(wp);
+        // The discussion's own worktree is a lane of the project: still tried
+        // first among lanes, but after the checkout, so a merged file reads
+        // "checkout". A workspace outside the project keeps its root slot.
+        match lanes
+            .iter()
+            .position(|lane| same_dir(&lane.path, &workspace))
+        {
+            Some(index) => {
+                let lane = lanes.remove(index);
+                lanes.insert(0, lane);
+            }
+            None if checkout.as_deref().is_some_and(|c| same_dir(c, &workspace)) => {}
+            None => roots.push(workspace),
+        }
     }
-    if !project_path.is_empty() {
-        roots.push(crate::core::scanner::resolve_host_path(project_path));
+    if let Some(checkout) = checkout {
+        roots.push(checkout);
     }
     // 0.8.8 — also resolve citations against the project's declared linked_repos
     // (filesystem locations only). Triage/dev agents legitimately cite sibling
@@ -1945,13 +2233,14 @@ pub fn finalize_lint_report(
         }
     }
     let root_refs: Vec<&Path> = roots.iter().map(|p| p.as_path()).collect();
-    let report = analyze_roots(text, &root_refs);
+    let report = analyze_roots_lanes(text, &root_refs, &lanes);
     tracing::info!(
         target: "anti_halluc",
         unsourced = report.unsourced_count,
         fabricated = report.fabricated_count,
         verified = report.verified_count(),
         roots = roots.len(),
+        lanes = lanes.len(),
         "lint finalized",
     );
     if report.has_signal() {
@@ -5209,5 +5498,322 @@ mod binary_citations {
                 .trim_start_matches('/')
         );
         assert!(status(&encoded_absolute, &root).is_fabricated());
+    }
+}
+
+#[cfg(test)]
+mod lane_origin {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("kronn_lane_{tag}_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(root: &Path, rel: &str, lines: usize) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x\n".repeat(lines)).unwrap();
+    }
+
+    /// A checkout with one lane under `.kronn/worktrees/0151-kt1181`.
+    fn project() -> (PathBuf, PathBuf) {
+        let checkout = temp_dir("checkout");
+        let lane = checkout.join(".kronn/worktrees/0151-kt1181");
+        std::fs::create_dir_all(&lane).unwrap();
+        (checkout, lane)
+    }
+
+    fn check(raw: &str, checkout: &Path) -> SourceCheck {
+        let lanes = project_lane_roots(checkout);
+        verify_source_marker_lanes(raw, &[checkout], &lanes)
+    }
+
+    #[test]
+    fn file_in_checkout_and_lane_reads_checkout() {
+        let (checkout, lane) = project();
+        write(&checkout, "src/a.rs", 5);
+        write(&lane, "src/a.rs", 5);
+        let c = check("file: src/a.rs:3", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::checkout()));
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn lane_only_file_is_verified_in_the_named_worktree() {
+        let (checkout, lane) = project();
+        write(&lane, "frontend/src/lib/templateMerge.ts", 10);
+        let c = check("file: frontend/src/lib/templateMerge.ts:4", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("0151-kt1181")));
+        assert!(c.detail.contains("0151-kt1181"), "{}", c.detail);
+        assert!(!c.status.is_fabricated());
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn file_missing_everywhere_is_not_found() {
+        let (checkout, _lane) = project();
+        let c = check("file: nowhere/ghost.rs:1", &checkout);
+        assert_eq!(c.status, SourceStatus::NotFound);
+        assert_eq!(c.origin, None);
+        assert!(c.detail.contains("1 active worktree"), "{}", c.detail);
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn line_out_of_bounds_in_a_lane_file_is_out_of_bounds_there() {
+        let (checkout, lane) = project();
+        write(&lane, "src/new.rs", 3);
+        let c = check("file: src/new.rs:9", &checkout);
+        assert_eq!(c.status, SourceStatus::OutOfBounds, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("0151-kt1181")));
+        assert!(c.detail.contains("beyond file length 3"), "{}", c.detail);
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn lines_past_the_checkout_copy_resolve_in_the_lane_that_has_them() {
+        let (checkout, lane) = project();
+        write(&checkout, "src/a.rs", 3);
+        write(&lane, "src/a.rs", 20);
+        let c = check("file: src/a.rs:15", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("0151-kt1181")));
+        assert!(c.detail.contains("shorter"), "{}", c.detail);
+        // Past the end of both copies: the checkout verdict stands.
+        let c = check("file: src/a.rs:99", &checkout);
+        assert_eq!(c.status, SourceStatus::OutOfBounds);
+        assert_eq!(c.origin, Some(SourceOrigin::checkout()));
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn explicit_lane_prefix_resolves_in_that_lane_only() {
+        let (checkout, lane) = project();
+        write(&lane, "src/x.rs", 4);
+        let c = check("file: .kronn/worktrees/0151-kt1181/src/x.rs:2", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("0151-kt1181")));
+        let c = check("file: .kronn/worktrees/0151-kt1181/src/x.rs:7", &checkout);
+        assert_eq!(c.status, SourceStatus::OutOfBounds, "{}", c.detail);
+        let absolute = format!("file: {}:2", lane.join("src/x.rs").display());
+        let c = check(&absolute, &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("0151-kt1181")));
+        // The lane jail holds: `../` out of the lane is refused.
+        let c = check(
+            "file: .kronn/worktrees/0151-kt1181/../../../../etc/hosts",
+            &checkout,
+        );
+        assert_eq!(c.status, SourceStatus::OutsideProject, "{}", c.detail);
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn another_projects_worktree_is_refused() {
+        let (checkout, _lane) = project();
+        let other = temp_dir("other");
+        write(&other, ".kronn/worktrees/lane-x/src/f.rs", 3);
+        let lanes = project_lane_roots(&checkout);
+        assert!(lanes.iter().all(|l| l.name != "lane-x"), "{lanes:?}");
+
+        let absolute = format!(
+            "file: {}:1",
+            other.join(".kronn/worktrees/lane-x/src/f.rs").display()
+        );
+        let c = check(&absolute, &checkout);
+        assert_eq!(c.status, SourceStatus::OutsideProject, "{}", c.detail);
+        assert_eq!(c.origin, None);
+        // Not a lane of this project: the prefix names nothing here.
+        let c = check("file: .kronn/worktrees/lane-x/src/f.rs:1", &checkout);
+        assert_eq!(c.status, SourceStatus::NotFound, "{}", c.detail);
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&other).ok();
+    }
+
+    #[test]
+    fn git_registered_worktree_outside_the_checkout_is_a_lane() {
+        let checkout = temp_dir("checkout");
+        let elsewhere = temp_dir("wt");
+        write(&elsewhere, "src/only_here.rs", 2);
+        let meta = checkout.join(".git/worktrees/kt-9");
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("gitdir"),
+            format!("{}\n", elsewhere.join(".git").display()),
+        )
+        .unwrap();
+        // A registration whose tree is gone is not a lane.
+        let stale = checkout.join(".git/worktrees/gone");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("gitdir"), "/nonexistent/kronn/gone/.git\n").unwrap();
+
+        let lanes = project_lane_roots(&checkout);
+        assert_eq!(lanes.len(), 1, "{lanes:?}");
+        let name = lanes[0].name.clone();
+        let c = verify_source_marker_lanes("file: src/only_here.rs:2", &[&checkout], &lanes);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree(&name)));
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn legacy_row_without_origin_reads_as_checkout() {
+        let legacy = r#"{"unsourced_count":0,"flagged_spans":[],"sources":[
+            {"raw":"file: src/a.rs:1","kind":"file","status":"verified","detail":"file exists"}
+        ],"fabricated_count":0}"#;
+        let report: LintReport = serde_json::from_str(legacy).unwrap();
+        assert_eq!(report.sources[0].origin, None);
+        assert_eq!(report.verified_count(), 1);
+        // Absent stays absent on the way out: old readers see the old shape.
+        let json = serde_json::to_value(&report.sources[0]).unwrap();
+        assert!(json.get("origin").is_none(), "{json}");
+        let lane = SourceCheck {
+            origin: Some(SourceOrigin::worktree("0151-kt1181")),
+            ..report.sources[0].clone()
+        };
+        let json = serde_json::to_value(&lane).unwrap();
+        assert_eq!(
+            json["origin"],
+            serde_json::json!({"kind":"worktree","name":"0151-kt1181"})
+        );
+        let back: SourceCheck = serde_json::from_value(json).unwrap();
+        assert_eq!(back, lane);
+    }
+
+    #[test]
+    fn inline_anchor_in_a_lane_is_verified_not_unverified() {
+        let (checkout, lane) = project();
+        write(&lane, "frontend/src/lib/templateMerge.ts", 10);
+        let lanes = project_lane_roots(&checkout);
+        let report = analyze_roots_lanes(
+            "See `frontend/src/lib/templateMerge.ts:3`.",
+            &[&checkout],
+            &lanes,
+        );
+        assert_eq!(report.unverified_count, 0, "{:?}", report.sources);
+        assert_eq!(report.sources.len(), 1);
+        assert_eq!(report.sources[0].status, SourceStatus::Verified);
+        assert_eq!(
+            report.sources[0].origin,
+            Some(SourceOrigin::worktree("0151-kt1181"))
+        );
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    fn set_mtime(dir: &Path, secs_ago: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// More lanes than the scan cap: `lane-000` … plus `zz-active` (last by
+    /// name, most recent) and `aa-stale` (first by name, oldest).
+    fn crowded_project() -> (PathBuf, PathBuf, PathBuf) {
+        let checkout = temp_dir("crowded");
+        let base = checkout.join(".kronn/worktrees");
+        for i in 0..MAX_LANE_ROOTS + 5 {
+            let lane = base.join(format!("lane-{i:03}"));
+            std::fs::create_dir_all(&lane).unwrap();
+            set_mtime(&lane, 3_600 + i as u64);
+        }
+        let active = base.join("zz-active");
+        write(&active, "src/active.rs", 4);
+        set_mtime(&active, 0);
+        let stale = base.join("aa-stale");
+        write(&stale, "src/stale.rs", 4);
+        set_mtime(&stale, 90_000);
+        (checkout, active, stale)
+    }
+
+    #[test]
+    fn most_recent_lane_is_scanned_even_past_the_cap_by_name() {
+        let (checkout, _active, _stale) = crowded_project();
+        let lanes = project_lane_roots(&checkout);
+        assert_eq!(lanes.len(), MAX_LANE_ROOTS + 7);
+        assert_eq!(lanes[0].name, "zz-active");
+        let c = check("file: src/active.rs:2", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("zz-active")));
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[test]
+    fn explicit_lane_path_resolves_its_lane_beyond_the_scan_cap() {
+        let (checkout, _active, _stale) = crowded_project();
+        let lanes = project_lane_roots(&checkout);
+        let position = lanes.iter().position(|l| l.name == "aa-stale").unwrap();
+        assert!(position >= MAX_LANE_ROOTS, "aa-stale at {position}");
+        let c = check("file: .kronn/worktrees/aa-stale/src/stale.rs:3", &checkout);
+        assert_eq!(c.status, SourceStatus::Verified, "{}", c.detail);
+        assert_eq!(c.origin, Some(SourceOrigin::worktree("aa-stale")));
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_lane_entry_is_ignored() {
+        let (checkout, _lane) = project();
+        let outside = temp_dir("outside");
+        write(&outside, "src/secret.rs", 3);
+        std::os::unix::fs::symlink(&outside, checkout.join(".kronn/worktrees/evil")).unwrap();
+        let lanes = project_lane_roots(&checkout);
+        assert!(lanes.iter().all(|l| l.name != "evil"), "{lanes:?}");
+        let c = check("file: src/secret.rs:1", &checkout);
+        assert_eq!(c.status, SourceStatus::NotFound, "{}", c.detail);
+        assert_eq!(c.origin, None);
+        // Named explicitly, it is no lane: the checkout's symlink guard refuses it.
+        let c = check("file: .kronn/worktrees/evil/src/secret.rs:1", &checkout);
+        assert_eq!(c.status, SourceStatus::OutsideProject, "{}", c.detail);
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    // Serial: `set_mode` mutates the process-global mode.
+    #[serial_test::serial]
+    #[test]
+    fn lint_receipt_counts_lane_files_as_found() {
+        let (checkout, lane) = project();
+        write(&checkout, "src/main.rs", 5);
+        write(&lane, "frontend/new.ts", 5);
+        set_mode("warn");
+        let text = "Done [src: file: src/main.rs:2], new [src: file: frontend/new.ts:3], \
+                    and [src: file: src/ghost.rs:1].";
+        let report =
+            finalize_lint_report(text, None, checkout.to_str().unwrap(), &[]).expect("signal");
+        assert_eq!(report.fabricated_count, 1, "{:?}", report.sources);
+        assert_eq!(report.verified_count(), 2);
+        let origins: Vec<_> = report.sources.iter().map(|s| s.origin.clone()).collect();
+        assert_eq!(
+            origins,
+            vec![
+                Some(SourceOrigin::checkout()),
+                Some(SourceOrigin::worktree("0151-kt1181")),
+                None
+            ]
+        );
+
+        // The discussion's own worktree is a lane: after the checkout.
+        write(&lane, "src/main.rs", 5);
+        let report = finalize_lint_report(
+            "[src: file: src/main.rs:2] [src: file: frontend/new.ts:1]",
+            Some(lane.to_str().unwrap()),
+            checkout.to_str().unwrap(),
+            &[],
+        )
+        .expect("signal");
+        assert_eq!(report.fabricated_count, 0);
+        assert_eq!(report.sources[0].origin, Some(SourceOrigin::checkout()));
+        assert_eq!(
+            report.sources[1].origin,
+            Some(SourceOrigin::worktree("0151-kt1181"))
+        );
+        std::fs::remove_dir_all(&checkout).ok();
     }
 }

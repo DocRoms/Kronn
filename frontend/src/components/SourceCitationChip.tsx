@@ -4,7 +4,7 @@
 // evidence: if making it pretty makes it less consultable, this failed.
 import { useT } from '../lib/I18nContext';
 import type { SourceCheck } from '../types/generated';
-import type { SourceCitation } from '../lib/sourceCitations';
+import { chipStateFor, laneOf, type SourceCitation } from '../lib/sourceCitations';
 import './SourceCitationChip.css';
 
 /** What the backend already decided about this marker, when it decided. */
@@ -34,13 +34,26 @@ export function SourceCitationChip({
   const kindLabel = citation.kind
     ? (t(kindKey) === kindKey ? citation.kind : t(kindKey))
     : '';
-  // Three states, and "unknown" is one of them: a chip that claimed every
-  // citation was fine would be worse than the raw marker it replaces.
-  const state = verdict?.status === 'verified'
-    ? 'verified'
-    : verdict && verdict.status !== 'unchecked'
-      ? 'suspect'
-      : 'unknown';
+  // "Unknown" is a state too: a chip that claimed every citation was fine
+  // would be worse than the raw marker it replaces.
+  const state = chipStateFor(verdict);
+  const lane = verdict ? laneOf(verdict) : null;
+  // Where the file was looked for, in words, before the backend's own reason.
+  const where = !verdict
+    ? null
+    : state === 'lane'
+      ? t('disc.srcOrigin.lane', lane ?? '')
+      : state === 'verified'
+        ? t('disc.srcOrigin.checkout')
+        : verdict.status === 'not_found'
+          ? t('disc.srcOrigin.notFound')
+          : lane !== null
+            ? t('disc.srcOrigin.invalidInLane', lane)
+            : null;
+  const marker = `[src: ${citation.raw}]`;
+  const title = verdict
+    ? [marker, where, verdict.detail].filter(Boolean).join('\n')
+    : marker;
 
   return (
     <span
@@ -48,10 +61,16 @@ export function SourceCitationChip({
       data-kind={citation.kind || undefined}
       data-state={state}
       data-testid="source-citation-chip"
-      title={verdict ? `[src: ${citation.raw}] — ${verdict.detail}` : `[src: ${citation.raw}]`}
+      title={title}
+      aria-label={where ? `${kindLabel} ${citation.label} — ${where}`.trim() : undefined}
     >
       {kindLabel && <span className="disc-src-chip-kind">{kindLabel}</span>}
       <span className="disc-src-chip-ref">{citation.label}</span>
+      {state === 'lane' && (
+        <span className="disc-src-chip-lane" data-testid="source-citation-lane">
+          {t('disc.srcOrigin.laneTag', lane ?? '')}
+        </span>
+      )}
     </span>
   );
 }
