@@ -362,6 +362,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     agents: {
       listAll: resolve([]),
       versionCheck: resolve([]),
+      reachability: resolve([]),
     },
 
     mcps: {

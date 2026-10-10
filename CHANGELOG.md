@@ -27,6 +27,23 @@ Release notes for 0.9.3 and earlier are available in the
   "reply directly to the user". It also sees the whole agent thread under the
   message, replies to replies included, not only the direct replies. The
   deeper replies are capped at the 24 most recent and 24 000 bytes.
+- An HTTP agent whose endpoint does not answer now fails in under a second
+  with the VPN card, and the other agents of the turn start anyway (KT-1154).
+  The start runs the KT-697 probe first (0.8 s budget, shared 30 s cache): a
+  DNS, refused, TLS, invalid-address or connect failure refuses that agent
+  alone, before any model call and without the runner's three retries. A
+  timeout or a 5xx lets the run try, so a slow proxy is never refused. Off the
+  VPN, LiteLLM used to show its card about 7 s after it was mentioned.
+- A model the catalogue refuses before the start now leaves a System card in
+  the discussion instead of a toast only. The card names the model and the
+  cause (access denied, not found, gone from the catalogue, sign-in needed...),
+  gives the date the catalogue recorded it, and the step that applies. The old
+  "not found or access denied, choose another model" sentence is gone.
+- The composer warns on the mentioned agent while you write: an endpoint the
+  last probe could not reach, with the reason, or a model the catalogue
+  refuses, with the date of that refusal. The probe runs when the set of
+  mentioned agents changes, not on each keystroke
+  (`POST /api/agents/reachability`).
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and

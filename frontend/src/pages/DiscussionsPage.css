@@ -4458,6 +4458,32 @@ button.disc-contact-open {
   font-weight: 600;
 }
 
+.disc-composer-parallel-chip[data-warning] {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-color: rgba(var(--kr-warning-rgb), 0.5);
+}
+
+.disc-composer-target-warnings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-4);
+  padding: 6px 10px 0;
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-composer-target-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
+  border-radius: var(--kr-r-pill);
+}
+
 .disc-delegation-prompt {
   display: flex;
   flex-direction: column;

@@ -1,4 +1,5 @@
 import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { WorkerConnectivity } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
   AssistantConversation,
@@ -1621,7 +1622,22 @@ export const agents = {
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
   readiness: (request: AgentReadinessRequest) =>
     api<AgentReadiness[]>('POST', '/agents/readiness', request),
+  /** Transport state of the HTTP agents a draft names (KT-1154), probed and cached 30 s server-side. */
+  reachability: (targets: ReachabilityTarget[]) =>
+    api<TargetReachability[]>('POST', '/agents/reachability', { targets }),
 };
+
+export interface ReachabilityTarget {
+  agent_type: AgentType;
+  connection_id?: string | null;
+}
+
+export interface TargetReachability {
+  agent_type: AgentType;
+  connection_id: string | null;
+  /** `null` for an agent without an address Kronn probes. */
+  connectivity: WorkerConnectivity | null;
+}
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────
 
