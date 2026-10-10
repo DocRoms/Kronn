@@ -41,6 +41,17 @@ Release notes for 0.9.3 and earlier are available in the
   runtime worker before its Agent step started. The backend and desktop
   runtimes now give their threads 8 MiB, and the static tool catalogue is
   built once instead of on the stack at every Agent step.
+- Automation and Planning no longer stall (KT-1148). Automation re-rendered
+  in full on every workflow poll (every 3 to 10 seconds), and these renders
+  kept the browser busy for close to a second at a time on a loaded machine.
+  Both pages now re-render only when their own data changes. Planning starts
+  its first load at once instead of waiting 180 ms for typing to settle. While
+  a list or a detail loads, both pages show the spinning Kronn logo instead of
+  an empty state or the old spinner. The database-size banner on Automation
+  now reads the file size only (a few milliseconds) instead of measuring
+  every table. That measurement took 1.7 to 2.4 seconds on an 11 GB database,
+  and Settings still runs it, but on a connection of its own: it no longer
+  holds up the requests queued behind it.
 
 ## [0.15.0] - 2026-10-10
 

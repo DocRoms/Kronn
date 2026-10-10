@@ -41,11 +41,11 @@ export function RunRetentionBanner({ retentionDays, onOpenSetting }: Props) {
     return () => { live = false; };
   }, [retentionDays]);
 
-  // The measurement walks the b-trees, so it only runs when the banner can show.
+  // Only the file size is shown: the per-table walk takes seconds on a large base.
   useEffect(() => {
     if (!off) return;
     let live = true;
-    config.dbUsage()
+    config.dbUsage({ sizeOnly: true })
       .then(usage => { if (live) setBytes(usage.file_bytes); })
       .catch(() => {});
     return () => { live = false; };

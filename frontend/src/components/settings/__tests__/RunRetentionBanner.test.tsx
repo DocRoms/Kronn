@@ -33,6 +33,7 @@ describe('RunRetentionBanner', () => {
     render(<RunRetentionBanner retentionDays={0} onOpenSetting={open} />);
     expect(screen.getByTestId('run-retention-banner')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(/config.runRetentionBannerSize 1.00 Go/)).toBeInTheDocument());
+    expect(configApi.dbUsage).toHaveBeenCalledWith({ sizeOnly: true });
     fireEvent.click(screen.getByText('config.runRetentionBannerOpen'));
     expect(open).toHaveBeenCalledTimes(1);
   });

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { useState } from 'react';
 import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 import {
@@ -33,8 +34,9 @@ const mockWorkflowsApi = vi.hoisted(() => ({
 // 0.8.2 — WorkflowsPage now uses useWebSocket() to listen for live
 // WorkflowRunUpdated events. Stub it to a no-op so the test runtime
 // doesn't try to open a real WebSocket inside jsdom.
+const useWebSocketSpy = vi.hoisted(() => vi.fn(() => ({ connected: false, connectionState: 'connecting' })));
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: () => ({ connected: false, connectionState: 'connecting' }),
+  useWebSocket: useWebSocketSpy,
 }));
 
 // Mock API — WorkflowsPage calls workflowsApi.list() and skillsApi.list() on mount
@@ -2687,5 +2689,38 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(jiraCard?.querySelector('.qp-card-endpoint')).toHaveTextContent('GET/tickets/a');
     expect(jiraCard?.querySelector('.qp-card-tools')).toBeInTheDocument();
     expect(jiraCard?.querySelector('.qp-card-primary-actions')).toHaveTextContent('Lancer');
+  });
+});
+
+// KT-1148 — Automation looked frozen: every Dashboard poll re-rendered the
+// whole page, and a pending list read as "no workflow".
+describe('WorkflowsPage loading and re-renders', () => {
+  it('shows the shared loader, not the empty state, while the list is pending', async () => {
+    let answer: (value: WorkflowSummary[]) => void = () => {};
+    mockWorkflowsApi.list.mockReturnValueOnce(new Promise(resolve => { answer = resolve; }));
+    await wrap(<WorkflowsPage projects={[]} />);
+    expect(screen.getByRole('status')).toHaveTextContent('Chargement...');
+    expect(screen.queryByText('Aucun workflow configuré')).toBeNull();
+
+    await act(async () => { answer([]); });
+    expect(screen.getByText('Aucun workflow configuré')).toBeInTheDocument();
+  });
+
+  it('does not re-render when its parent re-renders with the same props', async () => {
+    const projects: never[] = [];
+    const toast = vi.fn();
+    function Host() {
+      const [ticks, setTicks] = useState(0);
+      return <>
+        <button type="button" onClick={() => setTicks(ticks + 1)}>poll {ticks}</button>
+        <WorkflowsPage projects={projects} toast={toast} />
+      </>;
+    }
+    await wrap(<Host />);
+    const renders = useWebSocketSpy.mock.calls.length;
+    expect(renders).toBeGreaterThan(0);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'poll 0' })); });
+    expect(screen.getByRole('button', { name: 'poll 1' })).toBeInTheDocument();
+    expect(useWebSocketSpy.mock.calls.length).toBe(renders);
   });
 });

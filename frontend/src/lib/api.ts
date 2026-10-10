@@ -888,8 +888,10 @@ export const config = {
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
   /** Where the database's weight sits, one entry per table. Measured with
-   *  `dbstat` on demand — never on page load, since it reads the b-trees. */
-  dbUsage: () => api<DbUsage>('GET', '/config/db-usage'),
+   *  `dbstat` on demand — never on page load, since it reads the b-trees.
+   *  `sizeOnly` skips that walk and answers the file sizes with no table. */
+  dbUsage: (options: { sizeOnly?: boolean } = {}) =>
+    api<DbUsage>('GET', options.sizeOnly ? '/config/db-usage?tables=false' : '/config/db-usage'),
   /** SQLite online-backup snapshot. Backend writes to
    *  `<data_dir>/backups/kronn-YYYYMMDD-HHMMSS.db`. Returns the
    *  resulting path so the Settings UI can toast it. */
