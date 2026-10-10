@@ -873,6 +873,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "225_model_catalog_listing_evidence",
         include_str!("sql/225_model_catalog_listing_evidence.sql"),
     ),
+    (
+        "226_assistant_conversations",
+        include_str!("sql/226_assistant_conversations.sql"),
+    ),
+    (
+        "227_workflow_run_pins",
+        include_str!("sql/227_workflow_run_pins.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

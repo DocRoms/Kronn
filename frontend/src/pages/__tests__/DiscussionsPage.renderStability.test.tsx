@@ -38,6 +38,8 @@ vi.mock('../../components/MessageBubble', async importOriginal => {
 });
 
 vi.mock('../../lib/api', () => ({
+  // KT-1111 — the sidebar files assistant conversations apart.
+  assistantConversations: { list: vi.fn().mockResolvedValue([]) },
   // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
   learnings: {
     pending: vi.fn().mockResolvedValue({ count: 0 }),

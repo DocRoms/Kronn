@@ -13,7 +13,7 @@ import { CopyIdPill } from './CopyIdPill';
 import { CollectionShell, CollectionSidebarCollapseButton } from './CollectionShell';
 import { CollectionProjectTree } from './CollectionProjectTree';
 import type { Discussion, Project, Contact, BatchRunSummary, ExecutionDiscussionLink, MessageSearchHit } from '../types/generated';
-import { projects as projectsApi } from '../lib/api';
+import { assistantConversations as assistantConversationsApi, projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import { discussionMosaicUrl, MAX_MOSAIC_DISCUSSIONS } from '../lib/discussion-mosaic-navigation';
@@ -22,8 +22,9 @@ import type { ToastFn } from '../hooks/useToast';
 import {
   Folder, ChevronRight, Plus, X, MessageSquare, Archive, Search,
   Filter, Users2, Trash2, CheckCheck, Columns3, ListChecks, LogIn,
-  Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown, LayoutGrid,
+  Loader2, Upload, CircleDot, Clock3, MoreHorizontal, ChevronDown, LayoutGrid, Bot,
 } from 'lucide-react';
+import { ASSISTANT_CONVERSATIONS_CHANGED } from './assistantConversation';
 
 export interface DiscussionSidebarProps {
   discussions: Discussion[];
@@ -295,6 +296,20 @@ export function DiscussionSidebar({
     refreshImportProvenance();
   }, [discussions.length, refreshImportProvenance]);
 
+  // KT-1111 — configuration-assistant conversations live in their own section,
+  // out of Recent and of the project tree.
+  const [assistantIds, setAssistantIds] = useState<ReadonlySet<string>>(() => new Set());
+  const refreshAssistantIds = useCallback(() => {
+    assistantConversationsApi.list()
+      .then(rows => setAssistantIds(new Set(rows.map(row => row.discussion_id))))
+      .catch(e => console.warn('assistant conversations fetch failed', e));
+  }, []);
+  useEffect(() => {
+    refreshAssistantIds();
+    window.addEventListener(ASSISTANT_CONVERSATIONS_CHANGED, refreshAssistantIds);
+    return () => window.removeEventListener(ASSISTANT_CONVERSATIONS_CHANGED, refreshAssistantIds);
+  }, [discussions.length, refreshAssistantIds]);
+
   const refreshSourceBindings = useCallback(() => {
     projectsApi.discSources()
       .then((rows) => {
@@ -516,14 +531,17 @@ export function DiscussionSidebar({
   const contactsCollapsed = collapsedGroups.has(contactsGroupKey) && !showJoin && !showAddContact;
   const onlineContactCount = contacts.filter(contact => contactsOnline[contact.id]).length;
   const smartCandidates = discussions.filter(disc => (
-    !disc.archived && !nestedExecutionChildIds.has(disc.id) && matchesFilters(disc)
+    !disc.archived && !nestedExecutionChildIds.has(disc.id) && !assistantIds.has(disc.id) && matchesFilters(disc)
   ));
   // Rendering roots and counting the canonical tree are different concerns:
   // execution children render under their parent, but their unread work must
   // still reach the collapsed Projects badge and total.
   const canonicalCandidates = discussions.filter(disc => (
-    !disc.archived && (nestedExecutionChildIds.has(disc.id) || matchesFilters(disc))
+    !disc.archived && !assistantIds.has(disc.id) && (nestedExecutionChildIds.has(disc.id) || matchesFilters(disc))
   ));
+  const assistantDiscussions = discussions
+    .filter(disc => !disc.archived && assistantIds.has(disc.id) && matchesFilters(disc))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   const projectNameById = new Map(projects.map(project => [project.id, project.name]));
   const projectsGroupKey = '__projects__';
   const projectsCollapsed = collapsedGroups.has(projectsGroupKey);
@@ -1658,6 +1676,32 @@ export function DiscussionSidebar({
                 onToggle={() => onToggleGroup('__favorites__')}
               />
               {!isCollapsed && renderSmartSectionRows(pinned.sort(byLiveThenRecent), 'pin', sel)}
+            </div>
+          );
+        })()}
+
+        {assistantDiscussions.length > 0 && (() => {
+          const isCollapsed = collapsedGroups.has('__assistants__');
+          return (
+            <div
+              className="disc-sidebar-section disc-sidebar-assistants"
+              data-expanded={!isCollapsed}
+              data-testid="disc-sidebar-assistants"
+            >
+              <button
+                type="button"
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__assistants__')}
+                aria-expanded={!isCollapsed}
+                title={t('disc.assistantsHint')}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
+                <Bot size={10} />
+                <span>{t('disc.assistants')}</span>
+                <span className="disc-group-count">{assistantDiscussions.length}</span>
+              </button>
+              {!isCollapsed && renderSmartSectionRows(assistantDiscussions, 'assistants', sel)}
             </div>
           );
         })()}

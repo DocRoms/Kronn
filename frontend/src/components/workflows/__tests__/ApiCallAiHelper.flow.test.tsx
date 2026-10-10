@@ -349,16 +349,17 @@ describe('ApiCallAiHelper — minimize / restore / close', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('close tears down the discussion (delete) and returns to the trigger-only phase', async () => {
+  it('close keeps the discussion and returns to the trigger-only phase', async () => {
     await openChat();
     fireEvent.click(screen.getByRole('button', { name: /wf.apicall.helper.close/ }));
-    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('disc-1'));
     expect(screen.queryByRole('dialog')).toBeNull();
+    await act(async () => { await Promise.resolve(); });
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 });
 
 describe('ApiCallAiHelper — agent switch', () => {
-  it('opens the dropdown and switching agents kills the old disc + creates a new one', async () => {
+  it('opens the dropdown and switching agents keeps the old disc + creates a new one', async () => {
     await openChat();
     const headerTrigger = screen.getAllByRole('button').find(
       btn => btn.getAttribute('aria-haspopup') === 'listbox',
@@ -368,8 +369,132 @@ describe('ApiCallAiHelper — agent switch', () => {
     createMock.mockClear();
     // Switch to Codex (a different installed agent).
     fireEvent.click(screen.getByRole('option', { name: /Codex/ }));
-    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('disc-1'));
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(deleteMock).not.toHaveBeenCalled();
     expect(createMock.mock.calls[0][0].agent).toBe('Codex');
+  });
+});
+
+describe('ApiCallAiHelper — kept conversation (KT-1111)', () => {
+  const SECRET = 'sk_step_Zz9876543210';
+
+  it('creates the conversation filed under its step, with step credentials kept out', async () => {
+    streamMock.mockImplementation(async (_id, _req, onChunk, onDone) => { onChunk(`echo ${SECRET}`); onDone(); });
+    const step = mkStep({
+      api_headers: { Authorization: `Bearer ${SECRET}`, Accept: 'application/json', 'X-Trace': '{{run_id}}' },
+      api_query: { api_key: SECRET, q: 'news' },
+    });
+    const onConversationStarted = vi.fn();
+    await openChat({ step, ownerId: 'wf-7', onConversationStarted });
+    expect(createMock.mock.calls[0][0].assistant).toEqual(expect.objectContaining({
+      kind: 'api_call_step',
+      target_id: 'wf-7',
+      target_step: 'fetch',
+      plugin_id: 'chartbeat',
+      secrets: [SECRET, `Bearer ${SECRET}`],
+    }));
+    await waitFor(() => expect(onConversationStarted).toHaveBeenCalledWith('disc-1', 'fetch'));
+    const input = screen.getByPlaceholderText('wf.apicall.helper.inputPlaceholder');
+    fireEvent.change(input, { target: { value: `why 401 with ${SECRET}?` } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    await waitFor(() => expect(streamMock).toHaveBeenCalled());
+    expect(streamMock.mock.calls[0][1].assistant_secrets).toContain(SECRET);
+
+    const persisted = `${createMock.mock.calls[0][0].initial_prompt}\n${streamMock.mock.calls[0][1].content}`;
+    expect(persisted).not.toContain(SECRET);
+    expect(persisted).toContain('application/json');
+    expect(persisted).toContain('{{run_id}}');
+    expect(persisted).toContain('why 401 with');
+    expect(screen.getByRole('dialog').textContent).not.toContain(SECRET);
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('ApiCallAiHelper — resume (KT-1111)', () => {
+  const row = {
+    discussion_id: 'disc-draft', kind: 'api_call_step' as const, target_id: null, target_step: 'fetch',
+    plugin_id: 'chartbeat', target_label: 'Chartbeat · fetch', last_proposal_signature: null,
+    last_applied_signature: null, last_applied_at: null, created_at: '2026-10-08T10:00:00Z',
+    title: 'helper', agent: 'Codex' as const, archived: false, message_count: 2, updated_at: '2026-10-08T10:05:00Z',
+  };
+
+  it('blocks sending during a slow load, drops it after close, and attaches a draft conversation', async () => {
+    const api = await import('../../../lib/api');
+    vi.mocked(api.assistantConversations.list).mockResolvedValue([row]);
+    const update = vi.mocked(api.assistantConversations.update);
+    update.mockClear();
+    let release!: (value: unknown) => void;
+    vi.mocked(api.discussions.get).mockReturnValue(new Promise(r => { release = r; }) as never);
+    renderHelper({ ownerId: 'wf-7' });
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    const input = screen.getByPlaceholderText('wf.apicall.helper.inputPlaceholder') as HTMLTextAreaElement;
+    expect(input.disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /wf.apicall.helper.close/ }));
+    await act(async () => {
+      release({ messages: [{ id: 'm0', role: 'User', channel: 'main', content: 'sys' }, { id: 'm1', role: 'Agent', channel: 'main', content: 'stale' }] });
+    });
+    expect(document.body.textContent).not.toContain('stale');
+    expect(update).not.toHaveBeenCalled();
+
+    vi.mocked(api.discussions.get).mockResolvedValue({ messages: [] } as never);
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    await waitFor(() => expect(update).toHaveBeenCalledWith('disc-draft', { target_id: 'wf-7', target_step: 'fetch' }));
+    expect(vi.mocked(api.assistantConversations.list)).toHaveBeenCalledWith(expect.objectContaining({
+      target_id: 'wf-7', include_unattached: true, target_step: 'fetch', plugin_id: 'chartbeat',
+    }));
+  });
+});
+
+describe('ApiCallAiHelper — step identity (KT-1111)', () => {
+  it('files a saved step by its durable id, so a rename keeps its conversations', async () => {
+    const api = await import('../../../lib/api');
+    const list = vi.mocked(api.assistantConversations.list);
+    list.mockClear().mockResolvedValue([]);
+    const { rerender } = renderHelper({ ownerId: 'wf-7', step: mkStep({ id: 'step-uuid-1', name: 'fetch' }) });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /wf.apicall.helper.trigger/ }));
+    });
+    await waitFor(() => expect(createMock).toHaveBeenCalled());
+    expect(createMock.mock.calls[0][0].assistant).toEqual(expect.objectContaining({
+      target_id: 'wf-7', target_step: 'step-uuid-1',
+    }));
+    rerender(
+      <ApiCallAiHelper
+        step={mkStep({ id: 'step-uuid-1', name: 'renamed' })}
+        onApply={vi.fn()}
+        selectedServer={fakeServer}
+        projectId="proj-1"
+        installedAgents={['ClaudeCode', 'Codex']}
+        ownerId="wf-7"
+        t={t}
+      />,
+    );
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({
+      target_id: 'wf-7', target_step: 'step-uuid-1', unattached_step: 'renamed',
+    })));
+  });
+
+  it('resuming a draft conversation on an unsaved step tracks it for the save', async () => {
+    const api = await import('../../../lib/api');
+    vi.mocked(api.assistantConversations.list).mockResolvedValue([{
+      discussion_id: 'disc-draft', kind: 'api_call_step', target_id: null, target_step: 'fetch',
+      plugin_id: 'chartbeat', target_label: 'x', last_proposal_signature: null, last_applied_signature: null,
+      last_applied_at: null, created_at: '2026-10-08T10:00:00Z', title: 'h', agent: 'Codex', archived: false,
+      message_count: 1, updated_at: '2026-10-08T10:00:00Z',
+    }]);
+    vi.mocked(api.discussions.get).mockResolvedValue({ messages: [] } as never);
+    const onConversationStarted = vi.fn();
+    renderHelper({ onConversationStarted });
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    await waitFor(() => expect(onConversationStarted).toHaveBeenCalledWith('disc-draft', 'fetch'));
   });
 });

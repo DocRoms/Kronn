@@ -26,6 +26,7 @@ pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
 pub mod run_artifacts;
+pub mod run_pins;
 pub mod run_scope;
 pub mod runner;
 pub mod step_agents;

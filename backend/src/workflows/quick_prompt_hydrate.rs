@@ -30,9 +30,12 @@ use crate::models::WorkflowStep;
 ///   - L'accès DB échoue
 ///
 /// No-op si `quick_prompt_id` est `None`.
+/// `run_id` is the workflow run loading it: a pinned run gets its pinned
+/// revision (KT-1096).
 pub async fn hydrate_step_from_quick_prompt(
     step: &mut WorkflowStep,
     db: &Database,
+    run_id: Option<&str>,
 ) -> Result<(), String> {
     let qp_id = match step.quick_prompt_id.clone() {
         Some(id) => id,
@@ -40,21 +43,30 @@ pub async fn hydrate_step_from_quick_prompt(
     };
 
     let qp_lookup = qp_id.clone();
+    let pinned_run = run_id.map(str::to_string);
     let qp = match db
         .with_read_conn(move |conn| {
-            let prompt = crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)?;
+            let prompt = match crate::workflows::run_pins::quick_prompt_for(
+                conn,
+                pinned_run.as_deref(),
+                &qp_lookup,
+            )? {
+                Ok(prompt) => prompt,
+                Err(reason) => return Ok(Err(reason)),
+            };
             if let Some(prompt) = &prompt {
                 crate::core::repository_resources::ensure_quick_prompt_execution_approved(
                     conn, prompt,
                 )
                 .map_err(anyhow::Error::msg)?;
             }
-            Ok(prompt)
+            Ok(Ok(prompt))
         })
         .await
     {
-        Ok(Some(q)) => q,
-        Ok(None) => {
+        Ok(Err(reason)) => return Err(reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => {
             return Err(format!(
                 "Agent step references QuickPrompt `{}` which does not exist.",
                 qp_id
@@ -280,7 +292,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut step = blank_step(None);
         let before = step.clone();
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.prompt_template, before.prompt_template);
@@ -291,7 +303,7 @@ mod tests {
     async fn missing_quick_prompt_returns_clear_error() {
         let db = Database::open_in_memory().unwrap();
         let mut step = blank_step(Some("nonexistent".to_string()));
-        let err = hydrate_step_from_quick_prompt(&mut step, &db)
+        let err = hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap_err();
         assert!(err.contains("QuickPrompt"), "error mentions QP: {}", err);
@@ -303,7 +315,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let qp_id = seed_qp(&db, make_qp("qp-1", "Audit le host {{host}}")).await;
         let mut step = blank_step(Some(qp_id));
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.prompt_template, "Audit le host {{host}}");
@@ -333,7 +345,7 @@ mod tests {
             "{{steps.shape.data.toppages}}".to_string(),
         );
 
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
 
@@ -358,7 +370,7 @@ mod tests {
             "{{steps.shape.data.toppages}}".to_string(),
         );
 
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
 
@@ -381,7 +393,7 @@ mod tests {
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(
@@ -433,7 +445,7 @@ mod tests {
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
 
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
 
@@ -464,7 +476,7 @@ mod tests {
             connection_id: Some("conn-on-step".to_string()),
         });
 
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
 
@@ -499,7 +511,7 @@ mod tests {
             max_tokens: None,
             connection_id: None,
         });
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(
@@ -525,7 +537,7 @@ mod tests {
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(
@@ -559,7 +571,7 @@ mod tests {
             max_tokens: None,
             connection_id: None,
         });
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(
@@ -578,7 +590,7 @@ mod tests {
         let mut step = blank_step(Some(qp_id));
         // L'utilisateur a écrit son propre prompt — il doit gagner.
         step.prompt_template = "Step override version".to_string();
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.prompt_template, "Step override version");
@@ -590,7 +602,7 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-3", "...")).await;
         let mut step = blank_step(Some(qp_id));
         step.skill_ids = vec!["step-skill".to_string()];
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.skill_ids, vec!["step-skill"]);
@@ -604,7 +616,7 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-bind", "...")).await;
         let mut step = blank_step(Some(qp_id));
         // step has empty profile_ids/directive_ids; hydrate should inherit.
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.profile_ids, vec!["coder"]);
@@ -620,7 +632,7 @@ mod tests {
         let mut step = blank_step(Some(qp_id));
         step.profile_ids = vec!["step-profile".to_string()];
         step.directive_ids = vec!["step-directive".to_string()];
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.profile_ids, vec!["step-profile"]);
@@ -635,7 +647,7 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-ws", "Real QP prompt")).await;
         let mut step = blank_step(Some(qp_id));
         step.prompt_template = "   \n  ".to_string();
-        hydrate_step_from_quick_prompt(&mut step, &db)
+        hydrate_step_from_quick_prompt(&mut step, &db, None)
             .await
             .unwrap();
         assert_eq!(step.prompt_template, "Real QP prompt");

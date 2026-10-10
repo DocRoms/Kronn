@@ -530,3 +530,64 @@ async fn an_old_wait_can_neither_park_nor_claim_the_new_one() {
     assert_eq!(parked.state, second.state);
     assert_eq!(parked.step_results[1].output, second.step_results[1].output);
 }
+
+/// KT-1096 — an agent's edit to the Quick Prompt of the refused step, made
+/// while the run waits for its quota, never reaches the resumed step.
+#[tokio::test]
+async fn a_quota_resume_runs_the_quick_prompt_revision_the_run_pinned() {
+    let mut fx = fixture("quota-pin", SESSION_LIMIT, 1, 3 * 24 * 3600).await;
+    let approved: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+        "id": "qp-analyse", "name": "analyse", "icon": "P",
+        "prompt_template": "ANALYSE-MARKER APPROVED-TEXT", "variables": [],
+        "agent": "ClaudeCode", "project_id": null,
+        "created_at": Utc::now(), "updated_at": Utc::now()
+    }))
+    .unwrap();
+    let seeded = approved.clone();
+    fx.state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &seeded))
+        .await
+        .unwrap();
+    fx.workflow.steps[1].prompt_template = String::new();
+    fx.workflow.steps[1].quick_prompt_id = Some("qp-analyse".into());
+    let paused = run_until_paused(&fx, "run-quota-pin").await;
+    assert_eq!(paused.status, RunStatus::WaitingQuota);
+
+    let mut injected = approved.clone();
+    injected.prompt_template = "ANALYSE-MARKER INJECTED-TEXT".into();
+    fx.state
+        .db
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::update_quick_prompt_invalidating(
+                conn,
+                &injected,
+                Some("codex"),
+            )
+        })
+        .await
+        .unwrap();
+
+    // The agent's edit disabled the workflow: only a human resumes it.
+    let state = restarted(&fx.state);
+    let mut run = stored(&state, "run-quota-pin").await;
+    claim_interrupted_run(&state, &mut run, false)
+        .await
+        .expect("a human resumes the waiting run");
+    let latest = state
+        .db
+        .with_conn(|conn| crate::db::workflows::get_workflow(conn, "wf-quota-pin"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!latest.enabled);
+    let (_, tokens, agents) = test_state_and_configs();
+    resume_interrupted_run(state.clone(), &latest, &mut run, &tokens, &agents, None)
+        .await
+        .expect("resume");
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    let prompts = fx.prompts.lock().unwrap().clone();
+    let last = prompts.last().expect("the resumed step prompted");
+    assert!(last.contains("APPROVED-TEXT"), "{last}");
+    assert!(prompts.iter().all(|p| !p.contains("INJECTED-TEXT")));
+}

@@ -1,6 +1,9 @@
 import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
+  AssistantConversation,
+  AssistantKind,
+  UpdateAssistantConversationRequest,
   DiscussionWeightConfig,
   ProjectGithubConnection,
   SetProjectGithubConnectionRequest,
@@ -1724,6 +1727,36 @@ function webSessionId(): string {
     return crypto?.randomUUID?.() ?? `web-${Date.now()}`;
   }
 }
+
+/** KT-1111 — kept conversations of the configuration assistants. One is
+ *  created with `discussions.create({ assistant })`; deleting one is
+ *  `discussions.delete`: the link goes with the discussion. */
+export const assistantConversations = {
+  list: (filter: {
+    kind?: AssistantKind;
+    target_id?: string | null;
+    unattached?: boolean;
+    include_unattached?: boolean;
+    pending_ids?: string[];
+    unattached_step?: string | null;
+    target_step?: string | null;
+    plugin_id?: string | null;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (filter.kind) query.set('kind', filter.kind);
+    if (filter.target_id) query.set('target_id', filter.target_id);
+    if (filter.unattached) query.set('unattached', 'true');
+    if (filter.include_unattached) query.set('include_unattached', 'true');
+    if (filter.pending_ids?.length) query.set('pending_ids', filter.pending_ids.join(','));
+    if (filter.unattached_step) query.set('unattached_step', filter.unattached_step);
+    if (filter.target_step) query.set('target_step', filter.target_step);
+    if (filter.plugin_id) query.set('plugin_id', filter.plugin_id);
+    const qs = query.toString();
+    return api<AssistantConversation[]>('GET', `/assistant-conversations${qs ? `?${qs}` : ''}`);
+  },
+  update: (discussionId: string, patch: UpdateAssistantConversationRequest) =>
+    api<AssistantConversation>('PATCH', `/assistant-conversations/${encodeURIComponent(discussionId)}`, patch),
+};
 
 export const discussions = {
   monitor: (ids: string[], signal?: AbortSignal) => api<DiscussionMonitorItem[]>(

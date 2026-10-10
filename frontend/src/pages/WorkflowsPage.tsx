@@ -1560,6 +1560,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQA(null);
     if (saved?.id) setSelectedQuickApiId(saved.id);
     refetchQA();
+    return saved;
   };
 
   const handleSaveQE = async (request: CreateQuickExecRequest) => {

@@ -336,13 +336,17 @@ async fn execute_batch_quick_prompt_step_with_budget(
 
     // ── Load the Quick Prompt ───────────────────────────────────────────
     let qp_lookup = qp_id.clone();
+    let pinned_run = parent_run_id.to_string();
     let qp = match state
         .db
-        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::quick_prompt_for(conn, Some(&pinned_run), &qp_lookup)
+        })
         .await
     {
-        Ok(Some(q)) => q,
-        Ok(None) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
         Err(e) => return fail(step, start, format!("DB error loading QP: {}", e)),
     };
     let approval_prompt = qp.clone();
@@ -505,6 +509,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
         )
     };
     let parent_snapshot_id = parent_run_id.to_string();
+    let pin_parent = parent_run_id.to_string();
     let item_variables_for_tx = item_variables;
     let outcome = match state
         .db
@@ -555,7 +560,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                     &key,
                 )?;
             }
-            crate::db::workflows::create_batch_run_with_identities(
+            let outcome = crate::db::workflows::create_batch_run_with_identities(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp_for_tx,
@@ -573,7 +578,10 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 },
                 None,
                 &assigned_ids_for_tx,
-            )
+            )?;
+            // Chain prompts load later, from the batch run's own pin.
+            crate::workflows::run_pins::inherit_for_batch(conn, &pin_parent, &outcome.run_id)?;
+            Ok(outcome)
         })
         .await
     {

@@ -701,6 +701,30 @@ async fn execute_run_with_notify_policy(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    // KT-1096 — every execution of a run, resumes included, runs the
+    // revision pinned at its first one.
+    let pinned = {
+        let (definition, snapshot) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| super::run_pins::pin_or_load(conn, &definition, &snapshot))
+            .await?
+    };
+    let pinned = match pinned {
+        Ok(pinned) => pinned,
+        Err(reason) => {
+            if inherited_workspace.is_none() {
+                // The refused definition's own hooks never run.
+                let mut unhooked = workflow_in_run_project(workflow, run).into_owned();
+                unhooked.workspace_config = None;
+                if let Err(error) = reclaim_run_worktree(&state, &unhooked, run).await {
+                    tracing::warn!(run_id = %run.id, "worktree not removed: {error}");
+                }
+            }
+            anyhow::bail!(reason);
+        }
+    };
+    let workflow = &pinned;
     let is_inherited_workspace = inherited_workspace.is_some();
     let result = execute_run_body(
         state.clone(),
@@ -750,6 +774,15 @@ async fn execute_run_with_notify_policy(
         }
     }
     result
+}
+
+/// What a run tells its reader when its end kept a checkout holding work.
+pub(crate) fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
+    format!(
+        "Worktree `{}` kept with its branch: it holds {}. Commit or discard that work; Kronn removes the worktree at a later start once it is clean.",
+        kept.path.display(),
+        kept.reason
+    )
 }
 
 /// Finished runs whose checkout is gone no longer own a worktree. Clearing
@@ -815,7 +848,11 @@ async fn reclaim_run_worktree(
         &run.id,
         resolved_workspace_hooks(project_hooks.as_ref(), workflow.workspace_config.as_ref()),
     );
-    let outcome = ws.cleanup().await?;
+    // KT-1096 — this run did not succeed: a checkout holding work stays.
+    let outcome = ws.cleanup_keeping_work().await?;
+    if let Some(kept) = &outcome.kept {
+        tracing::warn!(run_id = %run.id, "{}", kept_checkout_note(kept));
+    }
     if let Some(preserved) = outcome.preserved {
         run.produced_branches.push(crate::models::ProducedBranch {
             branch_name: preserved.branch_name,
@@ -875,14 +912,18 @@ async fn execute_run_body(
     if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
         let mut resolved = workflow_in_project.into_owned();
         let project_id = resolved.project_id.clone();
+        let pinned_run = run.id.clone();
         let resolved_steps = state
             .db
             .with_read_conn(move |conn| {
-                crate::core::resource_refs::resolve_run_structured_references(
-                    conn,
-                    &mut resolved,
-                    project_id.as_deref(),
-                )?;
+                // KT-1096 — a pinned run keeps the resolutions it recorded.
+                if !super::run_pins::apply_pinned_structured(conn, &pinned_run, &mut resolved)? {
+                    crate::core::resource_refs::resolve_run_structured_references(
+                        conn,
+                        &mut resolved,
+                        project_id.as_deref(),
+                    )?;
+                }
                 Ok(resolved)
             })
             .await?;
@@ -947,6 +988,9 @@ async fn execute_run_body(
     // Released when this call returns (completion, Gate pause, error or cancel).
     let _resource_snapshot_guard =
         crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
+    let seeded_run_id = run.id.clone();
+    db.with_read_conn(move |conn| super::run_pins::seed_resource_snapshots(conn, &seeded_run_id))
+        .await?;
 
     // Update run status to Running. `false` = the Cancelled-stickiness guard
     // blocked the write: the user cancelled in the window between our caller
@@ -1399,8 +1443,15 @@ async fn execute_run_body(
     // unresolved one stays unknown so strict rendering fails its step.
     let refs_workflow = workflow.clone();
     let refs_project = workflow.project_id.clone();
+    let refs_run = run.id.clone();
     let references = db
         .with_conn(move |conn| {
+            // KT-1096 — values recorded at pin time, from the pinned objects.
+            if let Some(pinned) =
+                super::run_pins::pinned_template_references(conn, &refs_run, &refs_workflow.id)?
+            {
+                return Ok(pinned);
+            }
             crate::core::resource_refs::resolve_template_references(
                 conn,
                 &refs_workflow,
@@ -2029,9 +2080,7 @@ async fn execute_run_body(
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                     )
                     .await
                 }
@@ -2045,6 +2094,7 @@ async fn execute_run_body(
                     let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
                         &mut hydrated,
                         &state.db,
+                        Some(&run.id),
                     )
                     .await;
                     // Observe documents before launch, including dirty/indexed
@@ -2356,9 +2406,7 @@ async fn execute_run_body(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                     )
                     .await
                 }
@@ -2374,9 +2422,7 @@ async fn execute_run_body(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
                     )
@@ -3226,62 +3272,78 @@ async fn execute_run_body(
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                     )
                     .await
                 }
                 StepType::Agent => {
                     let room_started = std::time::Instant::now();
-                    match super::step_room::activate(
-                        &state.workflow_step_rooms,
+                    // KT-1096 — a rollback Agent step loads its pinned Quick
+                    // Prompt, as the main path does.
+                    let mut hydrated = rb_step.clone();
+                    let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
+                        &mut hydrated,
                         &state.db,
-                        &run.id,
-                        run.project_id.as_deref().or(workflow.project_id.as_deref()),
-                        rb_step,
-                        &ctx,
+                        Some(&run.id),
                     )
-                    .await
-                    {
-                        Err(error) => super::step_room::refused_outcome(
+                    .await;
+                    let rb_step = &hydrated;
+                    if let Err(error) = hydration {
+                        super::step_room::refused_outcome(
                             rb_step,
                             error,
                             room_started.elapsed().as_millis() as u64,
-                        ),
-                        Ok(step_room) => {
-                            let full_access = agents_config.full_access_for(&rb_step.agent);
-                            let native_tools = Some(KronnToolExecutor::workflow_arc(
-                                state.clone(),
-                                workflow.project_id.clone(),
-                                run.id.clone(),
-                                rb_step.name.clone(),
-                            ));
-                            let outcome = execute_step(
+                        )
+                    } else {
+                        match super::step_room::activate(
+                            &state.workflow_step_rooms,
+                            &state.db,
+                            &run.id,
+                            run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                            rb_step,
+                            &ctx,
+                        )
+                        .await
+                        {
+                            Err(error) => super::step_room::refused_outcome(
                                 rb_step,
-                                &project_path,
-                                workflow.project_id.as_deref(),
-                                &work_dir,
-                                tokens_config,
-                                full_access,
-                                &ctx,
-                                None,
-                                None,
-                                Some(&agents_config.model_tiers),
-                                Some(&crate::models::setup::HttpEndpoints::from_agents(
-                                    agents_config,
-                                )),
-                                Some(&ollama_context_overrides),
-                                native_tools,
-                                Some(&state.db),
-                                step_room.as_ref().map(|room| room.context()),
-                                Some(&run.id),
-                            )
-                            .await;
-                            if let Some(room) = step_room {
-                                room.finish().await;
+                                error,
+                                room_started.elapsed().as_millis() as u64,
+                            ),
+                            Ok(step_room) => {
+                                let full_access = agents_config.full_access_for(&rb_step.agent);
+                                let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                    state.clone(),
+                                    workflow.project_id.clone(),
+                                    run.id.clone(),
+                                    rb_step.name.clone(),
+                                ));
+                                let outcome = execute_step(
+                                    rb_step,
+                                    &project_path,
+                                    workflow.project_id.as_deref(),
+                                    &work_dir,
+                                    tokens_config,
+                                    full_access,
+                                    &ctx,
+                                    None,
+                                    None,
+                                    Some(&agents_config.model_tiers),
+                                    Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                        agents_config,
+                                    )),
+                                    Some(&ollama_context_overrides),
+                                    native_tools,
+                                    Some(&state.db),
+                                    step_room.as_ref().map(|room| room.context()),
+                                    Some(&run.id),
+                                )
+                                .await;
+                                if let Some(room) = step_room {
+                                    room.finish().await;
+                                }
+                                outcome
                             }
-                            outcome
                         }
                     }
                 }
@@ -3320,9 +3382,7 @@ async fn execute_run_body(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                     )
                     .await
                 }
@@ -3338,9 +3398,7 @@ async fn execute_run_body(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
                     )
@@ -3425,6 +3483,7 @@ async fn execute_run_body(
                 run_id,
                 Utc::now(),
             )?;
+            super::run_pins::purge(conn, run_id)?;
         }
         Ok(updated)
     })
@@ -3480,8 +3539,32 @@ async fn execute_run_body(
     };
     if !paused && !is_inherited_workspace && active_child_dispatches == 0 {
         if let Some(ws) = workspace {
-            match ws.cleanup().await {
+            // KT-1096 — only a fully successful run discards what it left
+            // uncommitted: its steps finished, so leftovers are its own scratch.
+            let cleaned = if run.status == RunStatus::Success {
+                ws.cleanup().await
+            } else {
+                ws.cleanup_keeping_work().await
+            };
+            match cleaned {
                 Ok(outcome) => {
+                    if let Some(kept) = &outcome.kept {
+                        let note = kept_checkout_note(kept);
+                        tracing::warn!(run_id = %run.id, "{note}");
+                        if let Some(last) = run.step_results.last_mut() {
+                            last.output = format!("{}\n\n{note}", last.output);
+                        }
+                        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                        if let Err(error) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::workflows::update_run_progress(conn, snap)
+                            })
+                            .await
+                        {
+                            tracing::error!(run_id = %run.id, "failed to record the kept worktree: {error}");
+                        }
+                    }
                     if let Some(preserved) = outcome.preserved {
                         // Persist the preserved branch on the run row so the
                         // UI can surface it — without this, the operator only
@@ -3582,6 +3665,13 @@ pub async fn resume_run(
     events_tx: Option<EventSender>,
 ) -> Result<()> {
     use anyhow::anyhow;
+    // The gate's targets come from the revision the run executes (KT-1096).
+    let pinned_run_id = run.id.clone();
+    let pinned = state
+        .db
+        .with_read_conn(move |conn| super::run_pins::pinned_workflow(conn, &pinned_run_id))
+        .await?;
+    let workflow = pinned.as_ref().unwrap_or(workflow);
     let workflow_in_project = workflow_in_run_project(workflow, run);
     let workflow: &Workflow = &workflow_in_project;
 
@@ -9254,6 +9344,7 @@ mod tests {
     }
 
     mod quota_wait_runs;
+    mod run_pin_runs;
 }
 
 #[cfg(test)]

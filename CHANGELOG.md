@@ -31,6 +31,35 @@ Release notes for 0.9.3 and earlier are available in the
   nothing, and only the first choice taken runs. A native reply that names an agent in prose without launching it now
   carries a discreet note saying so and why: already scheduled on this turn,
   or a plain mention with no handoff.
+- The configuration assistants (custom API plugin, workflow and Quick API
+  ApiCall step) keep their conversation when closed instead of deleting it
+  (KT-1111). Each one is created and filed in one transaction as an assistant
+  conversation linked to the plugin or the step it configures (migration 226,
+  `assistant_conversations`; `POST /api/discussions` takes an `assistant`
+  context). It shows in a new Assistants section of the discussion list rather
+  than in Recent or the project tree, and the global search finds it. The plugin
+  form and the ApiCall step list their "Assistant conversations" (date, agent,
+  whether the last proposal was applied); "Resume" reopens the same
+  conversation in the assistant, and deleting one is an explicit, confirmed
+  action. Conversations started before a plugin, workflow or Quick API is saved
+  are attached to it on save, and stay attachable after a failed save: the
+  browser records them as owed to the saved plugin or step (by conversation id,
+  never by name), which lists them and attaches one on resume. Without browser
+  storage (disabled or cleared), such a conversation stays reachable from the
+  Assistants section but is no longer reattached to its plugin or step on its
+  own. A saved ApiCall step is known by its durable id, so renaming it keeps its
+  conversations. Every write into an assistant conversation (its creation, user
+  messages, agent replies and streamed checkpoints, edit-resend and revisions)
+  masks the stored credentials of the linked plugin, common token shapes, and
+  the form values the assistant names with a message: those are held in memory
+  only, per dispatch, until that dispatch's reply is written or the dispatch is
+  over (a queued or running one keeps them however long it lasts). The assistant
+  masks them on display too. A custom API's literal header values
+  reach the agent only for known non-sensitive headers or `${ENV.*}` references
+  (KT-1041). The logical export (v7) carries the links; older archives still
+  import. The new routes (`GET /api/assistant-conversations`,
+  `PATCH /api/assistant-conversations/{discussion_id}`) are not open to agents'
+  bridge tokens. Conversations deleted by earlier versions cannot be recovered.
 
 - The waiting reply bubble now shows what the agent is doing from the first
   message on, for every agent (KT-1108). Before the first word it lists the
@@ -154,6 +183,33 @@ Release notes for 0.9.3 and earlier are available in the
   body past 16 MiB fails the step with an explicit message instead of being
   loaded; an error body is read only as far as its excerpt needs.
 
+- A workflow run now executes only the revision it started with (KT-1096).
+  Its first execution freezes the workflow and every Quick Prompt, Quick API,
+  sub-workflow, skill, directive and profile it can load, sub-workflows' own
+  dependencies included (migration 227). Gate and quota resumes, restarts,
+  rollback steps, sub-workflow children and BatchQuickPrompt fan-out (chain
+  prompts included) read that revision, so an agent's edit made while a run
+  is in flight never reaches it. That covers the skills, directives and
+  profiles a fan-out child starts with (a pinned run gets them inline in its
+  prompt, never through the shared native skill and profile files a project
+  sync can rewrite mid-turn),
+  the `ref:` targets and `{{ref:…}}` values the run resolved, and a rollback
+  Agent step's Quick Prompt. The edit still disables the workflow for the
+  next runs, and a resume of such a run still needs a human. A dependency
+  deleted during the run fails its step with a message naming it. A run whose
+  workflow an agent's change disabled between its launch and its start does
+  not start. A run started before this version is pinned at its next
+  execution.
+- A workflow run that ends partial, fails, is cancelled or is stopped by a
+  guard no longer deletes a worktree holding uncommitted or untracked work,
+  in itself or in a worktree created inside it, and neither does the boot
+  purge of finished runs (KT-1096). The worktrees and their branches stay,
+  the run's last step says where, and a later start removes them once clean.
+  A clean set is removed without `--force` and never forced: when git
+  refuses (work written after the check, a submodule), it is kept with the
+  reason. A fully successful run still discards what it left
+  uncommitted, as before: once every step finished, those files are its own
+  scratch.
 - `agent_list`, `task_exec_prepare`, `task_exec_launch` and the tier pickers
   now read the launch preflight's own catalogue decision (KT-860). A tier the
   preflight would refuse is listed with the reason (`model_unavailable`) and

@@ -3805,7 +3805,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // `project_path` (unchanged behaviour). Additive: only creates missing
     // files, never removes others.
     let agent_cwd = config.work_dir.unwrap_or(config.project_path);
-    let native_sync_ok = if !agent_cwd.is_empty()
+    // KT-1096 — a pinned run gets its skills and profiles inline: a shared
+    // native file can be rewritten from the live catalog during its turn.
+    let native_sync_ok = if config.run_snapshot_id.is_none()
+        && !agent_cwd.is_empty()
         && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty())
     {
         let profile_ids_vec: Vec<String> = config.profile_ids.to_vec();

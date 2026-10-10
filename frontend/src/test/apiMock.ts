@@ -41,6 +41,7 @@ export const API_NAMESPACES = [
   'agents',
   'mcps',
   'discussions',
+  'assistantConversations',
   'discussionActions',
   'planning',
   'workflows',
@@ -103,6 +104,7 @@ interface DefaultMock {
   agents: Record<string, AnyFn>;
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
+  assistantConversations: Record<string, AnyFn>;
   discussionActions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
@@ -787,6 +789,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     // coverage figure, and "no sessions" is the honest neutral state.
     telemetry: {
       coverage: resolve([]),
+    },
+    assistantConversations: {
+      list: resolve([]),
+      update: resolve(null),
     },
     discussionActions: {
       list: resolve([]),

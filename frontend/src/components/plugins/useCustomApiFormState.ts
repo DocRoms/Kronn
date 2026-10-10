@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
+import { AssistantDraftStore } from '../assistantConversation';
 import type { ApiAuthKind, ApiDefaultHeader, ApiEndpoint } from '../../types/generated';
 
 /** Custom API / JSON plugin form fields: name/base URL/description/docs,
@@ -75,6 +76,12 @@ export function useCustomApiFormState() {
   // BasicApiKey / OAuth2) come in 0.8.6 Layer A — they all work in
   // the runtime, just no UI yet. Cf. [[project_custom_plugin_auth_0_8_7]].
   const [customAuth, setCustomAuth] = useState<ApiAuthKind>('None');
+  // KT-1111 — assistant conversations started while creating a plugin, kept
+  // until they are attached to it.
+  const [assistantDrafts] = useState(() => new AssistantDraftStore());
+  const trackAssistantConversation = useCallback((discussionId: string) => {
+    assistantDrafts.track(discussionId);
+  }, [assistantDrafts]);
 
   /** 0.8.6 — Discriminated-union helpers for the auth picker. The
    *  Rust enum serializes as `"None"` for the bare variant and
@@ -133,5 +140,6 @@ export function useCustomApiFormState() {
     editingCustomOriginalScope, setEditingCustomOriginalScope,
     replacingFields, setReplacingFields, customAuth, setCustomAuth,
     authKindOf, setAuthKindBy, slugEnvKey,
+    trackAssistantConversation, assistantDrafts,
   };
 }

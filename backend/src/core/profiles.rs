@@ -290,6 +290,11 @@ pub fn get_profile_snapshot(run_id: &str, id: &str) -> Option<AgentProfile> {
     PROFILE_SNAPSHOTS.get_or_resolve(run_id, id, || get_profile(id))
 }
 
+/// Seeds `run_id`'s snapshot with the revision its run recorded.
+pub fn pin_profile_snapshot(run_id: &str, id: &str, profile: AgentProfile) {
+    PROFILE_SNAPSHOTS.pin(run_id, id, profile);
+}
+
 /// Drop every profile snapshot pinned to `run_id`. Call once that run has
 /// finished so its resources don't stay pinned in memory.
 pub fn release_profiles_snapshot(run_id: &str) {

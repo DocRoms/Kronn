@@ -455,7 +455,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             )
             .await
             {
-                Ok(()) => true,
+                Ok(removed) => removed,
                 Err(error) => {
                     tracing::warn!(
                         run_id = %candidate.run_id,

@@ -1,4 +1,5 @@
 import type { ApiDefaultHeader, ApiEndpoint, CustomApiField, CustomApiPayload } from '../types/generated';
+import { isKnownNonSensitiveHeader, isPlaceholder } from '../lib/assistantSecrets';
 
 export type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -71,7 +72,11 @@ export function buildContextBlock(snapshot: CustomApiFormSnapshot, t: Translator
   const declaredHeaders = snapshot.default_headers.filter(h => h.name.trim());
   const headersLine = declaredHeaders.length === 0
     ? t('mcp.custom.helper.ctx.noHeaders')
-    : declaredHeaders.map(h => `  - ${h.name}: ${h.value}`).join('\n');
+    // A literal value may be a credential: only references and known
+    // non-sensitive headers show theirs (KT-1041).
+    : declaredHeaders.map(h => (headerValueIsShareable(h)
+      ? `  - ${h.name}: ${h.value}`
+      : `  - ${h.name}${h.value.trim() ? ' ✓' : ' (empty)'}`)).join('\n');
   return `${t('mcp.custom.helper.ctx.header')}
 - name        : ${snapshot.name || t('mcp.custom.helper.ctx.empty')}
 - base_url    : ${snapshot.base_url || t('mcp.custom.helper.ctx.empty')}
@@ -84,6 +89,18 @@ ${endpointsLine}
 - default_headers :
 ${headersLine}
 - test_endpoint : ${snapshot.test_endpoint || t('mcp.custom.helper.ctx.empty')}`;
+}
+
+function headerValueIsShareable(header: ApiDefaultHeader): boolean {
+  return isPlaceholder(header.value) || isKnownNonSensitiveHeader(header.name);
+}
+
+/** Values typed in the form that must never reach the kept conversation. */
+export function customApiSecrets(snapshot: CustomApiFormSnapshot): string[] {
+  return [
+    ...snapshot.fields.map(f => f.value),
+    ...snapshot.default_headers.filter(h => !headerValueIsShareable(h)).map(h => h.value),
+  ].filter(value => value.trim() !== '');
 }
 
 export function applyToCustomForm(parsed: Record<string, unknown>): Partial<CustomApiPayload> {

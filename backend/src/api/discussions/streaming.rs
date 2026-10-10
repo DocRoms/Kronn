@@ -3035,6 +3035,42 @@ async fn make_agent_stream_inner(
             );
         }
     }
+    // KT-1096 — a child of a pinned batch run starts on the skills, directives
+    // and profiles its workflow run pinned, under a snapshot key of its own.
+    let pinned_snapshot_key = match disc.workflow_run_id.clone() {
+        Some(batch_run) => {
+            let key = format!("{batch_run}/{}", uuid::Uuid::new_v4());
+            let seeded = key.clone();
+            let seed = state
+                .db
+                .with_read_conn(move |conn| {
+                    crate::workflows::run_pins::seed_resource_snapshots_as(
+                        conn, &batch_run, &seeded,
+                    )
+                })
+                .await;
+            match seed {
+                Ok(true) => Some(key),
+                Ok(false) => None,
+                Err(error) => {
+                    let reason = format!("Pinned run resources unavailable: {error}");
+                    finish_tracked_preflight(&mut completion_tx, &reason);
+                    let stream: SseStream = Box::pin(futures::stream::once(async move {
+                        Ok::<_, Infallible>(
+                            Event::default()
+                                .event("error")
+                                .data(serde_json::json!({ "error": reason }).to_string()),
+                        )
+                    }));
+                    return Sse::new(prepend_initial_event(stream, initial_event.take()));
+                }
+            }
+        }
+        None => None,
+    };
+    let pinned_snapshot_release = pinned_snapshot_key
+        .clone()
+        .map(crate::core::resource_snapshot::RunSnapshotGuard::new);
     let prompt = build_agent_prompt(&prompt_disc, &agent_type, extra_context_len);
 
     // KT-562 — the same discussion, re-narrated in full at every turn, is what
@@ -3243,6 +3279,8 @@ async fn make_agent_stream_inner(
     // Spawn background task — always saves to DB even if client disconnects
     let semaphore = state.agent_semaphore.clone();
     tokio::spawn(async move {
+        // Released once this child has started from its pinned snapshot.
+        let _pinned_snapshot_release = pinned_snapshot_release;
         // Keep the guard alive for the lifetime of this task. Dropping it at
         // the end of the move closure removes the token from the registry.
         let _cancel_guard = cancel_guard;
@@ -3440,6 +3478,7 @@ async fn make_agent_stream_inner(
             // channel would duplicate the surface for no gain.
             tools: native_http_tools,
             run_progress: Some(run_progress.clone()),
+            run_snapshot_id: pinned_snapshot_key.as_deref(),
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
         })
         .await
@@ -8552,3 +8591,7 @@ mod http_run_progress_tests {
         .expect("the run leaves the snapshot with its stop");
     }
 }
+
+#[cfg(test)]
+#[path = "streaming_pin_tests.rs"]
+mod pinned_batch_child_tests;

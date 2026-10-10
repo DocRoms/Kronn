@@ -9,7 +9,9 @@
 //   - empty agents list surfaces the "no agents" inline error
 //   - stop button aborts + calls discussions.stop
 //   - minimize / restore / close lifecycle
-//   - switch agent kills the old discussion and primes a new one
+//   - switch agent keeps the old discussion and primes a new one
+//   - KT-1111: the conversation is kept, linked, resumable, and no secret
+//     typed in the form reaches it
 //   - empty input is guarded (no stream fired)
 //
 // Conventions mirror the sibling base test (inline vi.mock of lib/api) and
@@ -17,13 +19,16 @@
 // REAL timers — the lifecycle assertions wait on real microtasks.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, act, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, act, cleanup, waitFor, within } from '@testing-library/react';
 
-const { createMock, streamMock, deleteMock, stopMock } = vi.hoisted(() => ({
+const { createMock, streamMock, deleteMock, stopMock, getMock, listMock, updateMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
   streamMock: vi.fn(),
   deleteMock: vi.fn(),
   stopMock: vi.fn(),
+  getMock: vi.fn(),
+  listMock: vi.fn(),
+  updateMock: vi.fn(),
 }));
 
 vi.mock('../../lib/api', () => ({
@@ -33,6 +38,11 @@ vi.mock('../../lib/api', () => ({
     runAgent: vi.fn(),
     delete: deleteMock,
     stop: stopMock,
+    get: getMock,
+  },
+  assistantConversations: {
+    list: listMock,
+    update: updateMock,
   },
 }));
 
@@ -84,6 +94,10 @@ beforeEach(() => {
   streamMock.mockReset();
   deleteMock.mockReset().mockResolvedValue(undefined);
   stopMock.mockReset().mockResolvedValue({ cancelled: true });
+  getMock.mockReset();
+  listMock.mockReset().mockResolvedValue([]);
+  updateMock.mockReset().mockResolvedValue(null);
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -321,16 +335,23 @@ describe('CustomApiAiHelper — minimize / restore / close', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('close tears down the discussion (delete) and returns to trigger-only phase', async () => {
+  it('close keeps the discussion and returns to trigger-only phase', async () => {
     await openChat();
     fireEvent.click(screen.getByRole('button', { name: /mcp.custom.helper.close/ }));
-    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('disc-c'));
     expect(screen.queryByRole('dialog')).toBeNull();
+    await act(async () => { await Promise.resolve(); });
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it('unmounting keeps the discussion', async () => {
+    const { unmount } = await openChat();
+    unmount();
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 });
 
 describe('CustomApiAiHelper — agent switch', () => {
-  it('switching agents kills the old disc + creates a new one with the new agent', async () => {
+  it('switching agents keeps the old disc + creates a new one with the new agent', async () => {
     await openChat({ installedAgents: ['ClaudeCode', 'Codex', 'GeminiCli'] });
     const headerTrigger = screen.getAllByRole('button').find(
       btn => btn.getAttribute('aria-haspopup') === 'listbox',
@@ -339,8 +360,300 @@ describe('CustomApiAiHelper — agent switch', () => {
     expect(screen.getByRole('listbox')).toBeTruthy();
     createMock.mockClear();
     fireEvent.click(screen.getByRole('option', { name: /Gemini CLI/ }));
-    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith('disc-c'));
     await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
     expect(createMock.mock.calls[0][0].agent).toBe('GeminiCli');
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('CustomApiAiHelper — kept conversation (KT-1111)', () => {
+  const SECRET = 'tok_live_S3cr3tValue42';
+  const HEADER_SECRET = 'hdr-K3y-998877';
+  const secretSnapshot: CustomApiAiHelperProps['formSnapshot'] = {
+    ...baseSnapshot,
+    fields: [{ label: 'API Token', value: SECRET }],
+    default_headers: [
+      { name: 'X-Api-Key', value: HEADER_SECRET },
+      { name: 'Accept', value: 'application/json' },
+    ],
+  };
+
+  it('creates and files the conversation in one call, with its secrets for the server', async () => {
+    const onConversationStarted = vi.fn();
+    await openChat({ targetId: 'srv-9', onConversationStarted, formSnapshot: secretSnapshot });
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(createMock.mock.calls[0][0].assistant).toEqual({
+      kind: 'custom_api',
+      target_id: 'srv-9',
+      target_label: 'MyAPI',
+      secrets: [SECRET, HEADER_SECRET],
+    });
+    await waitFor(() => expect(onConversationStarted).toHaveBeenCalledWith('disc-c'));
+    expect(listMock).toHaveBeenCalledWith({
+      kind: 'custom_api', target_id: 'srv-9', include_unattached: true, pending_ids: [],
+    });
+  });
+
+  it('never lets a secret typed in the form enter the kept conversation', async () => {
+    streamMock.mockImplementation(async (_id, _req, onChunk, onDone) => { onChunk('ok'); onDone(); });
+    await openChat({ formSnapshot: secretSnapshot });
+    const input = screen.getByPlaceholderText('mcp.custom.helper.inputPlaceholder');
+    const pasted = [
+      `curl -H "Authorization: Bearer ${SECRET}" -H "X-Api-Key: ${HEADER_SECRET}"`,
+      `encoded ${encodeURIComponent(SECRET)} b64 ${btoa(SECRET)}`,
+    ].join('\n');
+    fireEvent.change(input, { target: { value: pasted } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    await waitFor(() => expect(streamMock).toHaveBeenCalled());
+
+    // The secrets travel only in the transient fields the server masks with.
+    expect(streamMock.mock.calls[0][1].assistant_secrets).toEqual([SECRET, HEADER_SECRET]);
+    const persisted = [
+      createMock.mock.calls[0][0].initial_prompt as string,
+      createMock.mock.calls[0][0].title as string,
+      streamMock.mock.calls[0][1].content as string,
+      ...updateMock.mock.calls.map(call => JSON.stringify(call)),
+    ].join('\n');
+    for (const leak of [SECRET, HEADER_SECRET, encodeURIComponent(SECRET), btoa(SECRET)]) {
+      expect(persisted).not.toContain(leak);
+    }
+    // The agent still sees which header exists, and the user's question.
+    expect(persisted).toContain('X-Api-Key');
+    expect(persisted).toContain('curl -H');
+    expect(screen.getByRole('dialog').textContent).not.toContain(SECRET);
+  });
+
+  it('records the last proposal and its application', async () => {
+    streamMock.mockImplementation(async (_id, _req, onChunk, onDone) => {
+      onChunk('Here:\nKRONN:APPLY\n```json\n{"name":"Svc"}\n```\n');
+      onDone();
+    });
+    const { onApply } = await openChat();
+    const input = screen.getByPlaceholderText('mcp.custom.helper.inputPlaceholder');
+    fireEvent.change(input, { target: { value: 'go' } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('disc-c', {
+      last_proposal_signature: expect.any(String),
+    }));
+    const signature = updateMock.mock.calls[0][1].last_proposal_signature;
+    fireEvent.click(screen.getByRole('button', { name: 'mcp.custom.helper.apply' }));
+    expect(onApply).toHaveBeenCalledWith({ name: 'Svc' });
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('disc-c', { last_applied_signature: signature }));
+  });
+
+  it('"Resume" reopens the same conversation with its history', async () => {
+    listMock.mockResolvedValue([{
+      discussion_id: 'disc-old', kind: 'custom_api', target_id: null, target_step: null, plugin_id: null,
+      target_label: 'MyAPI', last_proposal_signature: null, last_applied_signature: null, last_applied_at: null,
+      created_at: '2026-10-08T10:00:00Z', title: 'helper', agent: 'Codex', archived: false, message_count: 3,
+      updated_at: '2026-10-08T10:05:00Z',
+    }]);
+    getMock.mockResolvedValue({
+      id: 'disc-old',
+      messages: [
+        { id: 'm0', role: 'User', channel: 'main', content: 'system prompt' },
+        { id: 'm1', role: 'User', channel: 'main', content: 'ctx block\n\nmcp.custom.helper.sys.userQuestion\nhow to auth?' },
+        { id: 'm2', role: 'System', channel: 'main', content: 'tool call' },
+        { id: 'm3', role: 'Agent', channel: 'main', content: 'Use a bearer token.' },
+      ],
+    });
+    renderHelper();
+    const toggle = await screen.findByRole('button', { name: /aiHelper.conversations.title\(1\)/ });
+    fireEvent.click(toggle);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('Use a bearer token.'));
+    const dialog = screen.getByRole('dialog').textContent ?? '';
+    expect(dialog).toContain('how to auth?');
+    expect(dialog).not.toContain('system prompt');
+    expect(dialog).not.toContain('ctx block');
+    expect(getMock).toHaveBeenCalledWith('disc-old');
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('deletion is an explicit, confirmed action', async () => {
+    listMock.mockResolvedValue([{
+      discussion_id: 'disc-old', kind: 'custom_api', target_id: null, target_step: null, plugin_id: null,
+      target_label: '', last_proposal_signature: 'a', last_applied_signature: null, last_applied_at: null,
+      created_at: '2026-10-08T10:00:00Z', title: 'helper', agent: 'Codex', archived: false, message_count: 3,
+      updated_at: '2026-10-08T10:05:00Z',
+    }]);
+    const confirmSpy = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmSpy);
+    renderHelper();
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    expect(screen.getByText('aiHelper.conversations.status.pending')).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'aiHelper.conversations.delete' }));
+    });
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(deleteMock).toHaveBeenCalledWith('disc-old');
+    vi.unstubAllGlobals();
+  });
+  it('masks a form secret echoed in a reply, as it streams', async () => {
+    streamMock.mockImplementation(async (_id, _req, onChunk, onDone) => {
+      onChunk(`Your token ${SECRET} looks fine`);
+      onDone();
+    });
+    await openChat({ formSnapshot: secretSnapshot });
+    const input = screen.getByPlaceholderText('mcp.custom.helper.inputPlaceholder');
+    fireEvent.change(input, { target: { value: 'check' } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('looks fine'));
+    expect(screen.getByRole('dialog').textContent).not.toContain(SECRET);
+  });
+});
+
+describe('CustomApiAiHelper — resume races (KT-1111)', () => {
+  const row = (id: string) => ({
+    discussion_id: id, kind: 'custom_api' as const, target_id: null, target_step: null, plugin_id: null,
+    target_label: id, last_proposal_signature: null, last_applied_signature: null, last_applied_at: null,
+    created_at: '2026-10-08T10:00:00Z', title: id, agent: 'Codex' as const, archived: false, message_count: 2,
+    updated_at: '2026-10-08T10:05:00Z',
+  });
+  const transcript = (reply: string) => ({
+    messages: [
+      { id: 'm0', role: 'User', channel: 'main', content: 'system prompt' },
+      { id: 'm1', role: 'Agent', channel: 'main', content: reply },
+    ],
+  });
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(r => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  async function resumeRow(id: string) {
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(within(screen.getByText(id).closest('li')!).getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+  }
+
+  it('cannot send while the history loads, and keeps what is sent afterwards', async () => {
+    listMock.mockResolvedValue([row('disc-a')]);
+    const slow = deferred<ReturnType<typeof transcript>>();
+    getMock.mockReturnValue(slow.promise);
+    streamMock.mockImplementation(async (_id, _req, onChunk, onDone) => { onChunk('fresh reply'); onDone(); });
+    renderHelper();
+    await resumeRow('disc-a');
+    const input = screen.getByPlaceholderText('mcp.custom.helper.inputPlaceholder') as HTMLTextAreaElement;
+    expect(input.disabled).toBe(true);
+    fireEvent.change(input, { target: { value: 'early' } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    expect(streamMock).not.toHaveBeenCalled();
+
+    await act(async () => { slow.resolve(transcript('old reply')); });
+    expect(input.disabled).toBe(false);
+    fireEvent.change(input, { target: { value: 'after load' } });
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }); });
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('fresh reply'));
+    const text = screen.getByRole('dialog').textContent ?? '';
+    expect(text).toContain('old reply');
+    expect(text).toContain('after load');
+  });
+
+  it('drops a history that arrives after another conversation was opened', async () => {
+    listMock.mockResolvedValue([row('disc-a'), row('disc-b')]);
+    const slowA = deferred<ReturnType<typeof transcript>>();
+    getMock.mockImplementation((id: string) => (id === 'disc-a' ? slowA.promise : Promise.resolve(transcript('reply of B'))));
+    renderHelper();
+    await resumeRow('disc-a');
+    await resumeRow('disc-b');
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toContain('reply of B'));
+    await act(async () => { slowA.resolve(transcript('reply of A')); });
+    expect(screen.getByRole('dialog').textContent).not.toContain('reply of A');
+  });
+
+  it('drops a history that arrives after the assistant was closed', async () => {
+    listMock.mockResolvedValue([row('disc-a')]);
+    const slow = deferred<ReturnType<typeof transcript>>();
+    getMock.mockReturnValue(slow.promise);
+    renderHelper();
+    await resumeRow('disc-a');
+    fireEvent.click(screen.getByRole('button', { name: /mcp.custom.helper.close/ }));
+    await act(async () => { slow.resolve(transcript('stale')); });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.body.textContent).not.toContain('stale');
+  });
+});
+
+describe('CustomApiAiHelper — unattached conversations (KT-1111)', () => {
+  const orphan = {
+    discussion_id: 'disc-orphan', kind: 'custom_api' as const, target_id: null, target_step: null, plugin_id: null,
+    target_label: 'MyAPI', last_proposal_signature: null, last_applied_signature: null, last_applied_at: null,
+    created_at: '2026-10-08T10:00:00Z', title: 'helper', agent: 'Codex' as const, archived: false, message_count: 2,
+    updated_at: '2026-10-08T10:05:00Z',
+  };
+
+  async function resumeOrphan() {
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+  }
+
+  it('reopening the created plugin offers the conversation whose attach failed, and resuming attaches it', async () => {
+    listMock.mockResolvedValue([orphan]);
+    getMock.mockResolvedValue({ messages: [] });
+    renderHelper({ targetId: 'custom-1' });
+    await resumeOrphan();
+    expect(listMock).toHaveBeenCalledWith({
+      kind: 'custom_api', target_id: 'custom-1', include_unattached: true, pending_ids: [],
+    });
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('disc-orphan', { target_id: 'custom-1' }));
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('resuming a draft in the new-plugin form tracks it for the save', async () => {
+    listMock.mockResolvedValue([orphan]);
+    getMock.mockResolvedValue({ messages: [] });
+    const onConversationStarted = vi.fn();
+    renderHelper({ onConversationStarted });
+    await resumeOrphan();
+    await waitFor(() => expect(onConversationStarted).toHaveBeenCalledWith('disc-orphan'));
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+});
+
+// Codex review R3 — a draft started before the plugin had its final name.
+describe('Codex review — draft recovery after a name change', () => {
+  it.each(['', 'InitialAPI', 'FinalAPI'])('recovers a conversation started with label %j after create succeeds and attachment fails', async (initialName) => {
+    await openChat({ formSnapshot: { ...baseSnapshot, name: initialName } });
+    const original = createMock.mock.calls[0][0].assistant;
+    const { AssistantDraftStore } = await import('../assistantConversation');
+    const drafts = new AssistantDraftStore();
+    drafts.track('disc-c');
+    updateMock.mockRejectedValueOnce(new Error('attachment temporarily unavailable'));
+    await expect(drafts.attach('custom-created', 'FinalAPI')).rejects.toThrow();
+    drafts.clear(); // resetAddMcp, after successful create.
+    cleanup();
+    const orphan = {
+      discussion_id: 'disc-c', kind: 'custom_api' as const, target_id: null, target_step: null, plugin_id: null,
+      target_label: original.target_label, last_proposal_signature: null, last_applied_signature: null, last_applied_at: null,
+      created_at: '2026-10-09T10:00:00Z', title: 'helper', agent: 'Codex' as const, archived: false, message_count: 2,
+      updated_at: '2026-10-09T10:05:00Z',
+    };
+    // Same orphan-selection predicate as db/assistant_conversations.rs.
+    listMock.mockImplementation(async filter =>
+      filter.include_unattached && (!filter.unattached_label || filter.unattached_label === orphan.target_label) ? [orphan] : []);
+    renderHelper({ targetId: 'custom-created', formSnapshot: { ...baseSnapshot, name: 'FinalAPI' } });
+    fireEvent.click(await screen.findByRole('button', { name: /aiHelper.conversations.title/ }));
+    await waitFor(() => expect(listMock).toHaveBeenLastCalledWith(expect.objectContaining({ target_id: 'custom-created' })));
+    expect(await screen.findByRole('button', { name: /aiHelper.conversations.resume/ })).toBeTruthy();
+    // Selected by the id this browser owes the plugin, never by its label.
+    expect(listMock).toHaveBeenLastCalledWith(expect.objectContaining({ pending_ids: ['disc-c'] }));
+    expect(listMock.mock.lastCall?.[0]).not.toHaveProperty('unattached_label');
+
+    getMock.mockResolvedValue({ messages: [] });
+    updateMock.mockReset().mockResolvedValue(null);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /aiHelper.conversations.resume/ }));
+    });
+    await waitFor(() => expect(updateMock).toHaveBeenCalledWith('disc-c', { target_id: 'custom-created' }));
+    const { pendingFor } = await import('../assistantConversation');
+    await waitFor(() => expect(pendingFor('custom-created')).toEqual([]));
+    expect(createMock).toHaveBeenCalledTimes(1);
   });
 });

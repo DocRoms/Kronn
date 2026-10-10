@@ -32,10 +32,17 @@ vi.mock('../../lib/api', () => ({
   apiCallLogs: {
     drift: vi.fn().mockResolvedValue([]),
   },
+  discussions: {
+    create: vi.fn(),
+  },
+  assistantConversations: {
+    list: vi.fn().mockResolvedValue([]),
+    update: vi.fn(),
+  },
 }));
 
 import { McpPage } from '../McpPage';
-import { mcps as mcpsApi } from '../../lib/api';
+import { mcps as mcpsApi, discussions as discussionsApi, assistantConversations as assistantApi } from '../../lib/api';
 import type { McpOverview, McpConfigDisplay, McpServer, McpDefinition, Project, AgentType, McpProbeResponse } from '../../types/generated';
 
 // Use fake timers to prevent the setTimeout in handleAddDuplicateConfig (50ms
@@ -1775,6 +1782,38 @@ describe('McpPage', () => {
     expect(payload.custom_spec.base_url).toBe('https://my.example.com');
     expect(payload.custom_spec.fields).toEqual([{ label: 'My Token', value: 'secret123' }]);
     expect(payload.custom_spec.default_headers).toEqual([]);
+  });
+
+  it('Custom API: assistant conversations survive a failed create and attach on the retry (KT-1111)', async () => {
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const customApi: McpDefinition = {
+      id: 'api-custom', name: 'Custom API', description: 'Define your own API.', transport: 'ApiOnly',
+      env_keys: [], tags: ['custom', 'api'], token_url: null, token_help: null, publisher: 'You', official: false,
+    };
+    (discussionsApi.create as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'disc-x', title: 'helper' });
+    (assistantApi.update as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (mcpsApi.createConfig as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('backend down'))
+      .mockResolvedValueOnce({ id: 'cfg-1', server_id: 'custom-1', label: 'MyAPI', merged_into_existing: false });
+
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[customApi]} refetchMcps={noop} installedAgentTypes={['ClaudeCode']} />);
+    fireEvent.click(getAddPluginButton());
+    fireEvent.click(document.querySelector('[data-tour-id="custom-api-tile"]') as HTMLElement);
+    fireEvent.change(screen.getByPlaceholderText(/Salesforce Sales API/), { target: { value: 'MyAPI' } });
+    fireEvent.change(screen.getByPlaceholderText(/my-org\.salesforce\.com/), { target: { value: 'https://my.example.com' } });
+
+    await act(async () => { fireEvent.click(screen.getByText("Construire avec l'IA")); });
+    await act(async () => { await Promise.resolve(); });
+    expect(discussionsApi.create).toHaveBeenCalledTimes(1);
+
+    await act(async () => { fireEvent.click(screen.getByText('Enregistrer')); });
+    await act(async () => { await Promise.resolve(); });
+    expect(assistantApi.update).not.toHaveBeenCalled();
+
+    await act(async () => { fireEvent.click(screen.getByText('Enregistrer')); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(mcpsApi.createConfig).toHaveBeenCalledTimes(2);
+    expect(assistantApi.update).toHaveBeenCalledWith('disc-x', { target_id: 'custom-1', target_label: 'MyAPI' });
   });
 
   it('Custom API: declared default headers are sent, blank rows are dropped', async () => {
