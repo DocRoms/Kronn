@@ -420,11 +420,51 @@ describe('PlanningPage', () => {
     );
     fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
-    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+    expect(await screen.findByText('Move the runtime forward.')).toBeInTheDocument();
     const panel = screen.getByRole('complementary', { name: 'planning.taskActions' });
     expect(panel.querySelector(':scope > header')).toHaveClass('collection-detail-header');
     expect(panel.querySelector('.planning-detail-form')).not.toBeNull();
     expect(container.querySelector('.collection-shell-detail > .planning-detail')).toBe(panel);
+  });
+
+  it('renders the description as Markdown and saves a raw edit with the unchanged patch', async () => {
+    const task = detail();
+    task.description = '# Runtime\n\n| Step | State |\n| --- | --- |\n| PHP | todo |';
+    mocks.get.mockResolvedValue(task);
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+    fireEvent.click(await findCanonicalTaskRow('Upgrade PHP'));
+    const panel = await screen.findByRole('complementary', { name: 'planning.taskActions' });
+    expect(await within(panel).findByRole('heading', { level: 1, name: 'Runtime' })).toBeInTheDocument();
+    expect(panel.querySelector('.task-description-rendered table')).not.toBeNull();
+    expect(within(panel).queryByDisplayValue(/# Runtime/)).toBeNull();
+
+    fireEvent.click(within(panel).getByRole('switch', { name: 'planning.descriptionRawHint' }));
+    fireEvent.change(within(panel).getByRole('textbox', { name: 'planning.description' }), {
+      target: { value: '## New plan' },
+    });
+    // Back to the rendered view: the unsaved edit must survive the switch.
+    fireEvent.click(within(panel).getByRole('switch'));
+    expect(within(panel).getByRole('heading', { level: 2, name: 'New plan' })).toBeInTheDocument();
+    fireEvent.click(within(panel).getByText('common.save'));
+
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('task-1', {
+      title: 'Upgrade PHP',
+      description: '## New plan',
+      status: 'todo',
+      priority: 'high',
+      blocked_reason: null,
+      tags: ['platform'],
+      project_ids: [],
+      definition_of_done: [],
+      links: [],
+    }));
   });
 
   it('opens a directly linked task detail on mount', async () => {
@@ -439,7 +479,7 @@ describe('PlanningPage', () => {
     );
 
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
-    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+    expect(await screen.findByText('Move the runtime forward.')).toBeInTheDocument();
   });
 
   it('keeps a valid initial selection that is outside the first loaded task page', async () => {
@@ -461,7 +501,7 @@ describe('PlanningPage', () => {
     );
     await findCanonicalTaskRow('Upgrade PHP');
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(outsideFirstPage.id));
-    expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+    expect(await screen.findByText('Move the runtime forward.')).toBeInTheDocument();
     expect(screen.getByRole('complementary', { name: 'planning.taskActions' })).toBeInTheDocument();
   });
 

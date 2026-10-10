@@ -2140,6 +2140,52 @@ pub fn subworkflow_children(conn: &Connection, parent_run_id: &str) -> Result<Ve
     Ok(runs)
 }
 
+/// KT-1046 — raises the tree's durable LLM-call count, never lowers it, so a
+/// late or concurrent writer holding an older total cannot erase a newer one.
+pub fn raise_tree_llm_calls(conn: &Connection, root_run_id: &str, total: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE workflow_runs SET tree_llm_calls = MAX(tree_llm_calls, ?2) WHERE id = ?1",
+        params![root_run_id, total],
+    )?;
+    Ok(())
+}
+
+/// The LLM calls the root run's tree has durably recorded (0 when unknown).
+pub fn tree_llm_calls(conn: &Connection, root_run_id: &str) -> Result<u32> {
+    Ok(conn
+        .query_row(
+            "SELECT tree_llm_calls FROM workflow_runs WHERE id = ?1",
+            params![root_run_id],
+            |r| r.get::<_, u32>(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// LLM calls recorded in the step history of every sub-workflow descendant of
+/// `root_run_id`: the rebuild source for runs from before `tree_llm_calls`.
+pub fn descendant_llm_calls_from_history(conn: &Connection, root_run_id: &str) -> Result<u32> {
+    let mut total = 0u32;
+    let mut pending = vec![root_run_id.to_string()];
+    while let Some(parent) = pending.pop() {
+        for child in subworkflow_children(conn, &parent)? {
+            total += child
+                .step_results
+                .iter()
+                .filter(|r| {
+                    matches!(r.step_kind.as_deref(), Some("Agent" | "BatchQuickPrompt"))
+                        && !matches!(
+                            r.status,
+                            RunStatus::WaitingQuota | RunStatus::Running | RunStatus::Pending
+                        )
+                })
+                .count() as u32;
+            pending.push(child.id);
+        }
+    }
+    Ok(total)
+}
+
 pub fn claim_run_status(
     conn: &Connection,
     run_id: &str,

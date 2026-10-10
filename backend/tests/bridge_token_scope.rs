@@ -3077,3 +3077,43 @@ async fn a_bridge_token_cannot_attach_agents_to_its_own_discussion() {
         .collect();
     assert_eq!(attached, vec!["Codex", "OpenCode"]);
 }
+
+/// KT-1043 — the approval a workflow's Security settings require before a run
+/// is a human decision: `/decide` is outside the bridge token's list.
+#[tokio::test]
+async fn a_bridge_token_cannot_approve_the_security_pause() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE workflows SET safety_json = '{\"sandbox\":false,\"require_approval\":true}' \
+             WHERE id = 'wf-a'",
+            [],
+        )?;
+        let mut run = kronn::db::workflows::get_run(conn, "run-a")?.expect("run-a");
+        run.status = kronn::models::RunStatus::WaitingApproval;
+        run.step_results = vec![kronn::workflows::safety::approval_result()];
+        kronn::db::workflows::update_run_progress(
+            conn,
+            kronn::db::workflows::RunProgressSnapshot::from_run(&run),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/runs/run-a/decide",
+        Some(guard.value()),
+        Some(json!({"decision": "approve"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let run = db
+        .with_conn(|conn| kronn::db::workflows::get_run(conn, "run-a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, kronn::models::RunStatus::WaitingApproval);
+}

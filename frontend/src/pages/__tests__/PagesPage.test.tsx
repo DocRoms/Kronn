@@ -56,6 +56,8 @@ vi.mock('../../lib/api', () => ({
   agents: { detect: vi.fn(() => Promise.resolve([])) },
 }));
 vi.mock('../../lib/downloadBlob', () => ({ triggerDownload: vi.fn() }));
+// The embed allow-list (KT-1115) listens on the WebSocket; no socket here.
+vi.mock('../../hooks/useWebSocket', () => ({ useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })) }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     locale: 'fr',

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
+import { SafetyWarnings } from './SafetyWarnings';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
@@ -1881,6 +1882,13 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
           )}
         </div>
       </div>
+
+      <SafetyWarnings request={{
+        workflow_id: workflow.id,
+        project_id: workflow.project_id ?? undefined,
+        per_run_project: !!workflow.project_scope,
+        safety: workflow.safety,
+      }} />
 
       {onApplyUnsafeFix && (
         <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} onApprove={onApproveUnsafeStep} />

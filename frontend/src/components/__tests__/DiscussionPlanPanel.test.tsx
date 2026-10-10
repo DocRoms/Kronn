@@ -182,6 +182,18 @@ describe('DiscussionPlanPanel', () => {
     } finally { storage.mockRestore(); }
   });
 
+  it('renders the selected task description as Markdown with a raw switch', async () => {
+    localStorage.clear();
+    mocks.get.mockResolvedValue(detail({ description: '## Scope\n\n- panel\n- page' }));
+    const { container } = render(<DiscussionPlanPanel discussionId="disc-1" initialTaskId="task-1" onClose={vi.fn()} toast={vi.fn()} />);
+    await waitFor(() => expect(container.querySelector('.plan-detail')).not.toBeNull());
+    const selected = container.querySelector<HTMLElement>('.plan-detail')!;
+    expect(await within(selected).findByRole('heading', { level: 2, name: 'Scope' })).toBeInTheDocument();
+    fireEvent.click(within(selected).getByRole('switch', { name: 'planning.descriptionRawHintReadOnly' }));
+    expect(selected.querySelector('pre.task-description-source')?.textContent).toBe('## Scope\n\n- panel\n- page');
+    localStorage.clear();
+  });
+
   it('jumps to a worker room straight from the task row', async () => {
     // The shortcut existed only inside the execution detail card, so seeing a
     // worker's discussion meant drilling in first. The row is where someone

@@ -7149,6 +7149,21 @@ export type RunQuickExecResponse = { run_id: string, success: boolean, duration_
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted" | "WaitingQuota";
 
+export type SafetyCheckRequest = {
+/**
+ * The saved workflow, to know whether another one runs it as a sub-workflow.
+ */
+workflow_id?: string, project_id?: string,
+/**
+ * The project is chosen at launch (multi-project workflow).
+ */
+per_run_project?: boolean, safety: WorkflowSafety, };
+
+/**
+ * A stored setting this host would refuse at run time, shown before any run.
+ */
+export type SafetyWarning = "sandbox_outside_container" | "limits_without_directory" | "limits_without_git" | "approval_on_sub_workflow";
+
 /**
  * The action the §4bis boot saga takes for an in-flight integration, decided by
  * comparing durable checkpoints against the *real* parent tip. Pure logic so it
@@ -8053,7 +8068,12 @@ last_activity?: AgentActivity | null,
  * KT-811 — set when the provider refused the step for a quota or session
  * limit, so the run reads "quota" rather than "failed".
  */
-quota_wait?: QuotaWait | null, };
+quota_wait?: QuotaWait | null,
+/**
+ * Why the run ends at this step for good: no `on_failure`, no quota wait,
+ * no recovery rule (a Security limit, a counter failure).
+ */
+terminal_stop?: string | null, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -9668,16 +9688,14 @@ gate_request_changes_target?: string | null,
  */
 gate_notify_url?: string | null,
 /**
- * 0.8.6 (#25) — `true` means create a git commit checkpoint before
- * pausing the run on this Gate. The SHA is stored in
- * `WorkflowRun.state["checkpoint:<step.name>"]`. On Goto from this
- * gate's `gate_request_changes_target`, the runner `git reset
- * --hard` to that SHA before re-running the target — makes
- * Gate→implement loops idempotent (re-implement on a clean tree,
- * not on top of the previous cycle's noise). Defaults to `false`
- * (no behaviour change for existing workflows). Skipped silently
- * in `Isolated` worktree mode (the worktree already has its own
- * branch). Skipped + warned on non-git project_path.
+ * 0.8.6 (#25) — `true` means commit the run's own worktree as a
+ * checkpoint before pausing the run on this Gate. The SHA is stored in
+ * `WorkflowRun.state["checkpoint:<step.name>"]`. On "Request changes",
+ * the target re-runs on top of that post-implementation commit, once
+ * the runner has checked the worktree is still clean and at that SHA.
+ * Only a run with workspace isolation gets a checkpoint:
+ * in shared mode none is taken and the Gate message says so, since it
+ * would commit the operator's checkout (KT-1042). Defaults to `false`.
  */
 gate_checkpoint_before?: boolean | null,
 /**

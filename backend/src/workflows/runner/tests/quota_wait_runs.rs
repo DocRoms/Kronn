@@ -5,7 +5,7 @@ use super::*;
 use crate::models::{QuotaParkReason, WorkflowGuards};
 use std::sync::{Arc, Mutex};
 
-const SESSION_LIMIT: &str = "[Agent provider error] You've hit your session limit · resets 9:40pm (Europe/Paris) (HTTP 429; terminal_reason=api_error)";
+pub(super) const SESSION_LIMIT: &str = "[Agent provider error] You've hit your session limit · resets 9:40pm (Europe/Paris) (HTTP 429; terminal_reason=api_error)";
 
 /// Claude over ACP: refuses prompts naming `refused_marker` while `refusals`
 /// remain, answers everything else, and records every prompt it is handed.
@@ -14,6 +14,8 @@ struct QuotaThenAnswer {
     refused_marker: &'static str,
     refusals: Mutex<usize>,
     prompts: Arc<Mutex<Vec<String>>>,
+    /// A file the refused step writes, as an agent can before the provider refuses.
+    write_on_refusal: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 #[async_trait::async_trait]
@@ -64,6 +66,9 @@ impl crate::acp::AcpTransport for QuotaThenAnswer {
             let mut left = self.refusals.lock().unwrap();
             if *left > 0 {
                 *left -= 1;
+                if let Some(path) = self.write_on_refusal.lock().unwrap().as_ref() {
+                    std::fs::write(path, "written\n").unwrap();
+                }
                 return Err(crate::acp::AcpError::Transport(self.refusal.clone()));
             }
         }
@@ -79,17 +84,18 @@ impl crate::acp::AcpTransport for QuotaThenAnswer {
     }
 }
 
-struct Fixture {
-    state: crate::AppState,
-    workflow: Workflow,
+pub(super) struct Fixture {
+    pub(super) state: crate::AppState,
+    pub(super) workflow: Workflow,
     prompts: Arc<Mutex<Vec<String>>>,
+    write_on_refusal: Arc<Mutex<Option<std::path::PathBuf>>>,
     _repo: tempfile::TempDir,
     _route: crate::agents::runner::test_acp_routes::RouteGuard,
 }
 
 impl Fixture {
     /// Agent prompts the provider received, by step marker.
-    fn prompt_markers(&self) -> Vec<&'static str> {
+    pub(super) fn prompt_markers(&self) -> Vec<&'static str> {
         self.prompts
             .lock()
             .unwrap()
@@ -109,7 +115,12 @@ impl Fixture {
 
 /// `prepare` then `analyse` (the step the provider refuses), on a git project
 /// whose agent is served by [`QuotaThenAnswer`].
-async fn fixture(id: &str, refusal: &str, refusals: usize, timeout_seconds: u64) -> Fixture {
+pub(super) async fn fixture(
+    id: &str,
+    refusal: &str,
+    refusals: usize,
+    timeout_seconds: u64,
+) -> Fixture {
     let (state, _tokens, _agents) = test_state_and_configs();
     let repo = tempfile::tempdir().unwrap();
     assert!(std::process::Command::new("git")
@@ -131,6 +142,7 @@ async fn fixture(id: &str, refusal: &str, refusals: usize, timeout_seconds: u64)
         .await
         .unwrap();
     let prompts = Arc::new(Mutex::new(Vec::new()));
+    let write_on_refusal = Arc::new(Mutex::new(None));
     let work_dir =
         crate::agents::runner::resolve_agent_work_dir(Some(&repo_path), &repo_path).unwrap();
     let route = crate::agents::runner::test_acp_routes::route(
@@ -140,6 +152,7 @@ async fn fixture(id: &str, refusal: &str, refusals: usize, timeout_seconds: u64)
             refused_marker: "ANALYSE-MARKER",
             refusals: Mutex::new(refusals),
             prompts: prompts.clone(),
+            write_on_refusal: write_on_refusal.clone(),
         }),
     );
     let mut workflow = make_workflow_with_artifacts(Default::default());
@@ -158,6 +171,7 @@ async fn fixture(id: &str, refusal: &str, refusals: usize, timeout_seconds: u64)
         state,
         workflow,
         prompts,
+        write_on_refusal,
         _repo: repo,
         _route: route,
     }
@@ -182,7 +196,7 @@ async fn run_until_paused(fx: &Fixture, run_id: &str) -> WorkflowRun {
     stored(&fx.state, run_id).await
 }
 
-async fn stored(state: &crate::AppState, run_id: &str) -> WorkflowRun {
+pub(super) async fn stored(state: &crate::AppState, run_id: &str) -> WorkflowRun {
     let id = run_id.to_string();
     state
         .db
@@ -193,7 +207,7 @@ async fn stored(state: &crate::AppState, run_id: &str) -> WorkflowRun {
 }
 
 /// The backend restarting: same database, nothing else carried over.
-fn restarted(state: &crate::AppState) -> crate::AppState {
+pub(super) fn restarted(state: &crate::AppState) -> crate::AppState {
     let cfg = crate::core::config::default_config();
     crate::AppState::new_defaults(
         Arc::new(tokio::sync::RwLock::new(cfg)),
@@ -254,6 +268,28 @@ async fn a_session_limit_waits_then_resumes_at_its_step_after_a_restart() {
         .get(RUN_RESUME_HISTORY_KEY)
         .expect("resume trail");
     assert!(history.contains("WaitingQuota"), "{history}");
+}
+
+/// KT-1043 — a step past a Security limit ends the run, even when the
+/// provider also refused it for quota.
+#[tokio::test]
+async fn a_security_limit_stop_wins_over_the_quota_wait() {
+    let mut fx = fixture("quota-limit", SESSION_LIMIT, 1, 3 * 24 * 3600).await;
+    fx.workflow.safety.max_files = Some(0);
+    *fx.write_on_refusal.lock().unwrap() = Some(fx._repo.path().join("written.txt"));
+    let ended = run_until_paused(&fx, "run-quota-limit").await;
+
+    assert_eq!(ended.status, RunStatus::Failed, "{:?}", ended.step_results);
+    assert!(ended.finished_at.is_some());
+    let refused = ended.step_results.last().unwrap();
+    assert_eq!(refused.step_name, "analyse");
+    assert_eq!(refused.status, RunStatus::Failed);
+    assert_eq!(refused.quota_wait, None);
+    assert!(
+        refused.output.contains("Security limit exceeded"),
+        "{}",
+        refused.output
+    );
 }
 
 #[tokio::test]

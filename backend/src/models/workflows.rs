@@ -624,16 +624,14 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_notify_url: Option<String>,
 
-    /// 0.8.6 (#25) — `true` means create a git commit checkpoint before
-    /// pausing the run on this Gate. The SHA is stored in
-    /// `WorkflowRun.state["checkpoint:<step.name>"]`. On Goto from this
-    /// gate's `gate_request_changes_target`, the runner `git reset
-    /// --hard` to that SHA before re-running the target — makes
-    /// Gate→implement loops idempotent (re-implement on a clean tree,
-    /// not on top of the previous cycle's noise). Defaults to `false`
-    /// (no behaviour change for existing workflows). Skipped silently
-    /// in `Isolated` worktree mode (the worktree already has its own
-    /// branch). Skipped + warned on non-git project_path.
+    /// 0.8.6 (#25) — `true` means commit the run's own worktree as a
+    /// checkpoint before pausing the run on this Gate. The SHA is stored in
+    /// `WorkflowRun.state["checkpoint:<step.name>"]`. On "Request changes",
+    /// the target re-runs on top of that post-implementation commit, once
+    /// the runner has checked the worktree is still clean and at that SHA.
+    /// Only a run with workspace isolation gets a checkpoint:
+    /// in shared mode none is taken and the Gate message says so, since it
+    /// would commit the operator's checkout (KT-1042). Defaults to `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_checkpoint_before: Option<bool>,
 
@@ -1906,6 +1904,10 @@ pub struct StepResult {
     /// limit, so the run reads "quota" rather than "failed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_wait: Option<QuotaWait>,
+    /// Why the run ends at this step for good: no `on_failure`, no quota wait,
+    /// no recovery rule (a Security limit, a counter failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_stop: Option<String>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {

@@ -1,0 +1,25 @@
+/* KT-1043 — Security settings this host would refuse. */
+.wf-safety-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+  margin-bottom: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.06);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.wf-safety-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+}
+
+.wf-safety-warning > svg {
+  color: var(--kr-warning);
+  flex-shrink: 0;
+  margin-top: 2px;
+}

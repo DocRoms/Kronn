@@ -22,7 +22,8 @@ const PLAIN_RUN_TYPES: &str = "'linear','subworkflow'";
 /// Columns that point at a run but are not listed here are logs with their own
 /// lifetime and read no step output: `agent_decisions.run_id`,
 /// `api_call_logs.run_id`, `execution_variable_snapshots.run_id`,
-/// `workflow_step_room_sessions.run_id`. `shared_runs.id` is not listed either:
+/// `workflow_step_room_sessions.run_id`. Nor are the rows a run owns outright,
+/// [`OWNED_COLUMNS`]. `shared_runs.id` is not listed either:
 /// every workflow run has that card, which renders step names and links to the
 /// run rather than reading its outputs; listing it would protect every run.
 pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
@@ -45,6 +46,14 @@ pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
     ("discussion_questions", "resume_run_id"),
     // Room messages attributed to one of the run's steps.
     ("workflow_step_room_activities", "run_id"),
+];
+
+/// Columns whose rows belong to the run itself and go with it (ON DELETE
+/// CASCADE). Every run has some, so listing them as references would protect
+/// every run.
+pub const OWNED_COLUMNS: &[(&str, &str)] = &[
+    // The definitions the run froze when it started.
+    ("workflow_run_pins", "run_id"),
 ];
 
 /// What a blanked step output reads afterwards.
@@ -389,6 +398,28 @@ mod tests {
     }
 
     #[test]
+    fn a_run_s_own_pins_do_not_protect_it_and_go_with_it() {
+        let conn = db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn, "pinned", "Success", "linear", Some(OLD));
+        for (table, column) in OWNED_COLUMNS {
+            reference(&conn, table, column, "pinned");
+        }
+        assert_eq!(compact_all(&conn), 1);
+        assert_eq!(delete_runs_chunk(&conn, CUTOFF, CHUNK_ROWS).unwrap(), 1);
+        for (table, column) in OWNED_COLUMNS {
+            let left: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = 'pinned'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "{table}.{column} is deleted with its run");
+        }
+    }
+
+    #[test]
     fn a_trimmed_run_keeps_its_steps_and_metadata() {
         let conn = db();
         run(&conn, "plain", "Success", "linear", Some(OLD));
@@ -593,6 +624,7 @@ mod tests {
                 }
                 let known = REFERENCING_COLUMNS
                     .iter()
+                    .chain(OWNED_COLUMNS)
                     .any(|(t, c)| *t == table && *c == column);
                 assert!(
                     known,

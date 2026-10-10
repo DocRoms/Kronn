@@ -24090,6 +24090,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         };
         let run_for_update = run_id.clone();
         state

@@ -3052,6 +3052,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         StepResult {
             step_name: "deploy".into(),
@@ -3075,6 +3076,7 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -3226,6 +3228,7 @@ fn workflow_runs_update() {
         cache_write_prompt_tokens: None,
         last_activity: None,
         quota_wait: None,
+        terminal_stop: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 

@@ -145,7 +145,8 @@ async fn a_child_sub_workflow_runs_the_revision_its_parent_pinned() {
     state
         .db
         .with_conn(|conn| {
-            let mut child = crate::db::workflows::get_workflow(conn, "pin-child-child")?.unwrap();
+            let mut child = crate::db::workflows::get_workflow(conn, "pin-child-child")?
+                .ok_or_else(|| anyhow::anyhow!("the child workflow is missing"))?;
             child.steps[0].json_data_payload = Some(serde_json::json!({ "v": "INJECTED" }));
             crate::db::workflows::update_workflow_as_agent(conn, &child)?;
             crate::core::resource_refs::disable_workflows(conn, &[child.id.clone()])?;
@@ -584,7 +585,8 @@ async fn edit_prompt(state: &crate::AppState, id: &str, template: &str) {
     state
         .db
         .with_conn(move |conn| {
-            let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, &id)?.unwrap();
+            let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, &id)?
+                .ok_or_else(|| anyhow::anyhow!("quick prompt {id} is missing"))?;
             prompt.prompt_template = template;
             crate::db::quick_prompts::update_quick_prompt(conn, &prompt)
         })
@@ -673,7 +675,8 @@ async fn resumed_prompt_after(tag: &str, resume: Resume, change: Change) -> (Str
             fx.state
                 .db
                 .with_conn(move |conn| {
-                    let mut old = crate::db::workflows::get_workflow(conn, &renamed)?.unwrap();
+                    let mut old = crate::db::workflows::get_workflow(conn, &renamed)?
+                        .ok_or_else(|| anyhow::anyhow!("workflow {renamed} is missing"))?;
                     old.name = "Renamed Elsewhere".into();
                     crate::db::workflows::update_workflow(conn, &old).map(|_| ())
                 })
@@ -764,8 +767,8 @@ async fn a_structured_reference_keeps_the_target_resolved_at_pin_time() {
     fx.state
         .db
         .with_conn(|conn| {
-            let mut prompt =
-                crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-a")?.unwrap();
+            let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-a")?
+                .ok_or_else(|| anyhow::anyhow!("qp-structured-a is missing"))?;
             prompt.name = "Pinned Target".into();
             crate::db::quick_prompts::update_quick_prompt(conn, &prompt)
         })
@@ -792,8 +795,8 @@ async fn a_structured_reference_keeps_the_target_resolved_at_pin_time() {
     fx.state
         .db
         .with_conn(|conn| {
-            let mut prompt =
-                crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-a")?.unwrap();
+            let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-a")?
+                .ok_or_else(|| anyhow::anyhow!("qp-structured-a is missing"))?;
             prompt.name = "Somewhere Else".into();
             crate::db::quick_prompts::update_quick_prompt(conn, &prompt)
         })
@@ -803,8 +806,8 @@ async fn a_structured_reference_keeps_the_target_resolved_at_pin_time() {
     fx.state
         .db
         .with_conn(|conn| {
-            let mut prompt =
-                crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-b")?.unwrap();
+            let mut prompt = crate::db::quick_prompts::get_quick_prompt(conn, "qp-structured-b")?
+                .ok_or_else(|| anyhow::anyhow!("qp-structured-b is missing"))?;
             prompt.name = "Pinned Target".into();
             crate::db::quick_prompts::update_quick_prompt(conn, &prompt)
         })

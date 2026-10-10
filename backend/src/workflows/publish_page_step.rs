@@ -273,6 +273,7 @@ fn succeed(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -302,6 +303,7 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }
@@ -772,6 +774,7 @@ mod tests {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         };
         super::super::runner::record_step_completion(&step, &mut result, context, None);
         result
