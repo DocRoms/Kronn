@@ -2,15 +2,14 @@ name: CI Tests
 
 # The fast loop, run on every push of a pull request labelled `ci-test`. The
 # app builds (portability, desktop, Windows exporter) live in ci-build.yml
-# under their own label. A label event re-runs this workflow only when it
-# changes `ci-test` itself; another label's run repeats the earlier verdict.
+# under their own label. Label and edit events never start this workflow: its
+# skipped jobs would hide the real results. CI Verdict (ci-verdict.yml)
+# answers them, re-running this run once when the label arrived after it.
 on:
   pull_request:
     # `opened`/`reopened` exist for the require-ci-label guard below: a fresh
     # PR without the label gets a visible RED check instead of zero runs.
-    # `edited` re-runs only when the base branch changed; a title edit, like
-    # another workflow's label, repeats the verdict already given.
-    types: [opened, reopened, labeled, unlabeled, synchronize, edited]
+    types: [opened, reopened, synchronize]
   push:
     branches: [main]
   # Called by Desktop Build with the release commit: every job then runs, as on
@@ -63,20 +62,29 @@ jobs:
   require-ci-label:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ steps.label.outputs.run }}
     steps:
       - name: Require ci-test label for pull requests
+        id: label
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          HAS_CI_TEST_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-test') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Labels are read live: a re-run replays the original event payload.
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ] || [ "$HAS_CI_TEST_LABEL" = "true" ]; then
-            exit 0
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && ! gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.labels[].name' | grep -qx 'ci-test'; then
+            echo "::error::This PR has no 'ci-test' label — every CI job was SKIPPED (green-by-skip). Add the label to run the suite."
+            exit 1
           fi
-          echo "::error::This PR has no 'ci-test' label — every CI job was SKIPPED (green-by-skip). Add the label to run the suite."
-          exit 1
+          echo "run=true" >> "$GITHUB_OUTPUT"
 
   test-backend:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     # The one backend test pass: every lib, binary and integration test once,
     # under nextest (one process per test) and coverage instrumentation, with
@@ -238,7 +246,8 @@ jobs:
           echo 'schema=3' > ../target/llvm-cov-target/debug/.kronn-backend-cache-v3
 
   test-backend-quality:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -318,7 +327,8 @@ jobs:
   # again whenever the measured baseline improves. This is the
   # mechanical guard that stops agents (and humans) from merging dup'd code.
   duplication-check:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -341,7 +351,8 @@ jobs:
   # no compiler or linter reads. A PR checkout is the merge commit, whose first
   # parent is the base tip; other triggers compare with the merge base of main.
   diff-hygiene:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -366,7 +377,8 @@ jobs:
   # cache behaviour, missing-env handling, idempotency-collision guard
   # on `source_session_id`. Stdlib only — zero dev deps, sub-second run.
   test-python:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -395,7 +407,8 @@ jobs:
         run: python3 -m unittest test_build_bundle.py test_parent_watch.py -v
 
   test-frontend:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -465,7 +478,8 @@ jobs:
     # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
     # tab buttons leak" were all UI-only bugs that pure-JS tests can't
     # see).
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
@@ -644,7 +658,8 @@ jobs:
           retention-days: 7
 
   test-shell:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -660,7 +675,8 @@ jobs:
         run: make test-shell
 
   security-scan:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-label
+    if: needs.require-ci-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -727,31 +743,17 @@ jobs:
       - test-shell
       - security-scan
     runs-on: ubuntu-latest
-    # Waits up to 50 min for an earlier run's verdict after an unrelated label.
-    timeout-minutes: 60
-    permissions:
-      actions: read
-      contents: read
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      # An unrelated label or a title edit tested nothing: repeat the verdict
-      # of the run that tested this pull request, head and base.
-      - name: Repeat the verdict already given for this pull request
-        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-test') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base))
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: scripts/ci/previous_gate_verdict.sh ci-test.yml ci-quality-gates
-      # The name records what this run tested; the step above reads it back.
+      - name: Require the ci-test label
+        if: needs.require-ci-label.outputs.run != 'true'
+        run: |
+          echo "::error::Add the ci-test label: it runs the suite this check requires."
+          exit 1
+      # The name records what this run tested; CI Verdict reads it back.
       - name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"
-        if: "!(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-test') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base)))"
+        if: needs.require-ci-label.outputs.run == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-test') }}
           RESULTS: ${{ toJson(needs.*.result) }}
         run: |
           echo "Gate results: $RESULTS"
@@ -760,8 +762,8 @@ jobs:
   backend-ci-performance:
     # This observer publishes timing evidence but never changes a functional
     # gate result: an SLO breach is a warning, while a real timeout still fails.
-    if: always() && inputs.ref == '' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-test') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-test') || (github.event.action == 'edited' && !github.event.changes.base))))
-    needs: [test-backend, ci-quality-gates]
+    if: always() && inputs.ref == '' && needs.require-ci-label.outputs.run == 'true'
+    needs: [require-ci-label, test-backend, ci-quality-gates]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

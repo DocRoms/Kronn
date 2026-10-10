@@ -108,11 +108,24 @@ Pull-request CI runs under two labels:
   exporter). Required before merge: add it once the pull request is ready.
   `ci-build-gates` is its required check and stays red without the label.
 
-Both labels persist: every push (`synchronize`) and every change of base
-branch re-runs both workflows for the new head. Adding or removing one label,
-or editing the title, never re-runs the other workflow: its run repeats the
-verdict an earlier run gave for the same pull request, head and base, and
-fails when there is none. Pushes to `main` and release tags run both.
+Both labels persist: opening, reopening and every push (`synchronize`) run
+**CI Tests** (`ci-test.yml`) and **CI Build** (`ci-build.yml`) for the new
+head. Their jobs read the labels live, so a job skipped there means the label
+was missing, never that it ran elsewhere.
+
+Labels and edits (title, description, base) start only **CI Verdict**
+(`ci-verdict.yml`), which publishes nothing but the two aggregates. Each one
+repeats the verdict CI Tests or CI Build gave for the same pull request, head
+and base. When that run predates the label (you added `ci-test` or `ci-build`
+after pushing), CI Verdict re-runs it once and repeats the new verdict; the
+real job results then replace the skipped ones on the same run. On a fork,
+whose token cannot re-run, a maintainer uses "Re-run all jobs" on that run.
+After a change of base, push a commit or close and reopen the pull request.
+Pushes to `main` and release tags run both test workflows.
+
+Which checks matter: `ci-quality-gates` and `ci-build-gates`. They report on
+every pull-request event, from whichever workflow ran last, and are the
+verdicts to read; the individual jobs are the details.
 
 `main` is protected by repository ruleset 13870406, whose required checks are
 job names. A job skipped by its `if` reports as passing, so the job names
@@ -137,7 +150,7 @@ gh api -X PUT repos/DocRoms/Kronn/rulesets/13870406 --input ruleset.json
 
 The ruleset already requires branches to be up to date, so a base branch that
 only advances (no pull-request event) still forces a new push, which re-runs
-both workflows.
+both test workflows.
 
 ## Reporting Bugs
 

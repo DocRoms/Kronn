@@ -1,0 +1,59 @@
+name: CI Verdict
+
+# A label change or an edit tests nothing new. CI Tests and CI Build never run
+# for them, so their real results stay on the pull request page; this workflow
+# republishes only the two required aggregates, from the run that tested the
+# same pull request, head and base. When that run predates the label, it is
+# re-run once (it reads labels live) and its verdict is repeated.
+#
+# No job here may carry an `if`: a skipped required check counts as passing.
+on:
+  pull_request:
+    types: [labeled, unlabeled, edited]
+
+permissions: {}
+
+jobs:
+  ci-quality-gates:
+    runs-on: ubuntu-latest
+    # Waits up to 50 min for the tested run's verdict.
+    timeout-minutes: 60
+    permissions:
+      # Re-runs CI Tests when it ran before the label (read-only on forks).
+      actions: write
+      contents: read
+    steps:
+      - name: Require the ci-test label
+        if: "!contains(github.event.pull_request.labels.*.name, 'ci-test')"
+        run: |
+          echo "::error::Add the ci-test label: it runs the suite this check requires."
+          exit 1
+      - uses: actions/checkout@v4
+      - name: Repeat the CI Tests verdict for this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci/previous_gate_verdict.sh ci-test.yml ci-quality-gates ci-test
+
+  ci-build-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Require the ci-build label
+        if: "!contains(github.event.pull_request.labels.*.name, 'ci-build')"
+        run: |
+          echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
+          exit 1
+      - uses: actions/checkout@v4
+      - name: Repeat the CI Build verdict for this pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: scripts/ci/previous_gate_verdict.sh ci-build.yml ci-build-gates ci-build

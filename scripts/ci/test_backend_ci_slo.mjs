@@ -59,6 +59,8 @@ const runJobs = [
 ];
 assert.equal(fastLoopDurationMs({ created_at: at(0) }, runJobs), 14 * 60 * 1000);
 assert.equal(fastLoopDurationMs({ created_at: at(0) }, runJobs.slice(0, 2)), null);
+// A re-run attempt is timed from its own start, not the first attempt.
+assert.equal(fastLoopDurationMs({ created_at: "2026-08-30T23:00:00Z", run_started_at: at(0) }, runJobs), 14 * 60 * 1000);
 assert.equal(runnerMilliseconds(runJobs), 19 * 60 * 1000);
 const totalsReport = markdown(summary, completedJob, "hot", true, { fastLoopMs: 14 * 60 * 1000, runnerMs: 19 * 60 * 1000 });
 assert.match(totalsReport, /Trigger to ci-quality-gates \| 14m 0s/);

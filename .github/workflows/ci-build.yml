@@ -3,14 +3,13 @@ name: CI Build
 # The app builds: the release backend, platform portability tests, the
 # desktop crate and the Windows document exporter. Slower than the `ci-test` loop and only needed
 # once a pull request is ready, so they hang off their own label, `ci-build`,
-# and `ci-build-gates` is required to merge. Adding one label never re-runs the
-# other workflow's jobs: a run started by an unrelated label repeats the
-# verdict of the run that did test the commit.
+# and `ci-build-gates` is required to merge. Label and edit events never start
+# this workflow: its skipped jobs would hide the real results. CI Verdict
+# (ci-verdict.yml) answers them, re-running this run once when the label
+# arrived after it.
 on:
   pull_request:
-    # `edited` re-runs only when the base branch changed; a title edit, like
-    # another workflow's label, repeats the verdict already given.
-    types: [opened, reopened, labeled, unlabeled, synchronize, edited]
+    types: [opened, reopened, synchronize]
   push:
     branches: [main]
   # Called by Desktop Build with the release commit: every job then runs.
@@ -35,8 +34,32 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
+  # Labels are read live: a re-run replays the original event payload.
+  require-ci-build-label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ steps.label.outputs.run }}
+    steps:
+      - name: Require ci-build label for pull requests
+        id: label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && ! gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.labels[].name' | grep -qx 'ci-build'; then
+            echo "::error::Add the ci-build label before merging: it runs the app builds ci-build-gates requires."
+            exit 1
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
   test-desktop-compile:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -85,7 +108,8 @@ jobs:
   # Exercise the exact Windows release-sidecar path on every tested PR so a
   # broken installer cannot remain hidden until the next version tag.
   test-docs-sidecar-windows:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -153,7 +177,8 @@ jobs:
   # modules whose behaviour actually differs per platform. Linux stays covered by
   # `test-backend`; this adds the two hosts nothing else runs on.
   test-backend-portability:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -196,7 +221,8 @@ jobs:
   # ci-test e2e job serves a cheaper build, so this is where every pull request
   # proves the real release build still compiles; tags build the installers.
   build-release:
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci-build') && !(((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))
+    needs: require-ci-build-label
+    if: needs.require-ci-build-label.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -224,40 +250,24 @@ jobs:
     # the pull request carries the `ci-build` label and every build passed.
     if: always()
     needs:
+      - require-ci-build-label
       - build-release
       - test-desktop-compile
       - test-docs-sidecar-windows
       - test-backend-portability
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      actions: read
-      contents: read
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      # An unrelated label or a title edit tested nothing: repeat the verdict
-      # of the run that tested this pull request, head and base.
-      - name: Repeat the verdict already given for this pull request
-        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-build') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base))
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: scripts/ci/previous_gate_verdict.sh ci-build.yml ci-build-gates
-      # The name records what this run tested; the step above reads it back.
+      - name: Require the ci-build label
+        if: needs.require-ci-build-label.outputs.run != 'true'
+        run: |
+          echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
+          exit 1
+      # The name records what this run tested; CI Verdict reads it back.
       - name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"
-        if: "!(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci-build') && (((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-build') || (github.event.action == 'edited' && !github.event.changes.base)))"
+        if: needs.require-ci-build-label.outputs.run == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-build') }}
           RESULTS: ${{ toJson(needs.*.result) }}
         run: |
           echo "Gate results: $RESULTS"
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$HAS_LABEL" != "true" ]; then
-            echo "::error::Add the ci-build label before merging: it runs the app builds this check requires."
-            exit 1
-          fi
           echo "$RESULTS" | jq -e 'all(.[]; . == "success")'
