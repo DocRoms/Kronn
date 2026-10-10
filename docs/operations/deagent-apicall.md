@@ -297,7 +297,8 @@ therefore keep the same instant.
 ```
 
 - `shift:+1d|-24h|-7d` uses fixed durations with `s`, `m`, `h`, `d` or `w`.
-- `tz:` accepts an IANA timezone and defaults to UTC.
+- `tz:` accepts an IANA timezone and defaults to Kronn's global timezone
+  (Settings, the machine's zone unless set).
 - `floor:` accepts `minute`, `hour` or `day`; daily flooring is local-time aware.
 - `fmt:` accepts `rfc3339`, `local_iso_ms`, `date`, `unix` or `unix_ms`.
 - `{{now-24h|floor:hour}}` is the compact alias. A declared variable named

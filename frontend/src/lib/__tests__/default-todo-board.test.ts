@@ -4,10 +4,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 // KT-1030 — the board Kronn ships as a Live Page, run as the sandbox runs it:
 // its HTML in the document, its inline script evaluated once.
-const BOARD = readFileSync(
+const BOARD_SOURCE = readFileSync(
   resolve(__dirname, '../../../../backend/src/core/default_todo/board.html'),
   'utf8',
-).replace('__KRONN_LANG__', 'en');
+);
+const BOARD = BOARD_SOURCE.replace('__KRONN_LANG__', 'en');
 
 type Row = { id: string; ref?: string; title: string; column: string; description?: string; tags?: string[]; sentinel?: boolean; priority?: string; updated_at?: string; created_at?: string; discussion_id?: string };
 
@@ -18,8 +19,8 @@ const recordLaunch = (event: Event) => {
   if (action) launched.push(action.getAttribute('data-kronn-action') ?? '');
 };
 
-function mount(rows: Row[]) {
-  const parsed = new DOMParser().parseFromString(BOARD, 'text/html');
+function mount(rows: Row[], lang = 'en') {
+  const parsed = new DOMParser().parseFromString(lang === 'en' ? BOARD : BOARD_SOURCE.replace('__KRONN_LANG__', lang), 'text/html');
   const script = Array.from(parsed.querySelectorAll('script')).find(s => !s.getAttribute('type'));
   document.head.innerHTML = parsed.head.innerHTML;
   document.body.innerHTML = parsed.body.innerHTML.replace(script!.outerHTML, '');
@@ -180,7 +181,7 @@ describe('the first-view notice', () => {
   it('shows once, with the trust hint, and stays closed after a reload', async () => {
     mount([A]);
     expect(notice().hidden).toBe(false);
-    expect(notice().textContent).toContain('Kronn’s Tasks and Workflows');
+    expect(notice().textContent).toContain('This page runs without an agent.');
     expect(notice().textContent).toContain('todo-move');
     document.querySelector<HTMLButtonElement>('#avis-fermer')!.click();
     await flush();
@@ -188,6 +189,24 @@ describe('the first-view notice', () => {
     expect(launched).toEqual([]);
     mount([A]);
     expect(notice().hidden).toBe(true);
+  });
+
+  // Key phrases per locale; the menu labels match the Kronn sidebar (nav.planning / nav.workflows).
+  const PHRASES: Record<string, { strong: string[]; text: string[] }> = {
+    fr: { strong: ['Cette page fonctionne sans agent.', 'Tâches', 'Workflows'], text: ['(Planification)', '(Automatisation)', 'Grâce au MCP et aux outils Kronn'] },
+    en: { strong: ['This page runs without an agent.', 'Tasks', 'Workflows'], text: ['(Planning)', '(Automation)', 'Thanks to the MCP and Kronn’s tools'] },
+    es: { strong: ['Esta página funciona sin agente.', 'Tareas', 'Workflows'], text: ['(Planificación)', '(Automatización)', 'Gracias al MCP y a las herramientas de Kronn'] },
+    zh: { strong: ['此页面无需代理即可运行。', '任务', '工作流'], text: ['（规划）', '（自动化）', '借助 MCP 和 Kronn 工具'] },
+  };
+
+  it.each(Object.keys(PHRASES))('says it runs without an agent, in three paragraphs with bold built as nodes (%s)', lang => {
+    mount([A], lang);
+    const body = document.getElementById('avis-texte')!;
+    expect(body.querySelectorAll(':scope > p')).toHaveLength(3);
+    expect(Array.from(body.querySelectorAll('strong')).map(b => b.textContent)).toEqual(PHRASES[lang].strong);
+    for (const phrase of PHRASES[lang].text) expect(body.textContent).toContain(phrase);
+    expect(body.textContent).not.toContain('**');
+    expect(body.querySelectorAll('*:not(p):not(strong)')).toHaveLength(0);
   });
 
   it('still renders the board, notice shown, when storage throws', () => {

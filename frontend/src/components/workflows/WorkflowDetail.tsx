@@ -818,7 +818,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             availableAgentTypes={availableAgentTypes}
             agentChoices={agentChoices}
             onChange={onChangeAgent}
-            modelTiers={agentAccess?.model_tiers}
+            agentAccess={agentAccess}
             t={t}
           />
         )}
@@ -1344,7 +1344,7 @@ function StepAgentSwitcher({
   availableAgentTypes = [],
   agentChoices,
   onChange,
-  modelTiers,
+  agentAccess,
   t,
   compact = false,
 }: {
@@ -1353,7 +1353,7 @@ function StepAgentSwitcher({
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChange?: WorkflowDetailProps['onChangeStepAgent'];
-  modelTiers?: AgentsConfig['model_tiers'];
+  agentAccess?: AgentsConfig | null;
   t: (key: string, ...args: (string | number)[]) => string;
   compact?: boolean;
 }) {
@@ -1371,11 +1371,12 @@ function StepAgentSwitcher({
         default: t('disc.tier.default'),
         reasoning: t('disc.tier.reasoning'),
       }}
-      modelTiers={modelTiers}
+      modelTiers={agentAccess?.model_tiers}
       defaultModelLabel={t('config.defaultModel')}
       compact={compact}
       title={t('disc.switchAgentAndTier')}
       ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
+      needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
       staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
     />
   );
@@ -1820,11 +1821,11 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
 
   const triggerLabel = (() => {
     switch (workflow.trigger.type) {
-      case 'Cron': return `Cron: ${workflow.trigger.schedule} (${workflow.trigger.timezone ?? 'UTC'})`;
+      case 'Cron': return `Cron: ${workflow.trigger.schedule} (${workflow.trigger.timezone ?? t('wiz.timezoneKronn')})`;
       case 'Watch': {
         const w = workflow.trigger;
         const source = w.quick_api_id ? `Quick API ${w.quick_api_id.slice(0, 8)}` : `${w.api_plugin_slug ?? '?'} ${w.api_endpoint_path ?? ''}`;
-        return `Watch: ${source} · ${w.interval} (${w.timezone ?? 'UTC'})`;
+        return `Watch: ${source} · ${w.interval} (${w.timezone ?? t('wiz.timezoneKronn')})`;
       }
       case 'Tracker': {
         const src = workflow.trigger.source;
@@ -2026,7 +2027,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                               availableAgentTypes={availableAgentTypes}
                               agentChoices={agentChoices}
                               onChange={onChangeStepAgent}
-                              modelTiers={agentAccess?.model_tiers}
+                              agentAccess={agentAccess}
                               t={t}
                               compact
                             />

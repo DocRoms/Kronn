@@ -116,6 +116,8 @@
   .avis[hidden] { display: none; }
   .avis-texte { flex: 1; display: grid; gap: 0.25rem; }
   .avis-texte p { margin: 0; }
+  .avis-corps { display: grid; gap: 0.25rem; }
+  .avis-corps strong { color: var(--ink); font-weight: 600; }
   #aide-confiance { color: var(--muted); font-size: 0.78rem; }
   .avis-fermer { border: none; background: none; color: var(--muted); font-size: 1rem; line-height: 1; padding: 0.15rem 0.3rem; border-radius: 5px; }
   .avis-fermer:hover { color: var(--ink); background: var(--surface); }
@@ -147,7 +149,7 @@
     </div>
   </div>
   <div class="avis" id="avis" role="note" hidden>
-    <div class="avis-texte"><p id="avis-texte"></p><p id="aide-confiance"></p></div>
+    <div class="avis-texte"><div class="avis-corps" id="avis-texte"></div><p id="aide-confiance"></p></div>
     <button class="avis-fermer" type="button" id="avis-fermer">✕</button>
   </div>
   <p class="statut" id="statut" role="status" aria-live="polite"></p>
@@ -180,7 +182,7 @@
   var LANG = '__KRONN_LANG__';
   var DICT = {
     fr: {
-      title: 'Ma Todo', notice: 'Cette page utilise les Tâches et les Workflows de Kronn pour fonctionner. Vous pouvez l’éditer, ou demander à un agent de la modifier pour l’adapter à vos besoins.', closeNotice: 'Fermer ce message', add: '+ Ajouter', addAria: 'Ajouter une tâche', refresh: '↻', refreshAria: 'Relire les tâches',
+      title: 'Ma Todo', notice: ['**Cette page fonctionne sans agent.** Elle s’appuie sur les **Tâches** (Planification) et les **Workflows** (Automatisation) de Kronn.', 'Vous êtes libre de l’adapter : ajouter des blocs, des statistiques issues de nouveaux workflows, une étape de validation ou de tri par un agent local ou autre.', 'Grâce au MCP et aux outils Kronn, tous vos agents configurés peuvent modifier cette page et ses workflows selon vos besoins.'], closeNotice: 'Fermer ce message', add: '+ Ajouter', addAria: 'Ajouter une tâche', refresh: '↻', refreshAria: 'Relire les tâches',
       emptyCol: 'Rien ici pour l’instant', noMatch: 'Aucune carte ne correspond à la recherche.', search: 'Rechercher une tâche, un tag…', searchAria: 'Rechercher dans la todo', clearSearch: 'Effacer la recherche', filterTag: 'Filtrer sur ce tag', prio: { critical: 'Critique', high: 'Haute', low: 'Basse' }, updated: 'Modifiée', created: 'Créée', linked: 'Discussion liée', of: 'sur',
       todo: 'À faire', in_progress: 'En cours', done: 'Fait', atEnd: 'En fin de colonne', beforeCard: 'Avant « % »',
       emptyTodo: 'Rien à faire. « + Ajouter » pour noter la prochaine chose.', emptyDoing: 'Rien en cours. Glisse une carte ici ou ▶.', emptyDone: 'Rien de terminé récemment.',
@@ -194,7 +196,7 @@
       trustHint: 'Pour enregistrer un glisser-déposer sans carte de validation, approuve une fois l’action « todo-move » dans les détails de cette page (actions de confiance).'
     },
     en: {
-      title: 'My Todo', notice: 'This page runs on Kronn’s Tasks and Workflows. You can edit it, or ask an agent to change it to fit your needs.', closeNotice: 'Dismiss this message', add: '+ Add', addAria: 'Add a task', refresh: '↻', refreshAria: 'Reload the tasks',
+      title: 'My Todo', notice: ['**This page runs without an agent.** It relies on Kronn’s **Tasks** (Planning) and **Workflows** (Automation).', 'You are free to adapt it: add blocks, statistics from new workflows, or a validation or sorting step handled by a local agent or another one.', 'Thanks to the MCP and Kronn’s tools, all your configured agents can change this page and its workflows to fit your needs.'], closeNotice: 'Dismiss this message', add: '+ Add', addAria: 'Add a task', refresh: '↻', refreshAria: 'Reload the tasks',
       emptyCol: 'Nothing here yet', noMatch: 'No card matches the search.', search: 'Search tasks or tags…', searchAria: 'Search the todo', clearSearch: 'Clear the search', filterTag: 'Filter on this tag', prio: { critical: 'Critical', high: 'High', low: 'Low' }, updated: 'Updated', created: 'Created', linked: 'Linked discussion', of: 'of',
       todo: 'To do', in_progress: 'In progress', done: 'Done', atEnd: 'At the end of the column', beforeCard: 'Before “%”',
       emptyTodo: 'Nothing to do. “+ Add” to note the next thing.', emptyDoing: 'Nothing in progress. Drop a card here or use ▶.', emptyDone: 'Nothing finished recently.',
@@ -208,7 +210,7 @@
       trustHint: 'To save a drag and drop without a confirmation card, approve the “todo-move” action once in this page’s details (trusted actions).'
     },
     es: {
-      title: 'Mi Todo', notice: 'Esta página funciona con las Tareas y los Workflows de Kronn. Puedes editarla o pedir a un agente que la modifique para adaptarla a tus necesidades.', closeNotice: 'Cerrar este mensaje', add: '+ Añadir', addAria: 'Añadir una tarea', refresh: '↻', refreshAria: 'Volver a leer las tareas',
+      title: 'Mi Todo', notice: ['**Esta página funciona sin agente.** Se apoya en las **Tareas** (Planificación) y los **Workflows** (Automatización) de Kronn.', 'Eres libre de adaptarla: añadir bloques, estadísticas de nuevos workflows, una etapa de validación o de clasificación a cargo de un agente local u otro.', 'Gracias al MCP y a las herramientas de Kronn, todos tus agentes configurados pueden modificar esta página y sus workflows según tus necesidades.'], closeNotice: 'Cerrar este mensaje', add: '+ Añadir', addAria: 'Añadir una tarea', refresh: '↻', refreshAria: 'Volver a leer las tareas',
       emptyCol: 'Nada por aquí todavía', noMatch: 'Ninguna tarjeta coincide con la búsqueda.', search: 'Buscar tareas o etiquetas…', searchAria: 'Buscar en la lista', clearSearch: 'Borrar la búsqueda', filterTag: 'Filtrar por esta etiqueta', prio: { critical: 'Crítica', high: 'Alta', low: 'Baja' }, updated: 'Modificada', created: 'Creada', linked: 'Discusión vinculada', of: 'de',
       todo: 'Por hacer', in_progress: 'En curso', done: 'Hecho', atEnd: 'Al final de la columna', beforeCard: 'Antes de «%»',
       emptyTodo: 'Nada por hacer. «+ Añadir» para anotar lo siguiente.', emptyDoing: 'Nada en curso. Suelta una tarjeta aquí o usa ▶.', emptyDone: 'Nada terminado recientemente.',
@@ -222,7 +224,7 @@
       trustHint: 'Para guardar un arrastre sin tarjeta de confirmación, aprueba una vez la acción «todo-move» en los detalles de esta página (acciones de confianza).'
     },
     zh: {
-      title: '我的待办', notice: '此页面依靠 Kronn 的任务和工作流运行。你可以编辑它，或让代理修改它以满足你的需求。', closeNotice: '关闭此消息', add: '+ 添加', addAria: '添加任务', refresh: '↻', refreshAria: '重新读取任务',
+      title: '我的待办', notice: ['**此页面无需代理即可运行。**它依托 Kronn 的**任务**（规划）和**工作流**（自动化）。', '你可以自由调整它：添加区块、来自新工作流的统计数据，或由本地代理或其他代理执行的验证或分类步骤。', '借助 MCP 和 Kronn 工具，你配置的所有代理都可以根据你的需求修改此页面及其工作流。'], closeNotice: '关闭此消息', add: '+ 添加', addAria: '添加任务', refresh: '↻', refreshAria: '重新读取任务',
       emptyCol: '这里暂时还没有内容', noMatch: '没有卡片符合搜索条件。', search: '搜索任务或标签…', searchAria: '搜索待办', clearSearch: '清除搜索', filterTag: '按此标签筛选', prio: { critical: '紧急', high: '高', low: '低' }, updated: '更新于', created: '创建于', linked: '已关联讨论', of: '/',
       todo: '待办', in_progress: '进行中', done: '已完成', atEnd: '列末尾', beforeCard: '在“%”之前',
       emptyTodo: '没有待办。点击“+ 添加”记下下一件事。', emptyDoing: '没有进行中的任务。把卡片拖到这里或点 ▶。', emptyDone: '最近没有完成的任务。',
@@ -573,7 +575,20 @@
     var kept = Boolean(root && root.prefs && root.prefs['notice-dismissed'] === true);
     avis.hidden = closedHere || kept || locallyDismissed();
   }
-  document.getElementById('avis-texte').textContent = T.notice;
+  // Paragraphs with **bold** runs, built as nodes: the text never goes through innerHTML.
+  function renderNotice(el, paragraphs) {
+    el.textContent = '';
+    paragraphs.forEach(function (line) {
+      var p = document.createElement('p');
+      line.split('**').forEach(function (part, i) {
+        if (!part) return;
+        if (i % 2) { var b = document.createElement('strong'); b.textContent = part; p.appendChild(b); }
+        else p.appendChild(document.createTextNode(part));
+      });
+      el.appendChild(p);
+    });
+  }
+  renderNotice(document.getElementById('avis-texte'), T.notice);
   var fermer = document.getElementById('avis-fermer');
   fermer.setAttribute('aria-label', T.closeNotice);
   fermer.setAttribute('title', T.closeNotice);

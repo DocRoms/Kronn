@@ -64,6 +64,46 @@ fn with_runtime_notices(output: String, notices: &[String]) -> String {
 /// Optional sender for streaming partial agent output during step execution.
 pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
+/// The refusal of a native ACP step agent whose full-access setting is off,
+/// read as the runner reads it; `None` when the agent may start.
+pub(crate) fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
+    (runner::requires_explicit_full_access(agent) && !crate::core::config::saved_full_access(agent))
+        .then(|| runner::native_full_access_refusal(agent))
+}
+
+/// The step fails once on that refusal (`native_full_access_required: …`):
+/// the same on every attempt, so never retried and never a quota wait; an
+/// ordinary failure otherwise, so `on_failure` still runs.
+fn native_full_access_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
+    StepOutcome {
+        result: StepResult {
+            step_name: step.name.clone(),
+            status: RunStatus::Failed,
+            output: refusal,
+            tokens_used: Some(0),
+            duration_ms: 0,
+            started_at: None,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+            agent_provenance: Some(Box::default()),
+            native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
+        },
+        condition_action: None,
+    }
+}
+
 pub(crate) fn step_model_override(
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
@@ -219,6 +259,10 @@ pub async fn execute_step(
     run_id: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
+
+    if let Some(refusal) = native_full_access_refusal_for(&step.agent) {
+        return native_full_access_outcome(step, refusal);
+    }
 
     // Build prompt (template render + output-format addendum + triage
     // addendum). Errors map to a Failed StepOutcome.

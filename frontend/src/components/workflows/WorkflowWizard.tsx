@@ -316,6 +316,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       compact={compact}
       title={t('disc.switchAgentAndTier')}
       ariaLabel={t('wiz.agentAndTierLabel')}
+      needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
     />
   );
   const isEdit = !!editWorkflow;
@@ -1751,7 +1752,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </>
           ))}
           {triggerType === 'Cron' && (
-            <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} />
+            <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
           )}
         </div>
       )}
@@ -1911,7 +1912,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 </span>
               </div>
               <div className="mt-4">
-                <TimezoneField id="wf-cron-timezone" value={cronTimezone} onChange={setCronTimezone} />
+                <TimezoneField id="wf-cron-timezone" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
               </div>
             </>
           )}
@@ -3754,9 +3755,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           <div className="wf-page-write" key={writeIndex}>
                             <input className="wf-input text-sm" value={write.dataset} onChange={e => updateWrite({ dataset: e.target.value })} placeholder="dataset" aria-label="dataset" />
                             <select className="wf-select text-sm" value={write.operation} onChange={e => updateWrite({ operation: e.target.value as typeof write.operation })} aria-label="operation">
-                              <option value="replace">replace</option><option value="append">append</option><option value="upsert">upsert</option>
+                              <option value="replace">replace</option><option value="append">append</option><option value="upsert">upsert</option><option value="clear">clear</option>
                             </select>
-                            <input className="wf-input text-sm" value={write.value_from} onChange={e => updateWrite({ value_from: e.target.value })} placeholder={i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger'} aria-label="value_from" />
+                            <input className="wf-input text-sm" disabled={write.operation === 'clear'} value={write.value_from} onChange={e => updateWrite({ value_from: e.target.value })} placeholder={i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger'} aria-label="value_from" />
                             <button type="button" className="wf-icon-btn" onClick={() => setConfig({ ...config, writes: config.writes.filter((_, index) => index !== writeIndex) })}><X size={13} /></button>
                           </div>
                         );
@@ -5234,9 +5235,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <div className="wf-summary-row"><span className="wf-summary-label">Projet</span> {projects.find(p => p.id === projectId)?.name ?? 'Aucun'}</div>
           <div className="wf-summary-row">
             <span className="wf-summary-label">Trigger</span>
-            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()}${cronTimezone.trim() ? `, ${cronTimezone.trim()}` : ', UTC'})`
+            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()}${cronTimezone.trim() ? `, ${cronTimezone.trim()}` : `, ${t('wiz.timezoneKronn')}`})`
               : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}`
-              : triggerType === 'Watch' ? `Watch: ${watchDraft.interval}${watchDraft.timezone.trim() ? ` (${watchDraft.timezone.trim()})` : ' (UTC)'}`
+              : triggerType === 'Watch' ? `Watch: ${watchDraft.interval}${watchDraft.timezone.trim() ? ` (${watchDraft.timezone.trim()})` : ` (${t('wiz.timezoneKronn')})`}`
               : 'Manuel'}
           </div>
           {concurrencyLimit && (

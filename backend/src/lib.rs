@@ -34,6 +34,24 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Loads the config (defaults when none is saved) and arms the process-wide
+/// timezone from it. Every entry point (standalone, desktop) loads its config
+/// through this, so no scheduler tick or preview runs in the wrong zone.
+pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
+    load_startup_config_with(crate::core::timezone::detect_machine_timezone).await
+}
+
+async fn load_startup_config_with(
+    detect: impl FnOnce() -> chrono_tz::Tz,
+) -> anyhow::Result<AppConfig> {
+    let config = match crate::core::config::load().await? {
+        Some(cfg) => cfg,
+        None => crate::core::config::default_config_without_key(),
+    };
+    crate::core::timezone::apply_with(config.server.timezone.as_deref(), detect());
+    Ok(config)
+}
+
 /// Resolve the encryption key and load the stored credentials, right after the
 /// database opens. Both startup paths call this; an `Err` must stop the boot:
 /// continuing could mint or mirror over the only copy of the key (KT-1007).
@@ -1401,6 +1419,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/pages/{id}/datasets",
             post(api::live_pages::add_dataset),
         )
+        .route(
+            "/api/pages/{id}/datasets/{name}",
+            delete(api::live_pages::delete_dataset).patch(api::live_pages::update_dataset),
+        )
+        .route(
+            "/api/pages/{id}/dataset-usage",
+            get(api::live_pages::dataset_usage),
+        )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
         // ── Live Page inline Kronn actions (KT-538) ──
         .route(
@@ -2232,6 +2258,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/workflows/safety-check",
             post(api::workflows::safety_check),
+        )
+        .route(
+            "/api/workflows/cron-preview",
+            post(api::workflows::cron_preview),
         )
         .route(
             "/api/workflows/bundle/human",
@@ -3610,5 +3640,97 @@ mod auth_tests {
         assert!(!is_local_ip(""));
         assert!(!is_local_ip("not-an-ip"));
         assert!(!is_local_ip("172.foo.0.1"));
+    }
+}
+
+#[cfg(test)]
+mod startup_config_tests {
+    use super::*;
+    use chrono_tz::Tz;
+    use serial_test::serial;
+
+    /// Points the config dir at a fresh directory, returning the previous one.
+    fn fresh_config_dir(name: &str) -> Option<std::ffi::OsString> {
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        let base = previous
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("startup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
+        previous
+    }
+
+    fn restore(previous: Option<std::ffi::OsString>) {
+        // Back to UTC, the zone every other test of this binary assumes.
+        crate::core::timezone::apply_with(None, Tz::UTC);
+        match previous {
+            Some(dir) => crate::core::child_env::set_var("KRONN_DATA_DIR", dir),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    fn preview_zone() -> String {
+        let req = crate::api::workflows::CronPreviewRequest {
+            schedule: "0 7 * * *".into(),
+            timezone: None,
+        };
+        crate::api::workflows::cron_preview_at(
+            &req,
+            crate::core::timezone::current(),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .timezone
+    }
+
+    // Etc/* aliases render like UTC, so a concurrent test never sees a shift.
+    #[tokio::test]
+    #[serial]
+    async fn startup_applies_the_configured_zone_before_any_tick() {
+        let previous = fresh_config_dir("explicit");
+        let mut cfg = crate::core::config::default_config();
+        cfg.server.timezone = Some("Etc/UTC".into());
+        crate::core::config::save(&cfg).await.unwrap();
+        crate::core::timezone::apply_with(None, Tz::UTC);
+
+        let loaded = load_startup_config().await.unwrap();
+        let (zone, preview) = (crate::core::timezone::current(), preview_zone());
+        restore(previous);
+        assert_eq!(loaded.server.timezone.as_deref(), Some("Etc/UTC"));
+        assert_eq!(zone, Tz::Etc__UTC);
+        assert_eq!(preview, "Etc/UTC");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_without_a_saved_zone_applies_the_machine_zone() {
+        let previous = fresh_config_dir("empty");
+        crate::core::timezone::apply_with(None, Tz::UTC);
+
+        let loaded = load_startup_config_with(|| Tz::Etc__UCT).await.unwrap();
+        let (zone, preview) = (crate::core::timezone::current(), preview_zone());
+        restore(previous);
+        assert_eq!(loaded.server.timezone, None);
+        assert_eq!(zone, Tz::Etc__UCT);
+        assert_eq!(preview, "Etc/UCT");
+    }
+
+    #[test]
+    fn every_entry_point_loads_its_config_through_the_shared_startup() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                source.contains("kronn::load_startup_config().await"),
+                "{entry} must load its config through kronn::load_startup_config"
+            );
+            assert!(
+                !source.contains("config::load().await"),
+                "{entry} loads its config directly and skips the timezone"
+            );
+        }
     }
 }

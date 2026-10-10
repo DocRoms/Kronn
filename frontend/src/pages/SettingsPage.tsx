@@ -64,6 +64,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { RecoverySection } from '../components/settings/RecoverySection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
+import { TimezoneSetting } from '../components/settings/TimezoneSetting';
 import { PublicationCredentialsSection } from '../components/settings/PublicationCredentialsSection';
 import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
@@ -1820,6 +1821,8 @@ export function SettingsPage({
               {t('config.domainHint')}
             </div>
           </div>
+
+          <TimezoneSetting toast={toast} t={t} />
 
         </div>
       </div>

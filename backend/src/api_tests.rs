@@ -3185,6 +3185,97 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    async fn config_server_timezone_is_returned_validated_and_saved() {
+        isolate_config_dir();
+        let state = test_state();
+        let post = |tz: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/server")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "timezone": tz }).to_string(),
+                ))
+                .unwrap()
+        };
+        let get = || {
+            Request::builder()
+                .method("GET")
+                .uri("/api/config/server")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (_, body) = send(state.clone(), false, get()).await;
+        assert_eq!(body["data"]["timezone"], serde_json::Value::Null);
+        assert!(body["data"]["timezone_detected"]
+            .as_str()
+            .is_some_and(|z| !z.is_empty()));
+
+        // UTC keeps the process zone this test binary already uses.
+        let (_, body) = send(state.clone(), false, post(" UTC ")).await;
+        assert_eq!(body["success"], true, "{body}");
+        let (_, body) = send(state.clone(), false, get()).await;
+        assert_eq!(body["data"]["timezone"], "UTC");
+        assert_eq!(body["data"]["timezone_effective"], "UTC");
+
+        let (_, body) = send(state.clone(), false, post("Europe/Atlantis")).await;
+        assert_eq!(body["success"], false);
+        assert!(body["error"].as_str().unwrap().contains("Europe/Atlantis"));
+        assert_eq!(
+            state.config.read().await.server.timezone.as_deref(),
+            Some("UTC")
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_preview_returns_the_zone_and_the_next_three_firings() {
+        let state = test_state();
+        let preview = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/cron-preview")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let (_, body) = send(
+            state.clone(),
+            false,
+            preview(serde_json::json!({ "schedule": "0 7 * * 1-5", "timezone": "Europe/Paris" })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(body["data"]["timezone"], "Europe/Paris");
+        assert_eq!(body["data"]["inherited"], false);
+        let next = body["data"]["next"].as_array().unwrap();
+        assert_eq!(next.len(), 3);
+        assert!(next
+            .iter()
+            .all(|at| at.as_str().unwrap().contains("T07:00:00+0")));
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            preview(serde_json::json!({ "schedule": "*/5 * * * *" })),
+        )
+        .await;
+        assert_eq!(body["data"]["inherited"], true);
+        assert_eq!(
+            body["data"]["timezone"],
+            crate::core::timezone::current().name()
+        );
+
+        let (_, body) = send(
+            state,
+            false,
+            preview(serde_json::json!({ "schedule": "0 7 * * *", "timezone": "Mars/Olympus" })),
+        )
+        .await;
+        assert_eq!(body["success"], false);
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn config_agent_mention_color_validates_and_persists() {
         isolate_config_dir();
         let state = test_state();

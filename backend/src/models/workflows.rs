@@ -334,8 +334,8 @@ pub enum GuardKind {
 pub enum WorkflowTrigger {
     Cron {
         schedule: String,
-        /// IANA timezone the schedule is read in; absent means UTC, so
-        /// workflows saved before the field keep their hours.
+        /// IANA timezone the schedule is read in; absent means Kronn's
+        /// global timezone. Triggers saved before it were pinned to UTC.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         timezone: Option<String>,
@@ -375,7 +375,7 @@ pub struct WatchTrigger {
     pub api_query: Option<std::collections::HashMap<String, String>>,
     /// Cron expression of the poll cadence.
     pub interval: String,
-    /// IANA timezone `interval` is read in; absent means UTC.
+    /// IANA timezone `interval` is read in; absent means Kronn's global one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub timezone: Option<String>,
@@ -1472,7 +1472,9 @@ pub struct PublishPageDataWrite {
     pub dataset: String,
     pub operation: LivePageWriteOperation,
     /// Chemin typé du contexte, avec ou sans doubles accolades.
-    /// Exemple : `steps.fetch_metrics.data.series`.
+    /// Exemple : `steps.fetch_metrics.data.series`. Absent pour `clear` ;
+    /// la validation l'exige pour les autres opérations.
+    #[serde(default)]
     pub value_from: String,
     /// Date RFC3339 optionnelle, template runtime autorisé.
     #[serde(default, skip_serializing_if = "Option::is_none")]

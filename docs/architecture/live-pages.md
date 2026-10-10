@@ -183,6 +183,50 @@ JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
 new point does not rewrite the full history.
 
+### Dataset lifecycle (KT-1104)
+
+A dataset can be emptied, re-limited and deleted after creation:
+
+- **Clear.** `clear` is a publish write valid for every kind and needs no
+  `value`. It deletes every time-series point, sets a snapshot to `null` and a
+  collection to `[]` so a Page iterating it keeps working. It is recorded in
+  the publication ledger like any write, from the API or a `PublishPageData`
+  step. Only `clear` may omit `value` (API) or `value_from` (step); the other
+  operations still require them, an explicit `null` value included.
+  `[src: file: backend/src/db/live_pages.rs:854]`
+- **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
+  `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
+  limits in the same transaction, then moves the Page to a new data revision
+  when anything was removed. `[src: file: backend/src/db/live_page_datasets.rs:245]`
+- **Delete.** `DELETE /api/pages/{id}/datasets/{name}` removes the dataset and
+  its points. It is refused (`conflict`) with the list of references while a
+  saved workflow's `PublishPageData` step writes it (target matched by id, live
+  slug or retired slug), the current HTML names it as a whole word, or a Page
+  button binds to it (`<page.dataset.NAME...>`). `?force=true` deletes anyway
+  and returns the references it went past. The check and the deletion share
+  one transaction: a publication lands before (and is deleted) or after (and
+  fails with "Unknown dataset"). A workflow page target written as a runtime
+  template cannot be matched. `[src: file: backend/src/db/live_page_datasets.rs:60-88]`
+  `[src: file: backend/src/db/live_page_datasets.rs:204]`
+- **Usage.** `GET /api/pages/{id}/dataset-usage` returns, per dataset, its
+  writers, whether the HTML names it, and its bound buttons; the data panel
+  shows it next to each dataset's size and last write, with Empty, Delete and
+  (time series) limit controls behind confirmations.
+  `[src: file: backend/src/db/live_page_datasets.rs:161]`
+  `[src: file: frontend/src/components/LivePageDatasetControls.tsx:41]`
+
+Who may do what: a human may do all four. A bridge token (MCP
+`page_delete_dataset`) may delete only a dataset nothing references, within its
+Page write scope, and never with `force` (the handler refuses it). Limits,
+usage and publishing (hence `clear`) are absent from `BRIDGE_ROUTES`, so a
+token never reaches them; the limits and usage handlers also refuse a bridge
+caller.
+None of these touch what a trusted button's approval fingerprint covers (the
+block and the workflow definition), so approvals stay valid; deleting a dataset
+a button binds needs `force`, after which that button fails at launch.
+`[src: file: backend/src/api/live_pages.rs:533-620]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7756]`
+
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
 metadata is repeated, parallel nested arrays are zipped by index, and matrix

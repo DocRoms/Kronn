@@ -588,6 +588,12 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("PATCH", "/api/pages/{id}", Write, &[("id", G)]),
     r("PUT", "/api/pages/{id}/html", Write, &[("id", G)]),
     r("POST", "/api/pages/{id}/datasets", Write, &[("id", G)]),
+    r(
+        "DELETE",
+        "/api/pages/{id}/datasets/{name}",
+        Write,
+        &[("id", G)],
+    ),
     r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
     r("GET", "/api/pages/{id}/discussions", Read, &[("id", G)]),
     r("POST", "/api/media/generate", Effect, &[]),

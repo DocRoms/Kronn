@@ -522,6 +522,128 @@ pub async fn add_dataset(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteLivePageDatasetQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// What reads or writes each dataset of a Page. Human only: it names
+/// workflows a bridge token may not see.
+pub async fn dataset_usage(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::LivePageDatasetUsage>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Dataset usage is shown to a human only",
+        ));
+    }
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::live_pages::list_live_page_dataset_usage(conn, &id))
+        .await
+    {
+        Ok(Some(usage)) => Json(ApiResponse::ok(usage)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to read dataset usage: {error}"),
+        )),
+    }
+}
+
+/// Deletes a dataset nothing uses. A dataset still written, named or bound is
+/// refused with its references; only a human may delete it anyway (`force`).
+pub async fn delete_dataset(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(query): Query<DeleteLivePageDatasetQuery>,
+) -> Json<ApiResponse<crate::models::DeleteLivePageDatasetResult>> {
+    if query.force && bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can delete a dataset that is still in use",
+        ));
+    }
+    let force = query.force;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::delete_live_page_dataset(conn, &id, &name, force)
+        })
+        .await;
+    match result {
+        Ok(deleted) => {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::LivePageDataChanged {
+                    page_id: deleted.page_id.clone(),
+                    data_revision: deleted.data_revision,
+                });
+            Json(ApiResponse::ok(deleted))
+        }
+        Err(error) => Json(dataset_error(error, "Unable to delete dataset")),
+    }
+}
+
+/// Changes a dataset's retention limits; existing points are pruned at once.
+/// Human only, like `clear`: pruning destroys data.
+pub async fn update_dataset(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path((id, name)): Path<(String, String)>,
+    Json(request): Json<crate::models::UpdateLivePageDatasetRequest>,
+) -> Json<ApiResponse<crate::models::UpdateLivePageDatasetResult>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can change a dataset's retention limits",
+        ));
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::update_live_page_dataset_limits(conn, &id, &name, &request)
+        })
+        .await;
+    match result {
+        Ok(updated) => {
+            if updated.points_removed > 0 {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::models::WsMessage::LivePageDataChanged {
+                        page_id: updated.dataset.page_id.clone(),
+                        data_revision: updated.data_revision,
+                    });
+            }
+            Json(ApiResponse::ok(updated))
+        }
+        Err(error) => Json(dataset_error(error, "Unable to update dataset")),
+    }
+}
+
+fn dataset_error<T: serde::Serialize>(error: anyhow::Error, context: &str) -> ApiResponse<T> {
+    let message = error.to_string();
+    let code =
+        if message == "Page not found" || error.is::<crate::db::live_pages::DatasetNotFound>() {
+            ApiErrorCode::NotFound
+        } else if error.is::<crate::db::live_pages::DatasetReferenced>() {
+            ApiErrorCode::Conflict
+        } else if message.contains("must be greater than zero") {
+            ApiErrorCode::Validation
+        } else {
+            return ApiResponse::err_coded(ApiErrorCode::Internal, format!("{context}: {message}"));
+        };
+    ApiResponse::err_coded(code, message)
+}
+
 pub async fn publish(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -768,6 +890,10 @@ pub async fn change_embed_origins(
     announce_embed_origins_changed(&state);
     Json(ApiResponse::ok(next))
 }
+
+#[cfg(test)]
+#[path = "live_page_dataset_api_tests.rs"]
+mod dataset_api_tests;
 
 #[cfg(test)]
 mod tests {

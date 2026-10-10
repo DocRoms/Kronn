@@ -622,11 +622,8 @@ async fn start_backend(
         format!("http://127.0.0.1:{port}"),
     );
 
-    // Load or create config
-    let mut app_config = match config::load().await? {
-        Some(cfg) => cfg,
-        None => config::default_config_without_key(),
-    };
+    // Load or create config; also arms the process timezone (KT-1103).
+    let mut app_config = kronn::load_startup_config().await?;
 
     // Embedded mode: bind loopback by default, but HONOR the network-exposure
     // toggle (`config.server.host = 0.0.0.0`) so the desktop app can join the

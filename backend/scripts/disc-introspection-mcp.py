@@ -77,6 +77,48 @@ _BRIDGE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
 _BRIDGE_HANDOFF_PENDING_MAX_BYTES = 256 * 1024
 _BRIDGE_SOURCE_PATH = os.environ.get(_BRIDGE_SOURCE_ENV) or os.path.abspath(__file__)
 _BRIDGE_ARTIFACT_FD = None
+# A runtime that starts MCP servers without its own environment (Vibe) names
+# an owner-only file holding the launch's secrets instead (KT-1082).
+_BRIDGE_SECRET_ENV_FILE_ENV = "KRONN_BRIDGE_SECRET_ENV_FILE"
+_BRIDGE_SECRET_ENV_NAMES = ("KRONN_BRIDGE_TOKEN", "KRONN_WORKFLOW_STEP_CONTEXT")
+
+
+def _load_bridge_secret_env():
+    """Set the named secrets from the launch's file, never over a held value.
+
+    Only an owner-only regular file is read; anything else is ignored.
+    """
+    path = os.environ.get(_BRIDGE_SECRET_ENV_FILE_ENV)
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return
+        if os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+            sys.stderr.write("kronn-internal: secrets file is not owner-only, ignored\n")
+            return
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            values = json.loads(handle.read(64 * 1024))
+    except (OSError, ValueError):
+        return
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not isinstance(values, dict):
+        return
+    for name in _BRIDGE_SECRET_ENV_NAMES:
+        value = values.get(name)
+        if isinstance(value, str) and value and not os.environ.get(name):
+            os.environ[name] = value
+
+
+_load_bridge_secret_env()
 
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
@@ -1470,11 +1512,9 @@ TOOLS = [
     {
         "name": "page_list",
         "description": (
-            "List Live Pages (all, or one project's with `project_id`): id, "
-            "title, slug, project_id, data_revision, updated_at and "
-            "last_published_at. Before authoring a PublishPageData step, "
-            "reuse a matching page_id: several workflows may publish into "
-            "the same Page."
+            "List Live Pages (all, or one project's): id, title, slug, "
+            "project_id, data_revision, timestamps. Reuse a matching page_id "
+            "before authoring PublishPageData; several workflows may feed one Page."
         ),
         "inputSchema": {
             "type": "object",
@@ -1484,10 +1524,9 @@ TOOLS = [
     {
         "name": "page_get",
         "description": (
-            "Fetch one Live Page by id or slug, including its current HTML "
-            "revision, declared datasets, retained points and every saved "
-            "workflow step that targets it. Read this before changing the HTML "
-            "or wiring another workflow into the Page."
+            "Fetch a Live Page by id or slug: current HTML revision, datasets, "
+            "retained points and workflow steps targeting it. Read before "
+            "editing the HTML or wiring a workflow."
         ),
         "inputSchema": {
             "type": "object",
@@ -1503,9 +1542,8 @@ TOOLS = [
             "Create a sandboxed Live Page and its first immutable HTML revision. "
             "Call `page_list` first. Data arrives through `window.KronnPageData` "
             "and `kronn:page-data`; use the returned id in PublishPageData. Scope "
-            "inherits from a bound discussion, while host CLIs may create standalone "
-            "Pages. Typed inline QP/QA/QE/Workflow CTAs are documented by "
-            "`tool_manual({tool: \"page_create\"})`."
+            "inherits a bound discussion's; host CLIs may create standalone Pages. "
+            "Inline QP/QA/QE/Workflow buttons: `tool_manual({tool: \"page_create\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1539,7 +1577,7 @@ TOOLS = [
         "name": "page_update_html",
         "description": (
             "New immutable HTML revision of a Live Page; datasets and history "
-            "are kept. Call page_get first; send complete self-contained HTML, "
+            "are kept. Call page_get first; send the complete HTML, "
             "not a patch. `slug` renames it. Manual: "
             "`tool_manual({tool: \"page_update_html\"})`."
         ),
@@ -1556,8 +1594,8 @@ TOOLS = [
     {
         "name": "page_add_dataset",
         "description": (
-            "Attach a dataset to an existing Page so PublishPageData can write "
-            "to it. Idempotent on name+kind; reusing a name with another kind conflicts."
+            "Attach a dataset PublishPageData can write. Idempotent on "
+            "name+kind; a name reused with another kind conflicts."
         ),
         "inputSchema": {
             "type": "object",
@@ -1571,6 +1609,18 @@ TOOLS = [
                 "max_age_days": {"type": "integer"},
             },
             "required": ["page_id", "name", "kind"],
+        },
+    },
+    {
+        "name": "page_delete_dataset",
+        "description": (
+            "Irreversible: deletes a dataset and its data. Refused, listing "
+            "users, while a workflow, the HTML or a button uses it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}, "name": {"type": "string"}},
+            "required": ["page_id", "name"],
         },
     },
     {
@@ -1588,13 +1638,11 @@ TOOLS = [
     {
         "name": "convention_get",
         "description": (
-            "Fetch the canonical Kronn documentation convention — how to "
-            "author `docs/AGENTS.md`: the `kronn:section` markers, the "
-            "`[src: …]` provenance grammar, and the curated ownership rules. "
-            "Returns the markdown spec verbatim.\n\n"
-            "⚠ Call this BEFORE writing to a `curated=\"ai\"` section: the "
-            "embedded spec is the source of truth for THIS installation, "
-            "which is what it lints against."
+            "Fetch the Kronn convention for authoring `docs/AGENTS.md` "
+            "(`kronn:section` markers, `[src: ...]` provenance grammar, curated "
+            "ownership rules) as verbatim markdown. Call this BEFORE writing to a "
+            "`curated=\"ai\"` section: THIS installation lints against this "
+            "embedded spec."
         ),
         "inputSchema": {
             "type": "object",
@@ -7759,6 +7807,16 @@ def call_page_add_dataset(args):
     return _unwrap(_http("POST", f"/api/pages/{encoded}/datasets", body))
 
 
+def call_page_delete_dataset(args):
+    """Delete a dataset nothing uses; a forced deletion is a human's."""
+    encoded = _page_selector(args, "page_delete_dataset")
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise RuntimeError("page_delete_dataset: missing required 'name'")
+    path = f"/api/pages/{encoded}/datasets/{urllib.parse.quote(name.strip(), safe='')}"
+    return _unwrap(_http("DELETE", path))
+
+
 def _describe_access_rule(rule):
     """Mirror of `core::api_access::describe_rule` (KT-1026)."""
     kind = (rule or {}).get("kind")
@@ -10834,6 +10892,7 @@ DISPATCH = {
     "page_create": call_page_create,
     "page_update_html": call_page_update_html,
     "page_add_dataset": call_page_add_dataset,
+    "page_delete_dataset": call_page_delete_dataset,
     "mcp_list": call_mcp_list,
     # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
     # called; lets agents about to author AGENTS.md sections pull the
@@ -11599,7 +11658,7 @@ def _handle(req):
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
-                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset` · `page_delete_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "

@@ -298,6 +298,10 @@ pub struct ServerConfig {
     /// `models::discussion_weight`; this is only the persisted field.
     #[serde(default)]
     pub discussion_weight: crate::models::DiscussionWeightConfig,
+    /// IANA zone crons, watches and `{{time.now}}` default to (KT-1103).
+    /// `None` follows the machine's zone, detected at boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 impl ServerConfig {
@@ -1081,6 +1085,12 @@ pub struct ServerConfigPublic {
     pub run_payload_retention_days: u32,
     pub p2p_enabled: bool,
     pub frontend_origins: Vec<String>,
+    /// The zone set in Settings; `None` follows the machine.
+    pub timezone: Option<String>,
+    /// The zone in effect: `timezone`, else `timezone_detected`.
+    pub timezone_effective: String,
+    /// The machine's zone (`TZ`, then the OS setting, then UTC).
+    pub timezone_detected: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1128,4 +1138,7 @@ pub struct UpdateServerConfigRequest {
     /// Replaces the whole list; every entry must be an exact origin.
     #[serde(default)]
     pub frontend_origins: Option<Vec<String>>,
+    /// An IANA name, or an empty string to follow the machine's zone again.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }

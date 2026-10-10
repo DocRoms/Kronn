@@ -226,18 +226,55 @@ pub enum LivePageWriteOperation {
     Replace,
     Append,
     Upsert,
+    /// Empties any kind: the snapshot or collection value, or every point of
+    /// a time series. `value` is ignored.
+    Clear,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+#[serde(try_from = "RawLivePageWrite")]
 pub struct LivePageWrite {
     pub dataset: String,
     pub operation: LivePageWriteOperation,
+    /// Required, `null` included; only `clear` may omit it.
     #[ts(type = "any")]
     pub value: serde_json::Value,
     pub observed_at: Option<DateTime<Utc>>,
     pub dedupe_key: Option<String>,
     pub key_field: Option<String>,
+}
+
+/// The wire form, which tells an omitted `value` from an explicit `null`.
+#[derive(Deserialize)]
+struct RawLivePageWrite {
+    dataset: String,
+    operation: LivePageWriteOperation,
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    value: Option<Option<serde_json::Value>>,
+    observed_at: Option<DateTime<Utc>>,
+    dedupe_key: Option<String>,
+    key_field: Option<String>,
+}
+
+impl TryFrom<RawLivePageWrite> for LivePageWrite {
+    type Error = String;
+
+    fn try_from(raw: RawLivePageWrite) -> Result<Self, Self::Error> {
+        let value = match raw.value {
+            Some(value) => value.unwrap_or(serde_json::Value::Null),
+            None if raw.operation == LivePageWriteOperation::Clear => serde_json::Value::Null,
+            None => return Err("missing field `value`".into()),
+        };
+        Ok(Self {
+            dataset: raw.dataset,
+            operation: raw.operation,
+            value,
+            observed_at: raw.observed_at,
+            dedupe_key: raw.dedupe_key,
+            key_field: raw.key_field,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -260,6 +297,65 @@ pub struct PublishLivePageResult {
     pub points_added: u32,
     pub points_removed: u32,
     pub published_at: DateTime<Utc>,
+}
+
+/// `PATCH /api/pages/{id}/datasets/{name}`: new retention limits. Existing
+/// points beyond them are pruned at once. `max_age_days: null` lifts the age
+/// limit; an absent field keeps its value.
+#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateLivePageDatasetRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_points: Option<u32>,
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional, type = "number | null")]
+    pub max_age_days: Option<Option<u32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateLivePageDatasetResult {
+    pub dataset: LivePageDataset,
+    pub points_removed: u32,
+    pub data_revision: u64,
+}
+
+/// A workflow whose `PublishPageData` step writes one dataset.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageDatasetWriter {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub enabled: bool,
+}
+
+/// What reads or writes one dataset: the check made before deleting it.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LivePageDatasetUsage {
+    pub name: String,
+    pub writers: Vec<LivePageDatasetWriter>,
+    /// The dataset name appears as a whole word in the current HTML revision.
+    pub html_referenced: bool,
+    /// Page buttons (`action_ref`) whose values bind to this dataset.
+    pub action_refs: Vec<String>,
+}
+
+impl LivePageDatasetUsage {
+    pub fn is_referenced(&self) -> bool {
+        !self.writers.is_empty() || self.html_referenced || !self.action_refs.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteLivePageDatasetResult {
+    pub page_id: String,
+    pub name: String,
+    pub data_revision: u64,
+    /// The references a forced deletion went past; empty otherwise.
+    pub overridden: LivePageDatasetUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

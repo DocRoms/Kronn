@@ -1,11 +1,21 @@
+import { useEffect, useState } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { COMMON_TIMEZONES, type WatchDraft, type WatchDetectionMode } from '../../lib/watchTrigger';
-import type { QuickApi } from '../../types/generated';
+import { workflows as workflowsApi } from '../../lib/api';
+import { COMMON_TIMEZONES, formatFires, type WatchDraft, type WatchDetectionMode } from '../../lib/watchTrigger';
+import type { CronPreview, QuickApi } from '../../types/generated';
 import type { ApiPluginOption } from './ApiCallStepCard';
 
-/** IANA timezone input; empty means UTC. Shared by the Cron and Watch triggers. */
-export function TimezoneField({ id, value, onChange }: { id: string; value: string; onChange: (tz: string) => void }) {
-  const { t } = useT();
+/** IANA timezone input; empty means Kronn's global zone. Shared by the Cron
+ *  and Watch triggers; with a `schedule`, it previews the next 3 firings. */
+export function TimezoneField({ id, value, onChange, schedule }: {
+  id: string;
+  value: string;
+  onChange: (tz: string) => void;
+  schedule?: string;
+}) {
+  const { t, locale } = useT();
+  const preview = useCronPreview(schedule, value);
+  const inherited = preview.data?.inherited ? preview.data.timezone : null;
   return (
     <div className="mb-4">
       <label className="wf-label" htmlFor={id}>{t('wiz.timezone')}</label>
@@ -15,15 +25,52 @@ export function TimezoneField({ id, value, onChange }: { id: string; value: stri
         list={`${id}-zones`}
         value={value}
         onChange={e => onChange(e.target.value)}
-        placeholder="UTC"
+        placeholder={inherited ?? t('wiz.timezoneKronn')}
         spellCheck={false}
       />
       <datalist id={`${id}-zones`}>
         {COMMON_TIMEZONES.map(zone => <option key={zone} value={zone} />)}
       </datalist>
-      <p className="text-xs text-ghost mt-1">{t('wiz.timezoneUtcNote')}</p>
+      <p className="text-xs text-ghost mt-1">{t('wiz.timezoneDefaultNote')}</p>
+      {schedule !== undefined && (
+        <div className="wf-cron-preview text-xs mt-1" data-testid={`${id}-preview`}>
+          {preview.data && (
+            <>
+              <div className="text-muted">
+                {t(preview.data.inherited ? 'wiz.timezoneInUseKronn' : 'wiz.timezoneInUse', preview.data.timezone)}
+              </div>
+              <div className="text-tertiary">
+                {preview.data.next.length > 0
+                  ? t('wiz.cronNextFires', formatFires(preview.data.next, preview.data.timezone, locale))
+                  : t('wiz.cronNoNextFire')}
+              </div>
+            </>
+          )}
+          {preview.error && <div className="text-error">{preview.error}</div>}
+        </div>
+      )}
     </div>
   );
+}
+
+/** The backend's preview of `schedule` in `timezone`, debounced. */
+function useCronPreview(schedule: string | undefined, timezone: string) {
+  const expr = schedule?.trim() ?? '';
+  const tz = timezone.trim();
+  const key = `${expr}\u0000${tz}`;
+  const [state, setState] = useState<{ key: string; data: CronPreview | null; error: string | null }>({ key: '', data: null, error: null });
+  useEffect(() => {
+    if (!expr) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      workflowsApi.cronPreview(tz ? { schedule: expr, timezone: tz } : { schedule: expr })
+        .then(data => { if (live) setState({ key, data, error: null }); })
+        .catch((e: unknown) => { if (live) setState({ key, data: null, error: e instanceof Error ? e.message : String(e) }); });
+    }, 300);
+    return () => { live = false; clearTimeout(timer); };
+  }, [expr, tz, key]);
+  // A stale answer for another schedule or zone is never shown.
+  return expr && state.key === key ? state : { data: null, error: null };
 }
 
 interface WatchTriggerEditorProps {
@@ -123,7 +170,7 @@ export function WatchTriggerEditor({ value, onChange, availableQuickApis, availa
       />
       <p className="text-xs text-ghost mb-4">{t('wiz.watchIntervalHint')}</p>
 
-      <TimezoneField id="wf-watch-timezone" value={value.timezone} onChange={timezone => set({ timezone })} />
+      <TimezoneField id="wf-watch-timezone" value={value.timezone} onChange={timezone => set({ timezone })} schedule={value.interval} />
 
       <label className="wf-label" htmlFor="wf-watch-detection">{t('wiz.watchDetection')}</label>
       <select

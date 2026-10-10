@@ -52,7 +52,7 @@
         "page_publish.writes"
       ],
       "optional": [],
-      "note": "Typed, zero-token sink for Kronn Live Pages. Each write requires dataset, operation (replace|append|upsert), and value_from as one typed context path such as steps.fetch.data.series. Upsert also requires key_field; append is idempotent per workflow run by default.",
+      "note": "Typed, zero-token sink for Kronn Live Pages. Each write requires dataset, operation (replace|append|upsert|clear), and value_from as one typed context path such as steps.fetch.data.series (not for clear, which empties the dataset). Upsert also requires key_field; append is idempotent per workflow run by default.",
       "example": {
         "name": "publish-report",
         "step_type": {
@@ -414,9 +414,9 @@
   "discovery_rule": "Do not infer the available step types from one workflow: step_types_closed_set is the complete taxonomy. To adapt an existing workflow, call workflow_list and then workflow_get with an id actually returned by that list; no named example is guaranteed to exist.",
   "triggers": {
     "Manual": "{\"type\":\"Manual\"}",
-    "Cron": "{\"type\":\"Cron\",\"schedule\":\"0 7 * * 1-5\",\"timezone\":\"Europe/Paris\"}: five-field cron; `timezone` (IANA) is optional, absent = UTC.",
+    "Cron": "{\"type\":\"Cron\",\"schedule\":\"0 7 * * 1-5\",\"timezone\":\"Europe/Paris\"}: five-field cron; `timezone` (IANA) is optional, absent = Kronn's global timezone (Settings; default the machine's), so pass `UTC` for a UTC schedule. DST: a local time the spring change skips does not fire that day; one the autumn change repeats fires once.",
     "Tracker": "{\"type\":\"Tracker\",\"source\":{\"type\":\"GitHub\",\"owner\":\"o\",\"repo\":\"r\"},\"query\":\"\",\"labels\":[],\"interval\":\"*/10 * * * *\"}: one run per new issue (UTC interval).",
-    "Watch": "{\"type\":\"Watch\",\"api_plugin_slug\":\"github\",\"api_config_id\":\"<config>\",\"api_endpoint_path\":\"/repos/o/r/commits\",\"api_query\":{},\"interval\":\"*/5 * * * *\",\"timezone\":null,\"detection\":{\"type\":\"Validators\"}} (or `quick_api_id` instead of the api_* fields). Polls the source with a GET through the API broker (stored credentials, default headers) and creates a run ONLY when it changed; a poll creates no run. Detection: the stored ETag/Last-Modified go out as If-None-Match/If-Modified-Since (304 = unchanged); on a 200, `Validators` compares ETag/Last-Modified (body fingerprint when absent), `Body` the body fingerprint, `{\"type\":\"JsonPath\",\"path\":\"$.items[*].id\"}` the fingerprint of that extract. The first poll records a baseline without a run. Interval: five fields, at most once a minute. An unadmitted change (concurrency limit, preflight) is detected again next poll. The run reads `{{trigger.*}}`."
+    "Watch": "{\"type\":\"Watch\",\"api_plugin_slug\":\"github\",\"api_config_id\":\"<config>\",\"api_endpoint_path\":\"/repos/o/r/commits\",\"api_query\":{},\"interval\":\"*/5 * * * *\",\"timezone\":null,\"detection\":{\"type\":\"Validators\"}} (or `quick_api_id` instead of the api_* fields). Polls the source with a GET through the API broker (stored credentials, default headers) and creates a run ONLY when it changed; a poll creates no run. Detection: the stored ETag/Last-Modified go out as If-None-Match/If-Modified-Since (304 = unchanged); on a 200, `Validators` compares ETag/Last-Modified (body fingerprint when absent), `Body` the body fingerprint, `{\"type\":\"JsonPath\",\"path\":\"$.items[*].id\"}` the fingerprint of that extract. The first poll records a baseline without a run. Interval: five fields, at most once a minute, read in `timezone` like a Cron. An unadmitted change (concurrency limit, preflight) is detected again next poll. The run reads `{{trigger.*}}`."
   },
   "template_vars": {
     "syntax": "`{{namespace.path}}` in any string field (prompt_template, api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, gate_message, notify_config, …). Dotted nested access works incl. array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref is left VERBATIM in previews and rejected before execution, so a typo never reaches an agent, command or external API. `{{path|sh}}` renders the value as one POSIX single-quoted shell word (a quoting helper, never accepted inside Exec inline code). The one explicit fallback is `{{path ?? \"text\"}}` (or `'text'`, no escapes): it renders the literal when the path is absent or JSON null, e.g. `{{steps.check.data.stdout ?? \"\"}}` after a Goto skipped `check`; such a ref may name a later step but never an unknown one.",
@@ -441,10 +441,10 @@
     },
     "time_expressions": {
       "canonical": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
-      "shorthand": "{{now-24h|floor:hour}} (UTC + rfc3339 defaults)",
+      "shorthand": "{{now-24h|floor:hour}} (Kronn's global timezone + rfc3339 defaults)",
       "filters": {
         "shift": "+/- fixed duration; units s, m, h, d, w; 10-year safety limit",
-        "tz": "IANA timezone such as Europe/Paris; UTC by default",
+        "tz": "IANA timezone such as Europe/Paris; Kronn's global timezone (Settings) by default",
         "floor": "minute | hour | day; day boundaries use the selected timezone",
         "fmt": "rfc3339 | local_iso_ms | date | unix | unix_ms"
       },

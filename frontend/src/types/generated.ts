@@ -2051,6 +2051,26 @@ enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: Work
  */
 export type CredentialSource = "stored" | "cli_token" | "none";
 
+export type CronPreview = {
+/**
+ * The zone the schedule is read in.
+ */
+timezone: string,
+/**
+ * True when that zone is Kronn's global one (no trigger override).
+ */
+inherited: boolean,
+/**
+ * The next firings, RFC 3339 with the zone's offset.
+ */
+next: Array<string>, };
+
+export type CronPreviewRequest = { schedule: string,
+/**
+ * The trigger's own zone; absent means Kronn's global zone.
+ */
+timezone?: string, };
+
 export type CustomApiField = { label: string, value: string, };
 
 /**
@@ -2294,6 +2314,12 @@ timeout_secs?: number, };
  * A native worker identity for delegated subtasks (CLI sessions excluded).
  */
 export type DelegateWorker = { agent: AgentType, tier?: ModelTier, model?: string, };
+
+export type DeleteLivePageDatasetResult = { page_id: string, name: string, data_revision: number,
+/**
+ * The references a forced deletion went past; empty otherwise.
+ */
+overridden: LivePageDatasetUsage, };
 
 export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
@@ -4486,6 +4512,19 @@ export type LivePageDatasetKind = "snapshot" | "time_series" | "collection";
 
 export type LivePageDatasetPoint = { id: string, dataset_id: string, observed_at: string, payload: any, workflow_run_id: string | null, };
 
+/**
+ * What reads or writes one dataset: the check made before deleting it.
+ */
+export type LivePageDatasetUsage = { name: string, writers: Array<LivePageDatasetWriter>,
+/**
+ * The dataset name appears as a whole word in the current HTML revision.
+ */
+html_referenced: boolean,
+/**
+ * Page buttons (`action_ref`) whose values bind to this dataset.
+ */
+action_refs: Array<string>, };
+
 export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
 /**
  * Compact UTF-8 JSON bytes currently retained for this dataset. This
@@ -4493,6 +4532,11 @@ export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
  * payloads, but excludes SQLite row metadata and the optional schema.
  */
 data_size_bytes: number, id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
+
+/**
+ * A workflow whose `PublishPageData` step writes one dataset.
+ */
+export type LivePageDatasetWriter = { workflow_id: string, workflow_name: string, enabled: boolean, };
 
 export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>,
 /**
@@ -4529,9 +4573,13 @@ export type LivePagesCapability = { activated: boolean, activated_at: string | n
  */
 export type LivePageWorkflowLink = { id: string, name: string, enabled: boolean, step_names: Array<string>, };
 
-export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation, value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
+export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation,
+/**
+ * Required, `null` included; only `clear` may omit it.
+ */
+value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
 
-export type LivePageWriteOperation = "replace" | "append" | "upsert";
+export type LivePageWriteOperation = "replace" | "append" | "upsert" | "clear";
 
 /**
  * A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
@@ -6376,7 +6424,8 @@ page_id: string, writes: Array<PublishPageDataWrite>, };
 export type PublishPageDataWrite = { dataset: string, operation: LivePageWriteOperation,
 /**
  * Chemin typé du contexte, avec ou sans doubles accolades.
- * Exemple : `steps.fetch_metrics.data.series`.
+ * Exemple : `steps.fetch_metrics.data.series`. Absent pour `clear` ;
+ * la validation l'exige pour les autres opérations.
  */
 value_from: string,
 /**
@@ -7608,7 +7657,12 @@ agent_handoff_blocked_agents: Array<AgentType>,
  * Sidebar storage-weight indicator. Validation and fallback live in
  * `models::discussion_weight`; this is only the persisted field.
  */
-discussion_weight: DiscussionWeightConfig, };
+discussion_weight: DiscussionWeightConfig,
+/**
+ * IANA zone crons, watches and `{{time.now}}` default to (KT-1103).
+ * `None` follows the machine's zone, detected at boot.
+ */
+timezone?: string | null, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -7642,7 +7696,19 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>, };
+run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+/**
+ * The zone set in Settings; `None` follows the machine.
+ */
+timezone: string | null,
+/**
+ * The zone in effect: `timezone`, else `timezone_detected`.
+ */
+timezone_effective: string,
+/**
+ * The machine's zone (`TZ`, then the OS setting, then UTC).
+ */
+timezone_detected: string, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -9031,6 +9097,15 @@ attach_agents?: Array<AgentType> | null,
  */
 execution_variable_retention_days?: number | null | null, };
 
+/**
+ * `PATCH /api/pages/{id}/datasets/{name}`: new retention limits. Existing
+ * points beyond them are pruned at once. `max_age_days: null` lifts the age
+ * limit; an absent field keeps its value.
+ */
+export type UpdateLivePageDatasetRequest = { max_points?: number, max_age_days?: number | null, };
+
+export type UpdateLivePageDatasetResult = { dataset: LivePageDataset, points_removed: number, data_revision: number, };
+
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 
 export type UpdateLivePageRequest = { title?: string | null,
@@ -9366,7 +9441,7 @@ export type WatchTrigger = { quick_api_id?: string, api_plugin_slug?: string, ap
  */
 interval: string,
 /**
- * IANA timezone `interval` is read in; absent means UTC.
+ * IANA timezone `interval` is read in; absent means Kronn's global one.
  */
 timezone?: string, detection: WatchDetection, };
 
@@ -10242,8 +10317,8 @@ watch?: WatchStatus, created_at: string, };
 
 export type WorkflowTrigger = { "type": "Cron", schedule: string,
 /**
- * IANA timezone the schedule is read in; absent means UTC, so
- * workflows saved before the field keep their hours.
+ * IANA timezone the schedule is read in; absent means Kronn's
+ * global timezone. Triggers saved before it were pinned to UTC.
  */
 timezone?: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" } | { "type": "Watch" } & WatchTrigger;
 

@@ -877,6 +877,11 @@ pub async fn get_server_config(
         run_payload_retention_days: config.server.run_payload_retention_days,
         p2p_enabled: config.server.p2p_enabled,
         frontend_origins: config.server.frontend_origins.clone(),
+        timezone: config.server.timezone.clone(),
+        timezone_effective: crate::core::timezone::current().name().to_string(),
+        timezone_detected: crate::core::timezone::detect_machine_timezone()
+            .name()
+            .to_string(),
     }))
 }
 
@@ -903,7 +908,21 @@ pub async fn set_server_config(
         None => None,
     };
 
+    // `Some(None)` clears the setting; an unknown zone is refused.
+    let timezone = match req.timezone.as_deref().map(str::trim) {
+        None => None,
+        Some("") => Some(None),
+        Some(name) => match crate::core::timezone::parse(name) {
+            Ok(tz) => Some(Some(tz.name().to_string())),
+            Err(e) => return Json(ApiResponse::err(e)),
+        },
+    };
+
     let mut config = state.config.write().await;
+    if let Some(timezone) = timezone {
+        crate::core::timezone::apply(timezone.as_deref());
+        config.server.timezone = timezone;
+    }
     if let Some(list) = frontend_origins {
         config.server.frontend_origins = list;
     }

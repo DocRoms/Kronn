@@ -3,7 +3,9 @@
 HTTP discussion agents expose `page_list`, `page_get`, `page_create`,
 `page_update_html` and `page_add_dataset`. They call the same Page handlers as
 the MCP bridge, including transactional dataset validation, immutable HTML
-revisions and inert action ingestion. The dispatcher returns real stored
+revisions and inert action ingestion. Dataset deletion (`page_delete_dataset`, KT-1104)
+exists on the MCP bridge only; native discussion agents do not get it. See
+[Dataset lifecycle](../architecture/live-pages.md#dataset-lifecycle-kt-1104). The dispatcher returns real stored
 objects, not an HTML preview.
 [src: file: backend/src/api/agent_tools.rs:1675]
 [src: file: backend/src/api/agent_page_tools.rs:133]

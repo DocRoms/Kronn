@@ -880,3 +880,173 @@ async fn a_rollback_agent_step_runs_its_pinned_quick_prompt() {
     assert!(rollback.contains("ROLLBACK-PINNED"), "{rollback}");
     assert!(prompts.iter().all(|p| !p.contains("ROLLBACK-LIVE")));
 }
+
+// ─── KT-1103 — a run renders its dates in the zone it pinned ─────────────
+
+/// Rewrites the zone recorded in `run_id`'s pin, as if it started under it.
+async fn set_pinned_zone(state: &crate::AppState, run_id: &str, zone: Option<&str>) {
+    let (run_id, zone) = (run_id.to_string(), zone.map(String::from));
+    state
+        .db
+        .with_conn(move |conn| {
+            let json = crate::db::workflow_run_pins::get(
+                conn,
+                &run_id,
+                crate::db::workflow_run_pins::RUN_KIND,
+                "",
+            )?
+            .expect("pinned header");
+            let mut header: serde_json::Value = serde_json::from_str(&json)?;
+            match zone {
+                Some(zone) => header["timezone"] = serde_json::json!(zone),
+                None => {
+                    if let Some(header) = header.as_object_mut() {
+                        header.remove("timezone");
+                    }
+                }
+            }
+            conn.execute(
+                "UPDATE workflow_run_pins SET content_json = ?1
+                 WHERE run_id = ?2 AND kind = ?3 AND resource_id = ''",
+                rusqlite::params![
+                    header.to_string(),
+                    run_id,
+                    crate::db::workflow_run_pins::RUN_KIND
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn pinned_zone(state: &crate::AppState, run_id: &str) -> Option<chrono_tz::Tz> {
+    let run_id = run_id.to_string();
+    state
+        .db
+        .with_conn(move |conn| crate::workflows::run_pins::pinned_timezone(conn, &run_id))
+        .await
+        .unwrap()
+}
+
+/// The prompt an Agent step renders after a Gate resume, for a run anchored
+/// at 2026-08-14T22:30Z whose pin records `zone` (the live zone stays UTC).
+async fn date_prompt_after_gate(tag: &str, zone: Option<&str>) -> String {
+    let project = format!("proj-{tag}");
+    let fx = agent_fixture(&project).await;
+    let (_, tokens, agents) = test_state_and_configs();
+    let mut wf = make_workflow_with_artifacts(Default::default());
+    wf.id = format!("{tag}-wf");
+    wf.project_id = Some(project.clone());
+    let mut gate = fake_step("review");
+    gate.step_type = StepType::Gate;
+    let mut agent = fake_step("write");
+    agent.prompt_template =
+        "DATE={{time.now|fmt:date}} FROM={{time.now|floor:day|fmt:rfc3339}}".into();
+    wf.steps = vec![gate, agent];
+    // The fixed anchor is in the past: keep the timeout guard out of the way.
+    wf.guards = Some(crate::models::WorkflowGuards {
+        timeout_seconds: Some(10 * 365 * 24 * 3600),
+        ..Default::default()
+    });
+    let mut run = pending_run(&format!("{tag}-run"), &wf.id);
+    run.started_at = "2026-08-14T22:30:00Z".parse().unwrap();
+    run.status = RunStatus::Running;
+    let mut paused = fake_result("review");
+    paused.status = RunStatus::WaitingApproval;
+    run.step_results = vec![paused];
+    insert_wf_and_run(&fx.state, &wf, &run).await;
+    pin_now(&fx.state, &wf, &run).await;
+    set_pinned_zone(&fx.state, &run.id, zone).await;
+
+    resume_run(
+        fx.state.clone(),
+        &wf,
+        &mut run,
+        GateDecision::Approve { comment: None },
+        &tokens,
+        &agents,
+        None,
+    )
+    .await
+    .expect("approval resumes");
+    assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+    let prompts = fx.prompts.lock().unwrap().clone();
+    prompts.last().cloned().expect("prompted")
+}
+
+#[tokio::test]
+async fn a_gate_resume_renders_dates_in_the_zone_the_run_pinned() {
+    // Started under Paris; Settings now say UTC (this binary's live zone).
+    let prompt = date_prompt_after_gate("tz-gate-paris", Some("Europe/Paris")).await;
+    assert!(prompt.contains("DATE=2026-08-15"), "{prompt}");
+    assert!(
+        prompt.contains("FROM=2026-08-15T00:00:00.000+02:00"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_pin_older_than_zones_renders_in_utc() {
+    let prompt = date_prompt_after_gate("tz-gate-legacy", None).await;
+    assert!(prompt.contains("DATE=2026-08-14"), "{prompt}");
+    assert!(prompt.contains("FROM=2026-08-14T00:00:00.000Z"), "{prompt}");
+}
+
+#[tokio::test]
+async fn a_child_run_inherits_its_parent_pinned_zone() {
+    let (state, _, _) = test_state_and_configs();
+    let (_, parent_run) = parent_and_child(&state, "tz-child").await;
+    // The parent started under Tokyo; the live zone is UTC.
+    set_pinned_zone(&state, &parent_run.id, Some("Asia/Tokyo")).await;
+    let child_wf = state
+        .db
+        .with_conn(|conn| crate::db::workflows::get_workflow(conn, "tz-child-child"))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut child = pending_run("tz-child-sub", &child_wf.id);
+    child.parent_run_id = Some(parent_run.id.clone());
+    let stored = child.clone();
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::insert_run(conn, &stored))
+        .await
+        .unwrap();
+    pin_now(&state, &child_wf, &child).await;
+    assert_eq!(
+        pinned_zone(&state, "tz-child-sub").await,
+        Some(chrono_tz::Asia::Tokyo)
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_run_pins_the_live_zone_and_a_pre_pin_run_keeps_utc() {
+    let (state, _, _) = test_state_and_configs();
+    // An Etc alias renders like UTC, so concurrent tests never see a shift.
+    crate::core::timezone::apply_with(Some("Etc/UTC"), chrono_tz::UTC);
+    let mut wf = make_workflow_with_artifacts(Default::default());
+    wf.id = "tz-live-wf".into();
+    wf.steps = vec![json_data_step("only", serde_json::json!({}))];
+    let fresh = pending_run("tz-live-fresh", &wf.id);
+    insert_wf_and_run(&state, &wf, &fresh).await;
+    pin_now(&state, &wf, &fresh).await;
+    // Started before pins existed and already ran a step under UTC.
+    let mut started = pending_run("tz-live-started", &wf.id);
+    started.step_results.push(fake_result("only"));
+    let stored = started.clone();
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::insert_run(conn, &stored))
+        .await
+        .unwrap();
+    pin_now(&state, &wf, &started).await;
+    let (fresh_zone, started_zone) = (
+        pinned_zone(&state, "tz-live-fresh").await,
+        pinned_zone(&state, "tz-live-started").await,
+    );
+    crate::core::timezone::apply_with(None, chrono_tz::UTC);
+    assert_eq!(fresh_zone, Some(chrono_tz::Etc::UTC));
+    assert_eq!(started_zone, Some(chrono_tz::UTC));
+}

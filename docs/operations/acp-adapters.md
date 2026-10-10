@@ -215,9 +215,26 @@ project path never reuses that identifier.
   stdin for both adapters, never argv. Secret
   values therefore enter neither adapter argv, ACP payloads, events, nor
   audit records.
+- **Vibe's bridge environment (KT-1082):** Vibe starts stdio MCP servers
+  without its own environment, only with the `env` declared in `session/new`.
+  Vibe saves that declaration in its session metadata, and it can log ACP
+  messages (`VIBE_ACP_LOGGING_ENABLED`). So Kronn declares only non-secret
+  values for its bridge: `KRONN_DISCUSSION_ID`, `KRONN_BACKEND_URL`, and the
+  room/worker contexts. `KRONN_BRIDGE_TOKEN` and `KRONN_WORKFLOW_STEP_CONTEXT`
+  go in a per-launch file instead, mode 0600 in a 0700 directory, which the
+  declaration names through `KRONN_BRIDGE_SECRET_ENV_FILE`. The bridge loads
+  just those two variables, and only from an owner-only regular file. The file
+  stays as long as the session's transport, because Vibe restarts the bridge
+  for each tool call, and is deleted when the transport is dropped.
+  [src: file: backend/src/acp/bridge_env.rs]
 
 ## Known limitations
 
+- **Vibe secrets file, partly qualified.** The 0600/0700 POSIX permissions are
+  tested. On Windows Kronn relies on the per-user temp directory and does not
+  check its ACLs. A real `vibe-acp` was shown to pass declared values, not its
+  own environment, to an MCP server. No end-to-end run of Kronn with Vibe has
+  been done yet.
 - **No live permission negotiation in the current adapters.** Kronn applies
   a static launch policy instead of consulting its broker for each tool call.
   The native ACP permission-request path remains separate.
