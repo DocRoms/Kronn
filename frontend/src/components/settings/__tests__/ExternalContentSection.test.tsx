@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ origins: vi.fn(), change: vi.fn() }));
 vi.mock('../../../lib/api', () => ({ config: { getEmbedOrigins: mocks.origins, changeEmbedOrigins: mocks.change } }));
+vi.mock('../../../hooks/useWebSocket', () => ({ useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })) }));
 vi.mock('../../../lib/I18nContext', () => ({ useT: () => ({ t: (key: string, ...args: unknown[]) => args.length ? `${key}:${args.join(',')}` : key }) }));
 
 import { ExternalContentSection, EXTERNAL_CONTENT_SECTION_ID } from '../ExternalContentSection';

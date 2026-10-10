@@ -291,6 +291,9 @@ pub enum WsMessage {
         seq: u32,
         progress: super::AgentRunProgress,
     },
+    /// The allowed embed sites changed: open tabs re-read the list. Carries
+    /// no origin. Local only: never relayed to a peer.
+    EmbedOriginsChanged,
 }
 
 impl WsMessage {
@@ -368,6 +371,16 @@ mod tests {
             targets: vec![],
             reply_to_message_id: None,
         }
+    }
+
+    #[test]
+    fn embed_origins_change_names_the_category_only_and_stays_local() {
+        let frame = WsMessage::EmbedOriginsChanged;
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({ "type": "embed_origins_changed" })
+        );
+        assert!(!frame.is_peer_relayable());
     }
 
     #[test]

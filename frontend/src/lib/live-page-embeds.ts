@@ -52,6 +52,8 @@ export interface LivePageEmbedPlayer {
   placement: LivePageEmbedPlacement;
   url: string;
   origin: string;
+  /** Why a reload notice replaces it: the site was allowed after load, or a site the document's policy admits was revoked. */
+  reason?: 'added' | 'revoked' | 'pending' | 'unknown' | 'httpOnly';
 }
 
 export interface LivePageEmbedPlan {
@@ -59,22 +61,35 @@ export interface LivePageEmbedPlan {
   players: LivePageEmbedPlayer[];
   /** Valid URLs from sites this Kronn has not allowed, as many again. */
   blocked: LivePageEmbedPlayer[];
+  /** Allowed after this document loaded: its frame policy still refuses them. */
+  reload: LivePageEmbedPlayer[];
 }
 
-const NO_PLAN: LivePageEmbedPlan = { players: [], blocked: [] };
+const NO_PLAN: LivePageEmbedPlan = { players: [], blocked: [], reload: [] };
 
 /**
  * Decide, on the host, what each placeholder gets. Nothing is drawn before the
  * allowed sites are known (`null`). Malformed URLs get nothing; refused ones
- * do not count against the players' quota.
+ * do not count against the players' quota. A site allowed after the document
+ * loaded (absent from `framableOrigins`) gets a reload notice, since the
+ * browser would refuse to frame it. Once a site the document's policy admits
+ * is revoked, every player gets one: any of them may have navigated, or may
+ * still navigate, to that site, which the document's policy keeps admitting.
+ * While a change is announced but not read yet (`suspended`), or when the
+ * document's policy is unknown (`framableOrigins` is `null`), every player
+ * gets one too.
  */
 export function planLivePageEmbeds(
   placements: readonly LivePageEmbedPlacement[],
   allowedOrigins: ReadonlySet<string> | null,
+  framableOrigins: ReadonlySet<string> | null = allowedOrigins,
+  suspended = false,
 ): LivePageEmbedPlan {
   if (!allowedOrigins) return NO_PLAN;
   const players: LivePageEmbedPlayer[] = [];
   const blocked: LivePageEmbedPlayer[] = [];
+  const reload: LivePageEmbedPlayer[] = [];
+  const policyRevoked = !!framableOrigins && [...framableOrigins].some(origin => !allowedOrigins.has(origin));
   const seen = new Set<string>();
   for (const placement of placements) {
     if (seen.has(placement.key)) continue;
@@ -83,12 +98,20 @@ export function planLivePageEmbeds(
     if (!url) continue;
     const entry = { placement, url: url.href, origin: url.origin };
     if (allowedOrigins.has(url.origin)) {
-      if (players.length < MAX_LIVE_PAGE_EMBEDS) players.push(entry);
+      // CSP lets an http source match its https upgrade too, so the host never
+      // frames an http site whose https address is not allowed: a reload cannot help.
+      const httpOnly = url.protocol === 'http:' && !allowedOrigins.has(`https://${url.host}`);
+      if (!framableOrigins || suspended || policyRevoked || httpOnly || !framableOrigins.has(url.origin)) {
+        const reason = !framableOrigins ? 'unknown' : suspended ? 'pending' : policyRevoked ? 'revoked' : httpOnly ? 'httpOnly' : 'added';
+        if (reload.length < MAX_LIVE_PAGE_EMBEDS) reload.push({ ...entry, reason });
+      } else if (players.length < MAX_LIVE_PAGE_EMBEDS) {
+        players.push(entry);
+      }
     } else if (blocked.length < MAX_LIVE_PAGE_EMBEDS) {
       blocked.push(entry);
     }
   }
-  return { players, blocked };
+  return { players, blocked, reload };
 }
 
 /** Whether any of the placeholder can be seen, its clip included. */

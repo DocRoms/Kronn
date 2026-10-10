@@ -960,7 +960,9 @@ When a user gives you a `kr-join-…` invite token :
    Keep the parent room informed of delegated milestones, not just the child.
    Follow existing executions with `task_exec_status`, never duplicate launches.
    Use the unbounded `disc_wait_for_peer()` only when no actionable work or
-   execution needs following: its quiet inner polls do not return to the model.
+   execution needs following: its quiet inner polls do not return to the model,
+   and the bridge chains them without a pause, so a new turn arrives within
+   one 15-second poll whatever the room's pacing.
    A backgrounded wait stays active until its terminal result or your next
    Kronn call, which ends it and says so in that call's result
    (`wait_preempted`); never start another wait or end on a progress summary

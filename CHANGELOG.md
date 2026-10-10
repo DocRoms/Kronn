@@ -110,6 +110,25 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A CLI listening in a room with `disc_wait_for_peer` no longer goes deaf
+  between polls (KT-703). The bridge slept the server's pacing delay after
+  each quiet 15-second poll: 40 s while a human was active, up to 480 s in a
+  quiet room. A message posted during that sleep waited for the next poll,
+  so after a calm period a reply could take more than 8 minutes while the
+  session still looked present. The bridge now starts the next poll right
+  away, so it listens continuously and a new message arrives within one poll.
+  The server's pacing values are unchanged. A CLI reading a wake result is
+  also no longer told to rotate its session in a shared room. The
+  `session_budget` verdict now appears only in a delegated task's execution
+  room, where rotating is the intended response. In a shared room, it had
+  been read as an order to stop listening.
+- On macOS, the `caffeinate` that keeps the Mac awake during a run no longer
+  outlives Kronn (KT-1127). It is now started as `caffeinate -i -w <backend
+  pid>`, so macOS ends it when the backend exits, however it exits (crash,
+  SIGKILL, update, desktop quit, normal exit while a run holds the lease).
+  Before, an orphaned `caffeinate` stayed alive forever and the Mac never
+  idle-slept again. It also no longer inherits descriptors the backend itself
+  inherited without close-on-exec.
 - The reply bubble's Logs panel follows the same no-leak rule as the run
   progress (KT-1120). A tool call is logged by its category only (`→ Read`
   when it starts, `✓ Read` when it ends), never by its name, input, file path,
@@ -186,6 +205,39 @@ Release notes for 0.9.3 and earlier are available in the
   the chat shows a notice with a Retry action and the raw JSON instead of
   dropping it silently. The system prompts in the 4 locales now say that the
   marker is a bare text line outside any code fence.
+- Live Pages: the browser itself now refuses to frame a site that is not
+  allowed, in desktop, native and Docker alike (KT-1115). Every app document
+  carries `frame-src` and `child-src` set to the app plus exactly the allowed
+  sites (same rules as the Docker gateway: no wildcard, an `http://` site only
+  with its `https://` counterpart, 16 KiB bound). An allowed site that
+  redirects, or navigates its player, to another origin is blocked before any
+  request reaches that origin. The desktop sets it on the documents its
+  embedded backend serves (its Tauri CSP is null), native mode through a Vite
+  plugin reading the same backend route, Docker through the gateway as
+  before. Removing an allowed site now takes its players down at once in every
+  open tab, a visible one included, through a local WebSocket event that
+  carries no origin; a tab that was disconnected re-reads the list when it
+  reconnects. A site allowed after a page was opened shows a "Reload to show
+  this content" notice until that page is reloaded, since a document keeps the
+  policy it was served with. Because that policy still admits a revoked site,
+  revoking any site takes down every player of the open tabs, not only the
+  revoked site's (an allowed player may have been redirected to it), until the
+  page is reloaded; a change also hides the players until the new list is
+  read, so a failed read never leaves them running. Each document carries the
+  exact sources its policy was served with (`<meta
+  name="kronn-served-frame-src">`, written with the header in every mode), and
+  the page compares later lists against it, so a site revoked before a Page is
+  first opened is still treated as revoked; without that marker no player is
+  drawn. An allowed `http://` site whose `https://` address is not allowed is
+  never framed; its placeholder now says to allow it over https instead of
+  asking for a reload. This lifts the two 0.14.3 known limitations on
+  embeds, except the one below.
+
+### Known limitations
+
+- An allowed embed site can itself embed other origins inside its own page:
+  Kronn controls only what the Page frames directly, redirects included
+  (KT-1115).
 
 ## [0.14.3] - 2026-10-07
 

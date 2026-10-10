@@ -1034,6 +1034,10 @@ pub async fn import(
                     }
                     Err(error) => Err(error),
                 };
+                drop(config);
+                if outcome.is_ok() {
+                    crate::api::live_pages::announce_embed_origins_changed(&state);
+                }
                 if let Err(error) = outcome {
                     tracing::warn!("Imported Artifact, but could not allow its sites: {error}");
                     imported.not_allowed_embed_origins =

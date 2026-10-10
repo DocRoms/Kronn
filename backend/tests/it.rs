@@ -62,6 +62,8 @@ mod model_catalog_migration;
 mod ollama_model_catalog;
 #[path = "orchestration_handoff_e2e.rs"]
 mod orchestration_handoff_e2e;
+#[path = "power_guard_orphan.rs"]
+mod power_guard_orphan;
 #[path = "real_agent_e2e.rs"]
 mod real_agent_e2e;
 #[path = "reasoning_effort_runtime.rs"]

@@ -11568,24 +11568,87 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
         self.assertEqual(self.mod._WAIT_PREEMPTED["notice"]["listening"], False)
         self.mod._WAIT_PREEMPTED["notice"] = None
 
-    def test_interruption_during_pacing_sleep_keeps_its_captured_reason(self):
+    def _isolate_side_probes(self):
+        """Stub probes outside the loop under test: their subprocesses sleep on the fake clock."""
+        for name in ("_maybe_report_telemetry", "_attempt_orchestrator_return_resume"):
+            patch = mock.patch.object(self.mod, name, return_value=None)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _room_server(self, posts):
+        """Fake `/wait`: blocks for its window, answers at a post's instant."""
+        self._isolate_side_probes()
+        calls = []
+
         def fake_wait_once(args):
-            self.now[0] += 60
-            return self._quiet(delay=30)
+            calls.append(dict(args))
+            since = args.get("since_sort_order") or 0
+            window_end = self.now[0] + args["timeout_secs"]
+            for order, posted_at in posts:
+                if order > since and posted_at <= window_end:
+                    self.now[0] = max(self.now[0], posted_at)
+                    return {"timed_out": False, "latest_sort_order": order,
+                            "messages": [{"message_id": f"m{order}", "sort_order": order}]}
+            self.now[0] = window_end
+            # Cold ramp cap: what a room quiet for 23+ minutes gets.
+            return {"timed_out": True, "messages": [], "latest_sort_order": since,
+                    "pacing": {"regime": "cold", "next_delay_seconds": 480}}
 
-        def queue_during_sleep(_seconds):
-            self.now[0] += 1
-            if self.mod._REQUEST_QUEUE.empty():
-                self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 13,
-                                             "params": {"name": "disc_meta", "arguments": {}}})
+        return fake_wait_once, calls
 
-        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
-             mock.patch.object(self.mod.time, "sleep", queue_during_sleep):
+    def test_a_turn_posted_after_a_quiet_cold_poll_arrives_within_one_poll(self):
+        # KT-703 — the bridge used to sleep the server's 480 s cold pacing
+        # between polls, deaf to a turn posted just after a quiet poll.
+        posted_at = self.mod._WAIT_POLL_SECS + 0.5
+        fake, calls = self._room_server([(42, posted_at)])
+        with mock.patch.object(self.mod, "_wait_once", fake):
             result = self.mod.call_disc_wait_for_peer({})
 
-        self.assertEqual(result["interrupted"], "new_request")
-        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 13)
-        self.mod._WAIT_PREEMPTED["notice"] = None
+        self.assertEqual(result["messages"][0]["message_id"], "m42")
+        self.assertLessEqual(self.now[0] - posted_at, self.mod._WAIT_POLL_SECS)
+        self.assertEqual(len(calls), 2)
+
+    def test_two_turns_after_long_silences_each_arrive_within_one_poll(self):
+        # KT-703 DoD — two new messages after quiet periods, no manual nudge.
+        posts = [(42, 1_100.0), (43, 2_600.0)]
+        fake, _calls = self._room_server(posts)
+        with mock.patch.object(self.mod, "_wait_once", fake):
+            first = self.mod.call_disc_wait_for_peer({"since_sort_order": 41})
+            self.assertEqual(first["messages"][0]["message_id"], "m42")
+            self.assertLessEqual(self.now[0] - 1_100.0, self.mod._WAIT_POLL_SECS)
+            second = self.mod.call_disc_wait_for_peer({"since_sort_order": 42})
+
+        self.assertEqual(second["messages"][0]["message_id"], "m43")
+        self.assertLessEqual(self.now[0] - 2_600.0, self.mod._WAIT_POLL_SECS)
+
+    def test_quiet_polls_are_chained_without_a_listening_gap(self):
+        # Each inner poll starts where the previous one ended: no deaf window.
+        fake, calls = self._room_server([(42, 200.0)])
+        starts = []
+
+        def recording(args):
+            starts.append(self.now[0])
+            return fake(args)
+
+        with mock.patch.object(self.mod, "_wait_once", recording):
+            self.mod.call_disc_wait_for_peer({})
+
+        windows = [call["timeout_secs"] for call in calls]
+        for index in range(1, len(starts)):
+            self.assertEqual(starts[index], starts[index - 1] + windows[index - 1])
+
+    def test_a_server_answering_early_cannot_spin_the_loop(self):
+        self._isolate_side_probes()
+
+        def instant_quiet(_args):
+            self.now[0] += 0.01
+            return self._quiet(delay=480)
+
+        with mock.patch.object(self.mod, "_wait_once", instant_quiet):
+            result = self.mod.call_disc_wait_for_peer({"max_total_secs": 10})
+
+        self.assertTrue(result["timed_out"])
+        self.assertLessEqual(result["bridge_polls"], 11)
 
     def _call(self, rid, name, fn):
         with mock.patch.dict(self.mod.DISPATCH, {name: fn}), \

@@ -273,9 +273,103 @@ pub fn frame_src_sources(allowed: &[String]) -> String {
     sources
 }
 
+/// Policy the host puts on every app document (desktop and native; the Docker
+/// gateway adds the same `frame-src` to its own CSP). The browser checks it on
+/// each navigation of a frame, redirects included; it cannot reach frames that
+/// a framed site creates inside its own document. `worker-src` matches the
+/// gateway's, since `child-src` would otherwise govern workers too.
+pub fn document_frame_policy(allowed: &[String]) -> String {
+    policy_for_sources(&frame_src_sources(allowed))
+}
+
+/// The document policy for an already built `frame_src_sources` value.
+pub fn policy_for_sources(sources: &str) -> String {
+    format!("frame-src {sources}; child-src {sources}; worker-src 'self' blob:")
+}
+
+/// Name of the `<meta>` that tells the page which sources its CSP was served
+/// with; the page compares later lists against it, never against a later read.
+pub const SERVED_FRAME_SRC_META: &str = "kronn-served-frame-src";
+
+fn escape_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `html` with the served-sources marker right after its `<head>` tag, or
+/// `None` when it has none (the page then treats its policy as unknown).
+pub fn inject_served_frame_src(html: &[u8], sources: &str) -> Option<Vec<u8>> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.windows(5).enumerate().find_map(|(index, window)| {
+        let next = lower.get(index + 5).copied();
+        (window == b"<head" && matches!(next, Some(b'>' | b' ' | b'\t' | b'\n' | b'\r')))
+            .then_some(index)
+    })?;
+    let end = start + html[start..].iter().position(|&b| b == b'>')? + 1;
+    let marker = format!(
+        "<meta name=\"{SERVED_FRAME_SRC_META}\" content=\"{}\">",
+        escape_attribute(sources)
+    );
+    let mut out = Vec::with_capacity(html.len() + marker.len());
+    out.extend_from_slice(&html[..end]);
+    out.extend_from_slice(marker.as_bytes());
+    out.extend_from_slice(&html[end..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn served_marker_follows_the_head_tag_escaped() {
+        let html = b"<!DOCTYPE html>\n<HTML><Head lang=x>\n<title>k</title></head></html>";
+        let out =
+            String::from_utf8(inject_served_frame_src(html, "'self' https://suno.com").unwrap())
+                .unwrap();
+        assert_eq!(
+            out,
+            "<!DOCTYPE html>\n<HTML><Head lang=x><meta name=\"kronn-served-frame-src\" content=\"&#39;self&#39; https://suno.com\">\n<title>k</title></head></html>"
+        );
+        let hostile = String::from_utf8(
+            inject_served_frame_src(b"<head>", "\"><script>x</script>&").unwrap(),
+        )
+        .unwrap();
+        assert!(!hostile.contains("<script>"), "{hostile}");
+        assert!(hostile.contains("&quot;&gt;&lt;script&gt;x&lt;/script&gt;&amp;"));
+        // No head tag (or only a `<header>`): no marker, the page fails closed.
+        assert!(inject_served_frame_src(b"<!doctype html><title>k</title>", "'self'").is_none());
+        assert!(inject_served_frame_src(b"<header>x</header>", "'self'").is_none());
+    }
+
+    #[test]
+    fn document_policy_frames_exactly_the_allowed_origins() {
+        assert_eq!(
+            document_frame_policy(&[]),
+            "frame-src 'self'; child-src 'self'; worker-src 'self' blob:"
+        );
+        let allowed = vec![
+            "https://suno.com".to_string(),
+            "http://only-http.example".to_string(),
+            "https://*.example.com".to_string(),
+            "https://a.example; script-src *".to_string(),
+        ];
+        assert_eq!(
+            document_frame_policy(&allowed),
+            "frame-src 'self' https://suno.com; child-src 'self' https://suno.com; worker-src 'self' blob:"
+        );
+        assert!(!document_frame_policy(&allowed).contains('*'));
+    }
 
     #[test]
     fn frame_src_lists_exactly_the_allowed_origins() {
