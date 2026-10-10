@@ -227,6 +227,18 @@ project path never reuses that identifier.
   stays as long as the session's transport, because Vibe restarts the bridge
   for each tool call, and is deleted when the transport is dropped.
   [src: file: backend/src/acp/bridge_env.rs]
+- **Vibe's tool identity (KT-1158):** Vibe's `session/request_permission`
+  carries only `toolCallId`: no kind, server or arguments. The `tool_call`
+  update it sends first names the tool it resolved in `_meta.tool_name`
+  (`mcp_<server normalized>.<tool>`, a digest suffix when two servers
+  normalize alike). For Vibe sessions only, the broker remembers that name per
+  call id (same protocol session, 256 ids, a conflicting name voids the id).
+  A name in the exact group of the registered bridge identifies a
+  kronn-internal call, then checked against the step's tool list. Any other
+  name stays unidentified and is governed as before. Every refusal carries
+  `_meta.kronn.refusal` (what, why, what the user can change). Vibe 2.26 does
+  not read it: its model sees "User rejected the tool call".
+  [src: file: backend/src/acp/permission_broker.rs]
 
 ## Known limitations
 

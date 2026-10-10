@@ -4175,6 +4175,23 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         self.assertEqual(meta["agent"], "ClaudeCode")
         self.assertNotIn("addressable", meta)
 
+    def test_disc_tools_name_the_right_tool_for_an_unexpected_argument(self):
+        # KT-1158: Vibe called disc_meta({id}) for another discussion; the id
+        # was dropped and it read the current room instead.
+        cases = [
+            ("call_disc_meta", {"id": "9f67eeef"}, "disc_load_other({disc_id})"),
+            ("call_disc_list", {"disc_id": "9f67eeef"}, "disc_load_other({disc_id})"),
+            ("call_disc_load_other", {"id": "9f67eeef"}, "`disc_id`"),
+        ]
+        for function, args, hint in cases:
+            with mock.patch.object(self.mod, "_disc_id", return_value="d1"), \
+                 mock.patch.object(self.mod, "_http") as http:
+                with self.assertRaises(RuntimeError) as raised:
+                    getattr(self.mod, function)(args)
+            self.assertIn("unknown argument(s)", str(raised.exception), function)
+            self.assertIn(hint, str(raised.exception), function)
+            http.assert_not_called()
+
     def test_an_unreadable_participant_list_refuses_like_a_failed_one(self):
         # A 200 carrying an unexpected shape is not "no participants" — it is an
         # answer we cannot read. Treating it as empty would let the ambiguity

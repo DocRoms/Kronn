@@ -936,6 +936,11 @@ impl AcpJsonRpcTransport {
         // The servers are authorized once, by the session's own broker: the
         // launch arguments never name a server `session/new` does not declare.
         let broker = session_broker(full_access, Some(scope));
+        // Vibe's permission request carries only the call id; the tool it
+        // resolved is in the update announcing that call.
+        if agent == AcpAgent::Vibe {
+            broker.identify_tools_by_runtime_name();
+        }
         let bridge_id = session_bridge_id(agent);
         let servers = native_session_mcp_servers(
             &broker,
@@ -1112,6 +1117,8 @@ impl AcpJsonRpcTransport {
                     }
                 } else {
                     trace_notification(&message);
+                    // Read in order: a runtime announces a call before asking about it.
+                    broker.observe_session_update(&message);
                     let _ = notifications.send(message);
                 }
             }
@@ -1317,7 +1324,7 @@ fn handle_client_request(
     params: &Value,
 ) -> Result<Value, (i64, String)> {
     match method {
-        "session/request_permission" => Ok(broker.decide_tool_call_permission(method, params)),
+        "session/request_permission" => Ok(broker.permission_response(method, params)),
         method if method.starts_with("fs/") || method.starts_with("terminal/") => {
             Err(broker.deny_unbound_capability(method))
         }
@@ -3785,6 +3792,81 @@ for line in sys.stdin:
             .find(|entry| entry.method == "fs/read_text_file")
             .expect("the fs/read_text_file decision must be audited");
         assert_eq!(audited.verdict, AcpPermissionVerdict::Deny);
+    }
+
+    /// KT-1158 — the live dispatcher reads Vibe's tool-call update before the
+    /// permission request naming only its call id, and answers it from it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dispatcher_identifies_a_vibe_bridge_call_from_the_update_that_announced_it() {
+        const VIBE_FIXTURE: &str = r#"
+import json, os, sys
+def send(frame):
+    sys.stdout.write(json.dumps(frame) + "\n"); sys.stdout.flush()
+replies = []
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1}})
+    elif method == "session/new":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "vibe-session"}})
+    elif method == "session/prompt":
+        for call, tool in [("call-1", "mcp_kronn_internal.disc_meta"),
+                           ("call-2", "mcp_github.create_issue")]:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "vibe-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": call, "title": tool,
+                    "kind": "other", "status": "pending", "rawInput": {},
+                    "_meta": {"tool_name": tool, "effect_kind": "tool"}}}})
+            send({"jsonrpc": "2.0", "id": 90 + len(replies), "method": "session/request_permission",
+                  "params": {"sessionId": "vibe-session", "toolCall": {"toolCallId": call},
+                             "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                                         {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"}]}})
+            replies.append(json.loads(sys.stdin.readline()))
+        with open(os.environ["RESPONSE_FILE"], "w") as handle:
+            json.dump(replies, handle)
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+"#;
+        let project = tempfile::tempdir().unwrap();
+        let response_file = tempfile::NamedTempFile::new().unwrap();
+        let mut command = tokio::process::Command::new("python3");
+        command
+            .env("RESPONSE_FILE", response_file.path())
+            .args(["-c", VIBE_FIXTURE]);
+        let broker = AcpPermissionBroker::scoped(
+            true,
+            AcpSessionScope::new(Some(project.path().to_path_buf()), "disc-vibe"),
+        );
+        broker.identify_tools_by_runtime_name();
+        broker.register_trusted_mcp_server(&AcpMcpServer {
+            id: "kronn-internal".into(),
+            command: "python3".into(),
+            args: vec![],
+            allowed_tools: vec![],
+        });
+        let transport = AcpJsonRpcTransport::spawn_with_broker(AcpAgent::Vibe, command, broker)
+            .await
+            .unwrap();
+        transport.initialize(request()).await.unwrap();
+        let target = transport.create_session().await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        transport
+            .prompt(&target, "fixture prompt", tx)
+            .await
+            .unwrap();
+        while rx.recv().await.is_some() {}
+        transport.shutdown().await.unwrap();
+
+        let replies: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(response_file.path()).unwrap()).unwrap();
+        assert_eq!(replies[0]["result"]["outcome"]["optionId"], "allow_once");
+        assert!(replies[0]["result"].get("_meta").is_none());
+        assert_eq!(replies[1]["result"]["outcome"]["optionId"], "reject_once");
+        let refusal = replies[1]["result"]["_meta"]["kronn"]["refusal"]
+            .as_str()
+            .unwrap();
+        assert!(refusal.contains("`mcp_github.create_issue`"), "{refusal}");
     }
 
     #[test]

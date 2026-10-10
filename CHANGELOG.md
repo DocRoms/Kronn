@@ -27,6 +27,14 @@ Release notes for 0.9.3 and earlier are available in the
   `kronn-mcp-state.json` beside each file and replaces only those. Servers
   left there by an older Kronn whose MCP has since been deleted are not
   recognised as Kronn's, so they stay until you remove them.
+- Mistral Vibe in Kronn can call Kronn's own tools again (KT-1158). Its
+  permission request names only the call id, so Kronn refused every
+  `disc_meta`/`disc_list` call, even with full access. Kronn now reads the tool
+  from the update that announced the call. A call to another tool is governed
+  as before. A refusal now says what was refused, why, and what the user can
+  change. `disc_meta`, `disc_list` and `disc_load_other` refuse an unexpected
+  argument and point to the right tool (`disc_meta` reads only the current
+  discussion).
 
 ## [0.15.0] - 2026-10-10
 
