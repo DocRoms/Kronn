@@ -118,6 +118,14 @@ Release notes for 0.9.3 and earlier are available in the
   citations (`My%20File.docx`) are decoded before they are resolved, and a
   path that leaves the project stays refused. The audit prompts, the repair
   messages and the citation spec now describe the same form.
+- A native agent's `disc_append` during its own turn is checked to stay in
+  that turn's thread (KT-1171). With no explicit `reply_to_message_id`, the
+  post replies to the message that started its running job, so the other
+  agents of the turn see it in their view of the thread. An explicit reply
+  wins. A post from a joined CLI, outside a running job, or naming a job of
+  another discussion keeps no inherited reply. The orphan reply seen in a
+  0.14.3 room came from a backend older than this rule (KT-1151); new tests
+  now pin each case.
 - A Kronn backend started on its own `KRONN_DATA_DIR`, for a test or a bench,
   no longer rewrites the CLI MCP configs in your home directory (KT-1144):
   `~/.copilot/mcp-config.json`, `~/.codex/config.toml`, `~/.claude.json` and

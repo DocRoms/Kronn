@@ -1812,7 +1812,7 @@ fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> Sse
 /// under the trigger (direct replies and their descendants) so it can
 /// complement it, but never later User turns or unrelated branches. The
 /// durable transcript itself remains untouched.
-fn discussion_at_dispatch_trigger(
+pub(crate) fn discussion_at_dispatch_trigger(
     disc: &Discussion,
     trigger_message_id: Option<&str>,
 ) -> Discussion {

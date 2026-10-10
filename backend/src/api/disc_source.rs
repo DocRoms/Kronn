@@ -2801,6 +2801,254 @@ mod tests {
         }
     }
 
+    // KT-1171 — which reply_to a native runner's plain MCP post is stored with.
+
+    fn judge_context(discussion_id: &str, job_id: &str, trigger: &str) -> RoomAgentAppendContext {
+        RoomAgentAppendContext {
+            discussion_id: discussion_id.into(),
+            agent_type: "OpenCode".into(),
+            dispatch_job_id: job_id.into(),
+            source_message_id: trigger.into(),
+        }
+    }
+
+    /// A mention-free OpenCode post; returns its stored reply_to.
+    async fn native_post_reply_to(
+        state: &crate::AppState,
+        room_agent: Option<RoomAgentAppendContext>,
+        explicit_reply_to: Option<&str>,
+    ) -> Option<String> {
+        let mut message = agent_msg("judge-plain-post", "Audience ouverte.");
+        message.agent_type = Some(AgentType::OpenCode);
+        message.reply_to_message_id = explicit_reply_to.map(str::to_owned);
+        let response = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: vec![message],
+                session_id: Some("opencode-runtime-session".into()),
+                since_sort_order: None,
+                session_credential: None,
+                publication_grant: None,
+                publication_proof: None,
+                room_agent,
+            }),
+        )
+        .await;
+        assert_eq!(response.0.data.expect("append succeeds").appended, 1);
+        state
+            .db
+            .with_read_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT reply_to_message_id FROM messages
+                     WHERE source_msg_id = 'judge-plain-post'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )?)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_native_runner_post_inherits_its_job_trigger_as_reply_to() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        let reply_to =
+            native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                .await;
+        assert_eq!(reply_to.as_deref(), Some("root"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_explicit_reply_to_wins_over_the_job_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                      received_at, reply_to_message_id)
+                     VALUES ('codex-joke', 'd-lint', 'Agent', 'une blague', 'Codex', ?1, 2, ?1,
+                             'root')",
+                    [&now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions SET next_message_seq = 3 WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reply_to = native_post_reply_to(
+            &state,
+            Some(judge_context("d-lint", &job_id, "root")),
+            Some("codex-joke"),
+        )
+        .await;
+        assert_eq!(reply_to.as_deref(), Some("codex-joke"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn no_running_job_means_no_inherited_reply_to() {
+        crate::core::anti_halluc::set_mode("off");
+        for status in ["Completed", "Failed", "Cancelled", "Pending"] {
+            let (state, _tmp) = lint_state(false).await;
+            let job_id = judge_room(&state).await;
+            state
+                .db
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE agent_dispatch_jobs SET status = ?1 WHERE id = 'job-judge'",
+                        [status],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let reply_to =
+                native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                    .await;
+            assert_eq!(reply_to, None, "status {status}: no running turn");
+        }
+        let (state, _tmp) = lint_state(false).await;
+        judge_room(&state).await;
+        let reply_to = native_post_reply_to(
+            &state,
+            Some(judge_context("d-lint", "job-missing", "root")),
+            None,
+        )
+        .await;
+        assert_eq!(reply_to, None, "an unknown job carries no turn");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_job_of_another_discussion_never_lends_its_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, agent, language, participants_json,
+                     created_at, updated_at, message_count, workspace_mode, no_agent,
+                     next_message_seq)
+                     VALUES ('d-other', 'O', 'OpenCode', 'fr', '[]', datetime('now'),
+                             datetime('now'), 1, 'Direct', 0, 2)",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('root-other', 'd-other', 'User', '@opencode ailleurs', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue(
+                    conn,
+                    crate::db::agent_dispatch::NewAgentDispatchJob {
+                        id: "job-other",
+                        discussion_id: "d-other",
+                        trigger_message_id: "root-other",
+                        trigger_sort_order: 1,
+                        dedupe_key: "force:root-other:job-other",
+                        agent_override: None,
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "job-other")?.expect("it runs");
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Another room's job, named honestly or claimed for this room, and a
+        // context naming another room: none carries a turn here.
+        for context in [
+            judge_context("d-other", "job-other", "root-other"),
+            judge_context("d-lint", "job-other", "root-other"),
+            judge_context("d-other", "job-judge", "root"),
+        ] {
+            let reply_to = native_post_reply_to(&state, Some(context), None).await;
+            assert_eq!(reply_to, None);
+            state
+                .db
+                .with_conn(|conn| {
+                    conn.execute(
+                        "DELETE FROM messages WHERE source_msg_id = 'judge-plain-post'",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_joined_cli_session_never_inherits_a_job_trigger() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "OpenCode",
+                    Some("opencode-runtime-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let reply_to =
+            native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None)
+                .await;
+        assert_eq!(reply_to, None, "a joined CLI is not the job's runner");
+    }
+
+    /// The point of the inheritance: the other agents of the turn see the post
+    /// in their frozen view of the trigger (KT-1153).
+    #[tokio::test]
+    #[serial]
+    async fn an_inherited_post_shows_in_the_frozen_thread_view() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        let job_id = judge_room(&state).await;
+        native_post_reply_to(&state, Some(judge_context("d-lint", &job_id, "root")), None).await;
+        let disc = state
+            .db
+            .with_read_conn(|conn| crate::db::discussions::get_discussion(conn, "d-lint"))
+            .await
+            .unwrap()
+            .expect("room exists");
+        let view =
+            crate::api::discussions::streaming::discussion_at_dispatch_trigger(&disc, Some("root"));
+        assert!(
+            view.messages
+                .iter()
+                .any(|message| message.content == "Audience ouverte."),
+            "the judge's post is in the turn's thread"
+        );
+    }
+
     #[tokio::test]
     #[serial]
     async fn unjoined_native_mcp_agent_can_still_address_an_explicit_responder() {
