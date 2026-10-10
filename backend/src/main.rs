@@ -29,13 +29,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Load config before tracing init so `debug_mode` can influence the
     // tracing filter's default level; `config::load()` emits no logs.
-    // Also arms the process timezone (KT-1103), shared with the desktop boot.
+    // Also arms the process timezone and anti-hallucination mode, shared with the desktop boot.
     let mut app_config = kronn::load_startup_config().await?;
-
-    // 0.8.7 anti-hallucination — arm the process-global mode flag from config
-    // so the runner chokepoint can gate P1/P2 without threading config through
-    // every agent-spawn site. Re-set on every save (see api::setup).
-    kronn::core::anti_halluc::set_mode(&app_config.server.anti_hallucination_mode);
 
     // Initialize tracing — write to stdout (Docker best practice: stdout for
     // logs, stderr for panics) AND to the in-memory ringbuffer that the

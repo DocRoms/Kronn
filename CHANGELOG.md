@@ -25,6 +25,10 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- The desktop app now applies the saved anti-hallucination mode at startup
+  (KT-1149). Only the standalone backend armed it, so on desktop the setting
+  was ignored until it was saved again in Settings. The arming moved into the
+  shared startup config load, so both boot paths run it and cannot diverge.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It
