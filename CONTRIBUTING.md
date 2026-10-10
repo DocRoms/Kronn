@@ -89,7 +89,7 @@ This project uses an AI-optimized context system in `ai/`. Before making changes
 2. Follow the coding rules documented in `ai/coding-rules.md`
 3. **Sign off every commit** (`git commit -s`)
 4. Test your changes:
-   - Backend: `cargo check && cargo clippy && cargo test`
+   - Backend: `make test-backend` (cargo-nextest, the runner CI uses; `make install-dev-tools` installs it), `cd backend && cargo clippy --all-targets -- -D warnings`, and `make test-backend-cov` for the coverage floors
    - Frontend: `pnpm build && pnpm lint && pnpm test`
    - Shell: `make test-shell`
    - E2E (Playwright, optional but recommended for UI changes): `make test-e2e` — requires the backend running. See [`frontend/e2e/README.md`](frontend/e2e/README.md) for the full setup + how to add a spec.

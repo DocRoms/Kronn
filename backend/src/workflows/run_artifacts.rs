@@ -20,7 +20,7 @@ const DIR_NAME: &str = "run-artifacts";
 pub fn root() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        Some(std::env::temp_dir().join(format!("kronn-test-{DIR_NAME}")))
+        Some(std::env::temp_dir().join(format!("kronn-test-{DIR_NAME}-{}", std::process::id())))
     }
     #[cfg(not(test))]
     {

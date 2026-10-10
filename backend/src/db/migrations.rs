@@ -2002,6 +2002,9 @@ mod tests {
         assert_eq!(seen, 1);
         conn.execute("INSERT INTO t(val) VALUES ('latest')", [])
             .unwrap();
+        // Each blocked checkpoint waits the busy timeout (5 s by default).
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
 
         let error = run_with_backup_checked(&conn, Some(&db_path), |_| Ok(u64::MAX))
             .expect_err("no consistent backup, no upgrade");

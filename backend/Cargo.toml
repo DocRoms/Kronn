@@ -4,6 +4,9 @@ version = "0.14.3"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
+# Integration tests are modules of one binary (tests/it.rs): one link of the
+# library instead of one per file.
+autotests = false
 
 [lib]
 name = "kronn"
@@ -12,6 +15,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "kronn"
 path = "src/main.rs"
+
+[[test]]
+name = "it"
+path = "tests/it.rs"
 
 [dependencies]
 # Web framework

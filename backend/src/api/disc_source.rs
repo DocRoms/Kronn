@@ -1795,10 +1795,9 @@ mod tests {
         state
             .db
             .with_conn(move |conn| {
-                let admin = crate::core::operator_secret::bootstrap(conn)
-                    .map(|_| ())
-                    .or_else(|_| Ok::<_, anyhow::Error>(()))
-                    .and_then(|_| crate::core::operator_secret::read_delivered())?;
+                // Minted in this test's own database, never through the shared
+                // secret file that parallel test processes would overwrite.
+                let admin = crate::db::human_credentials::create_admin_secret(conn, "test")?;
                 let authority = crate::db::human_credentials::authorise_enrolment(conn, &admin)?
                     .expect("the admin secret authorises");
                 let (_row, grant) = crate::db::human_credentials::enrol(

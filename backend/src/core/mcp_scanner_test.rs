@@ -44,7 +44,8 @@ mod tests {
         // This generic file fixture must not mutate process-wide host resolution.
         // Host-sync callers establish and restore KRONN_HOST_HOME in their own
         // #[serial] test bodies.
-        let tmp = std::env::temp_dir().join(format!("kronn-test-mcp-{}", name));
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-mcp-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         tmp
@@ -796,7 +797,7 @@ command = "manual-command"
         let tmp = setup_tmp("redir-no-ai");
         // No ai/ directory — should do nothing
         // Set KRONN_TEMPLATES_DIR to a valid templates path
-        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", "/tmp/kronn-test-no-templates");
+        crate::core::child_env::set_var("KRONN_TEMPLATES_DIR", tmp.join("no-templates"));
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
         // No files should be created
         assert!(!tmp.join("CLAUDE.md").exists());
@@ -816,7 +817,10 @@ command = "manual-command"
         std::fs::create_dir_all(tmp.join("docs")).unwrap();
         // docs/ exists but docs/AGENTS.md does NOT.
 
-        let tpl = std::env::temp_dir().join("kronn-test-templates-no-target");
+        let tpl = std::env::temp_dir().join(format!(
+            "kronn-test-templates-no-target-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tpl);
         std::fs::create_dir_all(&tpl).unwrap();
         std::fs::write(tpl.join("AGENTS.md"), "Read docs/AGENTS.md").unwrap();
@@ -847,7 +851,8 @@ command = "manual-command"
         std::fs::write(tmp.join("docs/AGENTS.md"), "# Entry point").unwrap();
 
         // Create a minimal templates dir with redirectors
-        let tpl = std::env::temp_dir().join("kronn-test-templates-redir");
+        let tpl =
+            std::env::temp_dir().join(format!("kronn-test-templates-redir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tpl);
         std::fs::create_dir_all(&tpl).unwrap();
         std::fs::write(tpl.join("CLAUDE.md"), "Read docs/AGENTS.md").unwrap();
@@ -895,7 +900,10 @@ command = "manual-command"
         std::fs::write(tmp.join("CLAUDE.md"), "Custom content").unwrap();
 
         // Create templates
-        let tpl = std::env::temp_dir().join("kronn-test-templates-noover");
+        let tpl = std::env::temp_dir().join(format!(
+            "kronn-test-templates-noover-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tpl);
         std::fs::create_dir_all(&tpl).unwrap();
         std::fs::write(tpl.join("CLAUDE.md"), "Template content").unwrap();

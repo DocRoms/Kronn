@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-backend test-backend-lib test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check check-diff test-backend test-backend-cov test-backend-lib install-dev-tools require-nextest test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -349,17 +349,44 @@ typegen:
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
 
-## Run the backend suite CI runs: library, integration tests under
-## backend/tests/ and doctests. Skips the ts-rs exports so bindings stay put
-## (CI regenerates them in its own drift check).
-test-backend:
-	@echo "$(CYAN)▸ Running backend tests (all targets, as CI)...$(RESET)"
-	cd backend && cargo test -- --skip export_bindings
+## Run the backend suite CI runs, with the runner CI uses (cargo-nextest,
+## backend/.config/nextest.toml): every test in its own process, then the
+## doctests nextest does not run. The ts-rs exports are filtered out by the
+## default profile so bindings stay put. No `cargo test` fallback: the
+## integration tests share one binary and assume a process per test.
+test-backend: require-nextest
+	@echo "$(CYAN)▸ Running backend tests with cargo-nextest (as CI)...$(RESET)"
+	cd backend && cargo nextest run --workspace $(NEXTEST_ARGS)
+	cd backend && cargo test --doc
+
+require-nextest:
+	@cargo nextest --version >/dev/null 2>&1 \
+	  || { echo "$(YELLOW)▸ cargo-nextest is required (the runner CI uses): run 'make install-dev-tools'.$(RESET)"; exit 1; }
+
+## The CI coverage gate, locally: the instrumented nextest run with the same
+## floors, then the key-management per-file floors from the same data.
+test-backend-cov:
+	@cargo nextest --version >/dev/null 2>&1 && cargo llvm-cov --version >/dev/null 2>&1 \
+	  || { echo "$(YELLOW)▸ cargo-nextest and cargo-llvm-cov are required: run 'make install-dev-tools'.$(RESET)"; exit 1; }
+	@echo "$(CYAN)▸ Running the backend coverage gate (as CI)...$(RESET)"
+	cd backend && cargo llvm-cov nextest --workspace --summary-only \
+	  --fail-under-lines 83 --fail-under-functions 83 --fail-under-regions 83
+	scripts/check-keymgmt-coverage.sh
 
 ## Library unit tests only: a quick loop, not the gate.
-test-backend-lib:
+test-backend-lib: require-nextest
 	@echo "$(CYAN)▸ Running backend library tests...$(RESET)"
-	cd backend && cargo test --lib -- --skip export_bindings
+	cd backend && cargo nextest run --lib $(NEXTEST_ARGS)
+
+## Install the backend test tools CI uses: cargo-nextest and cargo-llvm-cov
+## (prebuilt through cargo-binstall when present, built from source otherwise).
+install-dev-tools:
+	@if command -v cargo-binstall >/dev/null 2>&1; then \
+	  cargo binstall --no-confirm cargo-nextest cargo-llvm-cov; \
+	else \
+	  cargo install --locked cargo-nextest cargo-llvm-cov; \
+	fi
+	rustup component add llvm-tools-preview
 
 ## Run Python helper tests (MCP bridge auto-inheritance contract).
 ## Stdlib `unittest` only — no extra dev deps. The MCP script
@@ -497,6 +524,9 @@ help:
 	@echo "  make check          Verify prerequisites"
 	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
 	@echo "  make typegen        Sync Rust → TS types"
+	@echo "  make test-backend   Backend tests (cargo-nextest, as CI)"
+	@echo "  make test-backend-cov  Backend coverage gate (as CI)"
+	@echo "  make install-dev-tools  Install cargo-nextest and cargo-llvm-cov"
 	@echo "  make test-shell     Run shell tests (bats)"
 	@echo "  make bump V=x.y.z  Bump version everywhere"
 	@echo "  make check-version  Verify release version consistency"

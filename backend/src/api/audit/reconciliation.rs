@@ -894,7 +894,10 @@ mod tests {
 
     #[test]
     fn snapshot_skips_scaffolding_files() {
-        let tmp = std::env::temp_dir().join("kronn-test-reconcile-scaffolding");
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-test-reconcile-scaffolding-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         let docs = tmp.join("docs");
         let td = docs.join("tech-debt");
@@ -912,7 +915,8 @@ mod tests {
 
     #[test]
     fn compute_delta_detects_unchanged_updated_deleted() {
-        let tmp = std::env::temp_dir().join("kronn-test-reconcile-delta");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-reconcile-delta-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let td = tmp.join("docs").join("tech-debt");
         std::fs::create_dir_all(&td).unwrap();
@@ -966,7 +970,8 @@ also not interesting (this `path/that:1` should be ignored)
 
     #[test]
     fn check_signature_some_true_when_pointer_line_exists() {
-        let tmp = std::env::temp_dir().join("kronn-test-reconcile-sig");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-reconcile-sig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("src")).unwrap();
         std::fs::write(tmp.join("src/foo.rs"), "line1\nline2\nline3\n").unwrap();
@@ -989,7 +994,8 @@ also not interesting (this `path/that:1` should be ignored)
 
     #[test]
     fn check_signature_none_when_no_parsable_pointer() {
-        let tmp = std::env::temp_dir().join("kronn-test-reconcile-nptr");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-reconcile-nptr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let docs = tmp.join("docs/tech-debt");
         std::fs::create_dir_all(&docs).unwrap();

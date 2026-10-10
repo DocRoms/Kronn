@@ -19,7 +19,7 @@ impl Environment {
         if !self.0.iter().any(|(key, _)| *key == name) {
             self.0.push((name, kronn::core::child_env::var_os(name)));
         }
-        // This integration binary holds one current-thread test.
+        // nextest, the suite's runner, gives this test its own process.
         kronn::core::child_env::set_var(name, value.into());
     }
 }

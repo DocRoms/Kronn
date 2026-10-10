@@ -34,6 +34,14 @@ mod tests {
         crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
     }
 
+    /// A project directory of this test process only: parallel runs never share it.
+    fn tmp_project(name: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("{name}-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn test_state() -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
         let config_arc = Arc::new(RwLock::new(default_config()));
@@ -3714,7 +3722,7 @@ mod tests {
                 let project = crate::models::Project {
                     id: "drift-proj".into(),
                     name: "Drift Test Project".into(),
-                    path: "/tmp/kronn-drift-test".into(),
+                    path: tmp_project("kronn-drift-test"),
                     repo_url: None,
                     token_override: None,
                     ai_config: crate::models::AiConfigStatus {
@@ -3743,7 +3751,7 @@ mod tests {
             .unwrap();
 
         // Ensure the path exists (even if empty)
-        std::fs::create_dir_all("/tmp/kronn-drift-test").ok();
+        std::fs::create_dir_all(tmp_project("kronn-drift-test")).ok();
 
         let req = Request::builder()
             .method("GET")
@@ -3774,7 +3782,7 @@ mod tests {
                 let project = crate::models::Project {
                     id: "partial-proj".into(),
                     name: "Partial Audit Test".into(),
-                    path: "/tmp/kronn-partial-test".into(),
+                    path: tmp_project("kronn-partial-test"),
                     repo_url: None,
                     token_override: None,
                     ai_config: crate::models::AiConfigStatus {
@@ -3802,7 +3810,7 @@ mod tests {
             .await
             .unwrap();
 
-        std::fs::create_dir_all("/tmp/kronn-partial-test").ok();
+        std::fs::create_dir_all(tmp_project("kronn-partial-test")).ok();
 
         // POST with invalid step number (99)
         let body_json = serde_json::json!({
@@ -3846,7 +3854,7 @@ mod tests {
                 let project = crate::models::Project {
                     id: "partial-ok-proj".into(),
                     name: "Partial OK Test".into(),
-                    path: "/tmp/kronn-partial-ok-test".into(),
+                    path: tmp_project("kronn-partial-ok-test"),
                     repo_url: None,
                     token_override: None,
                     ai_config: crate::models::AiConfigStatus {
@@ -3874,7 +3882,7 @@ mod tests {
             .await
             .unwrap();
 
-        std::fs::create_dir_all("/tmp/kronn-partial-ok-test").ok();
+        std::fs::create_dir_all(tmp_project("kronn-partial-ok-test")).ok();
 
         // POST with valid step number (1)
         let body_json = serde_json::json!({

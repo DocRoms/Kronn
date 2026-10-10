@@ -2010,7 +2010,8 @@ mod tests {
     #[serial]
     fn find_binary_matches_cmd_extension() {
         // Create a temp dir with a fake "testbin.cmd" file
-        let tmp = std::env::temp_dir().join("kronn-test-findbin-cmd");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-findbin-cmd-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("testbin.cmd"), "echo hello").unwrap();
 
@@ -2026,7 +2027,8 @@ mod tests {
     #[test]
     #[serial]
     fn find_binary_matches_exe_extension() {
-        let tmp = std::env::temp_dir().join("kronn-test-findbin-exe");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-findbin-exe-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("testbin.exe"), "fake").unwrap();
 
@@ -2041,7 +2043,8 @@ mod tests {
     #[test]
     #[serial]
     fn find_binary_matches_exact_name() {
-        let tmp = std::env::temp_dir().join("kronn-test-findbin-exact");
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-test-findbin-exact-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join("testbin"), "fake").unwrap();
 

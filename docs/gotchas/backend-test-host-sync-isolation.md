@@ -12,7 +12,8 @@ roots. [src: file: backend/src/api/mcps.rs:650-673]
 [src: file: backend/src/api/agents.rs:1-18]
 [src: file: backend/src/core/mcp_scanner.rs:2228-2259]
 
-`backend/tests/api_tests.rs` is an independent process. Its ordinary
+`backend/tests/api_tests.rs` is a module of the single integration binary
+(`backend/tests/it.rs`), and nextest runs each of its tests in its own process. Its ordinary
 `test_state` calls a single `OnceLock<TempDir>` initializer which creates and
 installs both `KRONN_DATA_DIR` and `KRONN_HOST_HOME`; subsequent state builders
 do not mutate either process-global variable. [src: file: backend/tests/api_tests.rs:1645-1662]

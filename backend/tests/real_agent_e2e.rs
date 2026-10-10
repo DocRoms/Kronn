@@ -12,7 +12,7 @@
 //!
 //! ```bash
 //! # From the backend/ directory:
-//! KRONN_E2E_REAL_AGENT=1 cargo test --test real_agent_e2e -- --ignored --nocapture
+//! KRONN_E2E_REAL_AGENT=1 cargo test --test it real_agent_e2e -- --ignored --nocapture
 //! ```
 //!
 //! - `KRONN_E2E_REAL_AGENT=1` — opt-in env flag (without it, tests
@@ -54,7 +54,7 @@ fn require_opt_in() {
         panic!(
             "Real-agent E2E tests are opt-in: set KRONN_E2E_REAL_AGENT=1 to run. \
              Expect ~30-80k tokens per test (real LLM cost). \
-             Run: `KRONN_E2E_REAL_AGENT=1 cargo test --test real_agent_e2e -- --ignored --nocapture`"
+             Run: `KRONN_E2E_REAL_AGENT=1 cargo test --test it real_agent_e2e -- --ignored --nocapture`"
         );
     }
 }

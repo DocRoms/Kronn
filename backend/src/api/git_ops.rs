@@ -2895,30 +2895,48 @@ filename src/main.rs
             .current_dir(repo.path())
             .output()
             .unwrap();
+        // One fast-import stream instead of 305 `git commit` processes.
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let head = String::from_utf8(head.stdout).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let mut stream = String::new();
         for index in 0..305 {
-            let output = std::process::Command::new("git")
-                // Background auto-gc repacks refs mid-loop and the next commit
-                // can fail with "could not parse HEAD" on a loaded machine.
-                .args([
-                    "-c",
-                    "gc.auto=0",
-                    "-c",
-                    "maintenance.auto=false",
-                    "commit",
-                    "--allow-empty",
-                    "-m",
-                    &format!("history {index}"),
-                ])
-                .current_dir(repo.path())
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "empty history commit {index} failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let message = format!("history {index}");
+            stream.push_str(&format!(
+                "commit refs/heads/feature/history\ncommitter Kronn Test <test@kronn.invalid> {} +0000\ndata {}\n{}\n",
+                now + index,
+                message.len(),
+                message
+            ));
+            if index == 0 {
+                stream.push_str(&format!("from {}\n", head.trim()));
+            }
         }
+        let mut import = std::process::Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(repo.path())
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        import
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        let output = import.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "fast-import failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let first = run_git_status_page(repo.path(), 0, 40, &[]).unwrap();
         assert_eq!(first.commits_total, 305);
