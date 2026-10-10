@@ -989,6 +989,12 @@ jobs:
         run: make check-version
 
       - name: Run bats tests
+        # A stuck test fails by name: BATS_TEST_TIMEOUT (60s, run.sh) bounds
+        # each test, BATS_SUITE_TIMEOUT the run when a stray process keeps
+        # bats waiting. A green run takes about a minute.
+        timeout-minutes: 8
+        env:
+          BATS_SUITE_TIMEOUT: "300"
         run: make test-shell
 
   security-scan:
