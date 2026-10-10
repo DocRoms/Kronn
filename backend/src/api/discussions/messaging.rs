@@ -2745,6 +2745,7 @@ mod tests {
                 crate::db::workflows::insert_run(
                     conn,
                     &crate::models::WorkflowRun {
+                        outcome: None,
                         id: "batch-stop".into(),
                         workflow_id: "qp:qp-stop".into(),
                         status: crate::models::RunStatus::Running,

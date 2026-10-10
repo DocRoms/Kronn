@@ -71,6 +71,44 @@ export function groupRunsByParent(runs: WorkflowRun[]): RunGroup[] {
   return groups;
 }
 
+/** A row of the run list: a parent-tick group, or a streak of runs that
+ *  changed nothing folded into one line (KT-1100). */
+export type RunListItem =
+  | { kind: 'group'; group: RunGroup }
+  | { kind: 'noop'; key: string; runs: WorkflowRun[]; since: string };
+
+export function isNoOpRun(run: WorkflowRun): boolean {
+  return run.outcome === 'no_op';
+}
+
+/** Fold every streak of at least two consecutive standalone no-op runs into
+ *  one row. `since` is the oldest start of the streak (runs come newest first). */
+export function foldNoOpRuns(groups: RunGroup[]): RunListItem[] {
+  const items: RunListItem[] = [];
+  let streak: WorkflowRun[] = [];
+  const flush = () => {
+    if (streak.length >= 2) {
+      items.push({ kind: 'noop', key: `noop-${streak[0].id}`, runs: streak, since: streak[streak.length - 1].started_at });
+    } else {
+      for (const run of streak) {
+        items.push({ kind: 'group', group: { key: run.id, parentRunId: null, parentName: null, tickAt: null, runs: [run] } });
+      }
+    }
+    streak = [];
+  };
+  for (const group of groups) {
+    const lone = group.parentRunId === null && group.runs.length === 1 ? group.runs[0] : null;
+    if (lone && isNoOpRun(lone)) {
+      streak.push(lone);
+      continue;
+    }
+    flush();
+    items.push({ kind: 'group', group });
+  }
+  flush();
+  return items;
+}
+
 /** Whether this automation is working right now.
  *
  *  `Pending` counts: a run that is claimed but not yet streaming is already

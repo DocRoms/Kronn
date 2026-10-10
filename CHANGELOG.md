@@ -146,6 +146,51 @@ Release notes for 0.9.3 and earlier are available in the
   change. Without one the schedule stays in UTC, as before, and the editor
   says so. On the change days, a local time that does not exist (spring) does
   not fire that day, and a repeated one (autumn) fires once, at its first pass.
+- Workflow tools now say whether a saved workflow can start (KT-1138). Every
+  create, update, import, read and bundle returns a structured readiness
+  verdict (`readiness` in the API envelope, `kronn_readiness` first in agent
+  tool results, `readiness` in the bundle response): `ready` plus each blocker
+  with its workflow, step, rollback flag, kind (validation error, misconfigured
+  step, human approval, unsafe interpolation, missing child, cycle, collection
+  error), the runtime reason, the action and whether only a human can lift it.
+  It covers sub-workflows, triggered workflows and every `on_failure` chain,
+  and reads the run's own validators (the Exec allowlist, path and
+  irreversible-operation refusals of the main and setup lines now live in
+  functions shared by the run and the verdict; a line with a template is left
+  to the run). `GET /api/workflows/{id}/readiness` and the new
+  `workflow_validate` MCP tool return it on demand; `workflow_list` keeps the
+  `misconfigured_step_count` and `unsafe_step_count` it used to drop, zero
+  included, and adds `blocker_count` and `human_approval_count` (the misconfigured
+  count now includes rollback steps). Saving or enabling is no longer presented
+  as readiness, and `ready` means no known refusal, not a guaranteed run. Agents
+  still cannot approve a line, pin a script hash or clear its provenance
+  (KT-1017): the `workflow-architect` skill and the manuals tell them to fix
+  what they can and to list each pending approval to the human. In the
+  workflow view, a line that only lacks a human approval is no longer described
+  as a dangerous interpolation; it offers "Review and approve", and blocked
+  sub-workflows and rollbacks are named. The Exec step schema explains the
+  code/data split and the approval agent-written lines need.
+- Runs that change nothing are marked, hidden and purged fast (KT-1100). A
+  successful top-level run is stored with `outcome: no_op` when every step
+  declared or proved that it changed nothing: an Exec step prints a
+  `KRONN_NOOP` line, an Agent step puts `"no_change": true` in its envelope,
+  and Kronn infers an identical Page publish, a `GET`/`HEAD` call, a Collect
+  step made of Quick API reads and the pure data steps. Anything else, a
+  worktree, a preserved branch, a dataset write that changed content, a
+  recorded non-`GET` call or any row pointing at the run, keeps it `changed`.
+  The outcome is returned by the run API and by MCP `workflow_runs` /
+  `workflow_run_get`. The run list hides these runs by default
+  (`hide_no_op=true` on `GET /api/workflows/{id}/runs` and `/runs/count`),
+  offers "Show runs without changes (N)", and folds a streak of them into one
+  greyed row, "N runs without changes since HH:MM". A no-op run keeps the
+  first 2 000 characters of each step output and is deleted 24 h after it
+  finished by the existing run retention pass. A workflow can carry its own
+  retention (`retention: {no_op_hours, success_days, failure_days}`, editor
+  card "Run retention", `workflow_update`), which overrides the global
+  windows per class; `0` keeps forever. Runs that own a worktree or that
+  something references are never deleted. Retention is human-only on a
+  stored workflow: an agent's `workflow_update` refuses a changed
+  `retention`, and a `kronn/` re-import keeps the stored one.
 - Multi-agent discussions now say who is launched and how (KT-1109). While a
   draft names several agents, the composer shows "N agents launched in
   parallel" with one chip per agent, and the sent message's routing line adds
@@ -347,6 +392,37 @@ Release notes for 0.9.3 and earlier are available in the
   stay folded below, as before.
 
 ### Fixed
+
+- The desktop app no longer blocks allowed third-party players in Live Pages
+  by its own headers (KT-1123). It sent
+  `Cross-Origin-Embedder-Policy: require-corp` and
+  `Cross-Origin-Opener-Policy: same-origin` on every response, so the webview
+  refused any frame whose site does not opt in to that policy, whatever the
+  allow-list said. Both headers are gone, as in Docker, which never sent
+  them; the frame policy (`frame-src`) is unchanged. They only made
+  `SharedArrayBuffer` available, so the local voice workers now run on a
+  single WASM thread in the desktop app, as in Docker. Proven: in a native
+  macOS WKWebView, a synthetic player without COEP/CORP is blocked under the
+  old headers and loads without them, and text-to-speech still produces
+  audio without isolation. Not yet checked: the packaged app, a real player
+  (YouTube…), Windows WebView2. Local speech-to-text currently fails in
+  WKWebView with or without these headers (KT-1143), unrelated to this change.
+
+- The `kronn-internal` MCP bridge no longer hangs on a large request
+  (KT-1139). A `workflow_update` of more than 256 KiB, such as a 1 MiB
+  workflow, killed the bridge's input reader, and every later call waited
+  forever. A request may now carry up to 8 MiB. A larger one is refused with a
+  `request_too_large` error that runs nothing, and the connection keeps
+  working. If the reader stops on an unexpected error, the process exits
+  instead of hanging. The limits are listed by `bridge_info` and in
+  `initialize`. Large workflows are now edited one step at a time:
+  `workflow_get` takes `step_name` or `step_index` to read one step, and the
+  new `workflow_update_step` changes one step through the same save as
+  `workflow_update`, with every authorship, approval and enable rule unchanged.
+  If another save changed the workflow after the edit read it, the edit is
+  refused with a conflict and nothing is written.
+  See `docs/operations/mcp-servers/kronn-internal.md`, "Transport size
+  contract".
 
 - The header of a Page in the Artifacts view no longer puts the Page id under
   the "Open in new tab" button (KT-1141). The id stays with the title and

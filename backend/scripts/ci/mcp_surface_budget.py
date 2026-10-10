@@ -76,9 +76,20 @@ BRIDGE = "backend/scripts/disc-introspection-mcp.py"
 # KT-1128: `skill_create` and `skill_update` gained `project_id`, paid for by
 # dropping the false claim that an update changes the skill's id; ceiling
 # lowered by 9 B.
+# KT-1100: retention became human-only on a stored workflow, so
+# `workflow_update` lost its `retention` input (its shortened description
+# stays); ceiling lowered by 109 B.
 # Keep the declaration budget at the measured payload size. Extended contracts
 # are loaded through tool_manual and are excluded from this wire-size budget.
-CATALOGUE_MAX_BYTES = 85_726
+# KT-1138: `workflow_validate` (a workflow's ready/blockers verdict) was paid
+# for by tightening the workflow_list/get/clone/update descriptions; the
+# verdict guidance itself travels in tool results and the skill. Ceiling
+# lowered by 372 B (85_726 → 85_354 after the rebase).
+# KT-1139: `workflow_update_step` and a one-step `workflow_get` (large
+# workflows are edited step by step) were paid for by tightening
+# workflow_step_schema/active_runs/runs/run_discussions; ceiling lowered by
+# 6 B (85_354 -> 85_348).
+CATALOGUE_MAX_BYTES = 85_348
 
 # Per-declaration ceiling. The five heaviest tools were 29% of the catalogue for
 # 6% of the tools; their descriptions had grown into manuals. A per-tool cap is

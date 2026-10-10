@@ -2579,6 +2579,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

@@ -661,7 +661,17 @@ Each mode serves it on the real document response:
   from the embedded backend, which serves the built frontend through
   `serve_app_documents`; its middleware puts
   `frame-src S; child-src S; worker-src 'self' blob:` on each response, which
-  the webview enforces.
+  the webview enforces. The desktop sends no `Cross-Origin-Embedder-Policy`
+  or `Cross-Origin-Opener-Policy` (KT-1123): under `require-corp` the webview
+  refuses any player that does not itself send COEP + CORP (YouTube, Vimeo,
+  Suno do not), whatever the allow-list says, and `credentialless` is not
+  supported by WebKit, the macOS webview. They were set only to expose
+  `SharedArrayBuffer` to the TTS/STT workers; onnxruntime-web falls back to a
+  single WASM thread without it, as in Docker, which never sent them.
+  Proven in a native macOS WKWebView: a synthetic player without COEP/CORP is
+  blocked under the old headers and loads without them; TTS produces audio
+  without isolation. Open: the packaged app, a real player, Windows WebView2,
+  and STT, which fails there with or without the headers (KT-1143).
 - Native (`./kronn start-dev`, and the desktop dev URL): Vite serves the
   documents; the `kronn-frame-policy` plugin reads the same backend route per
   document request and sets the same policy, re-validating the sources and

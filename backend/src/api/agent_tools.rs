@@ -4486,10 +4486,20 @@ pub(super) fn unwrap_api_noticed<T: serde::Serialize>(
     response: crate::models::ApiResponse<T>,
 ) -> ToolOutcome {
     let notice = response.notice.clone();
+    let readiness = response.readiness.clone();
     let data = response.data.map(|data| {
         let mut value = serde_json::to_value(data).unwrap_or_default();
-        if let (Some(notice), Some(object)) = (notice, value.as_object_mut()) {
-            object.insert("kronn_notice".into(), serde_json::Value::String(notice));
+        if let Some(object) = value.as_object_mut() {
+            if let Some(notice) = notice {
+                object.insert("kronn_notice".into(), serde_json::Value::String(notice));
+            }
+            // The verdict an agent reads before saying a workflow is ready.
+            if let Some(readiness) = readiness {
+                object.insert(
+                    "kronn_readiness".into(),
+                    serde_json::to_value(readiness).unwrap_or_default(),
+                );
+            }
         }
         value
     });

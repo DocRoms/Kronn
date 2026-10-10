@@ -93,9 +93,10 @@ The HTTP security headers (CSP, `X-Frame-Options`, `X-Content-Type-Options`,
 `Referrer-Policy`) are set by the **nginx gateway**, NOT the Rust backend —
 they live in **`.docker/nginx.conf`** (the `add_header … always;` block near
 the top of the `server {}`). The desktop (Tauri) build instead serves the
-frontend via `ServeDir` and sets only COOP/COEP
-(`desktop/src-tauri/src/main.rs`) with no CSP, so the directives below apply
-to the Docker/self-hosted deployment.
+frontend via `serve_app_documents`, whose only header is the frame-policy CSP
+(`frame-src`/`child-src`/`worker-src`); it sends no COOP/COEP (KT-1123, see
+`docs/architecture/live-pages.md`), so the directives below apply to the
+Docker/self-hosted deployment.
 
 The CSP is a single `add_header Content-Security-Policy "…" always;` line:
 
@@ -145,5 +146,5 @@ the predicate behaviour is unchanged.
 - `backend/src/api/setup.rs:regenerate_auth_token` — rotation endpoint
 - `frontend/src/pages/SettingsPage.tsx:1240-1275` — Settings UI
 - `.docker/nginx.conf` — CSP + security headers (gateway, Docker mode)
-- `desktop/src-tauri/src/main.rs` — COOP/COEP headers (desktop mode)
+- `desktop/src-tauri/src/main.rs:desktop_app` — desktop router (no COOP/COEP)
 - `docs/tech-debt/TD-20260314-no-tls.md` (when filed) — TLS plan

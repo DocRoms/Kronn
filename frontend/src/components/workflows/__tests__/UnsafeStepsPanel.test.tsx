@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import type { UnsafeExecStep, Workflow } from '../../../types/generated';
+import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../../types/generated';
 
 const unsafeSteps = vi.fn();
+const readiness = vi.fn();
 vi.mock('../../../lib/api', () => ({
-  workflows: { unsafeSteps: (...args: unknown[]) => unsafeSteps(...args) },
+  workflows: {
+    unsafeSteps: (...args: unknown[]) => unsafeSteps(...args),
+    readiness: (...args: unknown[]) => readiness(...args),
+  },
 }));
 vi.mock('../../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string, ...args: unknown[]) => [key, ...args].join('|') }),
@@ -34,7 +38,11 @@ const manual: UnsafeExecStep = {
 };
 
 describe('UnsafeStepsPanel', () => {
-  beforeEach(() => unsafeSteps.mockReset());
+  beforeEach(() => {
+    unsafeSteps.mockReset();
+    readiness.mockReset();
+    readiness.mockResolvedValue(null);
+  });
 
   it('renders nothing when every step is safe', async () => {
     unsafeSteps.mockResolvedValue([]);
@@ -74,7 +82,13 @@ describe('UnsafeStepsPanel', () => {
     render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} onApprove={onApprove} />);
 
     expect(await screen.findByText(/wf\.unsafeAgentWritten/)).toBeDefined();
-    fireEvent.click(screen.getByText('wf.unsafeHow'));
+    // A missing approval is not presented as a value inside code.
+    expect(screen.getByRole('heading').textContent).toContain('wf.approvalTitle');
+    expect(screen.getByText('wf.approvalIntro')).toBeDefined();
+    expect(screen.queryByText('wf.unsafeIntro')).toBeNull();
+    expect(screen.queryByText('wf.unsafeHow')).toBeNull();
+    expect(screen.queryByLabelText('wf.unsafeAgentPromptLabel')).toBeNull();
+    fireEvent.click(screen.getByText('wf.approvalReview'));
     expect(screen.getByText('bash ["-c","terraform plan \\"$1\\"","_","{{x}}"]')).toBeDefined();
     fireEvent.click(screen.getByText('wf.unsafeApprove'));
     await waitFor(() => expect(onApprove).toHaveBeenCalledWith(pending));
@@ -126,5 +140,82 @@ describe('UnsafeStepsPanel', () => {
     render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
     await screen.findByText('greet');
     expect(screen.queryByLabelText('wf.unsafeAgentPromptLabel')).toBeNull();
+  });
+
+  it('presents a value inside code as an interpolation, not as an approval', async () => {
+    unsafeSteps.mockResolvedValue([fixable]);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    await screen.findByText('greet');
+    expect(screen.getByRole('heading').textContent).toContain('wf.unsafeTitle');
+    expect(screen.getByText('wf.unsafeIntro')).toBeDefined();
+    expect(screen.queryByText('wf.approvalIntro')).toBeNull();
+  });
+
+  it('names blocked sub-workflows and rollbacks even when this workflow has none', async () => {
+    const blocker = (workflow_id: string, workflow_name: string, human_only: boolean): WorkflowBlocker => ({
+      workflow_id, workflow_name, step: 's', on_failure: workflow_name === 'WF2', kind: human_only ? 'human_approval' : 'missing_child',
+      message: 'm', action: 'a', human_only,
+    });
+    const verdict: WorkflowReadiness = {
+      workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false,
+      blockers: [blocker('wf-2', 'WF2', true), blocker('wf-2', 'WF2', true), blocker('wf-3', 'WF3', false)],
+      human_approval_count: 2, checked_workflow_ids: ['wf-1', 'wf-2', 'wf-3'], summary: 'NOT READY',
+    };
+    unsafeSteps.mockResolvedValue([]);
+    readiness.mockResolvedValue(verdict);
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    const chain = await screen.findByTestId('readiness-chain');
+    expect(chain.textContent).toContain('wf.readinessChildItem|WF2|2|2');
+    expect(chain.textContent).toContain('wf.readinessChildItem|WF3|1|0');
+    expect(readiness).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('stays hidden when the chain is ready', async () => {
+    unsafeSteps.mockResolvedValue([]);
+    readiness.mockResolvedValue({
+      workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: true, blockers: [],
+      human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: 'READY',
+    });
+    const { container } = render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    await waitFor(() => expect(readiness).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("shows this workflow's own blockers the unsafe list does not cover, once", async () => {
+    const script: WorkflowBlocker = {
+      workflow_id: 'wf-1', workflow_name: 'PR review', step: 'run_tool', on_failure: false,
+      kind: 'human_approval', phase: 'script', message: '`tool.py` has no approved hash yet.',
+      action: 'Ask a human to open the step and save it.', human_only: true,
+    };
+    const duplicate: WorkflowBlocker = {
+      workflow_id: 'wf-1', workflow_name: 'PR review', step: 'greet', on_failure: false,
+      kind: 'unsafe_interpolation', phase: 'main', reason: 'inline_code_interpolation',
+      message: 'dup', action: 'Rewrite', human_only: false,
+    };
+    unsafeSteps.mockResolvedValue([]);
+    readiness.mockResolvedValue({
+      workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false,
+      blockers: [script], human_approval_count: 1, checked_workflow_ids: ['wf-1'], summary: 'NOT READY',
+    });
+    const { unmount } = render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.getAttribute('aria-label')).toBe('wf.approvalTitle');
+    const local = screen.getByTestId('readiness-local');
+    expect(local.textContent).toContain('run_tool');
+    expect(local.textContent).toContain('(script)');
+    expect(local.textContent).toContain(script.message);
+    expect(local.textContent).toContain(script.action);
+    unmount();
+
+    unsafeSteps.mockResolvedValue([fixable]);
+    readiness.mockResolvedValue({
+      workflow_id: 'wf-1', workflow_name: 'PR review', enabled: true, ready: false,
+      blockers: [duplicate], human_approval_count: 0, checked_workflow_ids: ['wf-1'], summary: 'NOT READY',
+    });
+    render(<UnsafeStepsPanel workflow={workflow} onApply={vi.fn()} />);
+    await screen.findByText('greet');
+    await waitFor(() => expect(readiness).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId('readiness-local')).toBeNull();
+    expect(screen.queryByText('dup')).toBeNull();
   });
 });

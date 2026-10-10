@@ -161,6 +161,7 @@ fn workflow() -> Workflow {
     .unwrap();
     assert!(matches!(steps[1].step_type, StepType::Agent));
     Workflow {
+        retention: None,
         project_scope: None,
         pinned: false,
         id: "wf-793".into(),
@@ -191,6 +192,7 @@ fn workflow() -> Workflow {
 
 fn pending_run() -> WorkflowRun {
     WorkflowRun {
+        outcome: None,
         id: RUN.into(),
         workflow_id: "wf-793".into(),
         status: RunStatus::Pending,

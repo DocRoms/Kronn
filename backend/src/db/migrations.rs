@@ -902,6 +902,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/237_workflow_watch_state.sql"),
     ),
     (
+        "238_run_outcome_and_workflow_retention",
+        include_str!("sql/238_run_outcome_and_workflow_retention.sql"),
+    ),
+    (
         "240_task_boards_and_default_contents",
         include_str!("sql/240_task_boards_and_default_contents.sql"),
     ),

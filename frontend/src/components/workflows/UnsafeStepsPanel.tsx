@@ -2,12 +2,14 @@
 // refused at run time. This panel names them and, on request, shows the
 // suggested positional-argument rewrite as a diff; nothing is applied until
 // the user clicks Apply. When a step needs a manual fix, it offers a ready
-// prompt to hand to an agent.
+// prompt to hand to an agent. KT-1138 — a line that only lacks a human's
+// approval is told apart from a value inside code, and blocked sub-workflows
+// or rollbacks are named so a saved chain is never mistaken for a ready one.
 import { useEffect, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { workflows as workflowsApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
-import type { UnsafeExecStep, Workflow } from '../../types/generated';
+import type { UnsafeExecStep, Workflow, WorkflowBlocker, WorkflowReadiness } from '../../types/generated';
 
 interface UnsafeStepsPanelProps {
   workflow: Workflow;
@@ -32,6 +34,7 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
   const [open, setOpen] = useState<string | null>(null);
   const [applying, setApplying] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,10 +42,42 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
       .then(() => workflowsApi.unsafeSteps(workflow.id))
       .then(found => { if (!cancelled) setIssues(found); })
       .catch(() => { if (!cancelled) setIssues([]); });
+    Promise.resolve()
+      .then(() => workflowsApi.readiness(workflow.id))
+      .then(found => { if (!cancelled) setReadiness(found ?? null); })
+      .catch(() => { if (!cancelled) setReadiness(null); });
     return () => { cancelled = true; };
   }, [workflow]);
 
-  if (issues.length === 0) return null;
+  // Blockers that live in another workflow of the chain, grouped by workflow.
+  const elsewhere = new Map<string, { name: string; total: number; human: number }>();
+  // This workflow's blockers the unsafe-line list does not already show
+  // (unpinned scripts, allowlist, destructive or missing config).
+  const shown = (blocker: WorkflowBlocker) => issues.some(issue =>
+    issue.step_name === blocker.step
+    && issue.phase === blocker.phase
+    && issue.on_failure === blocker.on_failure
+    && issue.reason === blocker.reason);
+  const local: WorkflowBlocker[] = [];
+  for (const blocker of readiness?.blockers ?? []) {
+    if (blocker.workflow_id === workflow.id) {
+      if (!shown(blocker)) local.push(blocker);
+      continue;
+    }
+    const entry = elsewhere.get(blocker.workflow_id) ?? { name: blocker.workflow_name, total: 0, human: 0 };
+    entry.total += 1;
+    if (blocker.human_only) entry.human += 1;
+    elsewhere.set(blocker.workflow_id, entry);
+  }
+
+  if (issues.length === 0 && local.length === 0 && elsewhere.size === 0) return null;
+
+  const codeIssues = issues.filter(issue => issue.reason !== 'unmodelled_program');
+  const approvalIssues = issues.filter(issue => issue.reason === 'unmodelled_program');
+  const needsHuman = approvalIssues.length > 0 || local.some(blocker => blocker.human_only);
+  const title = codeIssues.length > 0
+    ? t('wf.unsafeTitle')
+    : needsHuman ? t('wf.approvalTitle') : t('wf.readinessTitle');
 
   // A line that needs a human's approval is not an agent's to work around.
   const manualIssues = issues.filter(
@@ -96,12 +131,55 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
   };
 
   return (
-    <section className="wf-unsafe-panel" role="alert" aria-label={t('wf.unsafeTitle')}>
+    <section
+      className="wf-unsafe-panel"
+      role="alert"
+      aria-label={title}
+    >
       <h4 className="wf-unsafe-title">
         <AlertTriangle size={14} />
-        {t('wf.unsafeTitle')}
+        {title}
       </h4>
-      <p className="wf-unsafe-intro">{t('wf.unsafeIntro')}</p>
+      {codeIssues.length > 0 && <p className="wf-unsafe-intro" data-kind="code">{t('wf.unsafeIntro')}</p>}
+      {approvalIssues.length > 0 && (
+        <p className="wf-unsafe-intro" data-kind="approval">{t('wf.approvalIntro')}</p>
+      )}
+      {local.length > 0 && (
+        <ul className="wf-unsafe-list" data-testid="readiness-local">
+          {local.map((blocker, index) => (
+            <li
+              key={`${blocker.on_failure ? 'rollback' : 'main'}:${blocker.step ?? ''}:${blocker.phase ?? ''}:${blocker.kind}:${index}`}
+              className="wf-unsafe-item"
+              data-kind={blocker.kind}
+            >
+              <div className="wf-unsafe-item-head">
+                <span>
+                  <strong>{blocker.step ?? blocker.workflow_name}</strong>
+                  {blocker.phase ? ` (${blocker.phase})` : ''}
+                  {blocker.on_failure ? ` — ${t('wf.readinessRollback')}` : ''}
+                  {' — '}
+                  <code>{blocker.reason ?? blocker.kind}</code>
+                  {blocker.human_only ? ` — ${t('wf.readinessHumanOnly')}` : ''}
+                </span>
+              </div>
+              <p className="wf-unsafe-manual-reason">{blocker.message}</p>
+              <p className="wf-unsafe-manual">{blocker.action}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+      {elsewhere.size > 0 && (
+        <div className="wf-unsafe-chain" data-testid="readiness-chain">
+          <p className="wf-unsafe-intro">{t('wf.readinessChildren')}</p>
+          <ul className="wf-unsafe-list">
+            {[...elsewhere.entries()].map(([id, entry]) => (
+              <li key={id} className="wf-unsafe-item">
+                {t('wf.readinessChildItem', entry.name, entry.total, entry.human)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <ul className="wf-unsafe-list">
         {issues.map(issue => {
           const key = issueKey(issue);
@@ -123,7 +201,9 @@ export function UnsafeStepsPanel({ workflow, onApply, onApprove }: UnsafeStepsPa
                   aria-expanded={open === key}
                   onClick={() => setOpen(open === key ? null : key)}
                 >
-                  {issue.suggested_args ? t('wf.unsafeSuggest') : t('wf.unsafeHow')}
+                  {issue.suggested_args
+                    ? t('wf.unsafeSuggest')
+                    : issue.reason === 'unmodelled_program' ? t('wf.approvalReview') : t('wf.unsafeHow')}
                 </button>
               </div>
               {open === key && (

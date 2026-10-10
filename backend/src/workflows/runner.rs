@@ -888,6 +888,9 @@ async fn execute_run_with_notify_policy(
             );
         }
     }
+    if result.is_ok() {
+        super::run_effect::record(&state, run).await;
+    }
     result
 }
 
@@ -5922,6 +5925,7 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "test".into(),
@@ -6095,6 +6099,7 @@ mod tests {
 
     fn pending_run(id: &str, workflow_id: &str) -> WorkflowRun {
         WorkflowRun {
+            outcome: None,
             id: id.into(),
             workflow_id: workflow_id.into(),
             status: RunStatus::Pending,
@@ -10474,6 +10479,7 @@ mod tests {
 
     mod gate_guard_runs;
     mod quota_wait_runs;
+    mod run_effect_runs;
     mod run_pin_runs;
     mod task_board_runs;
     mod workflow_safety_runs;

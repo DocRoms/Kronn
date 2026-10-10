@@ -11467,6 +11467,7 @@ pub async fn task_exec_reassign(
                 error: response.error,
                 error_code: response.error_code,
                 notice: None,
+                readiness: None,
             })
         }
         ExecutionAmendment::ReplaceValidations(validations) => match replace_execution_validations(

@@ -1635,6 +1635,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 [&now],
             )?;
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
@@ -1885,6 +1886,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             )?;
 
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
@@ -5539,6 +5541,7 @@ async fn optional_variable_http_run(
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
@@ -5728,6 +5731,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
@@ -5863,6 +5867,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
@@ -6006,6 +6011,7 @@ async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
     // An in-flight run of EW-1, as a still-running launch would leave it.
     let now = chrono::Utc::now();
     let active = kronn::models::WorkflowRun {
+        outcome: None,
         id: "active-ew-1".into(),
         workflow_id: workflow_id.clone(),
         status: kronn::models::RunStatus::Running,
@@ -6477,6 +6483,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
@@ -6637,6 +6644,7 @@ async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
     }
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: workflow_id.into(),
         name: "Launch agent choice".into(),
@@ -23395,6 +23403,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23455,6 +23464,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23917,6 +23927,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23952,6 +23963,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
 
         let run_id = format!("run-{}", uuid::Uuid::new_v4());
         let run = kronn::models::WorkflowRun {
+            outcome: None,
             id: run_id.clone(),
             workflow_id: workflow_id.clone(),
             status,
@@ -26721,6 +26733,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
@@ -26941,6 +26954,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
@@ -27358,6 +27372,74 @@ fn workflow_request(steps: Value) -> Value {
     })
 }
 
+/// KT-1138 — an agent's bundle is saved but not ready: the bundle response,
+/// the readiness route, the workflow read and the list all say so, children
+/// and rollback chains included.
+#[tokio::test]
+async fn readiness_reports_the_pending_approvals_of_a_saved_chain() {
+    let app = test_app();
+    let mut child = workflow_request(serde_json::json!([safe_exec_step("inner")]));
+    child["bundle_id"] = serde_json::json!("child");
+    child["on_failure"] = serde_json::json!([safe_exec_step("undo")]);
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([
+                safe_exec_step("outer"),
+                {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"}
+            ]))
+        }),
+    )
+    .await;
+    assert_eq!(bundle["success"], true, "{bundle}");
+    let verdict = &bundle["data"]["readiness"];
+    assert_eq!(verdict["ready"], false, "{verdict}");
+    assert_eq!(bundle["readiness"], *verdict);
+    let steps: Vec<(String, bool, bool)> = verdict["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["step"].as_str().unwrap().to_string(),
+                b["on_failure"].as_bool().unwrap(),
+                b["human_only"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("outer".to_string(), false, true),
+            ("inner".to_string(), false, true),
+            ("undo".to_string(), true, true),
+        ]
+    );
+    let id = bundle["data"]["workflow"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, on_demand) = get_json(app.clone(), &format!("/api/workflows/{id}/readiness")).await;
+    assert_eq!(on_demand["data"], *verdict);
+    let (_, read) = get_json(app.clone(), &format!("/api/workflows/{id}")).await;
+    assert_eq!(read["readiness"], *verdict);
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let card = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(card["blocker_count"], 3);
+    assert_eq!(card["human_approval_count"], 3);
+    let (_, missing) = get_json(app, "/api/workflows/nope/readiness").await;
+    assert_eq!(missing["success"], false);
+    assert_eq!(missing["error_code"], "not_found");
+}
+
 /// KT-1017 — every write path that creates an Exec line, a Quick Exec or an
 /// inline CollectApiData source refuses an unsafe inline interpolation:
 /// create, bundle (parent and child), workflow import (step and bundled
@@ -27502,6 +27584,7 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-identity".into(),
                 name: "Identity".into(),

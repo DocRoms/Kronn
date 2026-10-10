@@ -30,6 +30,7 @@ async fn workflow_authoring_creates_a_disabled_draft_and_preserves_omitted_field
     assert_eq!(created.content["project_id"], "a");
     assert_eq!(created.content["steps"].as_array().unwrap().len(), 3);
     assert!(created.content["steps"][0]["id"].is_string());
+    assert_eq!(created.content["kronn_readiness"]["ready"], true);
     let id = created.content["id"].clone();
     let updated = call(
         &executor,
@@ -201,4 +202,47 @@ async fn workflow_list_shows_only_the_principal_s_project_runs() {
         .find(|workflow| workflow["id"] == "wf-shared")
         .expect("the shared workflow is listed");
     assert_eq!(shared["last_run"]["id"], "run-in-a", "{shared}");
+}
+
+/// KT-1138: a native principal sees the verdict and cannot approve its own line.
+#[tokio::test]
+async fn a_native_draft_with_an_agent_line_is_not_ready_and_stays_unapproved() {
+    let state = super::super::quick_prompt_tests::state_with_prompts().await;
+    let executor = KronnToolExecutor::new(state.clone(), Some("room-a".into()));
+    let step = json!({"name":"read","step_type":{"type":"Exec"},"exec_command":"python3",
+        "exec_args":["-c","import json, sys; print(json.load(sys.stdin))"],
+        "exec_stdin":"{{topic}}","exec_unmodelled_args_approved":true,"exec_agent_lines":[]});
+    let created = call(
+        &executor,
+        "workflow_create_draft",
+        json!({
+        "name":"Reader","trigger":{"type":"Manual"},"exec_allowlist":["python3"],
+        "variables":[{"name":"topic","label":"Topic","placeholder":"","required":false}],
+        "steps":[step]}),
+    )
+    .await;
+    assert!(created.ok, "{}", created.content);
+    let readiness = &created.content["kronn_readiness"];
+    assert_eq!(readiness["ready"], false);
+    assert_eq!(readiness["blockers"][0]["kind"], "human_approval");
+    assert_eq!(readiness["blockers"][0]["human_only"], true);
+    assert!(created.content["kronn_notice"].is_string());
+    let id = created.content["id"].clone();
+    let mut steps = created.content["steps"].clone();
+    steps[0]["exec_unmodelled_args_approved"] = json!(true);
+    steps[0]["exec_agent_lines"] = json!([]);
+    let again = call(
+        &executor,
+        "workflow_update",
+        json!({"workflow_id":id,"steps":steps}),
+    )
+    .await;
+    assert!(again.ok, "{}", again.content);
+    assert_eq!(again.content["kronn_readiness"]["ready"], false);
+    assert_eq!(
+        again.content["steps"][0]["exec_unmodelled_args_approved"],
+        Value::Null
+    );
+    let got = call(&executor, "workflow_get", json!({"workflow_id":id})).await;
+    assert_eq!(got.content["kronn_readiness"]["human_approval_count"], 1);
 }

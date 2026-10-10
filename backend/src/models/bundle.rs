@@ -123,6 +123,9 @@ pub struct BundleResponse {
     /// The workflow doesn't have a `bundle_id` (only one per bundle);
     /// the frontend uses `id` + `name` to navigate to it.
     pub workflow: BundleWorkflowCreated,
+    /// Whether the created chain can start (KT-1138): every blocker of the
+    /// workflow, its child workflows and rollback chains.
+    pub readiness: super::WorkflowReadiness,
 }
 
 #[derive(Debug, Serialize, TS)]

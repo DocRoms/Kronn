@@ -2255,8 +2255,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::workflows::delete),
         )
         .route(
+            "/api/workflows/{id}/step",
+            patch(api::workflows::update_step),
+        )
+        .route(
             "/api/workflows/{id}/unsafe-steps",
             get(api::workflows::unsafe_steps),
+        )
+        .route(
+            "/api/workflows/{id}/readiness",
+            get(api::workflows::readiness),
         )
         .route(
             "/api/exec/line-check",

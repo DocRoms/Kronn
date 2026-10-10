@@ -27,7 +27,9 @@ pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod quota_wait;
+pub mod readiness;
 pub mod run_artifacts;
+pub mod run_effect;
 pub mod run_pins;
 pub mod run_scope;
 pub mod runner;
@@ -447,6 +449,7 @@ impl WorkflowEngine {
             );
         }
         let mut run = WorkflowRun {
+            outcome: None,
             id: run_id,
             workflow_id: wf.id.clone(),
             status: RunStatus::Pending,
@@ -654,6 +657,7 @@ mod tests {
     fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
+            retention: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -768,6 +772,7 @@ mod tests {
         let mut wf = scheduled_workflow("wf-tracker-limit", WorkflowTrigger::Manual, 0);
         wf.concurrency_limit = Some(1);
         let mut active = crate::models::WorkflowRun {
+            outcome: None,
             id: "run-active".into(),
             workflow_id: wf.id.clone(),
             status: RunStatus::Running,
@@ -1162,6 +1167,7 @@ mod tests {
     fn workflow_run_initial_state() {
         let now = Utc::now();
         let run = WorkflowRun {
+            outcome: None,
             id: Uuid::new_v4().to_string(),
             workflow_id: "wf-123".into(),
             status: RunStatus::Pending,
@@ -1211,6 +1217,7 @@ mod tests {
             "issue_number": 42,
         });
         let run = WorkflowRun {
+            outcome: None,
             id: "test-id".into(),
             workflow_id: "wf-1".into(),
             status: RunStatus::Pending,

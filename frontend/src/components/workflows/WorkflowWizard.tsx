@@ -25,12 +25,13 @@ import type {
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
 import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
+import { RunRetentionCard } from './RunRetentionCard';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
@@ -406,6 +407,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
+  const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
 
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
@@ -1273,6 +1275,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           concurrency_limit: concurrency ?? null,
           concurrency_key: trimmedConcurrencyKey || null,
           guards,
+          retention,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
@@ -1290,6 +1293,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           concurrency_limit: concurrency,
           concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
+          retention: retention ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
@@ -4991,6 +4995,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               placed BEFORE the Advanced toggle (Antoine UX rationale:
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
+          <RunRetentionCard value={retention} onChange={setRetention} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
               prominent placement is intentional because Exec is a

@@ -762,6 +762,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [hasMoreDetailRuns, setHasMoreDetailRuns] = useState(false);
   const [loadingMoreRuns, setLoadingMoreRuns] = useState(false);
   const loadingMoreRunsRef = useRef(false);
+  // KT-1100 — runs that changed nothing stay out of the list unless asked;
+  // the ref keeps WebSocket refreshes on the current choice.
+  const [showNoOpRuns, setShowNoOpRuns] = useState(false);
+  const showNoOpRunsRef = useRef(false);
+  const [detailNoOpHidden, setDetailNoOpHidden] = useState(0);
   // Throttle clock for mirroring WorkflowRunUpdated into the run list while a
   // local SSE run is streaming (see the useWebSocket handler below).
   const lastRunsRefetchRef = useRef(0);
@@ -970,14 +975,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const fetchRunPage = async (id: string, offset: number, pageSize: number) => {
-    const [runs, total] = await Promise.all([
-      workflowsApi.listRuns(id, pageSize, offset, true),
-      workflowsApi.countRuns(id),
+    const hideNoOp = !showNoOpRunsRef.current;
+    const [runs, total, all] = await Promise.all([
+      workflowsApi.listRuns(id, pageSize, offset, true, hideNoOp),
+      workflowsApi.countRuns(id, hideNoOp),
+      hideNoOp ? workflowsApi.countRuns(id) : Promise.resolve(null),
     ]);
     return {
       runs,
       total,
       hasMore: offset + runs.length < total,
+      noOpHidden: all == null ? 0 : Math.max(0, all - total),
     };
   };
 
@@ -1008,6 +1016,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setDetailRuns(runs);
       setDetailRunPageCount(page.runs.length);
       setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
       setHasMoreDetailRuns(page.hasMore);
     } catch (e) {
       console.warn('Workflow action failed:', e);
@@ -1212,9 +1221,27 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setDetailRuns(page.runs);
       setDetailRunPageCount(page.runs.length);
       setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
       setHasMoreDetailRuns(page.hasMore);
     }).catch(() => {});
   });
+
+  const toggleNoOpRuns = async () => {
+    if (!detailWorkflow) return;
+    const next = !showNoOpRunsRef.current;
+    showNoOpRunsRef.current = next;
+    setShowNoOpRuns(next);
+    try {
+      const page = await fetchRunPage(detailWorkflow.id, 0, Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount));
+      setDetailRuns(page.runs);
+      setDetailRunPageCount(page.runs.length);
+      setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
+      setHasMoreDetailRuns(page.hasMore);
+    } catch (e) {
+      console.warn('Workflow run history load failed:', e);
+    }
+  };
 
   const loadMoreDetailRuns = async (amount: number | 'all') => {
     if (!detailWorkflow || loadingMoreRunsRef.current) return;
@@ -1225,13 +1252,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       let nextOffset = detailRunPageCount;
       let total = detailRunTotal;
       if (amount === 'all') {
-        total = await workflowsApi.countRuns(detailWorkflow.id);
+        const hideNoOp = !showNoOpRunsRef.current;
+        total = await workflowsApi.countRuns(detailWorkflow.id, hideNoOp);
         while (nextOffset < total) {
           const page = await workflowsApi.listRuns(
             detailWorkflow.id,
             Math.min(RUN_FETCH_MAX_PAGE_SIZE, total - nextOffset),
             nextOffset,
             true,
+            hideNoOp,
           );
           if (page.length === 0) break;
           nextRuns = [...nextRuns, ...page];
@@ -2981,6 +3010,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onApproveUnsafeStep={approveUnsafeStep}
                 agentChoices={compareAgentChoices}
                 totalRuns={detailRunTotal}
+                noOpRunsHidden={detailNoOpHidden}
+                showNoOpRuns={showNoOpRuns}
+                onToggleNoOpRuns={toggleNoOpRuns}
                 hasMoreRuns={hasMoreDetailRuns}
                 loadingMoreRuns={loadingMoreRuns}
                 onLoadMoreRuns={loadMoreDetailRuns}
@@ -3002,7 +3034,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   refetch();
                 }}
                 onDeleteAllRuns={async () => {
-                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal))) return;
+                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal + detailNoOpHidden))) return;
                   await workflowsApi.deleteAllRuns(detailWorkflow.id);
                   openDetail(detailWorkflow.id);
                   refetch();

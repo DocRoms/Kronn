@@ -25,7 +25,7 @@ pub(super) fn declarations() -> Vec<Value> {
         ("workflow_list", "List accessible workflows with ids, trigger, enabled state and step counts.", json!({}), json!([])),
         ("workflow_get", "Read the complete accessible workflow before editing it; omitted fields are preserved by update.", json!({"workflow_id":{"type":"string"}}), json!(["workflow_id"])),
         ("workflow_step_schema", "Read the complete canonical step contracts before authoring. Optional step_type narrows to one type; section selects a shared contract.", json!({"step_type":{"type":"string"},"section":{"type":"string","enum":["template_vars","data_pipeline_contract"]}}), json!([])),
-        ("workflow_create_draft", "Save a disabled workflow for human review. Never runs or enables it. Read workflow_step_schema and tool_manual for authoring rules.", create, json!(["name","trigger","steps"])),
+        ("workflow_create_draft", "Save a disabled workflow for human review. Never runs or enables it. Read workflow_step_schema and tool_manual for authoring rules. Its kronn_readiness says if it can start.", create, json!(["name","trigger","steps"])),
         ("workflow_update", "Patch a disabled workflow, preserving omitted fields and project. Enabled workflows must first be disabled in the Workflows UI. Read workflow_get before replacing steps.", editable, json!(["workflow_id"])),
     ].into_iter().map(|(name,description,properties,required)| json!({"type":"function","function":{"name":name,"description":description,"parameters":{"type":"object","properties":properties,"required":required}}})).collect()
 }
@@ -186,6 +186,7 @@ impl KronnToolExecutor {
                 let Json(response) =
                     crate::api::workflows::get(State(self.state.clone()), Path(id.to_owned()))
                         .await;
+                let readiness = response.readiness;
                 let saved = match (response.success, response.data) {
                     (true, Some(w))
                         if project_is_in_scope(w.project_id.as_deref(), project_id.as_deref()) =>
@@ -198,7 +199,9 @@ impl KronnToolExecutor {
                     ),
                 };
                 if call.name == "workflow_get" {
-                    return ok(call, json!(saved));
+                    let mut body = json!(saved);
+                    body["kronn_readiness"] = json!(readiness);
+                    return ok(call, body);
                 }
                 if saved.enabled {
                     return fail(call,"This workflow is enabled. Disable it in the Workflows UI before editing, or create a new disabled draft with workflow_create_draft.");

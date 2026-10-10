@@ -289,7 +289,7 @@ Kronn/
 ├── kronn                       # CLI entrypoint (bash script, cross-platform)
 ├── desktop/                    # Tauri desktop app (native Windows/macOS/Linux wrapper)
 │   ├── package.json            # Desktop app dependencies
-│   └── src-tauri/              # Tauri Rust backend (embedded server, COOP/COEP headers; src/port.rs = saved loopback port)
+│   └── src-tauri/              # Tauri Rust backend (embedded server, no COOP/COEP; src/port.rs = saved loopback port)
 ├── docker-compose.yml          # 3 services: backend, frontend, gateway
 ├── Makefile                    # start, stop, logs, build, dev-backend, dev-frontend, typegen
 └── .docker/                    # Docker configs (nginx gateway)
