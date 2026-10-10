@@ -7349,3 +7349,60 @@ fn batch_summaries_name_the_parent_workflow_and_count_its_runs_from_the_oldest()
     );
     assert_eq!(summary("b-manual").parent_run_sequence, None);
 }
+
+#[tokio::test]
+async fn a_dedicated_read_holds_neither_shared_connection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = std::sync::Arc::new(
+        crate::db::Database::open_path(&tmp.path().join("dedicated.db")).unwrap(),
+    );
+    if !read_companion_available(&db) {
+        return;
+    }
+    let (inside_tx, inside_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let db_r = db.clone();
+    let reader = tokio::spawn(async move {
+        db_r.with_dedicated_read_conn(move |conn| {
+            let _ = inside_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(20));
+            conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get::<_, i64>(0))
+                .map_err(Into::into)
+        })
+        .await
+    });
+    inside_rx.await.unwrap();
+
+    let limit = std::time::Duration::from_secs(10);
+    let wrote = tokio::time::timeout(
+        limit,
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-dr', 'DR', '/tmp/dr', datetime('now'), datetime('now'))",
+                [],
+            )
+            .map_err(Into::into)
+        }),
+    )
+    .await;
+    let read = tokio::time::timeout(
+        limit,
+        db.with_read_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get::<_, i64>(0))
+                .map_err(Into::into)
+        }),
+    )
+    .await;
+    let _ = release_tx.send(());
+    assert!(wrote.is_ok(), "the writer waited for the dedicated read");
+    assert!(
+        read.is_ok(),
+        "the read companion waited for the dedicated read"
+    );
+    assert_eq!(
+        reader.await.unwrap().unwrap(),
+        1,
+        "it reads the committed write"
+    );
+}

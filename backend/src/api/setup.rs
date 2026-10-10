@@ -1438,7 +1438,15 @@ pub async fn db_info(State(state): State<AppState>) -> Json<ApiResponse<DbInfo>>
 /// Measured with `dbstat` in its aggregate form — one row per b-tree instead of
 /// one per page. Timed at 1.07 s on a 7.2 GB database; the per-page form walks
 /// every page and is not worth the accuracy here.
-pub async fn db_usage(State(state): State<AppState>) -> Json<ApiResponse<DbUsage>> {
+///
+/// `?tables=false` skips that walk and answers the file sizes alone, for
+/// callers that only need to know how big the database is. Either way it runs
+/// on a connection of its own: the walk takes seconds on a large file and
+/// would otherwise stall every request queued behind the shared connections.
+pub async fn db_usage(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<DbUsageQuery>,
+) -> Json<ApiResponse<DbUsage>> {
     let db_path = state.db.path().to_path_buf();
     let file_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
     // The WAL is a sibling file. Counted apart: a checkpoint reclaims it, so
@@ -1449,12 +1457,52 @@ pub async fn db_usage(State(state): State<AppState>) -> Json<ApiResponse<DbUsage
 
     match state
         .db
-        .with_conn(move |conn| measure_db_usage(conn, file_bytes, wal_bytes))
+        .with_dedicated_read_conn(move |conn| {
+            if query.tables {
+                measure_db_usage(conn, file_bytes, wal_bytes)
+            } else {
+                measure_db_size(conn, file_bytes, wal_bytes)
+            }
+        })
         .await
     {
         Ok(usage) => Json(ApiResponse::ok(usage)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DbUsageQuery {
+    #[serde(default = "default_true")]
+    pub tables: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn free_bytes(conn: &rusqlite::Connection) -> u64 {
+    let page_size: u64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(4096) as u64;
+    let free_pages: u64 = conn
+        .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0) as u64;
+    free_pages * page_size
+}
+
+/// `db_usage` without the per-table walk: two pragmas, no page read.
+pub(crate) fn measure_db_size(
+    conn: &rusqlite::Connection,
+    file_bytes: u64,
+    wal_bytes: u64,
+) -> anyhow::Result<DbUsage> {
+    Ok(DbUsage {
+        file_bytes,
+        wal_bytes,
+        free_bytes: free_bytes(conn),
+        tables: Vec::new(),
+    })
 }
 
 /// The measurement behind `db_usage`, separated from the handler so it can be
@@ -1465,13 +1513,6 @@ pub(crate) fn measure_db_usage(
     wal_bytes: u64,
 ) -> anyhow::Result<DbUsage> {
     {
-        let page_size: u64 = conn
-            .query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(4096) as u64;
-        let free_pages: u64 = conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(0) as u64;
-
         // Every index's owning table, so an index's weight is reported
         // against the rows that would take it away when deleted.
         let mut owner: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -1535,7 +1576,7 @@ pub(crate) fn measure_db_usage(
         Ok(DbUsage {
             file_bytes,
             wal_bytes,
-            free_bytes: free_pages * page_size,
+            free_bytes: free_bytes(conn),
             tables,
         })
     }
@@ -3699,6 +3740,59 @@ mod tests {
             first.bytes,
             notes.bytes,
         );
+    }
+
+    #[test]
+    fn the_size_only_measure_skips_the_table_walk() {
+        let usage = measure_db_size(&weighted_db(), 123, 45).unwrap();
+        assert_eq!((usage.file_bytes, usage.wal_bytes), (123, 45));
+        assert!(usage.tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn db_usage_answers_while_the_write_connection_is_held() {
+        // The walk takes seconds on a large file; on the write connection it
+        // stalled every request queued behind it (KT-1148).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = std::sync::Arc::new(
+            crate::db::Database::open_path(&tmp.path().join("usage.db")).unwrap(),
+        );
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config())),
+            db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let writer = tokio::spawn(async move {
+            db.with_conn(move |_conn| {
+                let _ = locked_tx.send(());
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(20));
+                Ok(())
+            })
+            .await
+        });
+        locked_rx.await.unwrap();
+
+        for tables in [true, false] {
+            let answer = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                db_usage(
+                    State(state.clone()),
+                    axum::extract::Query(DbUsageQuery { tables }),
+                ),
+            )
+            .await;
+            let Ok(Json(response)) = answer else {
+                let _ = release_tx.send(());
+                panic!("db-usage (tables={tables}) waited for the write connection");
+            };
+            let usage = response.data.expect("db usage");
+            assert!(usage.file_bytes > 0);
+            assert_eq!(usage.tables.is_empty(), !tables);
+        }
+        let _ = release_tx.send(());
+        writer.await.unwrap().unwrap();
     }
 
     #[test]

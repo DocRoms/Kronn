@@ -428,6 +428,25 @@ impl Database {
         Self::run_on(conn, self.assistant_guard.clone(), f).await
     }
 
+    /// Runs a long read-only closure on a connection opened for it alone, so a
+    /// slow scan holds neither the writer nor the shared read connection.
+    /// Without a read companion (in-memory, WAL not effective) it falls back
+    /// to `with_read_conn`, for the same reason that companion is skipped.
+    pub async fn with_dedicated_read_conn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        if self.read_conn.is_none() {
+            return self.with_read_conn(f).await;
+        }
+        let path = self.path.clone();
+        let conn = tokio::task::spawn_blocking(move || Self::open_read_connection(&path))
+            .await
+            .map_err(|e| anyhow::anyhow!("dedicated read connection task failed: {e}"))??;
+        Self::run_on(Arc::new(Mutex::new(conn)), self.assistant_guard.clone(), f).await
+    }
+
     /// Execute a blocking closure with the database connection.
     /// Runs inside `spawn_blocking` so the Tokio worker thread is never blocked
     /// waiting on the mutex or executing a synchronous SQLite query.
