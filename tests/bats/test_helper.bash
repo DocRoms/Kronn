@@ -38,3 +38,66 @@ _load_lib() {
     # in a separate shell, where it retains its real production behavior.
     source "${PROJECT_ROOT}/tests/bats/bats-support/src/error.bash"
 }
+
+# ─── Bounded stop for background fixture processes ───────────────────────────
+# A bare `wait` on a fixture that misses its TERM hangs the whole suite until
+# CI cancels it. Launch fixtures with `3>&-` (bats waits for every holder of
+# its FD 3) and stop them with fixture_stop. Exported for `bash -c` fixtures.
+fixture_descendants() { # <pid>
+    local child
+    for child in $(pgrep -P "$1" 2>/dev/null); do
+        printf '%s\n' "$child"
+        fixture_descendants "$child"
+    done
+}
+
+fixture_kill_tree() { # <pid>
+    local pid="$1" child
+    # Freeze first so the process cannot fork while its children are listed.
+    builtin kill -STOP "$pid" 2>/dev/null || true
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        fixture_kill_tree "$child"
+    done
+    builtin kill -KILL "$pid" 2>/dev/null || true
+}
+
+# One TERM only: a second one would abort the fixture's own EXIT-trap cleanup
+# and orphan its children. Fails when the process outlives the grace period
+# or leaves a child behind; either way nothing keeps running.
+fixture_stop() { # <pid> <label> [grace seconds]
+    local pid="$1" label="$2" grace="${3:-10}" tick child status=0
+    local -a children
+    children=($(fixture_descendants "$pid"))
+    builtin kill -TERM "$pid" 2>/dev/null || true
+    for ((tick = 0; tick < grace * 20; tick++)); do
+        builtin kill -0 "$pid" 2>/dev/null || break
+        command sleep 0.05
+    done
+    if builtin kill -0 "$pid" 2>/dev/null; then
+        echo "fixture_stop: $label (pid $pid) still running ${grace}s after one TERM; killed its process tree" >&2
+        fixture_kill_tree "$pid"
+        status=1
+        for ((tick = 0; tick < 100; tick++)); do
+            builtin kill -0 "$pid" 2>/dev/null || break
+            command sleep 0.05
+        done
+    fi
+    if builtin kill -0 "$pid" 2>/dev/null; then
+        echo "fixture_stop: $label (pid $pid) survived SIGKILL; not waiting for it" >&2
+    else
+        wait "$pid" 2>/dev/null || true
+    fi
+    for child in "${children[@]}"; do
+        for ((tick = 0; tick < 40; tick++)); do
+            builtin kill -0 "$child" 2>/dev/null || break
+            command sleep 0.05
+        done
+        if builtin kill -0 "$child" 2>/dev/null; then
+            echo "fixture_stop: $label left child pid $child running; killed it" >&2
+            fixture_kill_tree "$child"
+            status=1
+        fi
+    done
+    return "$status"
+}
+export -f fixture_descendants fixture_kill_tree fixture_stop

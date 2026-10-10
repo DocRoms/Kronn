@@ -7,6 +7,11 @@ setup() {
     _load_lib "ui.sh"
 }
 
+# Stubbed `kill` would stop bats from cancelling its BATS_TEST_TIMEOUT watchdog.
+teardown() {
+    unset -f kill sleep curl
+}
+
 @test "Bats assertions reject a failed command after UI helpers load" {
     run false
     run assert_success
@@ -594,15 +599,14 @@ EOF
         KRONN_DEV_BACKEND_HEALTH_URL="http://test.invalid/health" \
         KRONN_TEST_BACKEND_STARTS="$starts" \
         bash -c '
-            "$1" >/dev/null 2>&1 &
+            "$1" >/dev/null 2>&1 3>&- &
             supervisor=$!
             for _ in $(seq 1 100); do
                 [[ "$(wc -l <"$2" 2>/dev/null || echo 0)" -ge 2 ]] && break
                 sleep 0.05
             done
             count="$(wc -l <"$2" 2>/dev/null || echo 0)"
-            kill -TERM "$supervisor" 2>/dev/null || true
-            wait "$supervisor" 2>/dev/null || true
+            fixture_stop "$supervisor" supervisor || exit 1
             [[ "$count" -eq 2 ]]
         ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$starts"
 
@@ -735,7 +739,7 @@ EOF
         bash -c '
             set -e
             exec 4<>"$4"
-            "$1" >/dev/null 2>&1 &
+            "$1" >/dev/null 2>&1 3>&- 4>&- &
             supervisor=$!
             cleanup_fixture() {
                 status=$?
@@ -743,8 +747,7 @@ EOF
                 # Release the owned fake Cargo even if an early assertion
                 # failed: the supervisor must not wait forever for its child.
                 printf "stop\n" >&4 || true
-                kill -TERM "$supervisor" 2>/dev/null || true
-                wait "$supervisor" 2>/dev/null || true
+                fixture_stop "$supervisor" supervisor || status=1
                 exit "$status"
             }
             trap cleanup_fixture EXIT
@@ -806,13 +809,12 @@ EOF
         KRONN_TEST_CARGO_MARKER="$cargo_marker" \
         bash -c '
             set -e
-            "$1" >"$2" 2>&1 &
+            "$1" >"$2" 2>&1 3>&- &
             supervisor=$!
             cleanup_fixture() {
                 status=$?
                 trap - EXIT
-                kill -TERM "$supervisor" 2>/dev/null || true
-                wait "$supervisor" 2>/dev/null || true
+                fixture_stop "$supervisor" supervisor || status=1
                 exit "$status"
             }
             trap cleanup_fixture EXIT
