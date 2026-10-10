@@ -169,6 +169,8 @@ import type {
   ModelTier,
   ModelTiersConfig,
   DriftCheckResponse,
+  CitationDriftResponse,
+  SectionCitations,
   AddContactResult,
   WorkflowSuggestion,
   ContextFile,
@@ -1234,6 +1236,9 @@ export const projects = {
       }>;
     }>('GET', `/discussions/${id}/source`),
   checkDrift: (id: string) => api<DriftCheckResponse>('GET', `/projects/${id}/drift`),
+  citationDrift: (id: string) => api<CitationDriftResponse>('GET', `/projects/${id}/citation-drift`),
+  acknowledgeCitations: (id: string, doc: string) =>
+    api<SectionCitations>('POST', `/projects/${id}/citation-drift/acknowledge`, { doc }),
   getBriefing: (id: string) => api<string | null>('GET', `/projects/${id}/briefing`),
   setBriefing: (id: string, notes: string | null) => api<void>('PUT', `/projects/${id}/briefing`, { notes }),
   startBriefing: (id: string, agent: AgentType, tier?: ModelTier) =>

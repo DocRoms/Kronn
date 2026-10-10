@@ -59,6 +59,8 @@ const DRIFT: DriftCheckResponse = {
   ],
   fresh_sections: [],
   total_sections: 1,
+  sources_state: 'unknown',
+  broken_citations: 0,
 };
 
 function renderCard(overrides: Partial<Record<string, unknown>> = {}) {

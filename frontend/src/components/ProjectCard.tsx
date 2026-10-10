@@ -14,6 +14,7 @@ import { TemplateMergeOfferSlot } from './TemplateMergePanel';
 import { useTemplateMergeOffer } from '../hooks/useTemplateMergeOffer';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
+import { SourcesBadge } from './SourcesBadge';
 import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
@@ -1307,6 +1308,7 @@ export function ProjectCard({
                   {auditOutcomeLabel}
                 </button>
               )}
+              {!auditActive && <SourcesBadge drift={driftStatus} />}
               {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
                 <>
                   <span
@@ -1449,6 +1451,7 @@ export function ProjectCard({
             ) : !auditActive && (proj.audit_status === 'Audited' || proj.audit_status === 'TemplateInstalled') ? (
               <span className="dash-badge-gray"><ShieldCheck size={9} /> Validated</span>
             ) : null}
+            {!auditActive && <SourcesBadge drift={driftStatus} />}
             {!auditActive && latestAuditOutcome && (
               <button
                 type="button"

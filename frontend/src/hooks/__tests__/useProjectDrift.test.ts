@@ -23,7 +23,7 @@ const project = (id: string, audit_status: Project['audit_status']): Project => 
   updated_at: '2026-01-01T00:00:00Z',
 });
 
-const drift = { audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0 };
+const drift = { audit_date: null, stale_sections: [], fresh_sections: [], total_sections: 0, sources_state: 'unknown' as const, broken_citations: 0 };
 
 beforeEach(() => {
   vi.mocked(projectsApi.checkDrift).mockReset().mockResolvedValue(drift);
