@@ -27,7 +27,8 @@ pub enum ModelProvenance {
     Manual,
     /// Seeded once from the formerly hardcoded catalog to preserve existing
     /// configurations. Never rewritten by discovery; only reconciliation can
-    /// promote the identity to `Live`.
+    /// promote the identity to `Live`, or refute it when a complete listing of
+    /// what the CLI serves omits it (Codex).
     Migrated,
 }
 
@@ -70,6 +71,20 @@ pub enum ModelUnavailableReason {
     /// this account or key — the proxy's own allow-list, tags or entitlements
     /// (KT-941). Not a verdict on the credential itself.
     AccessDenied,
+}
+
+/// Evidence from a runtime listing, kept apart from availability: a listing
+/// is not proof of access, so `NotListed` is a warning, never a refusal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CatalogListing {
+    /// No complete listing was read since this row last changed.
+    #[default]
+    Unknown,
+    Listed,
+    /// Absent from a complete listing of the runtime, hidden models included.
+    NotListed,
 }
 
 /// Coarse, catalog-driven cost classification. Never inferred from a
@@ -164,6 +179,11 @@ pub struct CatalogModelEntry {
     pub last_seen_at: Option<DateTime<Utc>>,
     /// Last time Kronn attempted to verify this identity, live or not.
     pub last_checked_at: DateTime<Utc>,
+    /// What the runtime's own model listing says about this model. Evidence
+    /// only: `not_listed` warns before launch, it never refuses.
+    #[serde(default)]
+    #[ts(as = "Option<CatalogListing>", optional)]
+    pub listing: CatalogListing,
     /// Last time a real call to this model answered. Being listed is not
     /// being served: `None` means no call has proven it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,6 +256,66 @@ pub struct ModelCatalogView {
     /// explicit operator action.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alerts: Vec<ModelCatalogAlert>,
+    /// The launch decision for each tier of an agent's own target, computed by
+    /// the same function as the preflight. Empty for HTTP connection targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_verdicts: Vec<CatalogTierVerdict>,
+}
+
+/// Whether a tier can launch, and on which model. `requested_model` is `None`
+/// when nothing is configured and the runtime's own default applies.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct CatalogTierVerdict {
+    pub tier: ModelTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    pub launchable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<ModelUnavailableReason>,
+    /// Why the tier is refused, or why another model runs in its place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// A launchable tier's pre-launch warning (model absent from the listing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+impl CatalogTierVerdict {
+    pub fn from_decision(
+        tier: ModelTier,
+        requested_model: Option<String>,
+        decision: Result<Option<CatalogPreflightResolution>, Box<CatalogPreflightFailure>>,
+    ) -> Self {
+        match decision {
+            Ok(resolution) => {
+                let warning = resolution.as_ref().and_then(|r| r.warning.clone());
+                let notice = resolution.as_ref().and_then(|r| r.notice.clone());
+                Self {
+                    tier,
+                    notice,
+                    effective_model: resolution
+                        .and_then(|r| r.effective_model)
+                        .or_else(|| requested_model.clone()),
+                    requested_model,
+                    launchable: true,
+                    reason: warning.as_ref().map(|w| w.reason),
+                    detail: warning.map(|w| w.detail),
+                }
+            }
+            Err(failure) => Self {
+                tier,
+                requested_model,
+                effective_model: None,
+                launchable: false,
+                reason: Some(failure.reason),
+                detail: Some(failure.detail),
+                notice: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -344,4 +424,8 @@ pub struct CatalogPreflightResolution {
     pub effective_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<CatalogPreflightWarning>,
+    /// Shown before the run, which still goes ahead: the runtime's complete
+    /// listing does not contain the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }

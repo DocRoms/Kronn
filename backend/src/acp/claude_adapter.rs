@@ -478,7 +478,9 @@ impl AcpTransport for ClaudeAcpAdapter {
                         // valid line shown to no one (thinking, keepalive) still
                         // proves the run alive to its inactivity watchdog.
                         StreamJsonEvent::SessionId(_) | StreamJsonEvent::Skip => {
-                            if crate::acp::is_runtime_frame(&line) {
+                            if crate::agents::activity::is_reasoning_frame(&line) {
+                                let _ = events.send(AcpSessionEvent::Thought).await;
+                            } else if crate::acp::is_runtime_frame(&line) {
                                 let _ = events.send(AcpSessionEvent::Activity).await;
                             }
                         }

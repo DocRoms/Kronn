@@ -27,10 +27,11 @@ use tokio::time::timeout;
 use crate::db::model_catalog::{self as db, DiscoveredModel};
 use crate::db::Database;
 use crate::models::{
-    AgentType, AppConfig, CatalogModelEntry, CatalogPreflightFailure, CatalogPreflightResolution,
-    CatalogPreflightWarning, CatalogReplacementSource, ModelAvailability, ModelCatalogAlert,
-    ModelCatalogReference, ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier,
-    ModelTierConfig, ModelTiersConfig, ModelUnavailableReason, StepType,
+    AgentType, AppConfig, CatalogListing, CatalogModelEntry, CatalogPreflightFailure,
+    CatalogPreflightResolution, CatalogPreflightWarning, CatalogReplacementSource,
+    CatalogTierVerdict, ModelAvailability, ModelCatalogAlert, ModelCatalogReference,
+    ModelCatalogReferenceKind, ModelCatalogView, ModelProvenance, ModelTier, ModelTierConfig,
+    ModelTiersConfig, ModelUnavailableReason, StepType,
 };
 
 /// How long a successful live snapshot is trusted before a consumer should
@@ -283,9 +284,24 @@ fn seed_configured_tiers(
     Ok(())
 }
 
+/// What a listing proves about the models it does not contain.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServedListing {
+    /// Every page, hidden models included: an absent identity is not served.
+    Complete(Vec<String>),
+    /// Cut short (page cap, repeated cursor): an absence proves nothing.
+    Partial,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiscoveryOutcome {
     Live(Vec<DiscoveredModel>),
+    /// A listing whose completeness is known: `models` feed the pickers, while
+    /// `served` alone decides whether an absent identity is refuted.
+    Listing {
+        models: Vec<DiscoveredModel>,
+        served: ServedListing,
+    },
     AuthRequired(String),
     Timeout,
     CliMissing(String),
@@ -359,7 +375,7 @@ async fn discover_inner(agent_type: &AgentType) -> DiscoveryOutcome {
 
 fn reason_for(outcome: &DiscoveryOutcome) -> Option<(ModelUnavailableReason, String)> {
     match outcome {
-        DiscoveryOutcome::Live(_) => None,
+        DiscoveryOutcome::Live(_) | DiscoveryOutcome::Listing { .. } => None,
         DiscoveryOutcome::AuthRequired(detail) => {
             Some((ModelUnavailableReason::AuthRequired, detail.clone()))
         }
@@ -557,6 +573,21 @@ async fn discover_and_reconcile(
             })
             .await?;
         }
+        DiscoveryOutcome::Listing { models, served } => {
+            db.with_conn(move |conn| {
+                let transaction = conn.unchecked_transaction()?;
+                let refutation = match &served {
+                    ServedListing::Complete(ids) => {
+                        db::Refutation::Complete(ids.iter().map(String::as_str).collect())
+                    }
+                    ServedListing::Partial => db::Refutation::Nothing,
+                };
+                db::reconcile_listing(&transaction, &target, &at, &models, refutation)?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await?;
+        }
         other => {
             if let Some((reason, detail)) = reason_for(&other) {
                 db.with_conn(move |conn| {
@@ -696,6 +727,7 @@ pub async fn build_view(
         last_error_reason: log.as_ref().and_then(|l| l.last_error_reason),
         last_error_detail: log.as_ref().and_then(|l| l.last_error_detail.clone()),
         alerts: Vec::new(),
+        tier_verdicts: Vec::new(),
     })
 }
 
@@ -988,121 +1020,77 @@ pub async fn legacy_runtime_target_id(db: &Database, agent_type: &AgentType) -> 
     }
 }
 
-/// Catalog-driven proactive preflight for one launch target. A disappeared
-/// identity resolves to a same-agent replacement when possible, while every
-/// other positive incompatibility remains a refusal. Unknown identities still
-/// pass through unchanged. HTTP targets read their own durable identity but
-/// never trigger CLI discovery here; reachability remains owned by their
-/// transport preflight.
-pub async fn preflight_resolve(
-    db: &Database,
-    runtime_target_id: Option<&str>,
-    agent_type: AgentType,
+/// Whether the refresh state of `runtime_target_id` takes part in the
+/// decision: CLI families on their own target, and named HTTP targets.
+fn refresh_state_applies(agent_type: &AgentType, runtime_target_id: &str) -> bool {
+    (is_catalog_managed(agent_type) && runtime_target_id == db::agent_runtime_target_id(agent_type))
+        || runtime_target_id.starts_with("http:")
+}
+
+/// The model a launch asks for: an explicit override or operator tier first,
+/// then the durable tier assignment, including an unavailable one.
+fn requested_model(
+    agent_type: &AgentType,
     tier: ModelTier,
     model_override: Option<&str>,
     model_tiers: Option<&ModelTiersConfig>,
-) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
-    let configured_model = model_override
+    entries: &[CatalogModelEntry],
+) -> Option<String> {
+    model_override
         .filter(|model| !model.trim().is_empty())
         .map(str::to_string)
-        .or_else(|| crate::agents::runner::configured_model_flag(&agent_type, tier, model_tiers));
-    let runtime_target_id = runtime_target_id
-        .map(str::to_string)
-        .unwrap_or_else(|| db::agent_runtime_target_id(&agent_type));
-
-    // Resolve from durable assignments, including unavailable ones. The hot
-    // execution cache intentionally excludes them; using it here could hide a
-    // disappeared tier behind an available HTTP Default (or a CLI default).
-    let model_id = if let Some(model) = configured_model {
-        model
-    } else {
-        let target = runtime_target_id.clone();
-        let http_default = crate::agents::runner::is_http_chat_agent(&agent_type);
-        let result = db
-            .with_read_conn(move |conn| {
-                let entries = db::list_for_target(conn, &target)?;
-                Ok(entries
-                    .iter()
-                    .find(|entry| entry.tier_assignment == Some(tier))
-                    .or_else(|| {
-                        http_default
-                            .then(|| {
-                                entries
-                                    .iter()
-                                    .find(|entry| entry.tier_assignment == Some(ModelTier::Default))
-                            })
-                            .flatten()
-                    })
-                    .map(|entry| entry.model_id.clone()))
-            })
-            .await;
-        match result {
-            Ok(Some(model)) => model,
-            Ok(None) => {
-                return Ok(CatalogPreflightResolution {
-                    requested_model: None,
-                    effective_model: None,
-                    warning: None,
+        .or_else(|| crate::agents::runner::configured_model_flag(agent_type, tier, model_tiers))
+        .or_else(|| {
+            let http_default = crate::agents::runner::is_http_chat_agent(agent_type);
+            entries
+                .iter()
+                .find(|entry| entry.tier_assignment == Some(tier))
+                .or_else(|| {
+                    http_default
+                        .then(|| {
+                            entries
+                                .iter()
+                                .find(|entry| entry.tier_assignment == Some(ModelTier::Default))
+                        })
+                        .flatten()
                 })
-            }
-            Err(error) => {
-                return Err(Box::new(CatalogPreflightFailure {
-                    runtime_target_id,
-                    agent_type,
-                    model_id: None,
-                    reason: ModelUnavailableReason::ProviderError,
-                    detail: format!("catalog assignment lookup failed: {error}"),
-                    last_checked_at: Utc::now(),
-                    recommended_action: "recheck_catalog".into(),
-                    replacement: None,
-                }))
-            }
-        }
-    };
+                .map(|entry| entry.model_id.clone())
+        })
+}
 
-    // A launch is a freshness trigger, not a blind read. CLI discovery is
-    // bounded by `DISCOVERY_TIMEOUT`; named HTTP targets consume the latest
-    // bounded connection-test result because credentials remain owned by the
-    // external-connection subsystem.
-    let refresh_view = if is_catalog_managed(&agent_type)
-        && runtime_target_id == db::agent_runtime_target_id(&agent_type)
-    {
-        match refresh_if_stale(db, agent_type.clone(), false).await {
-            Ok(view) => Some(view),
-            Err(error) => {
-                return Err(Box::new(CatalogPreflightFailure {
-                    runtime_target_id,
-                    agent_type,
-                    model_id: Some(model_id.clone()),
-                    reason: ModelUnavailableReason::ProviderError,
-                    detail: format!("catalog refresh failed: {error}"),
-                    last_checked_at: Utc::now(),
-                    recommended_action: "recheck_catalog".into(),
-                    replacement: None,
-                }));
-            }
-        }
-    } else if runtime_target_id.starts_with("http:") {
-        build_view(db, runtime_target_id.clone(), agent_type.clone())
-            .await
-            .ok()
-    } else {
-        None
-    };
+/// Names the installed CLI and its version, when detection already read it.
+fn installed_cli_label(agent_type: &AgentType) -> String {
+    match crate::agents::cached_version(agent_type) {
+        Some(version) => format!("the installed {agent_type:?} CLI v{version}"),
+        None => format!("the installed {agent_type:?} CLI"),
+    }
+}
 
-    if let Some(view) = refresh_view {
+/// The one availability decision for a model on a runtime target. The launch
+/// preflight, `agent_list`, `task_exec_prepare` and the tier pickers all call
+/// it on the same durable rows; only the preflight refreshes them first.
+pub fn decide_model(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    runtime_target_id: &str,
+    model_id: String,
+    model_tiers: Option<&ModelTiersConfig>,
+    entries: &[CatalogModelEntry],
+    refresh: Option<&ModelCatalogView>,
+) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
+    let agent_type = agent_type.clone();
+    let runtime_target_id = runtime_target_id.to_string();
+    if let Some(view) = refresh {
         if let Some(reason) = view.last_error_reason.filter(|reason| {
             // Claude discovery is not an account-access check. A transient
             // probe failure does not invalidate an exact model still recorded
             // Available; keep the error visible and let execution authenticate.
-            // Missing CLI/auth, unknown or disappeared identities and other
-            // runtimes retain their existing refusal policy.
             let retained_claude_model = agent_type == AgentType::ClaudeCode
                 && matches!(
                     reason,
                     ModelUnavailableReason::Timeout | ModelUnavailableReason::ProviderError
                 )
-                && view.models.iter().any(|entry| {
+                && entries.iter().any(|entry| {
                     entry.runtime_target_id == runtime_target_id
                         && entry.model_id == model_id
                         && entry.availability == ModelAvailability::Available
@@ -1112,10 +1100,11 @@ pub async fn preflight_resolve(
             return Err(Box::new(CatalogPreflightFailure {
                 runtime_target_id,
                 agent_type,
-                model_id: Some(model_id.clone()),
+                model_id: Some(model_id),
                 reason,
                 detail: view
                     .last_error_detail
+                    .clone()
                     .unwrap_or_else(|| "the runtime catalog could not be refreshed".into()),
                 last_checked_at: view.last_attempt_at.unwrap_or_else(Utc::now),
                 recommended_action: recommended_action_for(reason).to_string(),
@@ -1123,26 +1112,16 @@ pub async fn preflight_resolve(
             }));
         }
     }
-    let target = runtime_target_id.clone();
-    let mid = model_id.clone();
-    let (entry, entries) = db
-        .with_read_conn(move |conn| {
-            let entries = db::list_for_target(conn, &target)?;
-            let entry = entries.iter().find(|entry| entry.model_id == mid).cloned();
-            Ok((entry, entries))
-        })
-        .await
-        .unwrap_or((None, Vec::new()));
-    match entry {
+    match entries.iter().find(|entry| entry.model_id == model_id) {
         Some(entry) if entry.availability == ModelAvailability::Unavailable => {
             let reason = entry
                 .unavailable_reason
                 .unwrap_or(ModelUnavailableReason::Disappeared);
             let equivalent_tier = entry.tier_assignment.unwrap_or(tier);
             let replacement = (reason == ModelUnavailableReason::Disappeared)
-                .then(|| live_replacement_for_entry(&entries, &entry))
+                .then(|| live_replacement_for_entry(entries, entry))
                 .flatten()
-                .filter(|candidate| available_chat_entry(&entries, candidate).is_some())
+                .filter(|candidate| available_chat_entry(entries, candidate).is_some())
                 .map(|model| {
                     (
                         model,
@@ -1154,8 +1133,8 @@ pub async fn preflight_resolve(
                     (reason == ModelUnavailableReason::Disappeared)
                         .then(|| {
                             tier_replacement_for_entry(
-                                &entries,
-                                &entry,
+                                entries,
+                                entry,
                                 &agent_type,
                                 tier,
                                 model_tiers,
@@ -1167,16 +1146,18 @@ pub async fn preflight_resolve(
                         })
                 });
             if let Some((effective_model, replacement_source, equivalent_tier)) = replacement {
+                let detail = entry.unavailable_detail.clone().unwrap_or_else(|| {
+                    "this model disappeared from the latest live catalogue".into()
+                });
                 return Ok(CatalogPreflightResolution {
                     requested_model: Some(model_id.clone()),
                     effective_model: Some(effective_model.clone()),
+                    notice: None,
                     warning: Some(CatalogPreflightWarning {
                         requested_model: model_id,
                         effective_model,
                         reason,
-                        detail: entry.unavailable_detail.unwrap_or_else(|| {
-                            "this model disappeared from the latest live catalogue".into()
-                        }),
+                        detail,
                         replacement_source,
                         equivalent_tier,
                     }),
@@ -1190,6 +1171,7 @@ pub async fn preflight_resolve(
             } else {
                 entry
                     .unavailable_detail
+                    .clone()
                     .unwrap_or_else(|| "this model is not currently available".into())
             };
             Err(Box::new(CatalogPreflightFailure {
@@ -1210,7 +1192,7 @@ pub async fn preflight_resolve(
         // recorded capabilities is unaffected (see `entry_supports_capability`).
         Some(entry)
             if !crate::http_transport::entry_supports_capability(
-                &entry,
+                entry,
                 crate::http_transport::CAPABILITY_CHAT,
             ) =>
         {
@@ -1230,12 +1212,273 @@ pub async fn preflight_resolve(
                 replacement: None,
             }))
         }
-        _ => Ok(CatalogPreflightResolution {
+        entry => Ok(CatalogPreflightResolution {
+            notice: entry
+                .filter(|entry| entry.listing == CatalogListing::NotListed)
+                .map(|_| {
+                    format!(
+                        "model `{model_id}` is not in the complete model list reported by {}. That list does not prove access either way, so the run will still try this model",
+                        installed_cli_label(&agent_type)
+                    )
+                }),
             requested_model: Some(model_id.clone()),
             effective_model: Some(model_id),
             warning: None,
         }),
     }
+}
+
+/// Resolves the target and the requested model from durable rows. `Ok(None)`
+/// means no model is configured: the runtime's own default applies.
+async fn requested_launch_model(
+    db: &Database,
+    runtime_target_id: Option<&str>,
+    agent_type: &AgentType,
+    tier: ModelTier,
+    model_override: Option<&str>,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Result<Option<(String, String)>, Box<CatalogPreflightFailure>> {
+    let runtime_target_id = runtime_target_id
+        .map(str::to_string)
+        .unwrap_or_else(|| db::agent_runtime_target_id(agent_type));
+    let target = runtime_target_id.clone();
+    let entries = db
+        .with_read_conn(move |conn| db::list_for_target(conn, &target))
+        .await
+        .map_err(|error| {
+            Box::new(CatalogPreflightFailure {
+                runtime_target_id: runtime_target_id.clone(),
+                agent_type: agent_type.clone(),
+                model_id: None,
+                reason: ModelUnavailableReason::ProviderError,
+                detail: format!("catalog assignment lookup failed: {error}"),
+                last_checked_at: Utc::now(),
+                recommended_action: "recheck_catalog".into(),
+                replacement: None,
+            })
+        })?;
+    Ok(
+        requested_model(agent_type, tier, model_override, model_tiers, &entries)
+            .map(|model| (runtime_target_id, model)),
+    )
+}
+
+async fn durable_entries(db: &Database, runtime_target_id: &str) -> Vec<CatalogModelEntry> {
+    let target = runtime_target_id.to_string();
+    db.with_read_conn(move |conn| db::list_for_target(conn, &target))
+        .await
+        .unwrap_or_default()
+}
+
+/// Catalog-driven proactive preflight for one launch target. A disappeared
+/// identity resolves to a same-agent replacement when possible, while every
+/// other positive incompatibility remains a refusal. Unknown identities still
+/// pass through unchanged. HTTP targets read their own durable identity but
+/// never trigger CLI discovery here; reachability remains owned by their
+/// transport preflight.
+pub async fn preflight_resolve(
+    db: &Database,
+    runtime_target_id: Option<&str>,
+    agent_type: AgentType,
+    tier: ModelTier,
+    model_override: Option<&str>,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
+    let Some((runtime_target_id, model_id)) = requested_launch_model(
+        db,
+        runtime_target_id,
+        &agent_type,
+        tier,
+        model_override,
+        model_tiers,
+    )
+    .await?
+    else {
+        return Ok(CatalogPreflightResolution {
+            requested_model: None,
+            effective_model: None,
+            warning: None,
+            notice: None,
+        });
+    };
+
+    // A launch is a freshness trigger, not a blind read. CLI discovery is
+    // bounded by `DISCOVERY_TIMEOUT`; named HTTP targets consume the latest
+    // bounded connection-test result because credentials remain owned by the
+    // external-connection subsystem.
+    let refresh_view = if is_catalog_managed(&agent_type)
+        && runtime_target_id == db::agent_runtime_target_id(&agent_type)
+    {
+        match refresh_if_stale(db, agent_type.clone(), false).await {
+            Ok(view) => Some(view),
+            Err(error) => {
+                return Err(Box::new(CatalogPreflightFailure {
+                    runtime_target_id,
+                    agent_type,
+                    model_id: Some(model_id),
+                    reason: ModelUnavailableReason::ProviderError,
+                    detail: format!("catalog refresh failed: {error}"),
+                    last_checked_at: Utc::now(),
+                    recommended_action: "recheck_catalog".into(),
+                    replacement: None,
+                }));
+            }
+        }
+    } else if runtime_target_id.starts_with("http:") {
+        build_view(db, runtime_target_id.clone(), agent_type.clone())
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let entries = durable_entries(db, &runtime_target_id).await;
+    decide_model(
+        &agent_type,
+        tier,
+        &runtime_target_id,
+        model_id,
+        model_tiers,
+        &entries,
+        refresh_view.as_ref(),
+    )
+}
+
+/// The preflight's verdict on the durable catalogue, without running
+/// discovery: what `agent_list`, `task_exec_prepare` and the pickers show.
+pub async fn launch_verdict(
+    db: &Database,
+    runtime_target_id: Option<&str>,
+    agent_type: AgentType,
+    tier: ModelTier,
+    model_override: Option<&str>,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>> {
+    let Some((runtime_target_id, model_id)) = requested_launch_model(
+        db,
+        runtime_target_id,
+        &agent_type,
+        tier,
+        model_override,
+        model_tiers,
+    )
+    .await?
+    else {
+        return Ok(CatalogPreflightResolution {
+            requested_model: None,
+            effective_model: None,
+            warning: None,
+            notice: None,
+        });
+    };
+    let view = if refresh_state_applies(&agent_type, &runtime_target_id) {
+        build_view(db, runtime_target_id.clone(), agent_type.clone())
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let entries = match view.as_ref() {
+        Some(view) => view.models.clone(),
+        None => durable_entries(db, &runtime_target_id).await,
+    };
+    decide_model(
+        &agent_type,
+        tier,
+        &runtime_target_id,
+        model_id,
+        model_tiers,
+        &entries,
+        view.as_ref(),
+    )
+}
+
+/// Same decision for each tier of an agent's own target, from a view already
+/// read, so the launch-card pickers never re-derive it.
+pub fn populate_tier_verdicts(view: &mut ModelCatalogView, model_tiers: &ModelTiersConfig) {
+    if view.runtime_target_id != db::agent_runtime_target_id(&view.agent_type) {
+        view.tier_verdicts.clear();
+        return;
+    }
+    let refresh = refresh_state_applies(&view.agent_type, &view.runtime_target_id);
+    view.tier_verdicts = [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning]
+        .into_iter()
+        .map(|tier| {
+            let Some(model_id) = requested_model(
+                &view.agent_type,
+                tier,
+                None,
+                Some(model_tiers),
+                &view.models,
+            ) else {
+                return CatalogTierVerdict::from_decision(tier, None, Ok(None));
+            };
+            let decision = decide_model(
+                &view.agent_type,
+                tier,
+                &view.runtime_target_id,
+                model_id.clone(),
+                Some(model_tiers),
+                &view.models,
+                refresh.then_some(&*view),
+            );
+            CatalogTierVerdict::from_decision(tier, Some(model_id), decision.map(Some))
+        })
+        .collect();
+}
+
+/// One line for `last_error`: the refused model and reason come first, since
+/// compact status views clip the end.
+pub fn preflight_refusal_diagnostic(failure: &CatalogPreflightFailure) -> String {
+    let reason = serde_json::to_value(failure.reason)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{:?}", failure.reason));
+    format!(
+        "model catalogue preflight refused `{}` on {:?} ({reason}): {}; next: {}",
+        failure.model_id.as_deref().unwrap_or("runtime default"),
+        failure.agent_type,
+        failure.detail,
+        failure.recommended_action,
+    )
+}
+
+const CODEX_NEWER_VERSION_REFUSAL: &str = "model requires a newer version of Codex";
+
+/// Codex's refusal of a model as too recent tells the user to upgrade, which
+/// may already be done. Keep that constraint, name the model and qualify the
+/// versions Kronn knows, without claiming which one this run used.
+pub fn codex_model_refusal_message(raw: &str) -> Option<String> {
+    let installed = crate::agents::cached_version(&AgentType::Codex);
+    let latest = crate::core::versions::agent_status(&AgentType::Codex).latest;
+    codex_model_refusal_message_with(raw, installed.as_deref(), latest.as_deref())
+}
+
+fn codex_model_refusal_message_with(
+    raw: &str,
+    installed: Option<&str>,
+    latest: Option<&str>,
+) -> Option<String> {
+    let at = raw.find(CODEX_NEWER_VERSION_REFUSAL)?;
+    let model = raw[..at]
+        .rsplit('\'')
+        .nth(1)
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or("the selected model");
+    let versions = match (installed, latest) {
+        (Some(installed), Some(latest)) => {
+            format!("Kronn detected Codex CLI v{installed}; the latest known release is v{latest}")
+        }
+        (Some(installed), None) => {
+            format!("Kronn detected Codex CLI v{installed}; the latest release is not known")
+        }
+        (None, Some(latest)) => format!(
+            "Kronn did not detect the Codex CLI version; the latest known release is v{latest}"
+        ),
+        (None, None) => "Kronn did not detect the Codex CLI version".to_string(),
+    };
+    Some(format!(
+        "Codex refused model `{model}`: the provider says it requires a newer version of Codex. {versions}. Check in Settings › Agents which Codex binary Kronn launches and update it if needed, or choose a model listed for Codex in Settings › Models."
+    ))
 }
 
 /// Compatibility helper for launch surfaces that only need a blocking
@@ -2633,5 +2876,499 @@ mod tests {
             .iter()
             .all(|model| model.availability == ModelAvailability::Available
                 && model.provenance == ModelProvenance::Live));
+    }
+
+    fn listed(model_id: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            resolved_model: None,
+            description: None,
+            capabilities: vec!["chat".into()],
+            reasoning_modes: vec![],
+            default_reasoning_mode: None,
+        }
+    }
+
+    fn claude_reasoning(model: &str) -> ModelTiersConfig {
+        ModelTiersConfig {
+            claude_code: ModelTierConfig {
+                reasoning: Some(model.into()),
+                ..ModelTierConfig::default()
+            },
+            ..ModelTiersConfig::default()
+        }
+    }
+
+    /// The three readers of the decision, on the same durable rows.
+    async fn three_verdicts(
+        db: &Database,
+        agent: AgentType,
+        tier: ModelTier,
+        tiers: &ModelTiersConfig,
+        live: Vec<DiscoveredModel>,
+    ) -> (
+        Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>>,
+        Result<CatalogPreflightResolution, Box<CatalogPreflightFailure>>,
+        CatalogTierVerdict,
+    ) {
+        let listed_now = launch_verdict(db, None, agent.clone(), tier, None, Some(tiers)).await;
+        let launched = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Live(live),
+                preflight_resolve(db, None, agent.clone(), tier, None, Some(tiers)),
+            )
+            .await;
+        let mut view = build_view(db, db::agent_runtime_target_id(&agent), agent)
+            .await
+            .unwrap();
+        populate_tier_verdicts(&mut view, tiers);
+        let picker = view
+            .tier_verdicts
+            .into_iter()
+            .find(|verdict| verdict.tier == tier)
+            .unwrap();
+        (listed_now, launched, picker)
+    }
+
+    /// KT-860 — the real 0.14 inputs: tier `reasoning` pinned to `opus[1m]`,
+    /// which the CLI stopped listing. Every reader reaches the preflight's own
+    /// verdict, and none of them reports the pinned alias as what runs.
+    #[tokio::test]
+    async fn kt860_every_reader_shares_the_preflight_verdict_on_a_disappeared_alias() {
+        let db = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn(move |conn| {
+            db::insert_migrated_seed(
+                conn,
+                &AgentType::ClaudeCode,
+                "opus",
+                "opus",
+                Some(ModelTier::Reasoning),
+                &["chat".into()],
+                &[],
+            )?;
+            db::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[listed("opus[1m]"), listed("opus"), listed("sonnet")],
+            )?;
+            db::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[listed("opus"), listed("sonnet")],
+            )
+        })
+        .await
+        .unwrap();
+        let tiers = claude_reasoning("opus[1m]");
+        let (listed_now, launched, picker) = three_verdicts(
+            &db,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            &tiers,
+            vec![listed("opus"), listed("sonnet")],
+        )
+        .await;
+        let launched = launched.expect("an equivalent tier replaces the alias");
+        assert_eq!(listed_now.as_ref().ok(), Some(&launched));
+        assert_eq!(launched.effective_model.as_deref(), Some("opus"));
+        assert!(picker.launchable);
+        assert_eq!(picker.requested_model.as_deref(), Some("opus[1m]"));
+        assert_eq!(picker.effective_model.as_deref(), Some("opus"));
+        assert_eq!(picker.reason, Some(ModelUnavailableReason::Disappeared));
+    }
+
+    /// KT-860 — with no replacement, the preflight refuses, so the listing and
+    /// the pickers must refuse too, with the same reason and model.
+    #[tokio::test]
+    async fn kt860_a_tier_the_preflight_refuses_is_refused_by_every_reader() {
+        let db = test_db();
+        let target = db::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn(move |conn| {
+            db::reconcile_live(
+                conn,
+                &target,
+                &AgentType::ClaudeCode,
+                &[listed("claude-fable-5[1m]"), listed("sonnet")],
+            )?;
+            db::reconcile_live(conn, &target, &AgentType::ClaudeCode, &[listed("sonnet")])
+        })
+        .await
+        .unwrap();
+        let tiers = claude_reasoning("claude-fable-5[1m]");
+        let (listed_now, launched, picker) = three_verdicts(
+            &db,
+            AgentType::ClaudeCode,
+            ModelTier::Reasoning,
+            &tiers,
+            vec![listed("sonnet")],
+        )
+        .await;
+        let launched = launched.expect_err("no replacement exists: the launch is refused");
+        assert_eq!(listed_now.expect_err("the listing refuses too"), launched);
+        assert_eq!(launched.model_id.as_deref(), Some("claude-fable-5[1m]"));
+        assert_eq!(launched.reason, ModelUnavailableReason::Disappeared);
+        assert!(!picker.launchable);
+        assert_eq!(
+            picker.requested_model.as_deref(),
+            Some("claude-fable-5[1m]")
+        );
+        assert_eq!(picker.reason, Some(launched.reason));
+        assert_eq!(picker.detail.as_deref(), Some(launched.detail.as_str()));
+
+        let diagnostic = preflight_refusal_diagnostic(&launched);
+        let head: String = diagnostic.chars().take(160).collect();
+        assert!(head.contains("`claude-fable-5[1m]`"), "{diagnostic}");
+        assert!(head.contains("disappeared"), "{diagnostic}");
+    }
+
+    async fn seed_codex_reasoning_pin(db: &Database) {
+        db.with_conn(|conn| {
+            db::insert_migrated_seed(
+                conn,
+                &AgentType::Codex,
+                "gpt-5.6-sol",
+                "gpt-5.6-sol",
+                Some(ModelTier::Reasoning),
+                &["chat".into()],
+                &[],
+            )
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn reconcile_codex(db: &Database, models: Vec<DiscoveredModel>, served: ServedListing) {
+        TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Listing { models, served },
+                refresh_if_stale(db, AgentType::Codex, true),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn codex_entry(view: &ModelCatalogView, model: &str) -> CatalogModelEntry {
+        view.models
+            .iter()
+            .find(|entry| entry.model_id == model)
+            .cloned()
+            .unwrap()
+    }
+
+    /// KT-667 — a pin absent from a COMPLETE Codex listing is announced before
+    /// launch, and still launches: a listing is not proof of access.
+    #[tokio::test]
+    async fn kt667_a_pin_missing_from_a_complete_listing_warns_and_still_launches() {
+        let db = test_db();
+        seed_codex_reasoning_pin(&db).await;
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-6-astra")],
+            ServedListing::Complete(vec!["gpt-6-astra".into()]),
+        )
+        .await;
+        let tiers = ModelTiersConfig::default();
+        let (listed_now, launched, picker) =
+            three_verdicts(&db, AgentType::Codex, ModelTier::Reasoning, &tiers, vec![]).await;
+        let launched = launched.expect("not listed is a warning, never a refusal");
+        assert_eq!(listed_now.as_ref().ok(), Some(&launched));
+        assert_eq!(launched.effective_model.as_deref(), Some("gpt-5.6-sol"));
+        assert!(launched.warning.is_none(), "no replacement: {launched:?}");
+        let notice = launched.notice.expect("announced before launch");
+        assert!(notice.contains("`gpt-5.6-sol`"), "{notice}");
+        assert!(notice.contains("complete model list"), "{notice}");
+        assert!(picker.launchable);
+        assert_eq!(picker.notice.as_deref(), Some(notice.as_str()));
+    }
+
+    /// KT-667 — the same evidence gives the same verdict whatever the history:
+    /// a model once listed, then absent from a complete listing, then seen by a
+    /// partial and a failed listing, stays requested and is never refused.
+    #[tokio::test]
+    async fn kt667_a_listed_model_that_leaves_the_listing_warns_and_is_never_refused() {
+        let db = test_db();
+        let tiers = ModelTiersConfig {
+            codex: ModelTierConfig {
+                reasoning: Some("gpt-5.6-sol".into()),
+                ..ModelTierConfig::default()
+            },
+            ..ModelTiersConfig::default()
+        };
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-5.6-sol"), listed("gpt-6-astra")],
+            ServedListing::Complete(vec!["gpt-5.6-sol".into(), "gpt-6-astra".into()]),
+        )
+        .await;
+        let first = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            None,
+            Some(&tiers),
+        )
+        .await
+        .unwrap();
+        assert!(
+            first.notice.is_none() && first.warning.is_none(),
+            "{first:?}"
+        );
+
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-6-astra")],
+            ServedListing::Complete(vec!["gpt-6-astra".into()]),
+        )
+        .await;
+        let absent = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            None,
+            Some(&tiers),
+        )
+        .await
+        .expect("never refused");
+        assert_eq!(absent.effective_model.as_deref(), Some("gpt-5.6-sol"));
+        assert!(absent.warning.is_none(), "no replacement: {absent:?}");
+        assert!(absent.notice.is_some(), "{absent:?}");
+        let launched = TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::Listing {
+                    models: vec![listed("gpt-6-astra")],
+                    served: ServedListing::Complete(vec!["gpt-6-astra".into()]),
+                },
+                preflight_resolve(
+                    &db,
+                    None,
+                    AgentType::Codex,
+                    ModelTier::Reasoning,
+                    None,
+                    Some(&tiers),
+                ),
+            )
+            .await
+            .expect("the launch tries the requested model");
+        assert_eq!(launched, absent);
+
+        reconcile_codex(&db, vec![listed("gpt-6-astra")], ServedListing::Partial).await;
+        let unknown = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            None,
+            Some(&tiers),
+        )
+        .await
+        .expect("never refused");
+        assert_eq!(unknown.effective_model.as_deref(), Some("gpt-5.6-sol"));
+        assert!(
+            unknown.notice.is_none() && unknown.warning.is_none(),
+            "{unknown:?}"
+        );
+        let view = build_view(&db, "agent:codex".into(), AgentType::Codex)
+            .await
+            .unwrap();
+        let entry = codex_entry(&view, "gpt-5.6-sol");
+        assert_eq!(entry.availability, ModelAvailability::Available);
+        assert_eq!(entry.listing, CatalogListing::Unknown);
+    }
+
+    /// KT-667 — a refusal the provider actually returned is the one path that
+    /// refuses a Codex model, with its own reason.
+    #[tokio::test]
+    async fn kt667_a_recorded_provider_refusal_refuses_the_model() {
+        let db = test_db();
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-5.6-sol")],
+            ServedListing::Complete(vec!["gpt-5.6-sol".into()]),
+        )
+        .await;
+        db.with_conn(|conn| {
+            db::mark_unavailable(
+                conn,
+                &db::agent_runtime_target_id(&AgentType::Codex),
+                "gpt-5.6-sol",
+                ModelUnavailableReason::NotFound,
+                Some("provider answered 404 for this model"),
+            )
+        })
+        .await
+        .unwrap();
+        let failure = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            Some("gpt-5.6-sol"),
+            None,
+        )
+        .await
+        .expect_err("a provider refusal refuses");
+        assert_eq!(failure.reason, ModelUnavailableReason::NotFound);
+        assert_eq!(failure.detail, "provider answered 404 for this model");
+        // A later complete listing that still shows it does not lift the refusal.
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-5.6-sol")],
+            ServedListing::Complete(vec!["gpt-5.6-sol".into()]),
+        )
+        .await;
+        assert!(launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            Some("gpt-5.6-sol"),
+            None
+        )
+        .await
+        .is_err());
+    }
+
+    /// KT-667 — a hidden model is listed: neither warned about nor refuted, and
+    /// one a past visible-only listing refuted becomes available again.
+    #[tokio::test]
+    async fn kt667_a_hidden_model_counts_as_listed() {
+        let db = test_db();
+        seed_codex_reasoning_pin(&db).await;
+        db.with_conn(|conn| {
+            let target = db::agent_runtime_target_id(&AgentType::Codex);
+            db::reconcile_live(conn, &target, &AgentType::Codex, &[listed("gpt-5.5")])?;
+            db::reconcile_live(conn, &target, &AgentType::Codex, &[listed("gpt-6-astra")])
+        })
+        .await
+        .unwrap();
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-6-astra")],
+            ServedListing::Complete(vec![
+                "gpt-6-astra".into(),
+                "gpt-5.6-sol".into(),
+                "gpt-5.5".into(),
+            ]),
+        )
+        .await;
+        let view = build_view(&db, "agent:codex".into(), AgentType::Codex)
+            .await
+            .unwrap();
+        assert_eq!(
+            codex_entry(&view, "gpt-5.6-sol").listing,
+            CatalogListing::Listed
+        );
+        let restored = codex_entry(&view, "gpt-5.5");
+        assert_eq!(restored.availability, ModelAvailability::Available);
+        assert_eq!(restored.listing, CatalogListing::Listed);
+        let verdict = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(verdict.notice.is_none(), "{verdict:?}");
+    }
+
+    /// KT-667 — a partial listing (page cap) proves no absence: nothing is
+    /// refuted and the evidence returns to unknown.
+    #[tokio::test]
+    async fn kt667_a_partial_listing_refutes_nothing() {
+        let db = test_db();
+        seed_codex_reasoning_pin(&db).await;
+        reconcile_codex(
+            &db,
+            vec![listed("gpt-6-astra"), listed("gpt-6-luna")],
+            ServedListing::Complete(vec!["gpt-6-astra".into(), "gpt-6-luna".into()]),
+        )
+        .await;
+        reconcile_codex(&db, vec![listed("gpt-6-astra")], ServedListing::Partial).await;
+        let unknown = |view: &ModelCatalogView| {
+            let luna = codex_entry(view, "gpt-6-luna");
+            assert_eq!(luna.availability, ModelAvailability::Available);
+            assert_eq!(luna.listing, CatalogListing::Unknown);
+            assert_eq!(
+                codex_entry(view, "gpt-5.6-sol").listing,
+                CatalogListing::Unknown
+            );
+        };
+        let view = build_view(&db, "agent:codex".into(), AgentType::Codex)
+            .await
+            .unwrap();
+        unknown(&view);
+        let verdict = launch_verdict(
+            &db,
+            None,
+            AgentType::Codex,
+            ModelTier::Reasoning,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            verdict.notice.is_none() && verdict.warning.is_none(),
+            "{verdict:?}"
+        );
+
+        // A failed refresh keeps the existing Codex refresh-failure policy, and
+        // still refutes no model nor records any absence.
+        TEST_DISCOVERY
+            .scope(
+                DiscoveryOutcome::ProviderError("app-server crashed".into()),
+                refresh_if_stale(&db, AgentType::Codex, true),
+            )
+            .await
+            .unwrap();
+        let view = build_view(&db, "agent:codex".into(), AgentType::Codex)
+            .await
+            .unwrap();
+        unknown(&view);
+    }
+
+    /// KT-667 — the refusal keeps the provider's constraint, names the model
+    /// and qualifies the versions, without claiming an update cannot help.
+    #[test]
+    fn kt667_codex_upgrade_advice_names_the_model_and_qualified_versions() {
+        let raw = r#"{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}"#;
+        for (installed, latest) in [
+            (Some("0.160.1"), Some("0.160.1")),
+            (Some("0.136.0"), Some("0.160.1")),
+            (Some("0.154.0"), None),
+            (None, None),
+        ] {
+            let message =
+                codex_model_refusal_message_with(raw, installed, latest).expect("recognised");
+            assert!(message.contains("`gpt-5.6-sol`"), "{message}");
+            assert!(
+                message.contains("requires a newer version of Codex"),
+                "{message}"
+            );
+            assert!(!message.contains("will not help"), "{message}");
+            assert!(!message.contains("Please upgrade"), "{message}");
+            if let Some(installed) = installed {
+                assert!(
+                    message.contains(&format!("detected Codex CLI v{installed}")),
+                    "{message}"
+                );
+            }
+            if let Some(latest) = latest {
+                assert!(
+                    message.contains(&format!("latest known release is v{latest}")),
+                    "{message}"
+                );
+            }
+        }
+        assert!(codex_model_refusal_message_with("rate limited", None, None).is_none());
     }
 }

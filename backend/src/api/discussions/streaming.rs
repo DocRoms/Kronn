@@ -774,6 +774,35 @@ pub(super) fn forwards_to_log_panel(trimmed: &str) -> bool {
     !trimmed.is_empty() && !is_acp_tool_marker(trimmed)
 }
 
+/// The fixed line announcing that the agent wrote a diagnostic.
+pub(super) const STDERR_DIAGNOSTIC_LOG: &str = "⚠ Diagnostic";
+
+/// The panel's line for a batch of new stderr lines: a fixed notice, once per
+/// run. Their text can name paths and URLs, so it stays on the server; a failed
+/// run's stored error message carries it.
+pub(super) fn stderr_log_line(new_lines: &[String], announced: &mut bool) -> Option<String> {
+    if *announced
+        || !new_lines
+            .iter()
+            .any(|line| forwards_to_log_panel(line.trim()))
+    {
+        return None;
+    }
+    *announced = true;
+    Some(STDERR_DIAGNOSTIC_LOG.to_string())
+}
+
+/// The log line for a tool call that started. Only its category leaves, as in
+/// the run's progress frames: a tool's name or input can carry a path or a secret.
+pub(super) fn tool_started_log(tool: &str) -> String {
+    format!("→ {}", crate::agents::activity::category_of(tool).as_str())
+}
+
+/// The log line for a tool call that ended, reduced like [`tool_started_log`].
+pub(super) fn tool_finished_log(tool: &str) -> String {
+    format!("✓ {}", crate::agents::activity::category_of(tool).as_str())
+}
+
 /// Merge observed native tool metadata into the transcript buckets. Partial
 /// updates correlate by call id; missing arguments/status stay explicitly
 /// unknown. Detailed records replace legacy entries for the same tool name.
@@ -883,6 +912,37 @@ pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_
             updated_run.batch_failed
         );
     }
+}
+
+/// KT-1108 — a run's live progress, published on the local WebSocket as
+/// coalesced frames until its stop, and readable meanwhile through the
+/// discussion's `run-progress` snapshot. Never relayed to a peer.
+fn start_run_progress(
+    state: &AppState,
+    discussion_id: &str,
+    dispatch_id: Option<&str>,
+    trigger_message_id: Option<&str>,
+    agent_type: &AgentType,
+) -> crate::agents::run_progress::RunProgress {
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let identity = crate::agents::run_progress::RunIdentity {
+        discussion_id: discussion_id.to_owned(),
+        dispatch_id: dispatch_id.map(str::to_owned),
+        trigger_message_id: trigger_message_id.map(str::to_owned),
+        agent_type: agent_type.clone(),
+        run_id: Uuid::new_v4().to_string(),
+        started_at: Utc::now(),
+    };
+    let ws = state.ws_broadcast.clone();
+    tokio::spawn(crate::agents::run_progress::publish_registered(
+        state.live_runs.clone(),
+        identity,
+        progress.clone(),
+        move |frame| {
+            let _ = ws.send(frame);
+        },
+    ));
+    progress
 }
 
 /// Shared SSE stream builder.
@@ -1138,7 +1198,7 @@ fn agent_start_error_content(
 /// which is how a refusal reached `agent_dispatch_jobs.last_error` carrying
 /// nothing an operator could act on — 76 rows of it in one instance. Each
 /// caller names the condition it just detected instead.
-fn finish_tracked_preflight(
+pub(crate) fn finish_tracked_preflight(
     completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
     diagnostic: &str,
 ) {
@@ -3099,7 +3159,7 @@ async fn make_agent_stream_inner(
             });
             finish_tracked_preflight(
                 &mut completion_tx,
-                "model catalogue preflight refused this model",
+                &crate::core::model_catalog::preflight_refusal_diagnostic(&failure),
             );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
                 Ok::<_, Infallible>(Event::default().event("error").data(payload.to_string()))
@@ -3133,6 +3193,9 @@ async fn make_agent_stream_inner(
                 warning.requested_model, warning.effective_model
             )
         }),
+        preflight
+            .notice
+            .map(|notice| format!("⚠️ **Model catalogue** — {notice}.")),
         repository_skills_notice,
     ]
     .into_iter()
@@ -3317,6 +3380,19 @@ async fn make_agent_stream_inner(
             }
         }
 
+        // KT-1108 — the reply bubble's live progress, from here to the stop.
+        let run_progress = start_run_progress(
+            &state,
+            &disc_id,
+            dispatch_job_id.as_deref(),
+            dispatch_trigger_message_id.as_deref(),
+            &agent_type,
+        );
+        let _run_progress_stop = crate::agents::run_progress::StopOnDrop(run_progress.clone());
+        let run_route = crate::acp::resolve_acp_route(&agent_type);
+        if run_route == crate::acp::AcpProductionRoute::DirectCliMigration {
+            run_progress.phase(AgentRunPhase::StartingCli);
+        }
         // A delivery names the model the worker's runtime served, not the requested one.
         let served_model = cli_task_worker_context.as_ref().map(|worker| {
             crate::api::delivery_publication::ServedModelRecorder::start(
@@ -3363,6 +3439,7 @@ async fn make_agent_stream_inner(
             // primitives through the stdio bridge, and handing them a second
             // channel would duplicate the surface for no gain.
             tools: native_http_tools,
+            run_progress: Some(run_progress.clone()),
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
         })
         .await
@@ -3485,6 +3562,7 @@ async fn make_agent_stream_inner(
                 let log_tx = tx.clone();
                 let log_task = tokio::spawn(async move {
                     let mut last_len = 0;
+                    let mut diagnostic_announced = false;
                     loop {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let lines = match stderr_log_capture.lock() {
@@ -3495,22 +3573,10 @@ async fn make_agent_stream_inner(
                             }
                         };
                         if lines.len() > last_len {
-                            for line in &lines[last_len..] {
-                                let trimmed = line.trim();
-                                // ACP has no stdout event stream, so a tool call rides the
-                                // stderr capture to reach `lift_acp_tool_calls`. That marker
-                                // is a wire detail: the transcript already renders the call
-                                // under the reply, and this panel is for run diagnostics.
-                                // Forwarding it here fills the log with `[acp-tool] Bash`
-                                // and evicts the diagnostics the panel exists for.
-                                if !forwards_to_log_panel(trimmed) {
-                                    continue;
-                                }
-                                let _ = log_tx
-                                    .send(AgentStreamEvent::Log {
-                                        text: trimmed.to_string(),
-                                    })
-                                    .await;
+                            if let Some(text) =
+                                stderr_log_line(&lines[last_len..], &mut diagnostic_announced)
+                            {
+                                let _ = log_tx.send(AgentStreamEvent::Log { text }).await;
                             }
                             last_len = lines.len();
                         }
@@ -3531,6 +3597,11 @@ async fn make_agent_stream_inner(
                 // thoughts included, and ends a silent run itself: timing the
                 // text alone would kill a run busy with a tool.
                 let text_stall = consumer_text_stall(process.activity_watched(), stall_timeout);
+                // A run that watches its own activity shows its own bounds; any
+                // other shows this consumer's, the one that applies to it.
+                if text_stall.is_some() {
+                    run_progress.idle_limit(text_stall);
+                }
                 let mut was_interrupted = false;
                 let mut timeout_reason: Option<AgentTimeoutReason> = None;
                 // Set when we break the loop because the agent emitted a
@@ -3597,13 +3668,30 @@ async fn make_agent_stream_inner(
                     // Client disconnected — keep running to save result in DB
                     let client_gone = tx.is_closed();
 
+                    if !is_stream_json {
+                        run_progress.text();
+                    }
                     if is_stream_json {
                         direct_tool_traces.extend(
                             crate::agents::tool_trace::from_claude_line(&line)
                                 .into_iter()
                                 .map(|trace| trace.marker()),
                         );
-                        match runner::parse_claude_stream_line(&line) {
+                        let parsed = runner::parse_claude_stream_line(&line);
+                        match &parsed {
+                            runner::StreamJsonEvent::Text(_) => run_progress.text(),
+                            runner::StreamJsonEvent::ToolStart(name) => run_progress.tool(
+                                &crate::agents::activity::ToolActivityUpdate::named(None, name),
+                            ),
+                            runner::StreamJsonEvent::SessionId(_) => {
+                                run_progress.phase(AgentRunPhase::WaitingModel)
+                            }
+                            _ if crate::agents::activity::is_reasoning_frame(&line) => {
+                                run_progress.thought()
+                            }
+                            _ => run_progress.beat(),
+                        }
+                        match parsed {
                             runner::StreamJsonEvent::Text(text) => {
                                 // Loop-repeat detection — see constants above.
                                 // Non-whitespace deltas of >= REPEAT_MIN_LEN are
@@ -3719,7 +3807,7 @@ async fn make_agent_stream_inner(
                                 if !client_gone {
                                     let _ = tx
                                         .send(AgentStreamEvent::Log {
-                                            text: format!("→ {name}"),
+                                            text: tool_started_log(&name),
                                         })
                                         .await;
                                 }
@@ -3732,12 +3820,12 @@ async fn make_agent_stream_inner(
                             runner::StreamJsonEvent::ToolEnd => {
                                 text_blocks.block_ended();
                                 if let Some(ref tool) = current_tool {
-                                    let log = crate::api::disc_git::format_tool_log(
-                                        tool,
-                                        &current_tool_input,
-                                    );
                                     if !client_gone {
-                                        let _ = tx.send(AgentStreamEvent::Log { text: log }).await;
+                                        let _ = tx
+                                            .send(AgentStreamEvent::Log {
+                                                text: tool_finished_log(tool),
+                                            })
+                                            .await;
                                     }
                                     // Persist tool calls in the disc transcript
                                     // so the UI banner can render them after the
@@ -3842,6 +3930,16 @@ async fn make_agent_stream_inner(
 
                 // Stop the stderr log streamer
                 log_task.abort();
+                if stopped_on_cancel {
+                    run_progress.stop(AgentRunStop::Cancelled);
+                }
+                match timeout_reason.as_ref() {
+                    Some(AgentTimeoutReason::Stall(_)) => run_progress.stop(AgentRunStop::Idle),
+                    Some(AgentTimeoutReason::Global(_)) => {
+                        run_progress.stop(AgentRunStop::TimedOut)
+                    }
+                    None => {}
+                }
 
                 // Kill agent on timeout/stall OR terminal signal OR size cap
                 // OR user-triggered cancel OR decoder-loop detection
@@ -4901,6 +4999,11 @@ async fn make_agent_stream_inner(
                     }
                 }
 
+                run_progress.stop(if success {
+                    AgentRunStop::Finished
+                } else {
+                    AgentRunStop::Failed
+                });
                 let done = serde_json::json!({ "message_id": agent_msg.id, "success": success, "tokens_used": tokens_used });
                 let _ = tx.send(AgentStreamEvent::Done { data: done }).await;
             }
@@ -4910,6 +5013,15 @@ async fn make_agent_stream_inner(
                 // That is an intentional stop, not a provider/preflight
                 // failure: do not persist an error bubble or make the dispatch
                 // observer requeue it. The durable job is already Cancelled.
+                run_progress.stop(if cancel_token.is_cancelled() {
+                    AgentRunStop::Cancelled
+                } else if crate::agents::acp_start::AcpStartFailure::from_error(&e)
+                    .is_some_and(|failure| failure.detail.is_none())
+                {
+                    AgentRunStop::TimedOut
+                } else {
+                    AgentRunStop::Failed
+                });
                 if cancel_token.is_cancelled() {
                     tracing::info!(
                         "Agent start for disc {} cancelled before provider acceptance",
@@ -5192,7 +5304,6 @@ pub(super) async fn run_agent_streaming(
     let mut stream_tokens: u64 = 0;
     let mut stream_json_failure: Option<runner::StreamJsonFailure> = None;
     let mut current_tool: Option<String> = None;
-    let mut tool_input = String::new();
     let is_stream_json = process.output_mode() == runner::OutputMode::StreamJson;
     let raw_stream = process.raw_token_stream();
     let deadline = tokio::time::Instant::now() + global_timeout;
@@ -5252,26 +5363,23 @@ pub(super) async fn run_agent_streaming(
                                     // line for the whole of a long tool call.
                                     if !tx.is_closed() {
                                         let _ = tx.send(AgentStreamEvent::Log {
-                                            text: format!("→ {name}"),
+                                            text: tool_started_log(&name),
                                         }).await;
                                     }
                                     current_tool = Some(name);
-                                    tool_input.clear();
                                 }
-                                runner::StreamJsonEvent::ToolInputDelta(partial) => {
-                                    tool_input.push_str(&partial);
-                                }
+                                // The input is never shown: only the category leaves.
+                                runner::StreamJsonEvent::ToolInputDelta(_) => {}
                                 runner::StreamJsonEvent::ToolEnd => {
                                     text_blocks.block_ended();
                                     if let Some(ref tool) = current_tool {
                                         if !tx.is_closed() {
                                             let _ = tx.send(AgentStreamEvent::Log {
-                                                text: crate::api::disc_git::format_tool_log(tool, &tool_input),
+                                                text: tool_finished_log(tool),
                                             }).await;
                                         }
                                     }
                                     current_tool = None;
-                                    tool_input.clear();
                                 }
                                 // A debate round is scored on its own; rounds do
                                 // not resume one another's conversation.
@@ -6621,7 +6729,10 @@ mod run_agent_streaming_tests {
     //! flagged as untested : tool-call event → Log emission, terminal-signal
     //! truncation, decoder-loop abort, and the error-exit message — all
     //! without spawning a CLI or burning tokens.
-    use super::{run_agent_streaming, AgentStreamMeta};
+    use super::{
+        run_agent_streaming, stderr_log_line, tool_finished_log, tool_started_log, AgentStreamMeta,
+        STDERR_DIAGNOSTIC_LOG,
+    };
     use crate::agents::runner::ScriptedProcess;
     use crate::api::discussions::AgentStreamEvent;
     use crate::models::AgentType;
@@ -6765,7 +6876,7 @@ mod run_agent_streaming_tests {
     #[tokio::test]
     async fn tool_call_emits_a_log_event() {
         // ToolStart → ToolInputDelta → ToolEnd produces TWO Log events — the
-        // tool starting, then the human-readable breadcrumb once it is done —
+        // tool starting, then finishing, both as its category (KT-1120) —
         // and neither pollutes the response text.
         //
         // The start event was added deliberately: emitting only on ToolEnd
@@ -6807,12 +6918,104 @@ mod run_agent_streaming_tests {
             );
         }
         if let AgentStreamEvent::Log { text } = &logs[1] {
-            assert!(text.contains("Read"), "log should name the tool: {text}");
-            assert_ne!(
-                text, "→ Read",
-                "the completion event must be the breadcrumb, not a repeat of the start"
-            );
+            assert_eq!(text, "✓ Read", "the completion names the category only");
         }
+    }
+
+    /// KT-1120 — the log panel follows the progress frames' no-leak rule: a
+    /// tool call whose name and input carry a path, a URL and a token leaves
+    /// as its category, and only that.
+    #[tokio::test]
+    async fn a_tool_call_with_targets_leaves_the_log_as_its_category_only() {
+        const PATH: &str = "/Users/alice/secret-project/.env";
+        const URL: &str = "https://internal.example.com/admin?key=1";
+        const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let input = serde_json::json!({
+            "file_path": PATH, "command": format!("curl {URL} -H 'Authorization: {TOKEN}'"),
+            "url": URL, "description": TOKEN, "pattern": TOKEN, "path": PATH,
+        })
+        .to_string();
+        let tools = [
+            "Read",
+            "Bash",
+            "WebFetch",
+            "Agent",
+            "mcp__github__create_issue",
+            "read_secret_file",
+        ];
+        let mut script = Vec::new();
+        for tool in tools {
+            script.extend([tool_start(tool), tool_input(&input), tool_end()]);
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        run_agent_streaming(
+            ScriptedProcess::stream_json(script),
+            &tx,
+            &meta(),
+            &AgentType::ClaudeCode,
+            TEST_GLOBAL_TIMEOUT,
+        )
+        .await;
+        drop(tx);
+        let logs: Vec<String> = drain(rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentStreamEvent::Log { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            logs,
+            [
+                "→ Read",
+                "✓ Read",
+                "→ Execute",
+                "✓ Execute",
+                "→ Web",
+                "✓ Web",
+                "→ Think",
+                "✓ Think",
+                "→ Mcp",
+                "✓ Mcp",
+                "→ Other",
+                "✓ Other",
+            ]
+        );
+        // The discussion stream builds its lines with the same two helpers.
+        for tool in tools {
+            for line in [tool_started_log(tool), tool_finished_log(tool)] {
+                for leak in [PATH, URL, TOKEN, "github", "secret", "/", "http"] {
+                    assert!(!line.contains(leak), "{line:?} leaks {leak:?}");
+                }
+            }
+        }
+    }
+
+    /// A stderr diagnostic reaches the log as a fixed notice, once: its text can
+    /// name a path, a URL or a token.
+    #[test]
+    fn a_stderr_diagnostic_reaches_the_log_as_a_fixed_notice_only() {
+        let lines = [
+            "Could not open /Users/alice/private/project/src/lib.rs; endpoint https://internal.example.com/admin unavailable",
+            "auth failed for ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ]
+        .map(String::from);
+        let mut announced = false;
+        let text = stderr_log_line(&lines, &mut announced).expect("the diagnostic is announced");
+        assert_eq!(text, STDERR_DIAGNOSTIC_LOG);
+        for leak in ["/", "http", "alice", "internal", "ghp_"] {
+            assert!(!text.contains(leak), "{text:?} leaks {leak:?}");
+        }
+        assert_eq!(
+            stderr_log_line(&lines, &mut announced),
+            None,
+            "once per run"
+        );
+        let mut fresh = false;
+        assert_eq!(stderr_log_line(&[String::new()], &mut fresh), None);
+        let marker = format!("{} Bash", crate::agents::runner::ACP_TOOL_MARKER);
+        assert_eq!(stderr_log_line(&[marker], &mut fresh), None);
+        assert!(!fresh, "a tool marker alone is no diagnostic");
     }
 
     #[tokio::test]
@@ -7972,6 +8175,7 @@ for line in sys.stdin:
             crate::DEFAULT_MAX_CONCURRENT_AGENTS,
         );
 
+        let mut ws = state.ws_broadcast.subscribe();
         let started = std::time::Instant::now();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let response =
@@ -7994,6 +8198,49 @@ for line in sys.stdin:
             body.contains("OpenCode n'a pas ouvert sa session en 1 s"),
             "{body}"
         );
+
+        // KT-1108 — the bubble saw the startup phases in order, for this run
+        // of this discussion, and then the stop on the session bound.
+        let mut frames = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while frames.last().is_none_or(
+            |(_, _, progress): &(String, u32, crate::models::AgentRunProgress)| {
+                progress.stopped.is_none()
+            },
+        ) {
+            let message = tokio::time::timeout_at(deadline, ws.recv())
+                .await
+                .expect("a stopped frame")
+                .unwrap();
+            if let crate::models::WsMessage::AgentRunProgress {
+                discussion_id,
+                agent_type,
+                run_id,
+                seq,
+                progress,
+                ..
+            } = message
+            {
+                assert_eq!(discussion_id, "mute");
+                assert_eq!(agent_type, AgentType::OpenCode);
+                frames.push((run_id, seq, progress));
+            }
+        }
+        assert!(frames.iter().all(|(run, _, _)| *run == frames[0].0));
+        assert!(frames.windows(2).all(|pair| pair[0].1 < pair[1].1));
+        let last = &frames.last().unwrap().2;
+        assert_eq!(
+            last.timeline
+                .iter()
+                .map(|mark| mark.phase)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::models::AgentRunPhase::Preparing,
+                crate::models::AgentRunPhase::Initializing,
+                crate::models::AgentRunPhase::OpeningSession,
+            ]
+        );
+        assert_eq!(last.stopped, Some(crate::models::AgentRunStop::TimedOut));
 
         let messages = db
             .with_read_conn(|conn| crate::db::discussions::list_messages(conn, "mute"))
@@ -8101,5 +8348,207 @@ for line in sys.stdin:
             super::effective_stall_timeout(native, configured, super::NON_STREAMING_STALL_TIMEOUT),
             configured
         );
+    }
+}
+
+#[cfg(test)]
+mod http_run_progress_tests {
+    use crate::models::{AgentRunPhase, AgentRunStop, MessageRole, WsMessage};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
+
+    /// A LiteLLM proxy whose chat answer is held at two gates the test opens:
+    /// before the headers, and after one reasoning-only chunk.
+    async fn gated_proxy(gate: Arc<Notify>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let gate = gate.clone();
+                tokio::spawn(async move {
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        if let Some(at) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buffer[..head_end]).into_owned();
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    while buffer.len() < head_end + length {
+                        match stream.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    if !head.starts_with("POST /v1/chat/completions") {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
+                    gate.notified().await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                        .await;
+                    let _ = stream
+                        .write_all(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"secret-plan /etc/hunter2\"}}]}\n\n")
+                        .await;
+                    let _ = stream.flush().await;
+                    gate.notified().await;
+                    let _ = stream
+                        .write_all(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                        .await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    async fn next_frame(
+        ws: &mut tokio::sync::broadcast::Receiver<WsMessage>,
+        mut wanted: impl FnMut(&crate::models::AgentRunProgress) -> bool,
+    ) -> crate::models::AgentRunProgress {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(WsMessage::AgentRunProgress {
+                    discussion_id,
+                    progress,
+                    ..
+                }) = ws.recv().await
+                {
+                    assert_eq!(discussion_id, "http-disc");
+                    let json = serde_json::to_string(&progress).unwrap();
+                    assert!(
+                        !json.contains("secret-plan") && !json.contains("hunter2"),
+                        "{json}"
+                    );
+                    if wanted(&progress) {
+                        return progress;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the frame came")
+    }
+
+    /// A discussion turn on an HTTP agent, through the real consumer: the
+    /// bubble waits for the model with its deadline before any header, shows
+    /// a reasoning-only chunk as thinking, and ends on the run's own stop.
+    #[tokio::test]
+    async fn an_http_discussion_turn_reports_its_wait_its_reasoning_and_its_end() {
+        use axum::response::IntoResponse;
+        let gate = Arc::new(Notify::new());
+        let base = gated_proxy(gate.clone()).await;
+        let mut config = crate::core::config::default_config();
+        config.agents.lite_llm.base_url = Some(base);
+        config.agents.model_tiers.lite_llm.default = Some("proxy-model".into());
+        config.agents.model_tiers.lite_llm.reasoning = Some("proxy-model".into());
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, created_at, updated_at, awaiting_agent)
+                 VALUES ('http-disc', 'http', 'LiteLlm', 'fr', datetime('now'), datetime('now'), 1)",
+                [],
+            )?;
+            let user = crate::models::DiscussionMessage {
+                id: "u1".into(),
+                role: MessageRole::User,
+                channel: crate::models::MessageChannel::Main,
+                content: "bonjour".into(),
+                agent_type: None,
+                timestamp: chrono::Utc::now(),
+                tokens_used: 0,
+                session_tokens_at_message: None,
+                recovered_partial: false,
+                auth_mode: None,
+                model_tier: None,
+                model: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                author_cli_ordinal: None,
+                source_msg_id: None,
+                duration_ms: None,
+                lint_report: None,
+                target_agent: None,
+                reply_to_message_id: None,
+            };
+            crate::db::discussions::insert_message(conn, "http-disc", &user)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut ws = state.ws_broadcast.subscribe();
+        let snapshots = state.live_runs.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let response = super::make_agent_stream_inner(
+            state,
+            "http-disc".into(),
+            None,
+            None,
+            None,
+            None,
+            Some(tx),
+        )
+        .await
+        .into_response();
+        let body = tokio::spawn(axum::body::to_bytes(response.into_body(), 256 * 1024));
+
+        // Held before the headers: the model wait, with the transport's deadline.
+        let waiting = next_frame(&mut ws, |p| p.phase == AgentRunPhase::WaitingModel).await;
+        let limit = waiting
+            .idle_limit_ms
+            .expect("a deadline before the headers");
+        assert!(limit > 0);
+        assert!(
+            !snapshots.snapshot("http-disc").is_empty(),
+            "readable mid-run"
+        );
+
+        gate.notify_one();
+        let thinking = next_frame(&mut ws, |p| p.phase == AgentRunPhase::Thinking).await;
+        assert_eq!(
+            thinking.idle_limit_ms,
+            Some(limit),
+            "the body's bound, fresh"
+        );
+
+        gate.notify_one();
+        let last = next_frame(&mut ws, |p| p.stopped.is_some()).await;
+        assert_eq!(last.stopped, Some(AgentRunStop::Finished));
+        assert!(matches!(
+            rx.await.unwrap(),
+            super::AgentExecutionOutcome::Finished { success: true }
+        ));
+        let body = body.await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("done"));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !snapshots.snapshot("http-disc").is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the run leaves the snapshot with its stop");
     }
 }

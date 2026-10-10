@@ -912,7 +912,9 @@ async fn quick_exec_failed_stdout_remains_in_the_saved_diagnostic() {
 }
 
 async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    // The launch is fire-and-forget: its persisted terminal state is the event.
+    // The ceiling only bounds a hang; the paced poll leaves the DB to the launch.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let (_, action) =
                 get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
@@ -923,7 +925,7 @@ async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
             ) {
                 break action;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -24087,6 +24089,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         };
         let run_for_update = run_id.clone();
         state

@@ -1580,6 +1580,10 @@ pub enum RunStatus {
     /// `Failed` (the workflow didn't error — the host went away) so it doesn't
     /// poison "last run succeeded" cron logic or read as a real failure.
     Interrupted,
+    /// KT-811 — non-terminal: an Agent step was refused for a provider quota or
+    /// session limit. The engine resumes it at that step after the announced
+    /// reset; without a usable reset it stays parked until a manual resume.
+    WaitingQuota,
 }
 
 impl RunStatus {
@@ -1594,9 +1598,50 @@ impl RunStatus {
             | RunStatus::Cancelled
             | RunStatus::StoppedByGuard
             | RunStatus::Interrupted => true,
-            RunStatus::Pending | RunStatus::Running | RunStatus::WaitingApproval => false,
+            RunStatus::Pending
+            | RunStatus::Running
+            | RunStatus::WaitingApproval
+            | RunStatus::WaitingQuota => false,
         }
     }
+}
+
+/// KT-811 — why a quota-refused step waits for a human instead of a timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaParkReason {
+    /// The refusal named no reset time Kronn can trust.
+    NoResetTime,
+    /// The reset falls after the workflow's absolute timeout guard.
+    AfterDeadline,
+    /// The provider kept refusing after several automatic wake-ups.
+    TooManyAttempts,
+    /// The automatic resume was refused by the resume preconditions.
+    NotResumable,
+}
+
+/// KT-811 — a step refused for a provider quota, not an agent failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuotaWait {
+    /// Identity of this wait: a park or a claim applies only to the wait it read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The reset instant the provider announced, when it could be parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<DateTime<Utc>>,
+    /// When the engine resumes the step; `None` while parked or not waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<DateTime<Utc>>,
+    /// Consecutive quota refusals of this step, this one included.
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<QuotaParkReason>,
+    /// Why an automatic resume was refused, when `parked` is `NotResumable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1857,6 +1902,10 @@ pub struct StepResult {
     /// replaces the in-flight row, so it survives only an interrupted step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity: Option<AgentActivity>,
+    /// KT-811 — set when the provider refused the step for a quota or session
+    /// limit, so the run reads "quota" rather than "failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_wait: Option<QuotaWait>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {

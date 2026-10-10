@@ -232,3 +232,24 @@ fn a_call_is_counted_once_whatever_its_updates_and_the_display_buffer() {
     assert_eq!(recent.snapshot().entries[0].category, Edit);
     assert_eq!(recent.snapshot().entries.len(), 1);
 }
+
+/// KT-1108 — reasoning is recognised by its shape, whatever the runtime.
+#[test]
+fn a_reasoning_frame_is_recognised_by_its_shape_only() {
+    use super::is_reasoning_frame;
+    for line in [
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        r#"{"type":"item.completed","item":{"id":"i1","type":"reasoning","text":"plan"}}"#,
+    ] {
+        assert!(is_reasoning_frame(line), "{line}");
+    }
+    for line in [
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"thinking"}}}"#,
+        r#"{"type":"item.completed","item":{"type":"agent_message","text":"reasoning"}}"#,
+        "thinking_delta",
+        "",
+    ] {
+        assert!(!is_reasoning_frame(line), "{line}");
+    }
+}

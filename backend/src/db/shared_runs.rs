@@ -265,7 +265,7 @@ pub fn repair_stale_workflow_projections(conn: &Connection) -> Result<usize> {
         .prepare(
             "SELECT s.id FROM shared_runs s JOIN workflow_runs r ON r.id = s.id
              WHERE s.kind = 'workflow' AND s.status IN ('queued', 'running')
-               AND r.status NOT IN ('Pending', 'Running', 'WaitingApproval')",
+               AND r.status NOT IN ('Pending', 'Running', 'WaitingApproval', 'WaitingQuota')",
         )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -291,9 +291,9 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
     };
     let status = match run.status {
         crate::models::RunStatus::Pending => SharedRunStatus::Queued,
-        crate::models::RunStatus::Running | crate::models::RunStatus::WaitingApproval => {
-            SharedRunStatus::Running
-        }
+        crate::models::RunStatus::Running
+        | crate::models::RunStatus::WaitingApproval
+        | crate::models::RunStatus::WaitingQuota => SharedRunStatus::Running,
         crate::models::RunStatus::Success => SharedRunStatus::Success,
         crate::models::RunStatus::Cancelled => SharedRunStatus::Cancelled,
         crate::models::RunStatus::StoppedByGuard => SharedRunStatus::Timeout,
@@ -314,6 +314,7 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
                 crate::models::RunStatus::Pending
                     | crate::models::RunStatus::Running
                     | crate::models::RunStatus::WaitingApproval
+                    | crate::models::RunStatus::WaitingQuota
             )
         })
         .count();
@@ -326,6 +327,7 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
                 crate::models::RunStatus::Pending
                     | crate::models::RunStatus::Running
                     | crate::models::RunStatus::WaitingApproval
+                    | crate::models::RunStatus::WaitingQuota
             )
         })
         .map(|step| step.step_name.clone());
@@ -352,6 +354,8 @@ pub fn sync_workflow(conn: &Connection, run: &crate::models::WorkflowRun) -> Res
                 "current_label": current,
             },
             "steps": steps_without_outputs(&run.step_results),
+            // KT-811 — a card reads "quota", not "running", while the run waits.
+            "quota": crate::workflows::quota_wait::pending_wait(run),
         })),
         diagnostic: None,
         created_at: run.started_at,

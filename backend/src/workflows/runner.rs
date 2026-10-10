@@ -357,7 +357,10 @@ pub(crate) fn next_step_index_for_resume(
             .iter()
             .position(|s| s.name == last.step_name)
             .map(|i| {
-                if matches!(last.status, RunStatus::Running | RunStatus::Pending) {
+                if matches!(
+                    last.status,
+                    RunStatus::Running | RunStatus::Pending | RunStatus::WaitingQuota
+                ) {
                     // A durable StepStart placeholder means the process died
                     // before the step produced a terminal result. Resume must
                     // re-run that step, not skip it as if it had completed.
@@ -454,6 +457,7 @@ pub async fn settle_errored_run(
         cached_prompt_tokens: None,
         cache_write_prompt_tokens: None,
         last_activity: None,
+        quota_wait: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -586,6 +590,7 @@ fn workspace_failure_result(msg: &str) -> StepResult {
         cached_prompt_tokens: None,
         cache_write_prompt_tokens: None,
         last_activity: None,
+        quota_wait: None,
     }
 }
 
@@ -716,14 +721,25 @@ async fn execute_run_with_notify_policy(
         RunStatus::Pending
             | RunStatus::Running
             | RunStatus::WaitingApproval
+            | RunStatus::WaitingQuota
             | RunStatus::Interrupted
-    ) || (result.is_err() && run.status != RunStatus::WaitingApproval)
+    ) || (result.is_err()
+        && !matches!(
+            run.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        ))
     {
         super::run_artifacts::remove(&run.id);
     }
     // An error settles the run as failed: its worktree goes now, not at the
     // next boot. An inherited worktree belongs to the parent run.
-    if result.is_err() && !is_inherited_workspace && run.status != RunStatus::WaitingApproval {
+    if result.is_err()
+        && !is_inherited_workspace
+        && !matches!(
+            run.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        )
+    {
         let workflow = workflow_in_run_project(workflow, run);
         if let Err(error) = reclaim_run_worktree(&state, &workflow, run).await {
             tracing::warn!(
@@ -1167,6 +1183,7 @@ async fn execute_run_body(
                                 cached_prompt_tokens: None,
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
+                                quota_wait: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -1239,6 +1256,7 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1275,6 +1293,7 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1488,6 +1507,7 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1573,6 +1593,7 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1589,15 +1610,18 @@ async fn execute_run_body(
     let mut cancelled_by_user = false;
     let mut stopped_by_guard = false;
     let mut paused_for_approval = false;
+    let mut paused_for_quota = false;
     let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
-    if run
-        .step_results
-        .last()
-        .is_some_and(|result| matches!(result.status, RunStatus::Running | RunStatus::Pending))
-    {
+    if run.step_results.last().is_some_and(|result| {
+        matches!(
+            result.status,
+            RunStatus::Running | RunStatus::Pending | RunStatus::WaitingQuota
+        )
+    }) {
         // StepStart is persisted for live observability. After a daemon crash
         // that trailing row is evidence of an incomplete step, not history to
-        // keep alongside the retry. Replace it with the new attempt.
+        // keep alongside the retry. Replace it with the new attempt. A step
+        // refused for quota (KT-811) is replaced the same way.
         run.step_results.pop();
     }
     let total_steps = workflow.steps.len();
@@ -1664,6 +1688,7 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             });
             all_success = false;
             break;
@@ -1696,6 +1721,7 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             });
             break;
         }
@@ -1742,6 +1768,7 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             });
             stopped_by_guard = true;
             break;
@@ -1787,6 +1814,7 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             });
             stopped_by_guard = true;
             break;
@@ -1847,6 +1875,7 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
             });
             stopped_by_guard = true;
             break;
@@ -1909,6 +1938,7 @@ async fn execute_run_body(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         };
         apply_step_snapshot(
             step,
@@ -2083,6 +2113,7 @@ async fn execute_run_body(
                                 cached_prompt_tokens: None,
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
+                                quota_wait: None,
                             },
                             condition_action: None,
                         }
@@ -2451,6 +2482,7 @@ async fn execute_run_body(
                         cached_prompt_tokens: None,
                         cache_write_prompt_tokens: None,
                         last_activity: None,
+                        quota_wait: None,
                     },
                     condition_action: None,
                 }
@@ -2498,6 +2530,7 @@ async fn execute_run_body(
                         cached_prompt_tokens: None,
                         cache_write_prompt_tokens: None,
                         last_activity: None,
+                        quota_wait: None,
                     },
                     condition_action: None,
                 }
@@ -2582,6 +2615,37 @@ async fn execute_run_body(
             StepType::SubWorkflow => {}
         }
 
+        // KT-811 — a quota refusal waits for the reset instead of failing the
+        // run. Children are resumed through their parent, so they still fail.
+        if outcome.result.status == RunStatus::Failed
+            && run.parent_run_id.is_none()
+            && run.run_type == "linear"
+        {
+            if let Some(classified) = outcome.result.quota_wait.take() {
+                let timeout =
+                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4);
+                let wait = super::quota_wait::plan_wait(
+                    &mut run.state,
+                    &step.name,
+                    classified,
+                    Utc::now(),
+                    run.started_at + chrono::Duration::seconds(timeout),
+                );
+                tracing::info!(
+                    run_id = %run.id,
+                    step = %step.name,
+                    wake_at = ?wait.wake_at,
+                    parked = ?wait.parked,
+                    "provider quota refusal — the step waits instead of failing"
+                );
+                outcome.result.quota_wait = Some(wait);
+                outcome.result.status = RunStatus::WaitingQuota;
+            }
+        } else if outcome.result.status != RunStatus::Failed {
+            run.state
+                .remove(super::quota_wait::QUOTA_ATTEMPTS_STATE_KEY);
+        }
+        let waiting_quota_here = outcome.result.status == RunStatus::WaitingQuota;
         let step_failed = outcome.result.status == RunStatus::Failed;
         // Captured BEFORE `outcome.result` is moved into `step_results`
         // below — used by the Stop arm to give the run an honest verdict
@@ -2608,8 +2672,11 @@ async fn execute_run_body(
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
         // The current_step is cleared since this step is now finished.
-        let post_step_status = if outcome.result.status == RunStatus::WaitingApproval {
-            RunStatus::WaitingApproval
+        let post_step_status = if matches!(
+            outcome.result.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        ) {
+            outcome.result.status.clone()
         } else {
             run.status.clone()
         };
@@ -2786,6 +2853,10 @@ async fn execute_run_body(
         }
         if stopped_by_guard {
             all_success = false;
+            break;
+        }
+        if waiting_quota_here {
+            paused_for_quota = true;
             break;
         }
 
@@ -3056,7 +3127,8 @@ async fn execute_run_body(
     }
 
     // Run after_run hook (skip when paused — the run isn't done yet).
-    if !paused_for_approval {
+    let paused = paused_for_approval || paused_for_quota;
+    if !paused {
         if let Some(ref ws) = workspace {
             if let Err(e) = ws.after_run().await {
                 tracing::warn!(
@@ -3080,6 +3152,8 @@ async fn execute_run_body(
         RunStatus::Cancelled
     } else if paused_for_approval {
         RunStatus::WaitingApproval
+    } else if paused_for_quota {
+        RunStatus::WaitingQuota
     } else if stopped_by_guard {
         RunStatus::StoppedByGuard
     } else if all_success {
@@ -3333,12 +3407,12 @@ async fn execute_run_body(
         }
     }
 
-    if !paused_for_approval {
+    if !paused {
         run.finished_at = Some(Utc::now());
     }
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-    let terminal_snapshot_run_id = (!paused_for_approval).then(|| run.id.clone());
+    let terminal_snapshot_run_id = (!paused).then(|| run.id.clone());
     let db5 = db.clone();
     db5.with_conn(move |conn| {
         let updated = crate::db::workflows::update_run_progress(conn, snap)?;
@@ -3402,7 +3476,7 @@ async fn execute_run_body(
     } else {
         0
     };
-    if !paused_for_approval && !is_inherited_workspace && active_child_dispatches == 0 {
+    if !paused && !is_inherited_workspace && active_child_dispatches == 0 {
         if let Some(ws) = workspace {
             match ws.cleanup().await {
                 Ok(outcome) => {
@@ -3748,13 +3822,14 @@ fn append_resume_transition(run: &mut WorkflowRun) {
     let events = history["events"]
         .as_array_mut()
         .expect("resume history events normalized to an array");
+    let paused_status = format!("{:?}", run.status);
     let last_status = events
         .last()
         .and_then(|event| event.get("status"))
         .and_then(serde_json::Value::as_str);
-    if last_status != Some("Interrupted") {
+    if last_status != Some(paused_status.as_str()) {
         events.push(serde_json::json!({
-            "status": "Interrupted",
+            "status": paused_status,
             "at": run.finished_at.unwrap_or(now).to_rfc3339(),
         }));
     }
@@ -3776,7 +3851,8 @@ pub(crate) async fn claim_interrupted_run_row(
         .map_err(|reason| anyhow::anyhow!("Run {id} cannot resume: {reason}"))
 }
 
-/// Claims an `Interrupted` run, its concurrency key and resume trail included,
+/// Claims an `Interrupted` or `WaitingQuota` run, its concurrency key and
+/// resume trail included,
 /// in the same closure as the admission check. `Ok(Err(reason))`: the
 /// workflow's concurrency limit refused it; `run` is then left unchanged, so
 /// the caller may wait and try again. `deadline`: the earliest timeout the
@@ -3787,13 +3863,21 @@ pub(crate) async fn try_claim_interrupted_run_row(
     deadline: Option<chrono::DateTime<Utc>>,
 ) -> Result<std::result::Result<(), String>> {
     use anyhow::anyhow;
-    if run.status != RunStatus::Interrupted {
+    if !matches!(run.status, RunStatus::Interrupted | RunStatus::WaitingQuota) {
         return Err(anyhow!(
-            "Run {} is {:?} — only Interrupted runs can be resumed",
+            "Run {} is {:?} — only Interrupted or quota-waiting runs can be resumed",
             run.id,
             run.status
         ));
     }
+    let from_status = run.status.clone();
+    // The wait this copy read; owned so the closure below can carry it.
+    let quota_wait = (run.status == RunStatus::WaitingQuota).then(|| {
+        (
+            run.step_results.len().saturating_sub(1),
+            super::quota_wait::pending_wait(run).and_then(|wait| wait.id.clone()),
+        )
+    });
     let mut claim_run = run.clone();
     append_resume_transition(&mut claim_run);
     let candidate = claim_run.clone();
@@ -3820,9 +3904,13 @@ pub(crate) async fn try_claim_interrupted_run_row(
                     return Ok(Err(reason));
                 }
             }
-            crate::db::workflows::claim_interrupted_run_status(
+            crate::db::workflows::claim_paused_run_status(
                 conn,
                 &candidate.id,
+                &from_status,
+                quota_wait
+                    .as_ref()
+                    .map(|(index, id)| (*index, id.as_deref())),
                 &candidate.state,
                 candidate.concurrency_key.as_deref(),
             )
@@ -3859,6 +3947,17 @@ pub(crate) async fn try_claim_interrupted_run_row(
 ///     exactly the require_isolation hazard — refuse instead
 pub async fn claim_interrupted_run(
     state: &AppState,
+    run: &mut WorkflowRun,
+    retry_uncertain_effect: bool,
+) -> Result<()> {
+    check_resume_preconditions(run, retry_uncertain_effect)?;
+    claim_interrupted_run_row(state, run).await
+}
+
+/// The refusals every top-level resume applies, manual or after a quota reset
+/// (KT-811): children and batches, a vanished worktree, and an external effect
+/// with no durable result (fail-closed, KT-150).
+pub(crate) fn check_resume_preconditions(
     run: &mut WorkflowRun,
     retry_uncertain_effect: bool,
 ) -> Result<()> {
@@ -3904,7 +4003,24 @@ pub async fn claim_interrupted_run(
         }
         run.state.remove(UNCERTAIN_SIDE_EFFECT_STATE_KEY);
     }
-    claim_interrupted_run_row(state, run).await
+    Ok(())
+}
+
+/// Continues a run its caller already claimed, in the background, with the
+/// same settle and unattended-failure notification as every resume.
+pub(crate) fn spawn_claimed_resume(state: AppState, workflow: Workflow, mut run: WorkflowRun) {
+    tokio::spawn(async move {
+        let cfg = state.config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        if let Err(e) =
+            resume_interrupted_run(state.clone(), &workflow, &mut run, &tokens, &agents, None).await
+        {
+            settle_errored_run(&state, &workflow, &mut run, &e).await;
+        }
+        crate::core::run_notify::notify_if_failed(&state, &workflow, &run).await;
+    });
 }
 
 /// A2 — continue an `Interrupted` run the caller just claimed via
@@ -4491,6 +4607,7 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         }
     }
 
@@ -4841,6 +4958,7 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         }
     }
 
@@ -4972,6 +5090,7 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         }
     }
 
@@ -6800,7 +6919,9 @@ mod tests {
             .map(|_| run)
         });
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // The paused turn holds the step open, so the readable activity is the event;
+        // a run that ends first stops the wait too. The ceiling only bounds a hang.
+        let status = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
                     axum::extract::State(state.clone()),
@@ -6808,16 +6929,24 @@ mod tests {
                     axum::extract::Path("run-activity".to_string()),
                 )
                 .await;
-                if let Some(status) = response.data.filter(|s| s.current_activity.is_some()) {
+                if let Some(status) = response
+                    .data
+                    .filter(|s| s.current_activity.is_some() || s.finished_at.is_some())
+                {
                     return status;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("the running step's activity must become readable");
+        .expect("the run neither exposed its activity nor ended");
+        let activity = status.current_activity.clone().unwrap_or_else(|| {
+            panic!(
+                "the running step's activity must become readable, run ended {}",
+                status.status
+            )
+        });
         assert_eq!(status.current_step.as_deref(), Some("orchestrateur"));
-        let activity = status.current_activity.clone().unwrap();
         assert_eq!(activity.category, crate::models::ActivityCategory::Execute);
         let axum::Json(detail) = crate::api::workflows::get_run(
             axum::extract::State(state.clone()),
@@ -9104,6 +9233,8 @@ mod tests {
             ]
         );
     }
+
+    mod quota_wait_runs;
 }
 
 #[cfg(test)]

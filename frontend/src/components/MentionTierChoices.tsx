@@ -17,7 +17,8 @@ export function MentionTierChoices({ trigger, currentTier, keyboardTier, ariaLab
   return <span className="disc-mention-tier-choices" aria-label={ariaLabel}>
     {MENTION_TIER_CHOICES.map(tier => {
       const state = resolve(tier);
-      const title = t('disc.routingInvokeTier', t(`disc.tier.${tier}`), state.model || t('disc.defaultAgentModel'));
+      const title = [t('disc.routingInvokeTier', t(`disc.tier.${tier}`), state.model || t('disc.defaultAgentModel')),
+        state.notice, state.refusal].filter(Boolean).join(' — ');
       const provenance = state.provenance ? t(`modelCatalog.provenance.${state.provenance}`)
         : state.configured ? t('modelCatalog.notInCatalog') : '';
       const descriptionId = `${id}-${tier}`;
@@ -36,11 +37,15 @@ export function MentionTierChoices({ trigger, currentTier, keyboardTier, ariaLab
         }}>
         <span aria-hidden="true">{MODEL_TIER_ICONS[tier]}</span>
         <span id={descriptionId} hidden>{[title, state.entry?.model_id, provenance,
-          state.unavailable ? t('modelCatalog.unavailable') : '', state.entry?.unavailable_reason,
+          state.unavailable ? t('modelCatalog.unavailable') : '', state.refusal ?? state.entry?.unavailable_reason,
+          state.replacement ? t('modelCatalog.runsInstead', state.replacement, state.configured || state.entry?.model_id || '') : '',
+          state.notice ?? '',
           state.entry ? t('modelCatalog.lastChecked', state.entry.last_checked_at) : '',
         ].filter(Boolean).join(' · ')}</span>
-        {(state.entry || state.configured) && <span className="disc-mention-catalog-meta">
-          {state.unavailable ? t('modelCatalog.unavailable') : provenance}
+        {(state.entry || state.configured) && <span className="disc-mention-catalog-meta"
+          data-catalog-warning={!state.unavailable && state.notice ? 'true' : undefined}>
+          {state.unavailable ? t('modelCatalog.unavailable')
+            : state.notice ? `⚠ ${t('modelCatalog.notListedBadge')}` : provenance}
         </span>}
       </button>;
     })}

@@ -110,6 +110,42 @@ pub fn category_of_acp_kind(kind: &str) -> ActivityCategory {
     }
 }
 
+/// Whether a runtime's line is the model reasoning: Claude's thinking blocks,
+/// Codex's reasoning items, an HTTP model's reasoning field. Only the shape is
+/// read, never the text.
+pub fn is_reasoning_frame(line: &str) -> bool {
+    let line = line.trim();
+    // An OpenAI-wire stream frames each chunk as server-sent `data:`.
+    let line = line.strip_prefix("data:").map_or(line, str::trim);
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let non_empty = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    };
+    // Ollama's `message.thinking`, an OpenAI-wire `reasoning_content`/`reasoning`.
+    if non_empty("/message/thinking")
+        || non_empty("/choices/0/delta/reasoning_content")
+        || non_empty("/choices/0/delta/reasoning")
+    {
+        return true;
+    }
+    let event = value.get("event").unwrap_or(&value);
+    let str_at = |root: &Value, pointer: &str| {
+        root.pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    matches!(
+        str_at(event, "/delta/type").as_deref(),
+        Some("thinking_delta" | "signature_delta")
+    ) || str_at(event, "/content_block/type").as_deref() == Some("thinking")
+        || str_at(&value, "/item/type").as_deref() == Some("reasoning")
+}
+
 /// One step in a tool call's life: its start, or a later update of it.
 /// Updates carrying the same id refine one call; they never announce another.
 #[derive(Debug, Clone, PartialEq, Eq)]

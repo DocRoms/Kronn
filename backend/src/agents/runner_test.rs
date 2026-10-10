@@ -15643,6 +15643,7 @@ sleep 3600
                 ResponseTemplate::new(200).set_body_string(sse(&[&frame.to_string()]))
             }).expect(2).mount(&server).await;
         let (sink, activity_rx) = tokio::sync::watch::channel(None);
+        let progress = crate::agents::run_progress::RunProgress::new();
         let mut process = start_ollama_http_with_idle(
             &AgentType::LiteLlm,
             "read the audit document",
@@ -15663,6 +15664,7 @@ sleep 3600
             None,
             None,
             Some(sink),
+            Some(progress.clone()),
         )
         .await
         .unwrap();
@@ -15677,6 +15679,18 @@ sleep 3600
             (crate::models::ActivityCategory::Read, 1)
         );
         assert!(!serde_json::to_string(&latest).unwrap().contains("hunter2"));
+        // KT-1108 — the live bubble gets the same category, and nothing of the call.
+        let live = progress.snapshot();
+        assert_eq!(live.tool_calls, 1);
+        assert_eq!(
+            live.activity[0].category,
+            crate::models::ActivityCategory::Read
+        );
+        let frame = serde_json::to_string(&live).unwrap();
+        assert!(
+            !frame.contains("hunter2") && !frame.contains("read_file"),
+            "{frame}"
+        );
     }
 
     #[test]

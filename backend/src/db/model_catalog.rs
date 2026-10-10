@@ -13,8 +13,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::parse_dt;
 use crate::models::{
-    AgentType, CatalogModelEntry, ModelAvailability, ModelCostHint, ModelProvenance, ModelTier,
-    ModelUnavailableReason, UpsertManualModelRequest,
+    AgentType, CatalogListing, CatalogModelEntry, ModelAvailability, ModelCostHint,
+    ModelProvenance, ModelTier, ModelUnavailableReason, UpsertManualModelRequest,
 };
 
 const COLUMNS: &str =
@@ -22,7 +22,7 @@ const COLUMNS: &str =
     availability, unavailable_reason, unavailable_detail, capabilities_json, \
     reasoning_modes_json, default_reasoning_mode, tier_assignment, cost_hint, privacy_note, \
     manual_origin, first_seen_at, last_seen_at, last_checked_at, created_at, updated_at, \
-    resolved_model, description, last_answered_at";
+    resolved_model, description, last_answered_at, catalog_listing";
 
 pub fn canonical_id(runtime_target_id: &str, model_id: &str) -> String {
     let payload = format!("{runtime_target_id}\0{model_id}");
@@ -273,6 +273,11 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CatalogModelEntry> 
         created_at: parse_dt(row.get(20)?),
         updated_at: parse_dt(row.get(21)?),
         last_answered_at: row.get::<_, Option<String>>(24)?.map(parse_dt),
+        listing: match row.get::<_, Option<String>>(25)?.as_deref() {
+            Some("listed") => CatalogListing::Listed,
+            Some("not_listed") => CatalogListing::NotListed,
+            _ => CatalogListing::Unknown,
+        },
     })
 }
 
@@ -340,7 +345,7 @@ pub fn create_manual(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL,NULL)"
+             (?1,?2,?3,?4,?5,NULL,'manual','available',NULL,NULL,?6,?7,?8,?9,?11,?12,1,?10,NULL,?10,?10,?10,NULL,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -537,6 +542,17 @@ fn derive_opencode_zen_overlay(
     )
 }
 
+/// Which absent identities a listing may mark unavailable.
+pub enum Refutation<'a> {
+    /// A visible snapshot: previously live rows only.
+    LiveSnapshot,
+    /// Every model the runtime lists, hidden ones included: an absent row is
+    /// recorded `not_listed`, a warning that never makes it unavailable.
+    Complete(std::collections::HashSet<&'a str>),
+    /// An incomplete listing: none.
+    Nothing,
+}
+
 /// Reconcile one runtime's live discovery result into the catalog. Idempotent
 /// and safely replayable: reconciling an identical `discovered` set twice
 /// leaves the same rows with only `last_checked_at`/`last_seen_at` advancing.
@@ -556,6 +572,22 @@ pub fn reconcile_live(
     runtime_target_id: &str,
     agent_type: &AgentType,
     discovered: &[DiscoveredModel],
+) -> Result<()> {
+    reconcile_listing(
+        conn,
+        runtime_target_id,
+        agent_type,
+        discovered,
+        Refutation::LiveSnapshot,
+    )
+}
+
+pub fn reconcile_listing(
+    conn: &Connection,
+    runtime_target_id: &str,
+    agent_type: &AgentType,
+    discovered: &[DiscoveredModel],
+    refutation: Refutation<'_>,
 ) -> Result<()> {
     validate_runtime_target_projection(runtime_target_id, agent_type)?;
     let now = Utc::now().to_rfc3339();
@@ -613,7 +645,7 @@ pub fn reconcile_live(
                 conn.execute(
                     &format!(
                         "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13,NULL)"
+                         (?1,?2,?3,?4,?5,NULL,'live','available',NULL,NULL,?6,?7,?8,NULL,?10,?11,0,?9,?9,?9,?9,?9,?12,?13,NULL,'listed')"
                     ),
                     params![
                         id,
@@ -635,24 +667,63 @@ pub fn reconcile_live(
         }
     }
 
-    // Anything previously live-sourced but missing from this snapshot becomes
-    // `Cached` and unavailable — a stale-but-visible last-known state, never
-    // deleted or silently selectable.
+    // A visible snapshot downgrades a previously live row it no longer shows
+    // to `Cached` and unavailable — stale-but-visible, never deleted. A
+    // complete listing only records evidence: absence is a warning, since a
+    // listing is no access proof. A partial listing records nothing.
     for entry in &existing {
-        if discovered_ids.contains(entry.model_id.as_str())
-            || !matches!(
-                entry.provenance,
-                ModelProvenance::Live | ModelProvenance::Cached
-            )
-        {
-            continue;
+        let listed = discovered_ids.contains(entry.model_id.as_str());
+        match &refutation {
+            Refutation::LiveSnapshot => {
+                conn.execute(
+                    "UPDATE model_catalog_entries SET catalog_listing = ?1 WHERE id = ?2",
+                    params![listed.then_some("listed"), entry.id],
+                )?;
+                if !listed
+                    && matches!(
+                        entry.provenance,
+                        ModelProvenance::Live | ModelProvenance::Cached
+                    )
+                {
+                    conn.execute(
+                        "UPDATE model_catalog_entries SET provenance = 'cached', availability = 'unavailable', \
+                         unavailable_reason = 'disappeared', unavailable_detail = ?1, last_checked_at = ?2, \
+                         updated_at = ?2 WHERE id = ?3",
+                        params!["absent from the latest successful live catalog", now, entry.id],
+                    )?;
+                }
+            }
+            Refutation::Complete(served) => {
+                let served = served.contains(entry.model_id.as_str());
+                conn.execute(
+                    "UPDATE model_catalog_entries SET catalog_listing = ?1, last_checked_at = ?2, \
+                     provenance = CASE WHEN ?3 = 0 AND provenance = 'live' THEN 'cached' ELSE provenance END \
+                     WHERE id = ?4",
+                    params![
+                        if served { "listed" } else { "not_listed" },
+                        now,
+                        served,
+                        entry.id
+                    ],
+                )?;
+                // Only a recorded provider refusal (not_found, access_denied)
+                // blocks a model; a past listing-based disappearance does not.
+                if entry.unavailable_reason == Some(ModelUnavailableReason::Disappeared) {
+                    conn.execute(
+                        "UPDATE model_catalog_entries SET availability = 'available', \
+                         unavailable_reason = NULL, unavailable_detail = NULL, updated_at = ?1 \
+                         WHERE id = ?2",
+                        params![now, entry.id],
+                    )?;
+                }
+            }
+            Refutation::Nothing => {
+                conn.execute(
+                    "UPDATE model_catalog_entries SET catalog_listing = ?1 WHERE id = ?2",
+                    params![listed.then_some("listed"), entry.id],
+                )?;
+            }
         }
-        conn.execute(
-            "UPDATE model_catalog_entries SET provenance = 'cached', availability = 'unavailable', \
-             unavailable_reason = 'disappeared', unavailable_detail = ?1, last_checked_at = ?2, \
-             updated_at = ?2 WHERE id = ?3",
-            params!["absent from the latest successful live catalog", now, entry.id],
-        )?;
     }
 
     set_refresh_log(conn, runtime_target_id, agent_type, true, None, None)
@@ -673,6 +744,11 @@ pub fn record_refresh_failure(
         "UPDATE model_catalog_entries SET provenance = 'cached', last_checked_at = ?1, \
          updated_at = ?1 WHERE runtime_target_id = ?2 AND provenance = 'live'",
         params![now, runtime_target_id],
+    )?;
+    // A failed listing proves nothing: earlier listing evidence is unknown now.
+    conn.execute(
+        "UPDATE model_catalog_entries SET catalog_listing = NULL WHERE runtime_target_id = ?1",
+        params![runtime_target_id],
     )?;
     set_refresh_log(
         conn,
@@ -896,7 +972,7 @@ pub fn insert_migrated_seed_for_target(
     conn.execute(
         &format!(
             "INSERT INTO model_catalog_entries ({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL,NULL)"
+             (?1,?2,?3,?4,?5,NULL,'migrated','available',NULL,NULL,?6,?7,NULL,?8,NULL,NULL,0,?9,NULL,?9,?9,?9,NULL,NULL,NULL,NULL)"
         ),
         params![
             id,
@@ -1420,6 +1496,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_answered_at: None,
+            listing: crate::models::CatalogListing::Unknown,
         }
     }
 

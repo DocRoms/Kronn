@@ -5,7 +5,7 @@
 .run-status-card-status { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: var(--kr-fs-xs); font-weight: 700; }
 .run-status-card-status[data-status="success"] { color: var(--kr-success); }
 .run-status-card-status[data-status="failed"], .run-status-card-status[data-status="cancelled"] { color: var(--kr-error); }
-.run-status-card-status[data-status="partial"], .run-status-card-status[data-status="preflight_failed"], .run-status-card-status[data-status="timeout"] { color: var(--kr-warning); }
+.run-status-card-status[data-status="partial"], .run-status-card-status[data-status="preflight_failed"], .run-status-card-status[data-status="timeout"], .run-status-card-status[data-status="quota"] { color: var(--kr-warning); }
 .run-status-card-status[data-status="running"], .run-status-card-status[data-status="queued"] { color: var(--kr-cyan); }
 .run-status-card-link { display: inline-flex; color: var(--kr-text-muted); }
 .run-status-card-meta { margin-top: 8px; font-size: var(--kr-fs-xs); color: var(--kr-text-muted); }

@@ -720,6 +720,16 @@ pub fn prepare_body(
             ));
         }
     }
+    // Widening the handoff recipients is the human's orchestration choice;
+    // an agent would grant itself new delegates.
+    if route.method == "PATCH"
+        && route.pattern == "/api/discussions/{id}"
+        && body.get("attach_agents").is_some()
+    {
+        return Err(Refusal(
+            "a bridge token cannot attach agents to a discussion".into(),
+        ));
+    }
     if route.pattern == "/api/disc/link"
         && body.get("force_reassign") == Some(&serde_json::json!(true))
     {

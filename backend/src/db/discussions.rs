@@ -2313,6 +2313,38 @@ pub fn update_discussion_timestamp(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Append missing agents to the participants; the principal is already
+/// attached. Returns false when the discussion does not exist.
+pub fn attach_discussion_participants(
+    conn: &Connection,
+    id: &str,
+    agents: &[AgentType],
+) -> Result<bool> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT agent, participants_json FROM discussions WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((principal, participants_json)) = row else {
+        return Ok(false);
+    };
+    let principal = parse_agent_type(&principal)?;
+    let mut participants =
+        serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
+    let before = participants.len();
+    for agent in agents {
+        if *agent != principal && !participants.contains(agent) {
+            participants.push(agent.clone());
+        }
+    }
+    if participants.len() != before {
+        update_discussion_participants(conn, id, &participants)?;
+    }
+    Ok(true)
+}
+
 pub fn update_discussion_participants(
     conn: &Connection,
     id: &str,

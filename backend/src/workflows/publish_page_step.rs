@@ -192,6 +192,7 @@ fn succeed(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -220,6 +221,7 @@ fn fail(step: &WorkflowStep, started: Instant, error: impl std::fmt::Display) ->
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action: None,
     }

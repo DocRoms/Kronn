@@ -4518,6 +4518,30 @@
   border-color: rgba(var(--kr-warning-rgb), 0.35);
 }
 
+.wf-step-kind-badge[data-kind='quota'] {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+}
+
+.wf-quota-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.3);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-quota-notice-reset {
+  color: var(--kr-text-muted);
+}
+
 .wf-step-kind-badge[data-kind='exec'] {
   color: var(--kr-error);
   background: rgba(var(--kr-error-rgb), 0.1);

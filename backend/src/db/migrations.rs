@@ -869,6 +869,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "224_live_page_slug_aliases",
         include_str!("sql/224_live_page_slug_aliases.sql"),
     ),
+    (
+        "225_model_catalog_listing_evidence",
+        include_str!("sql/225_model_catalog_listing_evidence.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth

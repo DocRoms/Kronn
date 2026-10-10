@@ -1176,6 +1176,18 @@ pub struct CampaignTaskReason {
 pub struct TaskWorkerTier {
     pub tier: ModelTier,
     pub resolved_model: Option<String>,
+    /// Set when the launch preflight would refuse this tier, with its reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<CampaignTaskReason>,
+    /// The configured model when the catalogue runs `resolved_model` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requested_model: Option<String>,
+    /// A launchable tier's warning, e.g. a model absent from the CLI's listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub warning: Option<CampaignTaskReason>,
 }
 
 /// A media generation slot a worker can actually serve.
@@ -1586,6 +1598,9 @@ pub struct TaskExecutionPreparation {
     pub project_id: Option<String>,
     pub launchable: bool,
     pub reasons: Vec<CampaignTaskReason>,
+    /// Shown before launch without blocking it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<CampaignTaskReason>,
     pub active_execution: Option<TaskExecution>,
 }
 

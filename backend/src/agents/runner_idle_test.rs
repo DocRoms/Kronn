@@ -39,6 +39,15 @@ enum Generation {
     /// Answers at once with a call to `tool`, handing control to Kronn's own
     /// executor instead of generating further.
     ToolCall { tool: &'static str },
+    /// KT-1108 — sends no headers until the test opens the gate, then answers.
+    HeldThenQuick,
+    /// KT-1108 — one reasoning-only chunk, then nothing until the gate opens.
+    ThinksUntilReleased,
+    /// KT-1108 — a transient provider failure (503).
+    Unavailable,
+    /// KT-1108 — headers held until the gate opens, then the body held until
+    /// it opens again.
+    HeldHeadersThenHeldBody,
 }
 
 struct SimulatedOllama {
@@ -49,6 +58,8 @@ struct SimulatedOllama {
     abandoned: Arc<AtomicUsize>,
     /// Pulsed once a generation has written its first token.
     started: Arc<Notify>,
+    /// KT-1108 — what a held generation waits for; the test opens it.
+    gate: Arc<Notify>,
 }
 
 impl SimulatedOllama {
@@ -61,6 +72,8 @@ impl SimulatedOllama {
         // The model server's one runner slot.
         let slot = Arc::new(Semaphore::new(1));
         let (abandoned_for_server, started_for_server) = (abandoned.clone(), started.clone());
+        let gate = Arc::new(Notify::new());
+        let gate_for_server = gate.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 tokio::spawn(serve(
@@ -69,6 +82,7 @@ impl SimulatedOllama {
                     script.clone(),
                     abandoned_for_server.clone(),
                     started_for_server.clone(),
+                    gate_for_server.clone(),
                 ));
             }
         });
@@ -77,6 +91,7 @@ impl SimulatedOllama {
             port,
             abandoned,
             started,
+            gate,
         }
     }
 
@@ -124,6 +139,7 @@ async fn serve(
     script: Arc<Mutex<VecDeque<Generation>>>,
     abandoned: Arc<AtomicUsize>,
     started: Arc<Notify>,
+    gate: Arc<Notify>,
 ) {
     let (mut read, mut write) = stream.into_split();
     let Some(path) = read_request(&mut read).await else {
@@ -149,7 +165,7 @@ async fn serve(
         _ = hung_up(&mut read) => return,
     };
     let finished = tokio::select! {
-        outcome = generate(&mut write, generation, &started) => outcome.is_ok(),
+        outcome = generate(&mut write, generation, &started, &gate) => outcome.is_ok(),
         _ = hung_up(&mut read) => false,
     };
     if !finished {
@@ -222,6 +238,7 @@ async fn generate(
     write: &mut OwnedWriteHalf,
     generation: Generation,
     started: &Notify,
+    gate: &Notify,
 ) -> std::io::Result<()> {
     const HEAD: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n";
@@ -262,6 +279,41 @@ async fn generate(
             write.write_all(HEAD).await?;
             write_token(write, "ok").await?;
             finish(write).await
+        }
+        Generation::HeldThenQuick => {
+            gate.notified().await;
+            write.write_all(HEAD).await?;
+            write_token(write, "ok").await?;
+            finish(write).await
+        }
+        Generation::ThinksUntilReleased => {
+            write.write_all(HEAD).await?;
+            write_chunk(
+                write,
+                concat!(
+                    r#"{"message":{"role":"assistant","content":"","thinking":"secret-plan"},"done":false}"#,
+                    "\n"
+                ),
+            )
+            .await?;
+            started.notify_one();
+            gate.notified().await;
+            write_token(write, "ok").await?;
+            finish(write).await
+        }
+        Generation::HeldHeadersThenHeldBody => {
+            gate.notified().await;
+            write.write_all(HEAD).await?;
+            write.flush().await?;
+            gate.notified().await;
+            write_token(write, "ok").await?;
+            finish(write).await
+        }
+        Generation::Unavailable => {
+            write
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy")
+                .await?;
+            write.flush().await
         }
         Generation::ToolCall { tool } => {
             write.write_all(HEAD).await?;
@@ -316,6 +368,7 @@ async fn start_native(
         None,
         None,
         idle,
+        None,
         None,
         None,
     )
@@ -563,6 +616,7 @@ async fn a_local_tool_running_longer_than_the_idle_delay_is_not_mistaken_for_a_s
         None,
         None,
         Some(idle),
+        None,
         None,
         None,
     )
@@ -1080,6 +1134,7 @@ async fn a_reasoning_only_adapted_turn_outlives_the_delay(
             provenance: None,
             activity: None,
             idle_timeout: Some(REASONING_DELAY),
+            run_progress: None,
         },
         transport,
     )
@@ -1833,4 +1888,317 @@ async fn a_tool_call_that_never_ends_is_cut_by_its_own_bound_and_names_it() {
         "a step's on_timeout routing still recognises it: {reason}"
     );
     assert_eq!(agent.cancelled.load(Ordering::SeqCst), 1);
+}
+
+// ─── KT-1108: the HTTP transport's live progress ────────────────────────────
+//
+// Every phase is observed while the fake server or tool is held by a gate the
+// test opens itself: no assertion depends on a timing window.
+
+/// Starts a native Ollama run reporting to `progress`, in its own task so the
+/// test can look at the progress while the start still waits for headers.
+fn spawn_with_progress(
+    base: &str,
+    idle: Duration,
+    executor: Option<Arc<dyn crate::agents::tools::ToolExecutor>>,
+    progress: &crate::agents::run_progress::RunProgress,
+) -> tokio::task::JoinHandle<Result<AgentProcess, String>> {
+    let base = base.to_owned();
+    let progress = progress.clone();
+    tokio::spawn(async move {
+        start_ollama_http_with_idle(
+            &AgentType::Ollama,
+            "think about it",
+            "",
+            "sim-model",
+            None,
+            Some(&base),
+            None,
+            executor,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(idle),
+            None,
+            None,
+            Some(progress),
+        )
+        .await
+    })
+}
+
+async fn until_progress(
+    progress: &crate::agents::run_progress::RunProgress,
+    what: &str,
+    mut condition: impl FnMut(&crate::models::AgentRunProgress) -> bool,
+) -> crate::models::AgentRunProgress {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let snapshot = progress.snapshot();
+            if condition(&snapshot) {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("never happened: {what}"))
+}
+
+/// A tool held until the test opens its gate.
+struct GatedTool {
+    gate: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::agents::tools::ToolExecutor for GatedTool {
+    fn catalogue(&self) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "slow_tool",
+                "description": "Takes a while, like a build or a test run.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })]
+    }
+
+    async fn execute(
+        &self,
+        call: &crate::agents::tools::ToolCall,
+    ) -> crate::agents::tools::ToolOutcome {
+        self.gate.notified().await;
+        crate::agents::tools::ToolOutcome {
+            call: call.clone(),
+            content: serde_json::json!({"ok": true}),
+            ok: true,
+        }
+    }
+}
+
+const HTTP_IDLE: Duration = Duration::from_secs(20);
+
+/// Before the response headers come, the bubble already waits for the model,
+/// with the first-token deadline the transport enforces.
+#[tokio::test]
+#[serial]
+async fn http_progress_waits_for_the_model_with_its_deadline_before_the_headers() {
+    use crate::models::AgentRunPhase;
+    let ollama = SimulatedOllama::start(vec![Generation::HeldThenQuick]).await;
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let start = spawn_with_progress(&ollama.base, HTTP_IDLE, None, &progress);
+
+    let waiting = until_progress(&progress, "waiting for the model", |p| {
+        p.phase == AgentRunPhase::WaitingModel
+    })
+    .await;
+    assert!(!start.is_finished(), "the server holds its headers");
+    assert_eq!(waiting.idle_limit_ms, Some(20_000));
+    assert_eq!(
+        waiting.timeline.iter().map(|m| m.phase).collect::<Vec<_>>(),
+        vec![AgentRunPhase::Preparing, AgentRunPhase::WaitingModel]
+    );
+
+    ollama.gate.notify_one();
+    let mut running = start.await.unwrap().expect("the run starts");
+    drain(&mut running).await;
+    assert!(running.child.wait().await.unwrap().success());
+    assert_eq!(progress.snapshot().phase, AgentRunPhase::Responding);
+}
+
+/// Reasoning with no text is activity: the bubble shows it as such and its
+/// silence restarts with it; its text never travels.
+#[tokio::test]
+#[serial]
+async fn http_progress_shows_reasoning_only_chunks_as_activity() {
+    use crate::models::AgentRunPhase;
+    let ollama = SimulatedOllama::start(vec![Generation::ThinksUntilReleased]).await;
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let mut running = spawn_with_progress(&ollama.base, HTTP_IDLE, None, &progress)
+        .await
+        .unwrap()
+        .expect("the run starts");
+
+    let thinking = until_progress(&progress, "thinking", |p| {
+        p.phase == AgentRunPhase::Thinking
+    })
+    .await;
+    assert!(
+        thinking.silent_ms <= thinking.phase_ms,
+        "the reasoning chunk restarted the silence: {thinking:?}"
+    );
+    assert!(!serde_json::to_string(&thinking)
+        .unwrap()
+        .contains("secret-plan"));
+
+    // A streamed run bounds its own silences: the consumer's text timer stands down.
+    assert!(running.activity_watched());
+    ollama.gate.notify_one();
+    assert!(drain(&mut running).await.contains("ok"));
+    assert!(running.child.wait().await.unwrap().success());
+    let frame = serde_json::to_string(&progress.snapshot()).unwrap();
+    assert!(!frame.contains("secret-plan"), "{frame}");
+}
+
+/// A Kronn tool shows while it runs, by category, with no inactivity bound;
+/// once it is done the bubble waits for the model's next answer, with that
+/// request's own deadline.
+#[tokio::test]
+#[serial]
+async fn http_progress_shows_a_tool_while_it_runs_then_the_wait_for_the_next_answer() {
+    use crate::models::{ActivityCategory, AgentRunPhase};
+    let ollama = SimulatedOllama::start(vec![
+        Generation::ToolCall { tool: "slow_tool" },
+        Generation::HeldThenQuick,
+    ])
+    .await;
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let tool_gate = Arc::new(Notify::new());
+    let executor: Arc<dyn crate::agents::tools::ToolExecutor> = Arc::new(GatedTool {
+        gate: tool_gate.clone(),
+    });
+    let mut running = spawn_with_progress(&ollama.base, HTTP_IDLE, Some(executor), &progress)
+        .await
+        .unwrap()
+        .expect("the run starts");
+
+    let busy = until_progress(&progress, "the tool", |p| p.phase == AgentRunPhase::Tool).await;
+    assert_eq!(busy.tool_calls, 1);
+    assert_eq!(busy.activity[0].category, ActivityCategory::Other);
+    assert_eq!(
+        busy.idle_limit_ms, None,
+        "no countdown while Kronn runs the tool"
+    );
+    assert!(!serde_json::to_string(&busy).unwrap().contains("slow_tool"));
+
+    tool_gate.notify_one();
+    let next = until_progress(&progress, "the next answer", |p| {
+        p.phase == AgentRunPhase::WaitingNextAnswer
+    })
+    .await;
+    assert_eq!(next.idle_limit_ms, Some(20_000));
+    assert_eq!(
+        next.timeline.last().map(|m| m.phase),
+        Some(AgentRunPhase::WaitingModel),
+        "the startup steps are not reopened"
+    );
+
+    ollama.gate.notify_one();
+    drain(&mut running).await;
+    assert!(running.child.wait().await.unwrap().success());
+    assert_eq!(progress.snapshot().phase, AgentRunPhase::Responding);
+}
+
+/// A transient failure: the backoff runs with no countdown, then the retry
+/// has its own fresh deadline.
+#[tokio::test]
+#[serial]
+async fn http_progress_gives_each_attempt_its_own_deadline() {
+    use crate::models::AgentRunPhase;
+    let ollama =
+        SimulatedOllama::start(vec![Generation::Unavailable, Generation::HeldThenQuick]).await;
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let start = spawn_with_progress(&ollama.base, HTTP_IDLE, None, &progress);
+
+    // Held on the second attempt: the backoff is behind it.
+    until_progress(&progress, "the retry", |_| {
+        progress
+            .history()
+            .iter()
+            .filter(|entry| entry.limit_ms.is_none())
+            .count()
+            >= 1
+    })
+    .await;
+    let retry = until_progress(&progress, "the retry's wait", |p| {
+        p.phase == AgentRunPhase::WaitingModel && p.idle_limit_ms == Some(20_000)
+    })
+    .await;
+    assert!(retry.silent_ms < 20_000);
+    let limits: Vec<Option<u32>> = progress
+        .history()
+        .into_iter()
+        .filter(|entry| entry.phase == AgentRunPhase::WaitingModel)
+        .map(|entry| entry.limit_ms)
+        .collect();
+    assert_eq!(
+        limits,
+        vec![Some(20_000), None, Some(20_000)],
+        "first attempt, backoff, second attempt"
+    );
+
+    ollama.gate.notify_one();
+    let mut running = start.await.unwrap().expect("the retry starts the run");
+    drain(&mut running).await;
+    assert!(running.child.wait().await.unwrap().success());
+}
+
+/// A model that goes silent mid-answer, or never answers, is stopped for
+/// inactivity, and the bubble says so.
+#[tokio::test]
+#[serial]
+async fn http_progress_ends_in_an_idle_stop_on_silence() {
+    use crate::models::AgentRunStop;
+    let ollama =
+        SimulatedOllama::start(vec![Generation::Dies { chunks: 1 }, Generation::Mute]).await;
+
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let mut running =
+        spawn_with_progress(&ollama.base, Duration::from_millis(500), None, &progress)
+            .await
+            .unwrap()
+            .expect("the run starts");
+    drain(&mut running).await;
+    assert!(!running.child.wait().await.unwrap().success());
+    assert_eq!(progress.snapshot().stopped, Some(AgentRunStop::Idle));
+
+    let mute = crate::agents::run_progress::RunProgress::new();
+    let error = spawn_with_progress(&ollama.base, Duration::from_millis(500), None, &mute)
+        .await
+        .unwrap()
+        .err()
+        .expect("no headers, no run");
+    assert!(
+        error.contains("without ever sending a first token"),
+        "{error}"
+    );
+    assert_eq!(mute.snapshot().stopped, Some(AgentRunStop::Idle));
+}
+
+/// The headers come late: reading the body has a whole new bound, and the
+/// bubble shows that one, not what was left of the request's.
+#[tokio::test]
+#[serial]
+async fn http_progress_restarts_the_deadline_when_the_headers_come() {
+    use crate::models::AgentRunPhase;
+    let ollama = SimulatedOllama::start(vec![Generation::HeldHeadersThenHeldBody]).await;
+    let progress = crate::agents::run_progress::RunProgress::new();
+    let start = spawn_with_progress(&ollama.base, HTTP_IDLE, None, &progress);
+
+    // Held before its headers: the request's bound is published.
+    until_progress(&progress, "the request's wait", |p| {
+        p.phase == AgentRunPhase::WaitingModel
+    })
+    .await;
+    let recorded = progress.history().len();
+    ollama.gate.notify_one();
+    let mut running = start.await.unwrap().expect("the headers came");
+    // What the headers recorded, read from the update itself, not from a clock.
+    let at_headers: Vec<_> = progress.history()[recorded..].to_vec();
+    assert!(
+        at_headers
+            .iter()
+            .any(|entry| entry.phase == AgentRunPhase::WaitingModel
+                && entry.limit_ms == Some(20_000)
+                && entry.silence_restarted),
+        "the body's bound, published with a restarted silence: {at_headers:?}"
+    );
+    assert_eq!(progress.snapshot().idle_limit_ms, Some(20_000));
+
+    ollama.gate.notify_one();
+    drain(&mut running).await;
+    assert!(running.child.wait().await.unwrap().success());
 }

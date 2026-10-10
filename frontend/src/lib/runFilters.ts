@@ -12,7 +12,7 @@ export function runMatchesStatusFilter(run: WorkflowRun, f: RunStatusFilter): bo
   switch (f) {
     case 'all': return true;
     case 'failed': return run.status === 'Failed' || run.status === 'Partial';
-    case 'waiting': return run.status === 'WaitingApproval';
+    case 'waiting': return run.status === 'WaitingApproval' || run.status === 'WaitingQuota';
     case 'stopped': return run.status === 'StoppedByGuard';
     default: return true;
   }

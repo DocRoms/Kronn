@@ -14,12 +14,11 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::ChildStdin;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::db::model_catalog::DiscoveredModel;
 
-use super::DiscoveryOutcome;
+use super::{DiscoveryOutcome, ServedListing};
 
 #[derive(Debug, Deserialize)]
 struct ModelListEntry {
@@ -67,7 +66,14 @@ impl ReasoningEffort {
 #[derive(Debug, Deserialize)]
 struct ModelListResult {
     data: Vec<ModelListEntry>,
+    /// Opaque continuation token; absent or null on the last page.
+    #[serde(default)]
+    #[serde(rename = "nextCursor")]
+    next_cursor: Option<Value>,
 }
+
+/// Bound on `model/list` pages; a longer listing is reported partial.
+const MAX_MODEL_LIST_PAGES: u64 = 20;
 
 /// `codex app-server`, run outside any repository (design note §9).
 fn discovery_command() -> tokio::process::Command {
@@ -110,10 +116,11 @@ pub async fn discover() -> DiscoveryOutcome {
     outcome
 }
 
-async fn run_handshake_and_list(
-    stdin: &mut ChildStdin,
-    reader: &mut BufReader<tokio::process::ChildStdout>,
-) -> DiscoveryOutcome {
+async fn run_handshake_and_list<W, R>(stdin: &mut W, reader: &mut R) -> DiscoveryOutcome
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
     let initialize = json!({
         "jsonrpc": "2.0",
         "id": 0,
@@ -135,50 +142,68 @@ async fn run_handshake_and_list(
         return DiscoveryOutcome::ProviderError(error);
     }
 
-    let list = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "model/list",
-        "params": {"includeHidden": false},
-    });
-    if let Err(error) = write_frame(stdin, &list).await {
-        return DiscoveryOutcome::ProviderError(error);
-    }
-    let result = match read_response(reader, 1).await {
-        Ok(result) => result,
-        Err(outcome) => return outcome,
-    };
-    let parsed: ModelListResult = match serde_json::from_value(result) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return DiscoveryOutcome::InvalidCatalog(format!(
-                "codex app-server model/list response did not match the expected shape: {error}"
-            ))
+    // Hidden models are still served: only a listing with them, read to its
+    // last page, can prove that a model is not served.
+    let mut entries = Vec::new();
+    let mut cursor: Option<Value> = None;
+    let mut complete = false;
+    for page in 1..=MAX_MODEL_LIST_PAGES {
+        let mut params = json!({"includeHidden": true});
+        if let Some(cursor) = &cursor {
+            params["cursor"] = cursor.clone();
         }
+        let list = json!({"jsonrpc": "2.0", "id": page, "method": "model/list", "params": params});
+        if let Err(error) = write_frame(stdin, &list).await {
+            return DiscoveryOutcome::ProviderError(error);
+        }
+        let result = match read_response(reader, page).await {
+            Ok(result) => result,
+            Err(outcome) => return outcome,
+        };
+        let parsed: ModelListResult = match serde_json::from_value(result) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return DiscoveryOutcome::InvalidCatalog(format!(
+                    "codex app-server model/list response did not match the expected shape: {error}"
+                ))
+            }
+        };
+        entries.extend(parsed.data);
+        match parsed.next_cursor.filter(|next| !next.is_null()) {
+            None => {
+                complete = true;
+                break;
+            }
+            Some(next) if cursor.as_ref() == Some(&next) => break,
+            Some(next) => cursor = Some(next),
+        }
+    }
+    let served = if complete {
+        ServedListing::Complete(entries.iter().map(|entry| entry.id.clone()).collect())
+    } else {
+        ServedListing::Partial
     };
-    DiscoveryOutcome::Live(
-        parsed
-            .data
-            .into_iter()
-            .filter(|entry| !entry.hidden)
-            .map(|entry| DiscoveredModel {
-                display_name: entry.display_name.unwrap_or_else(|| entry.id.clone()),
-                model_id: entry.id,
-                resolved_model: None,
-                description: None,
-                capabilities: Vec::new(),
-                reasoning_modes: entry
-                    .supported_reasoning_efforts
-                    .into_iter()
-                    .map(ReasoningEffort::name)
-                    .collect(),
-                default_reasoning_mode: entry.default_reasoning_effort,
-            })
-            .collect(),
-    )
+    let models = entries
+        .into_iter()
+        .filter(|entry| !entry.hidden)
+        .map(|entry| DiscoveredModel {
+            display_name: entry.display_name.unwrap_or_else(|| entry.id.clone()),
+            model_id: entry.id,
+            resolved_model: None,
+            description: None,
+            capabilities: Vec::new(),
+            reasoning_modes: entry
+                .supported_reasoning_efforts
+                .into_iter()
+                .map(ReasoningEffort::name)
+                .collect(),
+            default_reasoning_mode: entry.default_reasoning_effort,
+        })
+        .collect();
+    DiscoveryOutcome::Listing { models, served }
 }
 
-async fn write_frame(stdin: &mut ChildStdin, frame: &Value) -> Result<(), String> {
+async fn write_frame<W: AsyncWrite + Unpin>(stdin: &mut W, frame: &Value) -> Result<(), String> {
     let encoded = serde_json::to_string(frame)
         .map_err(|error| format!("encode codex app-server request: {error}"))?;
     stdin
@@ -197,8 +222,8 @@ async fn write_frame(stdin: &mut ChildStdin, frame: &Value) -> Result<(), String
 
 /// Read lines until one carries the response matching `expected_id` (skipping
 /// unrelated notifications), then return its `result` object.
-async fn read_response(
-    reader: &mut BufReader<tokio::process::ChildStdout>,
+async fn read_response<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
     expected_id: u64,
 ) -> Result<Value, DiscoveryOutcome> {
     loop {
@@ -331,5 +356,115 @@ mod tests {
         let parsed: ModelListResult = serde_json::from_value(raw).unwrap();
         assert!(parsed.data[0].display_name.is_none());
         assert!(efforts(&parsed.data[0]).is_empty());
+    }
+
+    /// An in-process `codex app-server`: answers `initialize`, then serves
+    /// `model/list` from `pages`, each `(entries, nextCursor)`.
+    async fn list_against(pages: Vec<(Value, Value)>) -> (DiscoveryOutcome, Vec<Value>) {
+        let (client, server) = tokio::io::duplex(1 << 16);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let fake = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let mut requests = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let result = if request["method"] == "model/list" {
+                    requests.push(request["params"].clone());
+                    let (data, next) = pages
+                        .get(requests.len() - 1)
+                        .cloned()
+                        .unwrap_or((json!([]), Value::Null));
+                    json!({"data": data, "nextCursor": next})
+                } else {
+                    json!({})
+                };
+                let frame = json!({"jsonrpc": "2.0", "id": id, "result": result});
+                server_write
+                    .write_all(format!("{frame}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        let mut reader = BufReader::new(client_read);
+        let outcome = run_handshake_and_list(&mut client_write, &mut reader).await;
+        drop(client_write);
+        drop(reader);
+        (outcome, fake.await.unwrap())
+    }
+
+    fn served(outcome: &DiscoveryOutcome) -> (Vec<String>, &ServedListing) {
+        let DiscoveryOutcome::Listing { models, served } = outcome else {
+            panic!("a listing is expected: {outcome:?}");
+        };
+        (models.iter().map(|m| m.model_id.clone()).collect(), served)
+    }
+
+    #[tokio::test]
+    async fn a_model_on_page_two_is_listed() {
+        let (outcome, requests) = list_against(vec![
+            (json!([{"id": "gpt-6-astra"}]), json!("2")),
+            (json!([{"id": "gpt-5.6-sol"}]), Value::Null),
+        ])
+        .await;
+        let (visible, served) = served(&outcome);
+        assert_eq!(visible, vec!["gpt-6-astra", "gpt-5.6-sol"]);
+        assert_eq!(
+            served,
+            &ServedListing::Complete(vec!["gpt-6-astra".into(), "gpt-5.6-sol".into()])
+        );
+        assert_eq!(requests[0], json!({"includeHidden": true}));
+        assert_eq!(requests[1], json!({"includeHidden": true, "cursor": "2"}));
+    }
+
+    #[tokio::test]
+    async fn a_hidden_model_is_served_but_not_offered() {
+        let (outcome, _) = list_against(vec![(
+            json!([{"id": "gpt-6-astra"}, {"id": "gpt-5.5", "hidden": true}]),
+            Value::Null,
+        )])
+        .await;
+        let (visible, served) = served(&outcome);
+        assert_eq!(visible, vec!["gpt-6-astra"]);
+        assert_eq!(
+            served,
+            &ServedListing::Complete(vec!["gpt-6-astra".into(), "gpt-5.5".into()])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listing_cut_short_is_partial() {
+        // Past the page cap.
+        let pages = (0..MAX_MODEL_LIST_PAGES + 1)
+            .map(|page| (json!([{"id": format!("m{page}")}]), json!(page + 1)))
+            .collect();
+        let (outcome, requests) = list_against(pages).await;
+        assert_eq!(served(&outcome).1, &ServedListing::Partial);
+        assert_eq!(requests.len() as u64, MAX_MODEL_LIST_PAGES);
+
+        // A cursor that does not advance.
+        let (outcome, _) = list_against(vec![
+            (json!([{"id": "a"}]), json!("x")),
+            (json!([{"id": "b"}]), json!("x")),
+        ])
+        .await;
+        assert_eq!(served(&outcome).1, &ServedListing::Partial);
+    }
+
+    #[tokio::test]
+    async fn a_failed_page_is_a_failure_not_a_listing() {
+        let (outcome, _) = list_against(vec![
+            (json!([{"id": "a"}]), json!("2")),
+            (json!("not a list"), Value::Null),
+        ])
+        .await;
+        assert!(
+            matches!(outcome, DiscoveryOutcome::InvalidCatalog(_)),
+            "{outcome:?}"
+        );
     }
 }

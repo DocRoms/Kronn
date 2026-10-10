@@ -128,7 +128,7 @@ function escaped(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function proseOnly(text: string): string {
+export function proseOnly(text: string): string {
   // Keep offsets stable so textual target ordering still reflects the original
   // message. Mention examples in code, quotations and Markdown blockquotes are
   // documentation, never a dispatch request. This is deliberately handled at
@@ -145,10 +145,17 @@ function proseOnly(text: string): string {
     .replace(/(^|[\s([{,:;])'[\s\S]*?(?:'|$)/g, match => ' '.repeat(match.length));
 }
 
-export function targetsFromComposerText(
+export interface PositionedTarget {
+  target: MessageTarget;
+  /** Offset of the first mention of this identity in the original text. */
+  start: number;
+  end: number;
+}
+
+function mentionMatches(
   text: string,
   mentions: ComposerMention[],
-): { targets: MessageTarget[]; targetAll: boolean } {
+): Array<{ index: number; mention: ComposerMention }> {
   const prose = proseOnly(text);
   const matches: Array<{ index: number; mention: ComposerMention }> = [];
   for (const mention of mentions) {
@@ -163,12 +170,18 @@ export function targetsFromComposerText(
       });
     }
   }
-  matches.sort((left, right) => left.index - right.index);
+  return matches.sort((left, right) => left.index - right.index);
+}
 
-  const targets: MessageTarget[] = [];
+/** Typed targets in textual order, each with the span of its first mention. */
+export function positionedTargetsFromComposerText(
+  text: string,
+  mentions: ComposerMention[],
+): { targets: PositionedTarget[]; targetAll: boolean } {
+  const targets: PositionedTarget[] = [];
   let targetAll = false;
   const seen = new Set<string>();
-  for (const { mention } of matches) {
+  for (const { index, mention } of mentionMatches(text, mentions)) {
     if (mention.targetAll) {
       targetAll = true;
       continue;
@@ -181,9 +194,17 @@ export function targetsFromComposerText(
     ].join(':');
     if (seen.has(key)) continue;
     seen.add(key);
-    targets.push(mention.target);
+    targets.push({ target: mention.target, start: index, end: index + mention.trigger.length });
   }
   return { targets, targetAll };
+}
+
+export function targetsFromComposerText(
+  text: string,
+  mentions: ComposerMention[],
+): { targets: MessageTarget[]; targetAll: boolean } {
+  const { targets, targetAll } = positionedTargetsFromComposerText(text, mentions);
+  return { targets: targets.map(entry => entry.target), targetAll };
 }
 
 /** Native responders attached to a discussion, in stable reply order.

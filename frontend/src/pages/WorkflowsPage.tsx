@@ -359,6 +359,7 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
   WaitingApproval: 'run.status.waiting_approval',
   StoppedByGuard: 'run.status.stopped_by_guard',
   Interrupted: 'run.status.interrupted',
+  WaitingQuota: 'run.status.quota',
 };
 
 const RUN_FETCH_PAGE_SIZE = 10;

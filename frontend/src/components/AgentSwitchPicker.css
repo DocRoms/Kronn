@@ -209,6 +209,10 @@
   white-space: nowrap;
 }
 
+.kr-agent-switch-catalog-meta[data-catalog-warning='true'] {
+  color: var(--kr-warning);
+}
+
 .kr-agent-switch-tier-option:disabled .kr-agent-switch-catalog-meta {
   color: var(--kr-danger);
 }

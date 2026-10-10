@@ -368,6 +368,57 @@ export type AgentResumeJobStatus = "pending" | "running" | "completed" | "failed
  */
 export type AgentResumeJobView = { id: string, discussion_id: string, target_agent: AgentType, source_dispatch_job_id: string | null, task_execution_id: string | null, quick_exec_id: string | null, kind: AgentResumeJobKind, status: AgentResumeJobStatus, reason: string, scheduled_at: string, chain_depth: number, wake_budget: number, watchdog_redispatches: number, completion_dispatch_id: string | null, result: QuickExecResult | null, failure_kind: AgentResumeFailureKind | null, started_at: string | null, completed_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
 
+/**
+ * What a running agent is doing, as its live reply bubble shows it
+ * (KT-1108). The startup phases come first, in launch order; the last three
+ * follow the agent's own output once the prompt is sent.
+ */
+export type AgentRunPhase = "preparing" | "launching" | "initializing" | "opening_session" | "selecting_model" | "starting_cli" | "waiting_model" | "thinking" | "tool" | "responding" | "waiting_next_answer";
+
+/**
+ * When a startup phase began, in milliseconds since the run started.
+ */
+export type AgentRunPhaseMark = { phase: AgentRunPhase, at_ms: number, };
+
+/**
+ * One run's live progress. Categories, counts and durations only: never a
+ * tool's name, argument or target, nor any text from the agent.
+ */
+export type AgentRunProgress = { phase: AgentRunPhase,
+/**
+ * Milliseconds spent in `phase` so far.
+ */
+phase_ms: number,
+/**
+ * Milliseconds since the run started, frozen once it stopped.
+ */
+elapsed_ms: number,
+/**
+ * The startup phases reached, in order.
+ */
+timeline: Array<AgentRunPhaseMark>,
+/**
+ * How many MCP servers the session declares, when it declares any.
+ */
+mcp_servers: number | null,
+/**
+ * The latest tool calls, newest first.
+ */
+activity: Array<AuditActivityEntry>, tool_calls: number,
+/**
+ * Milliseconds since the agent last showed any sign of life.
+ */
+silent_ms: number,
+/**
+ * The silence after which Kronn stops the agent, when one applies now.
+ */
+idle_limit_ms: number | null, stopped: AgentRunStop | null, };
+
+/**
+ * Why a run's live progress ended.
+ */
+export type AgentRunStop = "finished" | "failed" | "cancelled" | "idle" | "timed_out";
+
 export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
 /**
  * Per-agent model tier overrides (Economy/Reasoning model names).
@@ -1382,6 +1433,12 @@ export type CampaignWorkerSelection = { target: MessageTarget, model?: string | 
 export type CancellationCleanupPolicy = "preserve" | "remove_if_clean";
 
 /**
+ * Evidence from a runtime listing, kept apart from availability: a listing
+ * is not proof of access, so `NotListed` is a warning, never a refusal.
+ */
+export type CatalogListing = "unknown" | "listed" | "not_listed";
+
+/**
  * One model as Kronn's shared contract sees it. `id` is an opaque encoding
  * of `(runtime_target_id, model_id)` — stable across reconciliation, free of
  * delimiter ambiguity and never derived from `display_name`.
@@ -1460,6 +1517,11 @@ last_seen_at?: string | null,
  */
 last_checked_at: string,
 /**
+ * What the runtime's own model listing says about this model. Evidence
+ * only: `not_listed` warns before launch, it never refuses.
+ */
+listing?: CatalogListing,
+/**
  * Last time a real call to this model answered. Being listed is not
  * being served: `None` means no call has proven it yet.
  */
@@ -1486,7 +1548,12 @@ recommended_action: string,
  */
 replacement?: string | null, };
 
-export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null, };
+export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null,
+/**
+ * Shown before the run, which still goes ahead: the runtime's complete
+ * listing does not contain the model.
+ */
+notice?: string | null, };
 
 /**
  * Non-blocking catalogue decision made immediately before a launch. The
@@ -1496,6 +1563,20 @@ export type CatalogPreflightResolution = { requested_model: string | null, effec
 export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
 
 export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
+
+/**
+ * Whether a tier can launch, and on which model. `requested_model` is `None`
+ * when nothing is configured and the runtime's own default applies.
+ */
+export type CatalogTierVerdict = { tier: ModelTier, requested_model?: string | null, effective_model?: string | null, launchable: boolean, reason?: ModelUnavailableReason | null,
+/**
+ * Why the tier is refused, or why another model runs in its place.
+ */
+detail?: string | null,
+/**
+ * A launchable tier's pre-launch warning (model absent from the listing).
+ */
+notice?: string | null, };
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -4801,7 +4882,12 @@ stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string |
  * contains. This is a warning only: changing a reference remains an
  * explicit operator action.
  */
-alerts?: Array<ModelCatalogAlert>, };
+alerts?: Array<ModelCatalogAlert>,
+/**
+ * The launch decision for each tier of an agent's own target, computed by
+ * the same function as the preflight. Empty for HTTP connection targets.
+ */
+tier_verdicts?: Array<CatalogTierVerdict>, };
 
 /**
  * Coarse, catalog-driven cost classification. Never inferred from a
@@ -6302,6 +6388,36 @@ avg_duration_ms: number | null,
  */
 avg_cost_usd: number | null, };
 
+/**
+ * KT-811 — why a quota-refused step waits for a human instead of a timer.
+ */
+export type QuotaParkReason = "no_reset_time" | "after_deadline" | "too_many_attempts" | "not_resumable";
+
+/**
+ * KT-811 — a step refused for a provider quota, not an agent failure.
+ */
+export type QuotaWait = {
+/**
+ * Identity of this wait: a park or a claim applies only to the wait it read.
+ */
+id?: string | null,
+/**
+ * The reset instant the provider announced, when it could be parsed.
+ */
+reset_at?: string | null,
+/**
+ * When the engine resumes the step; `None` while parked or not waiting.
+ */
+wake_at?: string | null,
+/**
+ * Consecutive quota refusals of this step, this one included.
+ */
+attempt: number, parked?: QuotaParkReason | null,
+/**
+ * Why an automatic resume was refused, when `parked` is `NotResumable`.
+ */
+detail?: string | null, };
+
 export type RecentMessagePreview = { sort_order: number, role: string, agent_type: string | null, timestamp: string,
 /**
  * Body trimmed to 400 chars so the response stays small. The
@@ -6981,7 +7097,7 @@ export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
 export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, exit_code: number | null, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
-export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
+export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted" | "WaitingQuota";
 
 /**
  * The action the §4bis boot saga takes for an in-flight integration, decided by
@@ -7877,7 +7993,12 @@ cache_write_prompt_tokens?: number | null,
  * Latest tool call of an Agent step while it runs. The terminal result
  * replaces the in-flight row, so it survives only an interrupted step.
  */
-last_activity?: AgentActivity | null, };
+last_activity?: AgentActivity | null,
+/**
+ * KT-811 — set when the provider refused the step for a quota or session
+ * limit, so the run reads "quota" rather than "failed".
+ */
+quota_wait?: QuotaWait | null, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -8104,7 +8225,11 @@ export type TaskExecutionObservability = { lineage: TaskExecutionLineage, metric
  * Read-only launch preflight for agent surfaces. Every refusal is a stable
  * code + actionable detail; calling it never creates a run or worktree.
  */
-export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
+export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>,
+/**
+ * Shown before launch without blocking it.
+ */
+warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
@@ -8241,7 +8366,19 @@ export type TaskWorkerScope = { "mode": "prelocalized_edit", path: string, start
  * default remains authoritative; HTTP providers need a concrete model before
  * the catalogue can call them available.
  */
-export type TaskWorkerTier = { tier: ModelTier, resolved_model: string | null, };
+export type TaskWorkerTier = { tier: ModelTier, resolved_model: string | null,
+/**
+ * Set when the launch preflight would refuse this tier, with its reason.
+ */
+refusal?: CampaignTaskReason,
+/**
+ * The configured model when the catalogue runs `resolved_model` instead.
+ */
+requested_model?: string,
+/**
+ * A launchable tier's warning, e.g. a model absent from the CLI's listing.
+ */
+warning?: CampaignTaskReason, };
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
@@ -8610,6 +8747,11 @@ agent_handoffs_disabled?: boolean | null,
  * switch, per-agent blocks and structural loop guards still apply.
  */
 agent_handoffs_unlimited?: boolean | null,
+/**
+ * Add these native agents to the participants without dispatching them,
+ * so an orchestrating agent may hand off to them. Never removes one.
+ */
+attach_agents?: Array<AgentType> | null,
 /**
  * Per-discussion encrypted execution-variable retention override.
  * Zero keeps values only for the lifetime of the active run.
@@ -9773,4 +9915,20 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };
+current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, } | { "type": "agent_run_progress", discussion_id: string,
+/**
+ * The durable dispatch the run executes, when it has one.
+ */
+dispatch_id: string | null, trigger_message_id: string | null, agent_type: AgentType,
+/**
+ * One launch; a retry of the same dispatch gets another.
+ */
+run_id: string,
+/**
+ * When the launch started: the latest attempt of a dispatch is the one shown.
+ */
+started_at: string,
+/**
+ * Increases with every frame of one run.
+ */
+seq: number, progress: AgentRunProgress, };

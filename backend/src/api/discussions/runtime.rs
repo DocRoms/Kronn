@@ -1942,6 +1942,161 @@ mod chain_render_tests {
         .unwrap();
     }
 
+    /// KT-860 — a run the catalogue preflight refuses keeps the refused model
+    /// and the reason in `last_error`, not only a generic sentence.
+    #[tokio::test]
+    async fn kt860_a_preflight_refusal_keeps_its_model_and_reason_in_last_error() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let target = crate::db::model_catalog::agent_runtime_target_id(
+                &crate::models::AgentType::ClaudeCode,
+            );
+            let listed = |id: &str| crate::db::model_catalog::DiscoveredModel {
+                model_id: id.into(),
+                display_name: id.into(),
+                resolved_model: None,
+                description: None,
+                capabilities: vec!["chat".into()],
+                reasoning_modes: vec![],
+                default_reasoning_mode: None,
+            };
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &crate::models::AgentType::ClaudeCode,
+                &[listed("claude-fable-5[1m]"), listed("sonnet")],
+            )?;
+            crate::db::model_catalog::reconcile_live(
+                conn,
+                &target,
+                &crate::models::AgentType::ClaudeCode,
+                &[listed("sonnet")],
+            )
+        })
+        .await
+        .unwrap();
+        let failure = crate::core::model_catalog::preflight_check(
+            &db,
+            None,
+            crate::models::AgentType::ClaudeCode,
+            crate::models::ModelTier::Reasoning,
+            Some("claude-fable-5[1m]"),
+            None,
+        )
+        .await
+        .expect("the disappeared alias has no replacement");
+        let diagnostic = crate::core::model_catalog::preflight_refusal_diagnostic(&failure);
+
+        let execution_id = db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                for (id, title) in [("d-pf-parent", "Parent"), ("d-pf-child", "Child")] {
+                    conn.execute(
+                        "INSERT INTO discussions (id, title, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, title, now],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO planning_tasks
+                     (id, task_number, title, status, created_at, updated_at)
+                     VALUES ('t-preflight-refused', 9903, 'Refused', 'todo', ?1, ?1)",
+                    [&now],
+                )?;
+                let actor = crate::models::PlanningActor {
+                    kind: crate::models::PlanningActorKind::Backend,
+                    id: Some("orchestrator".into()),
+                    session_id: None,
+                    source_message_id: None,
+                };
+                let execution = crate::db::orchestration::launch_single_task(
+                    conn,
+                    &crate::models::LaunchSingleTaskInput::new(
+                        "t-preflight-refused",
+                        "d-pf-parent",
+                    ),
+                    &actor,
+                )?
+                .execution;
+                for status in [
+                    crate::models::TaskExecutionStatus::Provisioning,
+                    crate::models::TaskExecutionStatus::Working,
+                ] {
+                    crate::db::orchestration::transition_execution(
+                        conn,
+                        &execution.id,
+                        status,
+                        &actor,
+                        serde_json::json!({}),
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO messages
+                     (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('u-preflight-refused', 'd-pf-child', 'User', 'go', ?1, 1, ?1)",
+                    [&now],
+                )?;
+                crate::db::agent_dispatch::enqueue_for_latest_user(
+                    conn,
+                    crate::db::agent_dispatch::NewLatestUserDispatch {
+                        id: "j-preflight-refused",
+                        discussion_id: "d-pf-child",
+                        dedupe_key: "message:u-preflight-refused",
+                        agent_override: Some(&crate::models::AgentType::ClaudeCode),
+                        chain_prompt_ids: &[],
+                        batch_item: None,
+                        group_id: None,
+                        group_concurrency_limit: None,
+                    },
+                )?;
+                crate::db::agent_dispatch::claim(conn, "j-preflight-refused")?;
+                crate::db::orchestration::attach_execution_dispatch(
+                    conn,
+                    &execution.id,
+                    "j-preflight-refused",
+                )?;
+                Ok(execution.id)
+            })
+            .await
+            .unwrap();
+
+        // The settlement `PreflightFailed { diagnostic }` reaches, as the
+        // dispatcher runs it for a refused preflight.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        super::super::streaming::finish_tracked_preflight(&mut Some(tx), &diagnostic);
+        let super::AgentExecutionOutcome::PreflightFailed {
+            diagnostic: settled,
+        } = rx.await.unwrap()
+        else {
+            panic!("a refused preflight settles as PreflightFailed");
+        };
+        db.with_conn(move |conn| {
+            persist_dispatch_settlement(
+                conn,
+                "j-preflight-refused",
+                "d-pf-child",
+                None,
+                crate::db::workflows::BatchChildOutcome::Failed,
+                Some(&settled),
+                None,
+            )
+        })
+        .await
+        .unwrap();
+
+        db.with_conn(move |conn| {
+            let detail = crate::api::orchestration::execution_detail(conn, &execution_id)?;
+            let compact = crate::api::orchestration::compact_execution_status(&detail, None);
+            let last_error = compact.last_error.expect("the refusal is kept");
+            assert!(last_error.contains("`claude-fable-5[1m]`"), "{last_error}");
+            assert!(last_error.contains("disappeared"), "{last_error}");
+            assert_ne!(last_error, "model catalogue preflight refused this model");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn terminal_agent_without_reply_is_counted_as_no_response_failure() {
         let db = Arc::new(crate::db::Database::open_in_memory().unwrap());

@@ -212,6 +212,18 @@ pub async fn poll(
     }
 }
 
+/// GET /api/discussions/{id}/run-progress
+///
+/// KT-1108 — the discussion's runs in progress, in the shape of their live
+/// frames, for a page that opens or reconnects mid-run. Read only: it moves
+/// neither a run's silence nor its frame numbers. Not on the bridge-token list.
+pub async fn run_progress(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<WsMessage>>> {
+    Json(ApiResponse::ok(state.live_runs.snapshot(&id)))
+}
+
 /// GET /api/discussions/{id}/native-agent
 pub async fn native_agent_mode(
     State(state): State<AppState>,
@@ -717,6 +729,7 @@ pub async fn update(
     let no_agent = req.no_agent;
     let agent_handoffs_disabled = req.agent_handoffs_disabled;
     let agent_handoffs_unlimited = req.agent_handoffs_unlimited;
+    let attach_agents = req.attach_agents;
     let execution_variable_retention_days = req.execution_variable_retention_days;
 
     // Reject conflicting directives on update
@@ -844,6 +857,11 @@ pub async fn update(
                     agent_handoffs_disabled,
                     agent_handoffs_unlimited,
                 )? || updated;
+            }
+            if let Some(ref agents) = attach_agents {
+                updated =
+                    crate::db::discussions::attach_discussion_participants(conn, &id, agents)?
+                        || updated;
             }
             if let Some(days) = execution_variable_retention_days {
                 updated = crate::db::discussions::update_execution_variable_retention_days(
@@ -1512,5 +1530,167 @@ mod tests {
         let response = native_agent_mode(State(state), Path("d-missing".to_string())).await;
         assert!(!response.0.success);
         assert_eq!(response.0.error.as_deref(), Some("Discussion not found"));
+    }
+
+    fn turn_message(
+        id: &str,
+        role: crate::models::MessageRole,
+        agent: Option<crate::models::AgentType>,
+        content: &str,
+        reply_to: Option<&str>,
+    ) -> DiscussionMessage {
+        DiscussionMessage {
+            recovered_partial: false,
+            session_tokens_at_message: None,
+            author_cli_ordinal: None,
+            model: None,
+            lint_report: None,
+            id: id.into(),
+            role,
+            channel: crate::models::MessageChannel::Main,
+            content: content.into(),
+            agent_type: agent,
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: reply_to.map(str::to_string),
+        }
+    }
+
+    /// One orchestrated turn: the user message reaches only @opencode, whose
+    /// reply hands off to the agents it was asked to orchestrate.
+    fn orchestrated_turn(
+        conn: &rusqlite::Connection,
+        disc: &str,
+    ) -> anyhow::Result<(usize, Vec<crate::models::AgentType>)> {
+        use crate::models::{AgentType, MessageRole, MessageTarget};
+        let user_id = format!("u-{disc}");
+        let job_id = format!("job-{disc}");
+        let user = turn_message(
+            &user_id,
+            MessageRole::User,
+            None,
+            "@opencode tu peux lancer @codex et @claude et juger la meilleure blague",
+            None,
+        );
+        crate::db::discussions::insert_user_message_with_dispatches(
+            conn,
+            disc,
+            &user,
+            &[MessageTarget::agent(AgentType::OpenCode)],
+            &[crate::db::discussions::UserDispatchSpec {
+                job_id: &job_id,
+                agent_override: Some(&AgentType::OpenCode),
+                dedupe_key: None,
+            }],
+            false,
+        )?;
+        let user_jobs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_dispatch_jobs WHERE trigger_message_id = ?1",
+            [&user_id],
+            |row| row.get(0),
+        )?;
+        let (content, marked) = crate::api::disc_helpers::extract_agent_handoff_markers(
+            "@codex, @claude : une blague chacun.\n\
+             <!-- kronn:handoff @codex -->\n<!-- kronn:handoff @claude -->",
+        );
+        assert_eq!(marked, vec![AgentType::Codex, AgentType::ClaudeCode]);
+        let reply = turn_message(
+            &format!("a-{disc}"),
+            MessageRole::Agent,
+            Some(AgentType::OpenCode),
+            &content,
+            Some(&user_id),
+        );
+        let outcome = crate::db::discussions::insert_native_agent_message_with_handoffs(
+            conn,
+            disc,
+            &reply,
+            true,
+            Some(&job_id),
+            &AgentType::OpenCode,
+            &marked,
+            true,
+            None,
+        )?;
+        Ok((user_jobs as usize, outcome.dispatched_agents))
+    }
+
+    #[tokio::test]
+    async fn orchestrate_sends_to_the_first_agent_only_and_its_handoff_reaches_the_others() {
+        use crate::models::AgentType;
+        let state = state_with_disc("d-orchestrate").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO discussions (id, title, created_at, updated_at, message_count, workspace_mode)
+                     VALUES ('d-parallel-only', 'control', ?1, ?1, 0, 'Direct')",
+                    [now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions SET agent = 'ClaudeCode'
+                     WHERE id IN ('d-orchestrate', 'd-parallel-only')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let request: UpdateDiscussionRequest =
+            serde_json::from_value(serde_json::json!({ "attach_agents": ["Codex", "ClaudeCode"] }))
+                .unwrap();
+        let attached = update(
+            State(state.clone()),
+            Path("d-orchestrate".to_string()),
+            Json(request),
+        )
+        .await;
+        assert!(attached.0.success, "{:?}", attached.0.error);
+
+        let (participants, orchestrated, control) = state
+            .db
+            .with_conn(|conn| {
+                let participants = crate::db::discussions::get_discussion(conn, "d-orchestrate")?
+                    .expect("discussion")
+                    .participants;
+                let orchestrated = orchestrated_turn(conn, "d-orchestrate")?;
+                let control = orchestrated_turn(conn, "d-parallel-only")?;
+                Ok((participants, orchestrated, control))
+            })
+            .await
+            .unwrap();
+
+        // The principal is attached already, so only the punctual agent is added.
+        assert_eq!(participants, vec![AgentType::Codex]);
+        assert_eq!(
+            orchestrated.0, 1,
+            "the user turn dispatches @opencode alone"
+        );
+        assert_eq!(
+            orchestrated.1,
+            vec![AgentType::Codex, AgentType::ClaudeCode],
+            "the orchestrator's handoff must launch both delegated agents"
+        );
+        // Without the attachment the unattached agent is refused by the handoff guard.
+        assert_eq!(control.1, vec![AgentType::ClaudeCode]);
+    }
+
+    #[tokio::test]
+    async fn attaching_agents_to_an_unknown_discussion_fails() {
+        let state = state_with_disc("d-existing").await;
+        let request: UpdateDiscussionRequest =
+            serde_json::from_value(serde_json::json!({ "attach_agents": ["Codex"] })).unwrap();
+        let response = update(State(state), Path("d-missing".to_string()), Json(request)).await;
+        assert!(!response.0.success);
     }
 }

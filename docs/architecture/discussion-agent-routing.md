@@ -134,6 +134,17 @@ new native dispatch requires the explicit hidden
 `<!-- kronn:handoff @alias -->` marker described in the collaboration prompt;
 Kronn removes that marker before persistence. An agent not scheduled yet can
 still be delegated a concrete follow-up under the normal collaboration limits.
+
+The UI makes this contract visible (KT-1109). A turn naming several agents is
+labelled as a parallel launch in the composer and on the sent message. When
+the first named agent is told to delegate to the others, the composer asks
+before sending: "orchestrate" sends `attach_agents` (participants only, no
+dispatch) and then addresses the first agent alone, so its handoff markers can
+reach the others; "parallel" keeps the fan-out above. A native reply's prose
+mention that launched nobody is annotated with its reason (already scheduled
+on the root turn, or no marker), computed from `message_targets`.
+[src: file: frontend/src/lib/agentDelegation.ts]
+[src: file: backend/src/db/discussions.rs]
 [src: file: backend/src/api/discussions/crud.rs:242-315]
 [src: file: backend/src/api/discussions/messaging.rs:54-117]
 [src: file: backend/src/api/discussions/messaging.rs:829-905]

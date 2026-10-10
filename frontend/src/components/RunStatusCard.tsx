@@ -20,6 +20,7 @@ function isActive(status: RunStatusCardStatus): boolean {
 function statusIcon(status: RunStatusCardStatus) {
   if (status === 'running' || status === 'queued') return <Loader2 className="spin" size={15} aria-hidden />;
   if (status === 'success') return <CheckCircle2 size={15} aria-hidden />;
+  if (status === 'quota') return <Clock3 size={15} aria-hidden />;
   if (status === 'partial' || status === 'preflight_failed' || status === 'timeout') return <AlertTriangle size={15} aria-hidden />;
   return <XCircle size={15} aria-hidden />;
 }

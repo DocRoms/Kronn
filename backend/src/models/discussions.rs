@@ -542,6 +542,10 @@ pub struct UpdateDiscussionRequest {
     /// switch, per-agent blocks and structural loop guards still apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_handoffs_unlimited: Option<bool>,
+    /// Add these native agents to the participants without dispatching them,
+    /// so an orchestrating agent may hand off to them. Never removes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_agents: Option<Vec<AgentType>>,
     /// Per-discussion encrypted execution-variable retention override.
     /// Zero keeps values only for the lifetime of the active run.
     #[serde(
@@ -798,4 +802,85 @@ pub struct OrchestrationRequest {
     pub profile_ids: Vec<String>,
     #[serde(default)]
     pub directive_ids: Vec<String>,
+}
+
+/// What a running agent is doing, as its live reply bubble shows it
+/// (KT-1108). The startup phases come first, in launch order; the last three
+/// follow the agent's own output once the prompt is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunPhase {
+    /// Kronn builds the context and the launch.
+    Preparing,
+    /// A native ACP runtime is being spawned.
+    Launching,
+    /// The ACP `initialize` handshake.
+    Initializing,
+    /// `session/new` or `session/resume`: the runtime starts the project's MCP servers.
+    OpeningSession,
+    /// The chosen model is applied to the session.
+    SelectingModel,
+    /// A CLI starts, with its own MCP servers, before it reports itself ready.
+    StartingCli,
+    /// The prompt is sent; nothing has come back from the model yet.
+    WaitingModel,
+    Thinking,
+    Tool,
+    Responding,
+    /// A request after a tool: the model has not answered it yet.
+    WaitingNextAnswer,
+}
+
+impl AgentRunPhase {
+    /// Phases before the model's first output.
+    pub fn is_startup(self) -> bool {
+        self <= Self::WaitingModel
+    }
+}
+
+/// Why a run's live progress ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunStop {
+    Finished,
+    Failed,
+    Cancelled,
+    /// Kronn stopped the agent after its inactivity delay.
+    Idle,
+    /// A startup bound or the run's global timeout expired.
+    TimedOut,
+}
+
+/// When a startup phase began, in milliseconds since the run started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentRunPhaseMark {
+    pub phase: AgentRunPhase,
+    pub at_ms: u32,
+}
+
+/// One run's live progress. Categories, counts and durations only: never a
+/// tool's name, argument or target, nor any text from the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentRunProgress {
+    pub phase: AgentRunPhase,
+    /// Milliseconds spent in `phase` so far.
+    pub phase_ms: u32,
+    /// Milliseconds since the run started, frozen once it stopped.
+    pub elapsed_ms: u32,
+    /// The startup phases reached, in order.
+    pub timeline: Vec<AgentRunPhaseMark>,
+    /// How many MCP servers the session declares, when it declares any.
+    pub mcp_servers: Option<u32>,
+    /// The latest tool calls, newest first.
+    pub activity: Vec<super::AuditActivityEntry>,
+    pub tool_calls: u32,
+    /// Milliseconds since the agent last showed any sign of life.
+    pub silent_ms: u32,
+    /// The silence after which Kronn stops the agent, when one applies now.
+    pub idle_limit_ms: Option<u32>,
+    pub stopped: Option<AgentRunStop>,
 }

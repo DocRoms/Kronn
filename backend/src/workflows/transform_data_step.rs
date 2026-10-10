@@ -306,6 +306,7 @@ fn build_outcome(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }

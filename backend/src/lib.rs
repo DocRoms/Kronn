@@ -421,6 +421,8 @@ pub struct AppState {
     /// not yet returned. Cancellation registration happens earlier, so it must
     /// not be used as process-liveness evidence.
     pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
+    /// KT-1108 — the discussion runs in progress, for a page that opens mid-run.
+    pub live_runs: Arc<crate::agents::run_progress::LiveRuns>,
     /// Task executions with a `/resume` in flight. Boot resumes run once HTTP is
     /// served, so a concurrent resume of the same execution is refused.
     pub execution_resumes: Arc<Mutex<HashSet<String>>>,
@@ -496,6 +498,7 @@ impl AppState {
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
+            live_runs: Arc::default(),
             execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -2597,6 +2600,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/discussions/{id}", get(api::discussions::get))
         .route("/api/discussions/{id}/poll", get(api::discussions::poll))
+        .route(
+            "/api/discussions/{id}/run-progress",
+            get(api::discussions::run_progress),
+        )
         .route(
             "/api/discussions/{id}/native-agent",
             get(api::discussions::native_agent_mode),

@@ -84,7 +84,10 @@ pub fn keeps_directory(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     match status {
-        RunStatus::Pending | RunStatus::Running | RunStatus::WaitingApproval => true,
+        RunStatus::Pending
+        | RunStatus::Running
+        | RunStatus::WaitingApproval
+        | RunStatus::WaitingQuota => true,
         RunStatus::Interrupted => {
             now - started_at < chrono::Duration::days(i64::from(interrupted_ttl_days))
         }

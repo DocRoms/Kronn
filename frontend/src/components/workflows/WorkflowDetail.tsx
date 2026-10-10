@@ -12,7 +12,7 @@ import {
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
-  Eye, Pencil, FileText, Database, Shuffle,
+  Eye, Pencil, FileText, Database, Shuffle, Clock,
 } from 'lucide-react';
 import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
@@ -1276,13 +1276,18 @@ export function LiveFinishedBanner({
   const isSuccess = status === 'Success';
   const isPartial = status === 'Partial';
   const isWaiting = status === 'WaitingApproval';
-  const dataStatus = isSuccess ? 'success' : isPartial || isWaiting ? 'waiting' : 'failed';
+  const isQuota = status === 'WaitingQuota';
+  const dataStatus = isSuccess ? 'success' : isPartial || isWaiting || isQuota ? 'waiting' : 'failed';
   const color = isSuccess
     ? 'var(--kr-success)'
-    : isPartial || isWaiting
+    : isPartial || isWaiting || isQuota
       ? 'var(--kr-warning)'
       : 'var(--kr-error)';
-  const label = isWaiting ? t('wf.runWaiting') : t('wf.runDone', status ?? '');
+  const label = isWaiting
+    ? t('wf.runWaiting')
+    : isQuota
+      ? t('run.status.quota')
+      : t('wf.runDone', status ?? '');
   return (
     <div className="wf-live-finished" data-status={dataStatus}>
       {isSuccess
@@ -1291,6 +1296,8 @@ export function LiveFinishedBanner({
           ? <AlertTriangle size={12} style={{ color }} />
           : isWaiting
           ? <Hand size={12} style={{ color }} />
+          : isQuota
+          ? <Clock size={12} style={{ color }} />
           : <X size={12} className="text-error" />}
       <span className="text-base font-semibold" style={{ color }}>{label}</span>
       <span className="text-xs text-dim">
@@ -1617,7 +1624,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
   const isRunExpanded = (run: WorkflowRun): boolean =>
     expandedRunIds.has(run.id) ||
-    run.status === 'Running' || run.status === 'Pending' || run.status === 'WaitingApproval';
+    run.status === 'Running' || run.status === 'Pending' || run.status === 'WaitingApproval'
+    || run.status === 'WaitingQuota';
   const toggleRunExpanded = (id: string) => setExpandedRunIds(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -1629,7 +1637,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   const [groupOverride, setGroupOverride] = useState<Record<string, boolean>>({});
   const isGroupExpanded = (key: string, groupRuns: WorkflowRun[]): boolean => {
     if (key in groupOverride) return groupOverride[key];
-    return groupRuns.some(r => r.status === 'Running' || r.status === 'Pending' || r.status === 'WaitingApproval');
+    return groupRuns.some(r => r.status === 'Running' || r.status === 'Pending'
+      || r.status === 'WaitingApproval' || r.status === 'WaitingQuota');
   };
   const toggleGroup = (key: string, groupRuns: WorkflowRun[]) =>
     setGroupOverride(prev => ({ ...prev, [key]: !isGroupExpanded(key, groupRuns) }));

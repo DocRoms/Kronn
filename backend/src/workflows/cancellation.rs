@@ -113,7 +113,7 @@ pub async fn cancel_run_tree(
                     "UPDATE workflow_runs
                      SET status = 'Cancelled', finished_at = ?2
                      WHERE id = ?1
-                       AND status IN ('Running', 'Pending', 'WaitingApproval')",
+                       AND status IN ('Running', 'Pending', 'WaitingApproval', 'WaitingQuota')",
                     rusqlite::params![settle_run_id, now],
                 )?
             } else {
@@ -138,7 +138,7 @@ pub async fn cancel_run_tree(
                     "{DESCENDANTS_CTE} UPDATE workflow_runs
                      SET status = 'Cancelled', finished_at = ?2
                      WHERE id IN (SELECT id FROM descendants)
-                       AND status IN ('Running', 'Pending', 'WaitingApproval')"
+                       AND status IN ('Running', 'Pending', 'WaitingApproval', 'WaitingQuota')"
                 ),
                 rusqlite::params![settle_run_id, now],
             )?;

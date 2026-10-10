@@ -533,6 +533,7 @@ async fn execute_core_unscrubbed(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
@@ -2189,6 +2190,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
         },
         condition_action,
     }
