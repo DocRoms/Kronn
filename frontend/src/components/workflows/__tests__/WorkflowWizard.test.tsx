@@ -1230,6 +1230,35 @@ describe('WorkflowWizard — config tab + cron', () => {
     expect(screen.getByText('wiz.execAllowlistTitle')).toBeInTheDocument();
   });
 
+  it('unticking every Security option is saved and stays unticked on reload', async () => {
+    const toConfig = () => {
+      fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+      fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+      fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    };
+    renderWizard({ editWorkflow: mkWorkflow({
+      safety: { sandbox: true, require_approval: true, max_files: 3, max_lines: 40 },
+    }) });
+    toConfig();
+    fireEvent.click(screen.getByLabelText('wiz.sandbox'));
+    fireEvent.click(screen.getByLabelText('wiz.requireApproval'));
+    fireEvent.change(screen.getByLabelText('wiz.maxFiles'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('wiz.maxLines'), { target: { value: '' } });
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    const saved = updateMock.mock.calls[0][1].safety;
+    expect(saved).toEqual({ sandbox: false, require_approval: false, max_files: null, max_lines: null });
+
+    cleanup();
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ name: 'review' })], safety: saved }) });
+    toConfig();
+    expect(screen.getByLabelText('wiz.sandbox')).not.toBeChecked();
+    expect(screen.getByLabelText('wiz.requireApproval')).not.toBeChecked();
+    expect(screen.getByLabelText('wiz.maxFiles')).toHaveValue(null);
+    expect(screen.getByLabelText('wiz.maxLines')).toHaveValue(null);
+  });
+
   it('adding a launch variable on the Config tab renders a variable row', () => {
     toAdvanced();
     fireEvent.click(screen.getByText('wiz.next')); // → Trigger

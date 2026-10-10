@@ -11,6 +11,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Workflow Security settings saved before this version now apply as stored
+  (KT-1043); nothing is unticked or disabled for you. Check the warning on
+  each affected workflow's page. A workflow with "Sandbox (Docker)" ticked has
+  every run refused on a native (non-Docker) install, its Cron and Tracker
+  runs included. One with "Approval required" now waits for a human before
+  every run: a Cron or Tracker trigger leaves runs waiting for approval
+  instead of running unattended. One with "Max files" or "Max lines" is
+  refused when its project has no directory or is not a git repository. A run
+  that had already started when you upgrade is not paused for approval when it
+  resumes (after a Gate, a quota wait or a restart), but it is refused by the
+  sandbox setting, and newly set limits measure from the point it resumes.
+
 ### Added
 
 - Multi-agent discussions now say who is launched and how (KT-1109). While a
@@ -132,6 +146,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Changed
 
+- A task description in Planning, and in the discussion plan panel, now shows
+  as rendered Markdown by default, with the same safe renderer as discussion
+  messages (no raw HTML, safe links), instead of raw source (KT-1137). A "Raw"
+  switch at the top of the block shows the source, where it can be edited in
+  Planning; the chosen mode is remembered in the browser. Switching never
+  drops an unsaved edit, and saving is unchanged.
 - `{{previous_step.data…}}` and `{{steps.<name>.data…}}` no longer read an
   older step's data after a step that produced no envelope (KT-1105). To read
   an earlier producer, name it with `steps.<producer>.data`, which works as
@@ -158,6 +178,32 @@ Release notes for 0.9.3 and earlier are available in the
   Before, an orphaned `caffeinate` stayed alive forever and the Mac never
   idle-slept again. It also no longer inherits descriptors the backend itself
   inherited without close-on-exec.
+- The workflow Security settings now take effect (KT-1043). They were saved
+  but nothing read them. "Sandbox (Docker)" refuses to start a run outside a
+  container. "Approval required" pauses each run before its worktree, its
+  hooks and its first step, until a human approves or rejects it from Kronn;
+  an agent's bridge token cannot decide it, and a sub-workflow child with this
+  setting fails instead, since it cannot pause. "Max files" and "Max lines"
+  compare the run's working tree, by content, with its state before the
+  workflow's hooks ran (changes already there are not the run's; hook changes
+  are). The run is measured after each step, its declared artifacts included,
+  and once more after the `after_run` hook. Files git is told to ignore changes
+  to (assume-unchanged, skip-worktree) are still measured, deletions
+  included; a flagged path already missing when the run started (a sparse
+  checkout) is not counted. The step that goes
+  past a limit fails and the run stops there for good: no quota wait, no
+  `on_failure` chain, changes kept for review. Such a stop in a sub-workflow
+  ends its parent the same way, and a foreach dispatches no further item. A
+  step's `---STATE:` output can no longer write Kronn's own `__kronn.*` run
+  state, and a recorded starting state that cannot be read stops the run
+  instead of being taken again. These limits need a git working tree; without one, or without a
+  project directory, the run is refused. The editor and the workflow page say
+  which stored settings this host would refuse. An agent that loosens these
+  settings on an enabled workflow disables it, as for any other execution
+  change.
+- Unticking every Security option in the workflow assistant is now saved
+  (KT-1044). An all-cleared panel used to send no settings, so the old ones
+  came back on reload.
 - The reply bubble's Logs panel follows the same no-leak rule as the run
   progress (KT-1120). A tool call is logged by its category only (`→ Read`
   when it starts, `✓ Read` when it ends), never by its name, input, file path,
@@ -210,6 +256,36 @@ Release notes for 0.9.3 and earlier are available in the
   reason. A fully successful run still discards what it left
   uncommitted, as before: once every step finished, those files are its own
   scratch.
+- A Gate with `gate_checkpoint_before` no longer commits the operator's
+  checkout (KT-1042). The checkpoint commit is taken only in the run's own
+  worktree (workspace isolation). In shared mode no checkpoint is taken and
+  the Gate message says so, where Kronn used to `git add -A` the project
+  directory and commit the operator's unstaged and untracked work on their
+  branch. The checkpoint records the work under review: "Request changes"
+  re-runs the target on top of it, after checking that the worktree is still
+  exactly that commit. It no longer runs `git reset --hard`, which could only
+  discard commits made by someone other than the paused run.
+- The anti-loop guards of a workflow run no longer restart from zero at
+  every resume (KT-1046). Step visits (`loop_detection_max_revisits`, and
+  `{{iter.<step>}}`), the fires of each capped Goto edge, the total iteration
+  safeguard and the `max_llm_calls` count are stored on the run. They carry
+  over a Gate decision (approve or request changes), a quota wake-up and a
+  restart, so a loop through an auto-approved Gate stops where the same loop
+  without a Gate stops. A step replayed after a quota refusal or a crash is
+  not counted as a new visit, and a call refused for quota does not count
+  against `max_llm_calls`. The LLM calls of sub-workflow children are recorded
+  on the root run as they happen (a new `tree_llm_calls` column that only
+  grows), so a crash in the middle of a foreach no longer forgets what the
+  children that already finished spent. If that count cannot be written or
+  read, the run stops before its next call instead of continuing on a total
+  it cannot trust, and a child whose calls were not recorded is not taken as
+  done. That stop is terminal: the run ends Failed without its `on_failure`
+  compensation steps, quota wait or recovery rule, since each of those could
+  spend further calls. This covers calls that finished: a child still running when the
+  backend dies is started again on resume, so its interrupted call can be
+  billed twice. Runs paused before this version
+  rebuild their counters from their own step history and that of their
+  sub-workflow children.
 - `agent_list`, `task_exec_prepare`, `task_exec_launch` and the tier pickers
   now read the launch preflight's own catalogue decision (KT-860). A tier the
   preflight would refuse is listed with the reason (`model_unavailable`) and

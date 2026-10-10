@@ -370,6 +370,8 @@ mod tests {
             // test builds only: fixtures
             ("backend/src/lib.rs", 1),
             ("backend/tests/api_tests.rs", 1),
+            // macOS test only: the helper process and the ps/pgrep/lsof probes
+            ("backend/tests/power_guard_orphan.rs", 1),
         ]
         .into_iter()
         .map(|(file, n)| (file.to_string(), n))

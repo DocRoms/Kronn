@@ -26,6 +26,28 @@ fn fail_document_audit(outcome: &mut StepOutcome, reason: &str) {
     tracing::warn!(target: "kronn::docs_write_filter", "Document audit failed; files preserved: {reason}");
 }
 
+/// The single place a `terminal_stop` takes effect: Failed, no quota wait, no
+/// recovery rule. The rollback chain is skipped where it starts.
+fn apply_terminal_stop(outcome: &mut StepOutcome) {
+    let Some(reason) = outcome.result.terminal_stop.as_deref() else {
+        return;
+    };
+    if !outcome.result.output.contains(reason) {
+        outcome.result.output = format!("{reason}\n\n{}", outcome.result.output);
+    }
+    outcome.result.status = RunStatus::Failed;
+    outcome.result.quota_wait = None;
+    outcome.result.condition_result = None;
+    outcome.condition_action = None;
+}
+
+/// A Security limit ends the run at this step, whatever the step's verdict.
+fn fail_safety_limit(outcome: &mut StepOutcome, reason: &str) {
+    outcome.result.output = format!("{reason}\n\nStep result:\n{}", outcome.result.output);
+    outcome.result.terminal_stop = Some(reason.to_string());
+    tracing::warn!(target: "kronn::workflow_safety", "{reason}");
+}
+
 /// Events emitted during a workflow run for real-time SSE streaming.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
@@ -269,6 +291,10 @@ pub struct SharedBudget {
     /// branch, with that runner's timeout: guards captured when each run
     /// started, never re-read from saved config.
     deadline: Option<(chrono::DateTime<Utc>, u64)>,
+    /// The run whose row durably records the tree's count (KT-1046).
+    root_run_id: Option<std::sync::Arc<str>>,
+    /// The highest total that row is known to hold.
+    recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl SharedBudget {
@@ -278,7 +304,23 @@ impl SharedBudget {
             llm_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_llm_calls,
             deadline: None,
+            root_run_id: None,
+            recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+    /// The same budget, recorded durably on `root_run_id`'s row.
+    pub fn recorded_on(mut self, root_run_id: &str) -> Self {
+        self.root_run_id = Some(root_run_id.into());
+        self
+    }
+    pub fn root_run_id(&self) -> Option<&str> {
+        self.root_run_id.as_deref()
+    }
+    /// Calls spent that the root's row does not hold yet: none may be
+    /// dispatched on top of them.
+    pub fn has_unrecorded_calls(&self) -> bool {
+        self.root_run_id.is_some()
+            && self.recorded.load(std::sync::atomic::Ordering::SeqCst) < self.llm_calls()
     }
     /// The same budget, bounded also by a runner whose timeout guard of
     /// `timeout_seconds` ends at `deadline`; the earlier deadline wins.
@@ -353,6 +395,8 @@ pub(crate) fn next_step_index_for_resume(
 ) -> usize {
     match step_results.last() {
         None => 0,
+        // The pre-start approval names no step: the run begins at the first one.
+        Some(last) if last.step_name == super::safety::APPROVAL_STEP => 0,
         Some(last) => steps
             .iter()
             .position(|s| s.name == last.step_name)
@@ -458,6 +502,7 @@ pub async fn settle_errored_run(
         cache_write_prompt_tokens: None,
         last_activity: None,
         quota_wait: None,
+        terminal_stop: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -591,7 +636,67 @@ fn workspace_failure_result(msg: &str) -> StepResult {
         cache_write_prompt_tokens: None,
         last_activity: None,
         quota_wait: None,
+        terminal_stop: None,
     }
+}
+
+/// The Security limit the run's changes exceed; a failed measurement counts as one.
+async fn safety_breach(
+    workflow: &Workflow,
+    work_dir: &str,
+    baseline: &super::safety::ChangeBaseline,
+) -> Option<String> {
+    let dir = std::path::PathBuf::from(work_dir);
+    let baseline = baseline.clone();
+    let measured = tokio::task::spawn_blocking(move || super::safety::measure(&dir, &baseline))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|measured| measured);
+    match measured {
+        Ok(stats) => super::safety::limit_breach(&workflow.safety, stats),
+        Err(error) => Some(format!(
+            "Could not measure the run's changes against the Security limits: {error}"
+        )),
+    }
+}
+
+/// Keeps the tree's starting state on the run, so a resumed run measures from it.
+async fn record_safety_baseline(
+    run: &mut WorkflowRun,
+    dir: &std::path::Path,
+) -> std::result::Result<(), String> {
+    let dir = dir.to_path_buf();
+    let baseline = tokio::task::spawn_blocking(move || super::safety::capture_baseline(&dir))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let raw = serde_json::to_string(&baseline).map_err(|error| error.to_string())?;
+    run.state
+        .insert(super::safety::BASELINE_STATE_KEY.to_string(), raw);
+    Ok(())
+}
+
+/// Ends a run the Security settings refuse, before any step executes.
+async fn refuse_run_for_safety(
+    state: &AppState,
+    run: &mut WorkflowRun,
+    msg: &str,
+    emit: &impl Fn(RunEvent),
+) -> Result<()> {
+    run.status = RunStatus::Failed;
+    run.finished_at = Some(Utc::now());
+    let mut refusal = super::safety::refusal_result(msg);
+    refusal.terminal_stop = Some(msg.to_string());
+    run.step_results.push(refusal);
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+        .await?;
+    emit(RunEvent::RunError {
+        error: msg.to_string(),
+    });
+    Ok(())
 }
 
 /// The definition a run executes against: the run's launch project wins over
@@ -1012,6 +1117,30 @@ async fn execute_run_body(
         return Ok(());
     }
 
+    let safety_refusal =
+        super::safety::sandbox_refusal(&workflow.safety, super::safety::in_container())
+            .or_else(|| super::safety::child_approval_refusal(&workflow.safety, run));
+    if let Some(msg) = safety_refusal {
+        return refuse_run_for_safety(&state, run, &msg, &emit).await;
+    }
+    // Before any worktree or hook: a refused run must have run nothing.
+    if super::safety::approval_pending(&workflow.safety, run) {
+        let approval = super::safety::approval_result();
+        emit(RunEvent::StepDone {
+            step_result: Box::new(approval.clone()),
+        });
+        run.step_results.push(approval);
+        run.status = RunStatus::WaitingApproval;
+        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+        db.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+            .await?;
+        emit(RunEvent::RunDone {
+            status: run.status.clone(),
+        });
+        broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+        return Ok(());
+    }
+
     // E part 2 (TD-20260717-run-power-assertion-sleep) — hold the shared,
     // refcounted power assertion for the whole active run so a laptop that
     // sleeps mid-run no longer freezes it or trips a `__guard_timeout__`.
@@ -1095,7 +1224,11 @@ async fn execute_run_body(
     // interrupted during its FIRST step (no result persisted yet) and a gate
     // RequestChanges that truncates back to step 0: both must re-attach the
     // preserved worktree, not create a second one.
-    let is_resume = !run.step_results.is_empty() || run.workspace_path.is_some();
+    let is_resume = run
+        .step_results
+        .iter()
+        .any(|result| result.step_name != super::safety::APPROVAL_STEP)
+        || run.workspace_path.is_some();
 
     // Isolation is opt-in. Before KT-343 every project-linked workflow tried
     // to create a worktree even when `require_isolation` was false, which made
@@ -1104,6 +1237,7 @@ async fn execute_run_body(
     // still request a worktree because silently dropping after_create / etc.
     // would be a different behavioral regression.
     let workspace_requested = workflow_requests_workspace(workflow.workspace_config.as_ref());
+    let mut safety_baseline_error: Option<String> = None;
 
     // Create or attach workspace (if we have a project path). An inherited or
     // resumed workspace remains authoritative even if the workflow definition
@@ -1172,8 +1306,26 @@ async fn execute_run_body(
                 None
             } else {
                 let base_ref = workflow_base_ref(workflow.workspace_config.as_ref());
-                match Workspace::create(&repo_path, &workflow.name, &run.id, hooks, base_ref).await
+                let created = match Workspace::create_before_hooks(
+                    &repo_path,
+                    &workflow.name,
+                    &run.id,
+                    hooks,
+                    base_ref,
+                )
+                .await
                 {
+                    Ok(ws) => {
+                        // Recorded before the project's hooks: their changes count.
+                        if super::safety::limits_set(&workflow.safety) {
+                            safety_baseline_error =
+                                record_safety_baseline(run, &ws.path).await.err();
+                        }
+                        ws.after_create().await.map(|()| ws)
+                    }
+                    Err(error) => Err(error),
+                };
+                match created {
                     Ok(ws) => {
                         run.workspace_path = Some(ws.path.to_string_lossy().to_string());
                         Some(ws)
@@ -1228,6 +1380,7 @@ async fn execute_run_body(
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
                                 quota_wait: None,
+                                terminal_stop: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -1239,6 +1392,8 @@ async fn execute_run_body(
                             return Ok(());
                         }
                         tracing::warn!("Failed to create worktree, running in main tree: {}", e);
+                        run.state.remove(super::safety::BASELINE_STATE_KEY);
+                        safety_baseline_error = None;
                         None
                     }
                 }
@@ -1301,6 +1456,7 @@ async fn execute_run_body(
                     cache_write_prompt_tokens: None,
                     last_activity: None,
                     quota_wait: None,
+                    terminal_stop: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1338,6 +1494,7 @@ async fn execute_run_body(
                     cache_write_prompt_tokens: None,
                     last_activity: None,
                     quota_wait: None,
+                    terminal_stop: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1365,6 +1522,34 @@ async fn execute_run_body(
                 project_path.clone()
             }
         });
+
+    if super::safety::limits_set(&workflow.safety) {
+        let refusal = if let Some(error) = safety_baseline_error.take() {
+            Some(error)
+        } else if work_dir.is_empty() {
+            Some("this run has no project directory".to_string())
+        } else {
+            match run.state.get(super::safety::BASELINE_STATE_KEY) {
+                // Absent: this run never had one (fresh, or limits set since).
+                None => record_safety_baseline(run, std::path::Path::new(&work_dir))
+                    .await
+                    .err(),
+                // Never recaptured: a new baseline would forgive what the run already changed.
+                Some(raw)
+                    if serde_json::from_str::<super::safety::ChangeBaseline>(raw).is_err() =>
+                {
+                    Some("the run's recorded starting state is unreadable".to_string())
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some(error) = refusal {
+            let msg = format!(
+                "The max files / max lines limits (Security settings) need the project to be a git working tree: {error}"
+            );
+            return refuse_run_for_safety(&state, run, &msg, &emit).await;
+        }
+    }
 
     // Run before_run hook — but not on resume, the hook already fired
     // before the pause and re-firing it would re-run setup actions
@@ -1550,6 +1735,7 @@ async fn execute_run_body(
                     cache_write_prompt_tokens: None,
                     last_activity: None,
                     quota_wait: None,
+                    terminal_stop: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1636,6 +1822,7 @@ async fn execute_run_body(
                     cache_write_prompt_tokens: None,
                     last_activity: None,
                     quota_wait: None,
+                    terminal_stop: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1647,6 +1834,11 @@ async fn execute_run_body(
         }
     }
 
+    let safety_baseline = run
+        .state
+        .get(super::safety::BASELINE_STATE_KEY)
+        .and_then(|raw| serde_json::from_str::<super::safety::ChangeBaseline>(raw).ok());
+
     // Execute steps sequentially
     let mut all_success = true;
     let mut cancelled_by_user = false;
@@ -1654,6 +1846,7 @@ async fn execute_run_body(
     let mut paused_for_approval = false;
     let mut paused_for_quota = false;
     let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
+    let mut retried_step = None;
     if run.step_results.last().is_some_and(|result| {
         matches!(
             result.status,
@@ -1664,11 +1857,10 @@ async fn execute_run_body(
         // that trailing row is evidence of an incomplete step, not history to
         // keep alongside the retry. Replace it with the new attempt. A step
         // refused for quota (KT-811) is replaced the same way.
-        run.step_results.pop();
+        retried_step = run.step_results.pop().map(|result| result.step_name);
     }
     let total_steps = workflow.steps.len();
     let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
-    let mut iteration_count = 0;
 
     // 0.7.0 — execution guards. Resolved once at run start so subsequent
     // edits to the workflow (loosen the timeout, raise max calls) don't
@@ -1678,8 +1870,9 @@ async fn execute_run_body(
     // Phase 1b-ii — shared LLM-calls budget. A child inherits the parent
     // tree's (same counter + cap); a top-level run gets a fresh one capped at
     // its own resolved limit. The whole tree is then governed by ONE quota.
+    let is_root_budget = shared_budget.is_none();
     let budget = shared_budget
-        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls))
+        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls).recorded_on(&run.id))
         .within_deadline(
             run.started_at
                 + chrono::Duration::seconds(
@@ -1687,14 +1880,19 @@ async fn execute_run_body(
                 ),
             resolved_guards.timeout_seconds,
         );
-    let mut step_revisits: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    // 0.7.0 Phase 6 — per-Goto-edge counter. Keyed by `(source, target)`
-    // so two different loops in the same workflow have independent
-    // limits. Falls through (continues past the loop) when the cap is
-    // reached on a given edge.
-    let mut goto_fires: std::collections::HashMap<(String, String), u32> =
-        std::collections::HashMap::new();
+    // Visits, Goto-edge fires, iterations and LLM calls continue across resumes
+    // (KT-1046): a loop through a pause must trip where it would without one.
+    let mut guard_counters = super::guard_counters::GuardCounters::resume(
+        &run.state,
+        &workflow.steps,
+        &run.step_results,
+        retried_step.as_deref(),
+    );
+    if is_root_budget {
+        // A stale total would let the tree overspend: no count, no run.
+        budget.add_llm_calls(root_llm_calls_spent(&state, run, &guard_counters).await?);
+        record_tree_llm_calls(&state, &budget).await?;
+    }
 
     while step_idx < workflow.steps.len() {
         // Cancellation check — fires when the user clicked "⏹ Arrêter" and
@@ -1731,12 +1929,13 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             });
             all_success = false;
             break;
         }
-        iteration_count += 1;
-        if iteration_count > max_total_iterations {
+        guard_counters.iterations += 1;
+        if guard_counters.iterations > max_total_iterations {
             tracing::error!(
                 "Workflow run exceeded {} iterations — aborting to prevent infinite loop",
                 max_total_iterations
@@ -1764,6 +1963,7 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             });
             break;
         }
@@ -1811,6 +2011,7 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1821,6 +2022,17 @@ async fn execute_run_body(
         // the actual child count); this check uses the cumulative count
         // accumulated from previous iterations. ApiCall and Notify count
         // as 0 because they don't spend tokens.
+        if budget.has_unrecorded_calls() {
+            if let Err(error) = record_tree_llm_calls(&state, &budget).await {
+                tracing::warn!(target: "kronn::workflow_guard", run_id = %run.id, %error,
+                    "Workflow run stopped: its LLM-call count is not recorded");
+                let mut row = budget_unrecorded_row(&error);
+                row.started_at = Some(Utc::now());
+                run.step_results.push(row);
+                all_success = false;
+                break;
+            }
+        }
         if budget.llm_calls() >= budget.max_llm_calls() {
             tracing::warn!(target: "kronn::workflow_guard",
                 run_id = %run.id, kind = "MaxLlmCalls",
@@ -1857,6 +2069,7 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1868,10 +2081,12 @@ async fn execute_run_body(
         // explicitly rejected "total iter count" as fragile.
         let visit_count = {
             let name = &workflow.steps[step_idx].name;
-            let n = step_revisits.entry(name.clone()).or_insert(0);
+            let n = guard_counters.visits.entry(name.clone()).or_insert(0);
             *n += 1;
             *n
         };
+        guard_counters.llm_calls = budget.llm_calls();
+        guard_counters.store(&mut run.state);
         // 0.7.0 Phase 6 — expose `{{iter.<step_name>}}` in templates so
         // a step can react to its own re-execution (e.g. "first pass:
         // generate; subsequent: refine"). Updated EVERY iteration so
@@ -1918,6 +2133,7 @@ async fn execute_run_body(
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1981,6 +2197,7 @@ async fn execute_run_body(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         };
         apply_step_snapshot(
             step,
@@ -2155,6 +2372,7 @@ async fn execute_run_body(
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
                                 quota_wait: None,
+                                terminal_stop: None,
                             },
                             condition_action: None,
                         }
@@ -2292,88 +2510,37 @@ async fn execute_run_body(
                     // the operator's decision (POST /runs/:id/decide) calls
                     // `resume_run` to continue from the next step.
                     //
-                    // 0.8.6 (#25) — checkpoint commit. When the step has
-                    // `gate_checkpoint_before: Some(true)`, snapshot the
-                    // working tree FIRST so a future "Request Changes" Goto
-                    // can `git reset --hard` to this SHA before re-running
-                    // the target. Skipped silently in Isolated worktree
-                    // mode (the worktree manages its own branch lifecycle).
-                    if step.gate_checkpoint_before.unwrap_or(false) {
-                        // Isolated workspace = the run has its own
-                        // worktree path. Skip checkpoint there — the
-                        // worktree manages its own branch lifecycle.
-                        let is_isolated = run.workspace_path.is_some();
-                        if is_isolated {
-                            tracing::info!(
+                    // Checkpoint the run's own worktree only: in shared mode the
+                    // commit would sweep the operator's work (KT-1042).
+                    let checkpoint_notice = if step.gate_checkpoint_before.unwrap_or(false) {
+                        let notice = super::gate_checkpoint::checkpoint_gate(
+                            run.workspace_path.as_deref(),
+                            &run.id,
+                            &mut run.state,
+                            &step.name,
+                        );
+                        match &notice {
+                            None => tracing::info!(
                                 run_id = %run.id,
                                 step = %step.name,
-                                "gate_checkpoint_before skipped — workflow uses Isolated worktree mode",
-                            );
-                        } else if let Some(pid) = workflow.project_id.as_ref() {
-                            let project_path_opt = match state
-                                .db
-                                .with_conn({
-                                    let pid2 = pid.clone();
-                                    move |conn| crate::db::projects::get_project(conn, &pid2)
-                                })
-                                .await
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        run_id = %run.id,
-                                        step = %step.name,
-                                        error = %e,
-                                        "project lookup failed — gate checkpoint commit skipped"
-                                    );
-                                    None
-                                }
-                            };
-                            if let Some(proj) = project_path_opt {
-                                let ckp = super::gate_checkpoint::commit_checkpoint(
-                                    std::path::Path::new(&proj.path),
-                                    &step.name,
-                                    &run.id,
-                                );
-                                match ckp {
-                                    super::gate_checkpoint::CheckpointOutcome::Committed { sha } => {
-                                        let key = format!("{}{}", super::gate_checkpoint::CHECKPOINT_STATE_PREFIX, step.name);
-                                        run.state.insert(key, sha.clone());
-                                        tracing::info!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            sha = %sha,
-                                            "gate_checkpoint_before committed",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::NotAGitRepo => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            project_path = %proj.path,
-                                            "gate_checkpoint_before requested but project_path is not a git repo — skipping",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::StagedChangesPresent => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            "gate_checkpoint_before refused — index has staged changes (user WIP)",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::GitCommandFailed { stderr } => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            stderr = %stderr,
-                                            "gate_checkpoint_before commit failed — continuing without checkpoint",
-                                        );
-                                    }
-                                }
-                            }
+                                "gate_checkpoint_before committed in the run worktree",
+                            ),
+                            Some(reason) => tracing::warn!(
+                                run_id = %run.id,
+                                step = %step.name,
+                                reason = %reason,
+                                "gate_checkpoint_before not taken",
+                            ),
                         }
+                        notice
+                    } else {
+                        None
+                    };
+                    let mut gate = super::gate_step::execute_gate_step(step, &ctx);
+                    if let Some(notice) = checkpoint_notice {
+                        gate.result.output = format!("{}\n\n> {notice}", gate.result.output);
                     }
-                    super::gate_step::execute_gate_step(step, &ctx)
+                    gate
                 }
                 StepType::Exec => {
                     // 0.7.0 Phase 5 — direct shell execution. Zero tokens.
@@ -2525,6 +2692,7 @@ async fn execute_run_body(
                         cache_write_prompt_tokens: None,
                         last_activity: None,
                         quota_wait: None,
+                        terminal_stop: None,
                     },
                     condition_action: None,
                 }
@@ -2573,6 +2741,7 @@ async fn execute_run_body(
                         cache_write_prompt_tokens: None,
                         last_activity: None,
                         quota_wait: None,
+                        terminal_stop: None,
                     },
                     condition_action: None,
                 }
@@ -2582,6 +2751,7 @@ async fn execute_run_body(
         if outcome.result.started_at.is_none() {
             outcome.result.started_at = Some(step_started_at);
         }
+        apply_terminal_stop(&mut outcome);
 
         // Snapshot "what actually ran" onto the result row FIRST, then seed
         // the template ctx from it — set_step_meta reads step_agent/step_model,
@@ -2616,46 +2786,21 @@ async fn execute_run_body(
             run.state.insert(k, v);
         }
 
+        // After the step's declared artifacts are written: they are the run's changes too.
+        if let Some(baseline) = safety_baseline.as_ref().filter(|_| {
+            matches!(
+                outcome.result.status,
+                RunStatus::Success | RunStatus::Partial | RunStatus::Failed
+            )
+        }) {
+            if let Some(reason) = safety_breach(workflow, &work_dir, baseline).await {
+                fail_safety_limit(&mut outcome, &reason);
+            }
+        }
+        apply_terminal_stop(&mut outcome);
+
         // Accumulate tokens
         run.tokens_used += outcome.result.tokens_used.unwrap_or(0);
-
-        // 0.7.0 — count this step toward the LLM-calls quota. Only step
-        // types that spawn an agent are counted: BatchQuickPrompt counts
-        // as the number of children actually spawned (read from the
-        // outcome's batch metadata when present, else 1 — conservative).
-        // ApiCall and Notify cost zero by design.
-        match step.step_type {
-            StepType::Agent => {
-                budget.add_llm_calls(1);
-            }
-            StepType::BatchQuickPrompt => {
-                // Conservative count: each batch step counts as 1 LLM call
-                // toward the quota (rather than N children). Senior Dev's
-                // recommendation was N post-fan-out, but `StepResult`
-                // doesn't carry the spawned-children count today, and
-                // wiring it through would touch every batch executor —
-                // out of scope for the Phase-1 guards. The fan-out cap
-                // (`batch_max_items`) already limits the per-step blast
-                // radius. Tracked separately as future enhancement.
-                budget.add_llm_calls(1);
-            }
-            StepType::ApiCall
-            | StepType::Notify
-            | StepType::Gate
-            | StepType::Exec
-            | StepType::BatchApiCall
-            | StepType::JsonData
-            | StepType::CollectApiData
-            | StepType::TransformData
-            | StepType::PublishPageData
-            // A triggered run has its own budget.
-            | StepType::TriggerWorkflow => {}
-            // SubWorkflow itself spawns no LLM directly; its child run's
-            // Agent steps consume LLM calls. Phase 1b aggregates the child's
-            // count into the SHARED budget so the parent quota isn't bypassed
-            // (spec §4.2). Stub today → zero direct cost.
-            StepType::SubWorkflow => {}
-        }
 
         // KT-811 — a quota refusal waits for the reset instead of failing the
         // run. Children are resumed through their parent, so they still fail.
@@ -2688,6 +2833,60 @@ async fn execute_run_body(
                 .remove(super::quota_wait::QUOTA_ATTEMPTS_STATE_KEY);
         }
         let waiting_quota_here = outcome.result.status == RunStatus::WaitingQuota;
+        // 0.7.0 — count this step toward the LLM-calls quota. Only step
+        // types that spawn an agent are counted: BatchQuickPrompt counts
+        // as the number of children actually spawned (read from the
+        // outcome's batch metadata when present, else 1 — conservative).
+        // ApiCall and Notify cost zero by design. A call refused for quota spent
+        // nothing and is replayed, so it does not count (KT-1046).
+        let llm_calls_before = budget.llm_calls();
+        match step.step_type {
+            StepType::Agent | StepType::BatchQuickPrompt if waiting_quota_here => {}
+            StepType::Agent => {
+                budget.add_llm_calls(1);
+            }
+            StepType::BatchQuickPrompt => {
+                // Conservative count: each batch step counts as 1 LLM call
+                // toward the quota (rather than N children). Senior Dev's
+                // recommendation was N post-fan-out, but `StepResult`
+                // doesn't carry the spawned-children count today, and
+                // wiring it through would touch every batch executor —
+                // out of scope for the Phase-1 guards. The fan-out cap
+                // (`batch_max_items`) already limits the per-step blast
+                // radius. Tracked separately as future enhancement.
+                budget.add_llm_calls(1);
+            }
+            StepType::ApiCall
+            | StepType::Notify
+            | StepType::Gate
+            | StepType::Exec
+            | StepType::BatchApiCall
+            | StepType::JsonData
+            | StepType::CollectApiData
+            | StepType::TransformData
+            | StepType::PublishPageData
+            // A triggered run has its own budget.
+            | StepType::TriggerWorkflow => {}
+            // SubWorkflow itself spawns no LLM directly; its child run's
+            // Agent steps consume LLM calls. Phase 1b aggregates the child's
+            // count into the SHARED budget so the parent quota isn't bypassed
+            // (spec §4.2). Stub today → zero direct cost.
+            StepType::SubWorkflow => {}
+        }
+
+        guard_counters.llm_calls = budget.llm_calls();
+        guard_counters.store(&mut run.state);
+        // Also covers calls a sub-workflow child spent on the shared budget.
+        if guard_counters.llm_calls != llm_calls_before || budget.has_unrecorded_calls() {
+            if let Err(error) = record_tree_llm_calls(&state, &budget).await {
+                // Not durably counted, so not durably done: a resume re-runs it.
+                // Counted after the quota verdict, hence its own application.
+                outcome.result.terminal_stop =
+                    Some(format!("The LLM-call count could not be recorded: {error}"));
+                apply_terminal_stop(&mut outcome);
+            }
+        }
+
         let step_failed = outcome.result.status == RunStatus::Failed;
         // Captured BEFORE `outcome.result` is moved into `step_results`
         // below — used by the Stop arm to give the run an honest verdict
@@ -2920,7 +3119,7 @@ async fn execute_run_body(
                 }) => {
                     if let Some(target) = workflow.steps.iter().position(|s| s.name == *step_name) {
                         let edge = (step.name.clone(), step_name.clone());
-                        let count = goto_fires.entry(edge.clone()).or_insert(0);
+                        let count = guard_counters.goto_fires.entry(edge.clone()).or_insert(0);
                         if let Some(cap) = max_iterations {
                             if *count >= cap {
                                 tracing::info!(
@@ -3134,7 +3333,7 @@ async fn execute_run_body(
                     // (capped only by the workflow-level loop_detection
                     // guard).
                     let edge = (step.name.clone(), step_name.clone());
-                    let count = goto_fires.entry(edge.clone()).or_insert(0);
+                    let count = guard_counters.goto_fires.entry(edge.clone()).or_insert(0);
                     if let Some(cap) = max_iterations {
                         if *count >= cap {
                             tracing::info!(
@@ -3181,6 +3380,21 @@ async fn execute_run_body(
             }
         }
     }
+    // The last writes (final artifacts, after_run) are measured before any verdict.
+    if !paused && !cancelled_by_user && super::safety::run_terminal_stop(run).is_none() {
+        if let Some(baseline) = safety_baseline.as_ref() {
+            if let Some(reason) = safety_breach(workflow, &work_dir, baseline).await {
+                tracing::warn!(target: "kronn::workflow_safety", "{reason}");
+                let mut stop = super::safety::refusal_result(&reason);
+                stop.terminal_stop = Some(reason);
+                emit(RunEvent::StepDone {
+                    step_result: Box::new(stop.clone()),
+                });
+                run.step_results.push(stop);
+                all_success = false;
+            }
+        }
+    }
 
     // Post-step actions (CreatePr, CommentIssue, etc.) are handled by MCP tools
     // injected into agent prompts — no separate actions phase needed.
@@ -3210,7 +3424,8 @@ async fn execute_run_body(
     // `{{failed_step.*}}` so they can react to what specifically broke.
     // If a rollback step itself fails, subsequent rollback steps are
     // skipped — the run stays `Failed` regardless of rollback outcome.
-    if run.status == RunStatus::Failed && !workflow.on_failure.is_empty() {
+    let terminal_stop = super::safety::run_terminal_stop(run).is_some();
+    if run.status == RunStatus::Failed && !terminal_stop && !workflow.on_failure.is_empty() {
         let failed = run
             .step_results
             .iter()
@@ -3822,58 +4037,39 @@ pub async fn resume_run(
         let cut = request_changes_cut(&run.step_results, target_step_name.as_deref(), target_idx);
         run.step_results.truncate(cut);
 
-        // 0.8.6 (#25) — checkpoint reset. If the gate captured a
-        // checkpoint SHA on its way in, `git reset --hard` to it
-        // BEFORE re-running the target step. Makes Goto loops
-        // idempotent : the agent re-implements on the same tree
-        // state the previous iteration started on, not on top of
-        // its own previous output.
+        // The target re-runs on top of the checkpoint; verify the run's own
+        // worktree is still exactly that commit (KT-1042).
         let checkpoint_key = format!(
             "{}{}",
             super::gate_checkpoint::CHECKPOINT_STATE_PREFIX,
             gate_step_name,
         );
         if let Some(sha) = run.state.get(&checkpoint_key).cloned() {
-            if let Some(pid) = workflow.project_id.as_ref() {
-                let pid2 = pid.clone();
-                let project = match state
-                    .db
-                    .with_conn(move |conn| crate::db::projects::get_project(conn, &pid2))
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            run_id = %run.id,
-                            gate = %gate_step_name,
-                            error = %e,
-                            "project lookup failed — checkpoint reset skipped before Goto"
-                        );
-                        None
-                    }
-                };
-                if let Some(proj) = project {
-                    match super::gate_checkpoint::reset_to_checkpoint(
-                        std::path::Path::new(&proj.path),
+            match run.workspace_path.as_deref() {
+                None => tracing::warn!(
+                    run_id = %run.id,
+                    gate = %gate_step_name,
+                    sha = %sha,
+                    "checkpoint check skipped — the run has no worktree of its own",
+                ),
+                Some(worktree) => {
+                    match super::gate_checkpoint::verify_checkpoint(
+                        std::path::Path::new(worktree),
                         &sha,
                     ) {
-                        Ok(()) => {
-                            tracing::info!(
-                                run_id = %run.id,
-                                gate = %gate_step_name,
-                                sha = %sha,
-                                "checkpoint reset applied before Goto",
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                run_id = %run.id,
-                                gate = %gate_step_name,
-                                sha = %sha,
-                                error = %e,
-                                "checkpoint reset failed — continuing Goto without reset",
-                            );
-                        }
+                        Ok(()) => tracing::info!(
+                            run_id = %run.id,
+                            gate = %gate_step_name,
+                            sha = %sha,
+                            "worktree still at the checkpoint before Goto",
+                        ),
+                        Err(e) => tracing::warn!(
+                            run_id = %run.id,
+                            gate = %gate_step_name,
+                            sha = %sha,
+                            error = %e,
+                            "worktree moved since the checkpoint — continuing Goto on its current state",
+                        ),
                     }
                 }
             }
@@ -3893,6 +4089,82 @@ pub async fn resume_run(
         None,
     )
     .await
+}
+
+/// The LLM calls a root run's tree already spent, for a (re)started root: the
+/// durable tree count, its own stored counters, or for a run from before both,
+/// its history and its sub-workflow children's.
+async fn root_llm_calls_spent(
+    state: &AppState,
+    run: &WorkflowRun,
+    counters: &super::guard_counters::GuardCounters,
+) -> Result<u32> {
+    let root = run.id.clone();
+    let legacy = !super::guard_counters::GuardCounters::is_stored(&run.state);
+    let durable = state
+        .db
+        .with_conn(move |conn| {
+            let tree = crate::db::workflows::tree_llm_calls(conn, &root)?;
+            let children = if legacy {
+                crate::db::workflows::descendant_llm_calls_from_history(conn, &root)?
+            } else {
+                0
+            };
+            Ok((tree, children))
+        })
+        .await;
+    let (tree, children) = durable
+        .map_err(|error| anyhow::anyhow!("the run's LLM-call count is unreadable: {error}"))?;
+    Ok(tree.max(counters.llm_calls + children))
+}
+
+/// Raises the root's durable count to the shared total: a child's calls must
+/// survive a crash before its parent's step returns (KT-1046).
+async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
+    let Some(root) = budget.root_run_id().map(str::to_string) else {
+        return Ok(());
+    };
+    let total = budget.llm_calls();
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::raise_tree_llm_calls(conn, &root, total))
+        .await?;
+    budget
+        .recorded
+        .fetch_max(total, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// The row that stops a run whose tree spent calls the database did not take.
+fn budget_unrecorded_row(error: &anyhow::Error) -> StepResult {
+    let reason = format!(
+        "Stopped before the next step: the LLM calls already spent could not be \
+         recorded ({error}), so the budget is not known."
+    );
+    StepResult {
+        step_name: "__guard_llm_calls_unrecorded__".to_string(),
+        status: RunStatus::Failed,
+        output: reason.clone(),
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_agent: None,
+        step_model: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+        quota_wait: None,
+        terminal_stop: Some(reason),
+    }
 }
 
 pub const RUN_RESUME_HISTORY_KEY: &str = "__kronn.resume_history";
@@ -4717,6 +4989,7 @@ mod tests {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -5068,6 +5341,7 @@ mod tests {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -5200,6 +5474,7 @@ mod tests {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -9343,8 +9618,10 @@ mod tests {
         );
     }
 
+    mod gate_guard_runs;
     mod quota_wait_runs;
     mod run_pin_runs;
+    mod workflow_safety_runs;
 }
 
 #[cfg(test)]

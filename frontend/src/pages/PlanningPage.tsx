@@ -26,6 +26,7 @@ import { CollectionShell } from '../components/CollectionShell';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
 import { CollectionRowActions } from '../components/CollectionRowActions';
 import { CollectionSidebarFooter } from '../components/CollectionSidebarFooter';
+import { TaskDescription } from '../components/TaskDescription';
 import { usePersistentIdSet } from '../hooks/usePersistentIdSet';
 import type { ToastFn } from '../hooks/useToast';
 import type {
@@ -848,10 +849,7 @@ function PlanningDetailForm({
             </button>
           </div>
         )}
-      <label>
-        <span>{t('planning.description')}</span>
-        <textarea rows={7} value={description} onChange={event => setDescription(event.target.value)} />
-      </label>
+      <TaskDescription value={description} onChange={setDescription} />
       {(task.workspaces?.length ?? 0) > 0 && (
         <section className="planning-task-workspaces">
           <h3>{t('planning.workspaces')}</h3>

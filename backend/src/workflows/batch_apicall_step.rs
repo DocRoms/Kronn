@@ -354,6 +354,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -568,6 +569,7 @@ fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -603,6 +605,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }
@@ -891,6 +894,7 @@ mod tests {
                 cache_write_prompt_tokens: None,
                 last_activity: None,
                 quota_wait: None,
+                terminal_stop: None,
             },
             condition_action: None,
         };

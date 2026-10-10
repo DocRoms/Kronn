@@ -452,14 +452,20 @@ function TriageManifestPanel({
  *  (detected via `tryParseTriageManifest`), the JSON dump is replaced
  *  with a structured visualization (`TriageManifestPanel`). Non-triage
  *  Gates render the raw message verbatim as before. */
+/** Result row of the approval a workflow's Security settings require before it starts. */
+const SAFETY_APPROVAL_STEP = '__safety_approval__';
+
 function GatePanel({
   message,
   onDecide,
   t,
+  allowRequestChanges = true,
 }: {
   message: string;
   onDecide: (payload: DecideRunRequest) => Promise<void> | void;
   t: (key: string, ...args: (string | number)[]) => string;
+  // Nothing has run before a pre-start approval, so there is nothing to change.
+  allowRequestChanges?: boolean;
 }) {
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState<GateDecisionKind | null>(null);
@@ -512,16 +518,18 @@ function GatePanel({
             : <Check size={12} />}
           {t('wf.gate.approve')}
         </button>
-        <button
-          className="wf-gate-btn wf-gate-btn--changes"
-          onClick={() => handle('request_changes')}
-          disabled={submitting !== null}
-        >
-          {submitting === 'request_changes'
-            ? <Loader2 size={12} className="spin" />
-            : <RotateCcw size={12} />}
-          {t('wf.gate.requestChanges')}
-        </button>
+        {allowRequestChanges && (
+          <button
+            className="wf-gate-btn wf-gate-btn--changes"
+            onClick={() => handle('request_changes')}
+            disabled={submitting !== null}
+          >
+            {submitting === 'request_changes'
+              ? <Loader2 size={12} className="spin" />
+              : <RotateCcw size={12} />}
+            {t('wf.gate.requestChanges')}
+          </button>
+        )}
         <button
           className="wf-gate-btn wf-gate-btn--reject"
           onClick={() => handle('reject')}
@@ -945,11 +953,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
       {run.status === 'WaitingApproval' && onDecide && (() => {
         const last = run.step_results[run.step_results.length - 1];
         if (!last || last.step_kind !== 'Gate') return null;
+        const safetyApproval = last.step_name === SAFETY_APPROVAL_STEP;
         return (
           <GatePanel
-            message={last.output}
+            message={safetyApproval ? t('wf.gate.safetyApproval') : last.output}
             onDecide={onDecide}
             t={t}
+            allowRequestChanges={!safetyApproval}
           />
         );
       })()}

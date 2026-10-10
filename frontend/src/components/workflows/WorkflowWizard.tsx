@@ -27,6 +27,7 @@ import type {
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
+import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
@@ -316,7 +317,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     editWorkflow.trigger?.type !== 'Manual' ||
     editWorkflow.workspace_config ||
     editWorkflow.safety?.sandbox ||
-    editWorkflow.safety?.require_approval
+    editWorkflow.safety?.require_approval ||
+    editWorkflow.safety?.max_files != null ||
+    editWorkflow.safety?.max_lines != null
   );
   const [wizardMode, setWizardMode] = useState<'simple' | 'advanced'>(needsAdvanced ? 'advanced' : 'simple');
   const isSimple = wizardMode === 'simple';
@@ -1222,7 +1225,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     try {
       const trigger = buildTrigger();
       const wsConfig = buildWorkspaceConfig();
-      const safetyVal = (safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) ? safety : undefined;
       const concurrency = concurrencyLimit ? parseInt(concurrencyLimit) : undefined;
       const trimmedConcurrencyKey = concurrencyKey.trim();
 
@@ -1233,7 +1235,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           trigger,
           steps,
           actions: [],
-          safety: safetyVal ?? editWorkflow.safety,
+          // Always sent: an all-cleared panel must replace the stored settings.
+          safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency ?? null,
           concurrency_key: trimmedConcurrencyKey || null,
@@ -1250,7 +1253,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           trigger,
           steps,
           actions: [],
-          safety: safetyVal,
+          safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency,
           concurrency_key: trimmedConcurrencyKey || undefined,
@@ -4864,6 +4867,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <Shield size={14} className="text-muted" />
               <span className="text-md font-semibold text-secondary">{t('wiz.security')}</span>
             </div>
+            <p className="text-xs text-muted mb-4">{t('wiz.securityHint')}</p>
+            <SafetyWarnings request={{
+              workflow_id: editWorkflow?.id,
+              project_id: projectId || undefined,
+              per_run_project: !!projectScope,
+              safety,
+            }} />
 
             <div className="flex-row gap-6 mb-4">
               <label className="wf-checkbox-label">
@@ -4885,7 +4895,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   style={{ width: 90 }}
                   value={safety.max_files ?? ''}
                   onChange={e => setSafety({ ...safety, max_files: e.target.value ? parseInt(e.target.value) : null })}
-                  placeholder="illimite"
+                  placeholder={t('wiz.securityUnlimited')}
                   aria-label={t('wiz.maxFiles')}
                 />
               </div>
@@ -4897,7 +4907,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   style={{ width: 90 }}
                   value={safety.max_lines ?? ''}
                   onChange={e => setSafety({ ...safety, max_lines: e.target.value ? parseInt(e.target.value) : null })}
-                  placeholder="illimite"
+                  placeholder={t('wiz.securityUnlimited')}
                   aria-label={t('wiz.maxLines')}
                 />
               </div>
@@ -5288,14 +5298,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </div>
             );
           })}
-          {(safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) && (
+          {(safety.sandbox || safety.require_approval || safety.max_files != null || safety.max_lines != null) && (
             <div className="wf-summary-row">
-              <span className="wf-summary-label">Securite</span>
+              <span className="wf-summary-label">{t('wiz.security')}</span>
               {[
-                safety.sandbox && 'sandbox',
-                safety.require_approval && 'approbation',
-                safety.max_files && `max ${safety.max_files} fichiers`,
-                safety.max_lines && `max ${safety.max_lines} lignes`,
+                safety.sandbox && t('wiz.sandbox'),
+                safety.require_approval && t('wiz.requireApproval'),
+                safety.max_files != null && `${t('wiz.maxFiles')}: ${safety.max_files}`,
+                safety.max_lines != null && `${t('wiz.maxLines')}: ${safety.max_lines}`,
               ].filter(Boolean).join(', ')}
             </div>
           )}

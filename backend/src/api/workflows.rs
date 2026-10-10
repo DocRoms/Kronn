@@ -5044,6 +5044,74 @@ pub struct DecideRunResponse {
     pub new_status: RunStatus,
 }
 
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SafetyCheckRequest {
+    /// The saved workflow, to know whether another one runs it as a sub-workflow.
+    #[serde(default)]
+    #[ts(optional)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    /// The project is chosen at launch (multi-project workflow).
+    #[serde(default)]
+    #[ts(optional)]
+    pub per_run_project: Option<bool>,
+    pub safety: WorkflowSafety,
+}
+
+/// POST /api/workflows/safety-check — the Security settings this host would
+/// refuse at run time, so the editor and the workflow page can say so first.
+pub async fn safety_check(
+    State(state): State<AppState>,
+    Json(req): Json<SafetyCheckRequest>,
+) -> Json<ApiResponse<Vec<crate::workflows::safety::SafetyWarning>>> {
+    use crate::workflows::safety::{self, DirectoryState};
+    let project_id = req.project_id.clone();
+    let workflow_id = req.workflow_id.clone();
+    let loaded = state
+        .db
+        .with_read_conn(move |conn| {
+            let path = match project_id {
+                Some(id) => crate::db::projects::get_project(conn, &id)?.map(|p| p.path),
+                None => None,
+            };
+            let used_as_sub_workflow = match workflow_id {
+                Some(id) => crate::db::workflows::list_workflows(conn)?
+                    .iter()
+                    .any(|wf| {
+                        wf.steps.iter().chain(wf.on_failure.iter()).any(|step| {
+                            matches!(step.step_type, StepType::SubWorkflow)
+                                && step.sub_workflow_id.as_deref().map(str::trim)
+                                    == Some(id.as_str())
+                        })
+                    }),
+                None => false,
+            };
+            Ok((path, used_as_sub_workflow))
+        })
+        .await;
+    let (path, used_as_sub_workflow) = match loaded {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
+    };
+    let directory = if req.per_run_project == Some(true) {
+        DirectoryState::PerRun
+    } else {
+        let path = path.map(|path| crate::core::scanner::resolve_host_path(&path));
+        tokio::task::spawn_blocking(move || safety::directory_state(path.as_deref()))
+            .await
+            .unwrap_or(DirectoryState::Missing)
+    };
+    Json(ApiResponse::ok(safety::warnings(
+        &req.safety,
+        safety::in_container(),
+        directory,
+        used_as_sub_workflow,
+    )))
+}
+
 /// POST /api/workflows/:id/runs/:run_id/decide
 ///
 /// Apply an operator's decision to a paused (Gate) run and resume it.
@@ -5143,6 +5211,17 @@ pub async fn decide_run(
             )))
         }
     };
+
+    // Nothing has run before the pre-start approval, so there is nothing to change.
+    let awaits_safety_approval = run
+        .step_results
+        .last()
+        .is_some_and(|last| last.step_name == crate::workflows::safety::APPROVAL_STEP);
+    if awaits_safety_approval && matches!(decision, GateDecision::RequestChanges { .. }) {
+        return Json(ApiResponse::err(
+            "This run waits for its pre-start approval: approve or reject it.",
+        ));
+    }
 
     let new_status = match &decision {
         GateDecision::Reject { .. } => RunStatus::Failed,
@@ -9028,6 +9107,166 @@ mod tests {
                 "an agent's concurrency change disables: {change}"
             );
         }
+    }
+
+    /// KT-1044: a Security setting cleared by a human is stored cleared, and an
+    /// agent loosening one on an enabled workflow disables it.
+    #[tokio::test]
+    async fn cleared_security_settings_persist_and_an_agent_cannot_loosen_them_silently() {
+        let state = agent_state();
+        let all_on = serde_json::json!({
+            "sandbox": true, "require_approval": true, "max_files": 3, "max_lines": 40
+        });
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "guarded", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "safety": all_on,
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.expect("created");
+        assert!(created.enabled);
+
+        let loosen = |safety: serde_json::Value| -> UpdateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({ "safety": safety })).unwrap()
+        };
+        let all_off = serde_json::json!({
+            "sandbox": false, "require_approval": false, "max_files": null, "max_lines": null
+        });
+        let Json(by_agent) = update_as(
+            state.clone(),
+            created.id.clone(),
+            loosen(all_off.clone()),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        let by_agent = by_agent.data.expect("agent update");
+        assert!(
+            !by_agent.enabled,
+            "an agent's weaker Security settings need a human again"
+        );
+
+        let restore: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "safety": all_on, "enabled": true
+        }))
+        .unwrap();
+        let Json(_) = update_as(
+            state.clone(),
+            created.id.clone(),
+            restore,
+            WorkflowWriter::Human,
+        )
+        .await;
+        let Json(cleared) = update_as(
+            state.clone(),
+            created.id.clone(),
+            loosen(all_off),
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(cleared.success, "{:?}", cleared.error);
+        let id = created.id.clone();
+        let stored = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.enabled, "a human's own change keeps the activation");
+        assert!(!stored.safety.sandbox);
+        assert!(!stored.safety.require_approval);
+        assert_eq!(stored.safety.max_files, None);
+        assert_eq!(stored.safety.max_lines, None);
+    }
+
+    /// KT-1043: the editor and the workflow page learn which stored settings
+    /// this host would refuse before any run.
+    #[tokio::test]
+    async fn the_safety_check_reports_what_a_run_here_would_refuse() {
+        use crate::workflows::safety::SafetyWarning;
+        let state = agent_state();
+        let mut child = mk_workflow_for_export("child");
+        child.id = "wf-child".into();
+        child.project_id = None;
+        let mut parent = mk_workflow_for_export("parent");
+        parent.id = "wf-parent".into();
+        parent.project_id = None;
+        parent.steps = serde_json::from_value(serde_json::json!([
+            {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-child"}
+        ]))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &child)?;
+                crate::db::workflows::insert_workflow(conn, &parent)
+            })
+            .await
+            .unwrap();
+        let check = |body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                let Json(response) =
+                    safety_check(State(state), Json(serde_json::from_value(body).unwrap())).await;
+                response.data.expect("warnings")
+            }
+        };
+        let all = serde_json::json!({
+            "sandbox": false, "require_approval": true, "max_files": 2, "max_lines": null
+        });
+        assert_eq!(
+            check(serde_json::json!({"workflow_id": "wf-child", "safety": all})).await,
+            vec![
+                SafetyWarning::LimitsWithoutDirectory,
+                SafetyWarning::ApprovalOnSubWorkflow
+            ]
+        );
+        assert!(check(serde_json::json!({
+            "workflow_id": "wf-parent", "per_run_project": true, "safety": all
+        }))
+        .await
+        .is_empty());
+    }
+
+    /// KT-1043: the pre-start approval has no earlier step to send changes to.
+    #[tokio::test]
+    async fn the_pre_start_approval_accepts_only_approve_or_reject() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("approval");
+        wf.project_id = None;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let mut run: WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-approval", "workflow_id": wf.id, "status": "WaitingApproval",
+            "step_results": [], "tokens_used": 0, "started_at": "2026-01-01T00:00:00Z",
+            "run_type": "linear", "batch_total": 0, "batch_completed": 0,
+            "batch_failed": 0, "batch_no_response": 0, "state": {}
+        }))
+        .unwrap();
+        run.step_results
+            .push(crate::workflows::safety::approval_result());
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &run))
+            .await
+            .unwrap();
+        let payload: DecideRunRequest = serde_json::from_value(serde_json::json!({
+            "decision": "request_changes", "comment": "do it differently"
+        }))
+        .unwrap();
+        let Json(refused) = decide_run(
+            State(state.clone()),
+            Path((wf.id.clone(), "run-approval".to_string())),
+            Json(payload),
+        )
+        .await;
+        assert!(!refused.success);
+        assert!(refused.error.unwrap().contains("approve or reject"));
     }
 
     /// KT-1037: an agent cannot resume a run of a disabled workflow; a human

@@ -271,6 +271,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
+import type { SafetyCheckRequest, SafetyWarning } from '../types/generated';
 import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
@@ -2596,6 +2597,9 @@ export const workflows = {
    *  `comment` is required for request_changes (the agent needs feedback).
    *  Returns the new run status (Running on approve / request_changes,
    *  Failed on reject). The actual continuation runs in the background. */
+  /** KT-1043 — the Security settings a run on this host would refuse. */
+  safetyCheck: (request: SafetyCheckRequest) =>
+    api<SafetyWarning[]>('POST', '/workflows/safety-check', request),
   decideRun: (id: string, runId: string, payload: DecideRunRequest) =>
     api<DecideRunResponse>(
       'POST', `/workflows/${id}/runs/${runId}/decide`, payload

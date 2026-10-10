@@ -652,6 +652,7 @@ fn outcome(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }

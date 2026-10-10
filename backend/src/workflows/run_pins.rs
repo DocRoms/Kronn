@@ -926,6 +926,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn the_pin_stores_and_hashes_the_closure_it_gathered() {
+        let _data_dir = crate::core::config::TestDataDir::new();
         let skill = crate::core::skills::save_custom_skill(
             "Barrier Skill",
             "desc",

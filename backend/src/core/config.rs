@@ -23,6 +23,13 @@ pub fn config_dir() -> Result<PathBuf> {
         return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
     }
 
+    // A unit test that forgot KRONN_DATA_DIR must not touch the real install
+    // (the operator secret and the encryption key live here); one directory
+    // per process, so parallel test processes never share it either.
+    if cfg!(test) {
+        return Ok(std::env::temp_dir().join(format!("kronn-test-data-{}", std::process::id())));
+    }
+
     ProjectDirs::from("com", "kronn", "kronn")
         .map(|d| d.config_dir().to_path_buf())
         .context("Cannot determine config directory")
@@ -97,6 +104,37 @@ pub(crate) mod test_saved_access {
 
     pub(crate) fn get(agent: &crate::models::AgentType) -> Option<bool> {
         SAVED.with(|saved| saved.borrow().get(&format!("{agent:?}")).copied())
+    }
+}
+
+/// Points `KRONN_DATA_DIR` at a fresh directory for one test, restoring the
+/// previous value when dropped. Process-wide: the test must be `#[serial]`.
+#[cfg(test)]
+pub(crate) struct TestDataDir {
+    _dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestDataDir {
+    pub(crate) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("scratch data dir");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
+        Self {
+            _dir: dir,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDataDir {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+        }
     }
 }
 

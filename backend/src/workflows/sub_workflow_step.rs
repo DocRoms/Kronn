@@ -560,6 +560,7 @@ pub async fn execute_sub_workflow_step(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
         },
         condition_action,
     }
@@ -1007,6 +1008,7 @@ async fn execute_foreach(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut skipped_for_capacity = 0usize;
+    let mut foreach_terminal_stop: Option<String> = None;
     let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
@@ -1395,6 +1397,11 @@ async fn execute_foreach(
             record_foreach_done(state, parent_run_id, &step.name,
                 json!({"idx": idx, "id": item_id, "status": "Success", "child_run_id": child_run.id})).await;
         }
+        // A terminal stop ends the whole tree: no further item is dispatched.
+        if let Some(reason) = crate::workflows::safety::run_terminal_stop(&child_run) {
+            foreach_terminal_stop = Some(reason);
+            break;
+        }
     }
     let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
@@ -1472,6 +1479,7 @@ async fn execute_foreach(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: foreach_terminal_stop,
         },
         condition_action,
     }
@@ -1528,6 +1536,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }

@@ -33,6 +33,7 @@ import { CopyIdPill } from './CopyIdPill';
 import { PlanAllTasksView } from './PlanAllTasksView';
 import { PlanningProposalReview } from './PlanningProposalReview';
 import { TaskCampaignPanel } from './TaskCampaignPanel';
+import { TaskDescription } from './TaskDescription';
 import { TaskExecutionCard } from './TaskExecutionCard';
 import { TaskLaunchDialog } from './TaskLaunchDialog';
 import { orchestrationResolution } from './taskLaunchResolution';
@@ -975,7 +976,7 @@ export function DiscussionPlanPanel({
               <button type="button" onClick={closeDetail}><X size={13} /></button>
             </div>
             <h3>{selectedTask.title}</h3>
-            {selectedTask.description && <p>{selectedTask.description}</p>}
+            {selectedTask.description && <TaskDescription value={selectedTask.description} />}
             {!selectedExecutionLink && (
               <div className="plan-orch-launch">
                 {(selectedCandidate?.launchable || (!campaign && selectedRelation?.actionable)) && (

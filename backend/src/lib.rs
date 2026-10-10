@@ -2207,6 +2207,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/workflows/reenable", post(api::workflows::reenable))
         .route(
+            "/api/workflows/safety-check",
+            post(api::workflows::safety_check),
+        )
+        .route(
             "/api/workflows/bundle/human",
             post(api::bundle::create_human_bundle),
         )

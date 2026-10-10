@@ -140,6 +140,7 @@ async fn start(state: crate::AppState, id: &str) {
 #[tokio::test]
 #[serial_test::serial]
 async fn batch_children_start_on_the_pinned_skills_and_directives_even_after_a_restart() {
+    let _data_dir = crate::core::config::TestDataDir::new();
     let project = tempfile::tempdir().unwrap();
     let project_path = project.path().to_str().unwrap().to_owned();
     let prompts = Arc::new(Mutex::new(Vec::new()));

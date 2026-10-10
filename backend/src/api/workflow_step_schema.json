@@ -186,7 +186,7 @@
       ],
       "optional": [
         "gate_request_changes_target (step name to loop back to on 'request changes')",
-        "gate_checkpoint_before (auto-commit before the gate)",
+        "gate_checkpoint_before (commit the run worktree before the gate; isolated runs only)",
         "gate_auto_approve_secs"
       ],
       "example": {

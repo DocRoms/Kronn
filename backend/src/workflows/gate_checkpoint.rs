@@ -1,20 +1,22 @@
 //! 0.8.6 (#25) — Git checkpoint commit for Gate steps.
 //!
 //! `gate_checkpoint_before: Some(true)` on a Gate step instructs the
-//! runner to `git add -A && git commit` the project working tree
-//! BEFORE pausing in `WaitingApproval`. The resulting SHA is stored
-//! in the run's `state` HashMap under `checkpoint:<gate_name>` so
-//! that — when the operator picks "Request Changes" and the runner
-//! resumes via Goto — we can `git reset --hard <sha>` BEFORE
-//! re-running the target step. The net effect is **idempotent
-//! Goto loops** : the agent re-implements on a clean tree, not on
-//! top of its previous cycle's partial output.
+//! runner to `git add -A && git commit` the run's isolated worktree
+//! BEFORE pausing in `WaitingApproval`. A run without its own worktree
+//! (shared workspace mode) gets no checkpoint: the sweep would commit
+//! the operator's own work on their branch (KT-1042). The resulting SHA
+//! is stored in the run's `state` HashMap under `checkpoint:<gate_name>`.
+//! The checkpoint captures the POST-implementation state the operator
+//! reviews: on "Request Changes" the target step re-runs on top of that
+//! committed work, it does not go back to the tree from before the
+//! implementation. The resume first verifies the worktree is still
+//! exactly at the checkpoint (see [`verify_checkpoint`]).
 //!
 //! Why a side-file module rather than inlining in gate_step.rs :
 //!   1. Gate execution is sync-render-only (no I/O). Keeping the
 //!      git-shelling out of that path preserves its testability.
-//!   2. The reset path lives in `runner::resume_run`, several modules
-//!      away from gate_step ; sharing the helper here keeps both
+//!   2. The verification lives in `runner::resume_run`, several modules
+//!      away from gate_step ; sharing the helpers here keeps both
 //!      callsites symmetric.
 //!
 //! All git invocations go through the local `git_cmd` helper (never
@@ -54,7 +56,7 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
 /// caller cannot fall back to the caller's `.git`. Every git invocation in
 /// this module — production and test alike — must go through this, never
 /// `sync_cmd("git")` directly.
-fn git_cmd(project_path: &Path) -> std::process::Command {
+pub(crate) fn git_cmd(project_path: &Path) -> std::process::Command {
     let mut cmd = crate::core::cmd::git_cmd();
     cmd.current_dir(project_path);
     for var in GIT_ENV_OVERRIDES {
@@ -75,7 +77,7 @@ pub enum CheckpointOutcome {
     /// SHA captured ; safe to proceed into `WaitingApproval`.
     Committed { sha: String },
     /// Project_path exists but isn't a git repo. Logged + skipped ;
-    /// the run continues without a checkpoint (no reset available
+    /// the run continues without a checkpoint (nothing to verify
     /// later on Goto, but no error either — this is opt-in feature).
     NotAGitRepo,
     /// Pre-condition failed : the index already has staged changes
@@ -117,7 +119,7 @@ fn has_staged_changes(project_path: &Path) -> bool {
 ///
 /// `--allow-empty` is intentional : a Gate that fires with NO file
 /// changes since the prior step should still get a checkpoint so the
-/// reset path has a stable anchor.
+/// resume has a stable anchor to verify.
 pub fn commit_checkpoint(
     project_path: &Path,
     gate_step_name: &str,
@@ -177,40 +179,75 @@ pub fn commit_checkpoint(
     }
 }
 
-/// Reset hard to a previously-captured checkpoint SHA. Used by the
-/// runner BEFORE re-firing the Goto target step on a Gate's
-/// "Request Changes" decision. Destructive — caller must already
-/// have verified the SHA came from the run's own `state` map (no
-/// arbitrary-SHA reset).
-pub fn reset_to_checkpoint(project_path: &Path, sha: &str) -> Result<(), String> {
-    // TD-20260709 (C) — this can run HOURS after the checkpoint, on a tree a
-    // human or another run may have touched since. Uncommitted changes are
-    // not ours to destroy: refuse, the caller degrades gracefully.
-    let st = git_cmd(project_path)
+/// Takes the Gate checkpoint in the run's own worktree and records its SHA,
+/// or returns the notice to show the operator when none was taken.
+pub fn checkpoint_gate(
+    run_worktree: Option<&str>,
+    run_id: &str,
+    run_state: &mut std::collections::HashMap<String, String>,
+    gate_step_name: &str,
+) -> Option<String> {
+    let key = format!("{CHECKPOINT_STATE_PREFIX}{gate_step_name}");
+    // A failed checkpoint must not leave an earlier cycle's SHA to verify against.
+    run_state.remove(&key);
+    let Some(worktree) = run_worktree else {
+        return Some(SHARED_MODE_NOTICE.to_string());
+    };
+    match commit_checkpoint(Path::new(worktree), gate_step_name, run_id) {
+        CheckpointOutcome::Committed { sha } => {
+            run_state.insert(key, sha);
+            None
+        }
+        CheckpointOutcome::NotAGitRepo => Some(format!(
+            "Checkpoint not taken: the run's worktree `{worktree}` is not a git repository."
+        )),
+        CheckpointOutcome::StagedChangesPresent => {
+            Some("Checkpoint not taken: the run's worktree has staged changes.".to_string())
+        }
+        CheckpointOutcome::GitCommandFailed { stderr } => Some(format!(
+            "Checkpoint not taken: git failed in the run's worktree: {}",
+            stderr.trim()
+        )),
+    }
+}
+
+/// Shown on a Gate whose run works in the operator's checkout.
+pub const SHARED_MODE_NOTICE: &str = "Checkpoint not taken: gate_checkpoint_before only applies \
+to a run with its own worktree (workspace isolation). In shared mode it would commit the \
+operator's checkout.";
+
+/// Checks, before "Request Changes" re-runs its target, that the run's
+/// worktree is still exactly the checkpoint: HEAD on its SHA and a clean
+/// tree. Nothing is reset; a mismatch means someone else changed it.
+pub fn verify_checkpoint(worktree: &Path, sha: &str) -> Result<(), String> {
+    // The run is paused between its checkpoint and this check, so any commit
+    // past the checkpoint is someone else's.
+    let head = git_cmd(worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("git rev-parse spawn failed: {e}"))?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if head != sha {
+        return Err(format!(
+            "HEAD is `{head}`, no longer the checkpoint `{sha}`: the branch received commits \
+             not made by this run"
+        ));
+    }
+    let st = git_cmd(worktree)
         .args(["status", "--porcelain"])
         .output()
         .map_err(|e| format!("git status spawn failed: {e}"))?;
     if !st.status.success() {
         return Err(format!(
-            "git status failed before reset: {}",
+            "git status failed: {}",
             String::from_utf8_lossy(&st.stderr)
         ));
     }
     if !st.stdout.is_empty() {
         return Err(format!(
-            "main tree has uncommitted changes not from this run — refusing `git reset --hard` \
-             (TD-20260709). Dirty entries:\n{}",
+            "the worktree has uncommitted changes not from this run (TD-20260709). \
+             Dirty entries:\n{}",
             String::from_utf8_lossy(&st.stdout).trim_end()
-        ));
-    }
-    let r = git_cmd(project_path)
-        .args(["reset", "--hard", sha])
-        .output()
-        .map_err(|e| format!("git reset spawn failed: {e}"))?;
-    if !r.status.success() {
-        return Err(format!(
-            "git reset --hard {sha} failed: {}",
-            String::from_utf8_lossy(&r.stderr)
         ));
     }
     Ok(())
@@ -373,46 +410,96 @@ mod tests {
     }
 
     #[test]
-    fn reset_to_checkpoint_rolls_back_subsequent_commits() {
+    fn verify_refuses_when_the_branch_received_commits_after_the_checkpoint() {
         let tmp = tmp_repo();
-        // Take a checkpoint, then mutate + commit, then reset.
         let sha = match commit_checkpoint(&tmp, "g1", "run-1") {
             CheckpointOutcome::Committed { sha } => sha,
             other => panic!("expected Committed, got {other:?}"),
         };
-        fs::write(tmp.join("oops.txt"), "after\n").unwrap();
+        fs::write(tmp.join("operator.txt"), "operator commit\n").unwrap();
         git_cmd(&tmp).args(["add", "."]).output().unwrap();
         git_cmd(&tmp)
-            .args(["commit", "-q", "-m", "after-checkpoint"])
+            .args(["commit", "-q", "-m", "operator work after the checkpoint"])
             .output()
             .unwrap();
+        let head_before = git_head(&tmp);
 
-        reset_to_checkpoint(&tmp, &sha).expect("reset must succeed");
-        // `oops.txt` is gone, HEAD is back at the checkpoint SHA.
-        assert!(
-            !tmp.join("oops.txt").exists(),
-            "post-reset file must be removed"
-        );
-        assert_eq!(
-            git_head(&tmp),
-            sha,
-            "HEAD must point at the checkpoint sha after reset",
-        );
+        let err = verify_checkpoint(&tmp, &sha).unwrap_err();
+        assert!(err.contains("not made by this run"), "{err}");
+        assert_eq!(git_head(&tmp), head_before, "the foreign commit stays");
+        assert!(tmp.join("operator.txt").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn reset_refuses_when_tree_has_uncommitted_changes() {
-        // TD-20260709 (C): a deferred reset must never destroy WIP the run
-        // didn't create.
+    fn verify_succeeds_when_head_is_the_clean_checkpoint() {
+        let tmp = tmp_repo();
+        let sha = match commit_checkpoint(&tmp, "g1", "run-1") {
+            CheckpointOutcome::Committed { sha } => sha,
+            other => panic!("expected Committed, got {other:?}"),
+        };
+        verify_checkpoint(&tmp, &sha).expect("the worktree is the checkpoint");
+        assert_eq!(git_head(&tmp), sha);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn checkpoint_gate_without_a_worktree_commits_nothing_and_drops_a_stale_sha() {
+        let mut run: crate::models::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-shared", "workflow_id": "wf", "status": "Running",
+            "step_results": [], "tokens_used": 0, "started_at": chrono::Utc::now(),
+        }))
+        .unwrap();
+        run.state
+            .insert(format!("{CHECKPOINT_STATE_PREFIX}review"), "a".repeat(40));
+        let notice = checkpoint_gate(None, &run.id, &mut run.state, "review").expect("a notice");
+        assert!(notice.contains("shared mode"), "{notice}");
+        assert!(run.state.is_empty(), "{:?}", run.state);
+    }
+
+    #[test]
+    fn checkpoint_gate_commits_in_the_run_worktree_only() {
+        let worktree = tmp_repo();
+        fs::write(worktree.join("agent-output.md"), "run output\n").unwrap();
+        let mut run: crate::models::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-isolated", "workflow_id": "wf", "status": "Running",
+            "step_results": [], "tokens_used": 0, "started_at": chrono::Utc::now(),
+            "workspace_path": worktree.to_string_lossy(),
+        }))
+        .unwrap();
+        assert_eq!(
+            checkpoint_gate(
+                run.workspace_path.as_deref(),
+                &run.id,
+                &mut run.state,
+                "review"
+            ),
+            None
+        );
+        let sha = run
+            .state
+            .get(&format!("{CHECKPOINT_STATE_PREFIX}review"))
+            .unwrap();
+        assert_eq!(&git_head(&worktree), sha);
+        assert!(
+            git_status(&worktree).is_empty(),
+            "the run's output was committed"
+        );
+        let _ = fs::remove_dir_all(&worktree);
+    }
+
+    #[test]
+    fn verify_refuses_when_tree_has_uncommitted_changes() {
+        // TD-20260709 (C): WIP the run didn't create is reported, never
+        // touched.
         let tmp = tmp_repo();
         let sha = match commit_checkpoint(&tmp, "g1", "run-1") {
             CheckpointOutcome::Committed { sha } => sha,
             other => panic!("expected Committed, got {other:?}"),
         };
         fs::write(tmp.join("wip.txt"), "human work in progress").unwrap();
-        let err = reset_to_checkpoint(&tmp, &sha).unwrap_err();
+        let err = verify_checkpoint(&tmp, &sha).unwrap_err();
         assert!(
             err.contains("uncommitted changes"),
             "must name the refusal reason: {err}"
@@ -426,10 +513,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_to_checkpoint_returns_err_on_bogus_sha() {
+    fn verify_returns_err_on_bogus_sha() {
         let tmp = tmp_repo();
-        let err = reset_to_checkpoint(&tmp, "deadbeefnotreal").unwrap_err();
-        assert!(err.contains("git reset --hard"));
+        let err = verify_checkpoint(&tmp, "deadbeefnotreal").unwrap_err();
+        assert!(err.contains("no longer the checkpoint"), "{err}");
         let _ = fs::remove_dir_all(&tmp);
     }
 

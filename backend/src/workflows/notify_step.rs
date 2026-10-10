@@ -269,6 +269,7 @@ pub async fn execute_notify_step_with_policy(
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -340,6 +341,7 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cache_write_prompt_tokens: None,
             last_activity: None,
             quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }

@@ -147,7 +147,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **RunEvent** — SSE event enum for live workflow run progress. Variants: `StepStart { step_name, step_index }`, `StepDone { step_result }`, `RunDone { status }`, `RunError { message }`. Frontend uses these to display a live progress panel with animated step indicators.
 
-**WorkflowSafety** — Guards: sandbox mode (Docker), max files/lines changed, approval gate, concurrency limit.
+**WorkflowSafety** — A workflow's Security settings, enforced by the runner (`backend/src/workflows/safety.rs`): sandbox (refuses to start outside a container), a human approval before any worktree, hook or step (not available to agents' bridge tokens), and max files/lines the run may change in its git working tree, measured by content against the tree before its hooks.
 
 **AgentSettings** — Per-step agent configuration override: `model`, `reasoning_effort`, `max_tokens`. Allows different steps to use different agent configurations.
 

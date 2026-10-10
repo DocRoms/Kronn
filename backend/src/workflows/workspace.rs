@@ -750,6 +750,21 @@ impl Workspace {
         hooks: Option<WorkspaceHooks>,
         base_ref: Option<&str>,
     ) -> Result<Self> {
+        let ws =
+            Self::create_before_hooks(repo_path, workflow_name, run_id, hooks, base_ref).await?;
+        ws.after_create().await?;
+        Ok(ws)
+    }
+
+    /// [`Self::create`] without its `after_create` hook, so the caller can act
+    /// on the fresh checkout (record its state) before project commands run.
+    pub async fn create_before_hooks(
+        repo_path: &Path,
+        workflow_name: &str,
+        run_id: &str,
+        hooks: Option<WorkspaceHooks>,
+        base_ref: Option<&str>,
+    ) -> Result<Self> {
         let _sanitized_name = sanitize_name(workflow_name);
 
         let branch = build_branch_name(workflow_name, run_id);
@@ -828,17 +843,17 @@ impl Workspace {
         // the project's MCP servers and its strict MCP config.
         crate::core::worktree::copy_agent_configs(repo_path, &worktree_path);
 
-        let ws = Self {
+        Ok(Self {
             path: worktree_path,
             branch,
             repo_path: repo_path.to_path_buf(),
             hooks,
-        };
+        })
+    }
 
-        // Run after_create hook
-        ws.run_hook("after_create").await?;
-
-        Ok(ws)
+    /// Run the after_create hook.
+    pub async fn after_create(&self) -> Result<()> {
+        self.run_hook("after_create").await
     }
 
     /// 0.7.0 Phase 4 — attach to a previously-created worktree. Used on
