@@ -486,6 +486,16 @@
   color: var(--kr-warning);
 }
 
+.arp-outcome {
+  margin-left: 6px;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-text-muted);
+}
+
+.arp-steps-table tbody tr[data-outcome="accepted"] .arp-outcome {
+  color: var(--kr-success);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════
    Pagination button (+ N plus anciens / – Réduire).
    ═══════════════════════════════════════════════════════════════════════ */

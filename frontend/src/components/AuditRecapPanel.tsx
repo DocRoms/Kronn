@@ -5,6 +5,7 @@ import { ClipboardList, X, ChevronRight, ChevronDown } from 'lucide-react';
 import { AGENT_LABELS } from '../lib/constants';
 import type { AuditTokenBreakdown } from '../types/generated';
 import { tokenBreakdownTitle } from '../lib/audit-cost';
+import { auditStepOutcome } from '../lib/audit-step-outcome';
 import './AuditRecapPanel.css';
 
 type Step = {
@@ -16,6 +17,10 @@ type Step = {
   cli_success: boolean;
   step_warning?: string | null;
   step_repaired_from_template: boolean;
+  unchanged?: boolean;
+  accepted_at?: string | null;
+  accepted_by?: string | null;
+  accepted_reason?: string | null;
   /** The fresh headline's parts and the total with cache. */
   breakdown?: AuditTokenBreakdown | null;
 };
@@ -411,17 +416,23 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
                 </thead>
                 <tbody>
                   {sortedLatestSteps.map(step => {
-                    const failed = !step.cli_success || !!step.step_warning;
+                    const outcome = auditStepOutcome(step);
                     return (
                       <tr
                         key={step.step_index}
-                        data-failed={failed ? 'true' : 'false'}
+                        data-failed={outcome === 'failed' ? 'true' : 'false'}
+                        data-outcome={outcome}
                         data-testid={`audit-recap-latest-row-${step.step_index}`}
                         title={step.step_warning ?? undefined}
                       >
                         <td className="arp-num">{step.step_index}</td>
                         <td>
                           {step.file_label}
+                          {(outcome === 'unchanged' || outcome === 'accepted') && (
+                            <span className="arp-outcome" title={step.accepted_reason ?? undefined}>
+                              {t(`projects.docAi.auditRecap.outcome.${outcome}`)}
+                            </span>
+                          )}
                           {step.step_repaired_from_template && (
                             <span className="arp-repair-icon" title={t('projects.docAi.auditRecap.repairedHint')}>🔧</span>
                           )}
@@ -609,17 +620,23 @@ export default function AuditRecapPanel({ projectId, refreshTrigger, selectedRun
                               </thead>
                               <tbody>
                                 {sortedSteps.map(s => {
-                                  const sf = !s.cli_success || !!s.step_warning;
+                                  const outcome = auditStepOutcome(s);
                                   return (
                                     <tr
                                       key={s.step_index}
-                                      data-failed={sf ? 'true' : 'false'}
+                                      data-failed={outcome === 'failed' ? 'true' : 'false'}
+                                      data-outcome={outcome}
                                       data-testid={`audit-recap-row-${s.step_index}`}
                                       title={s.step_warning ?? undefined}
                                     >
                                       <td className="arp-num">{s.step_index}</td>
                                       <td>
                                         {s.file_label}
+                                        {(outcome === 'unchanged' || outcome === 'accepted') && (
+                                          <span className="arp-outcome" title={s.accepted_reason ?? undefined}>
+                                            {t(`projects.docAi.auditRecap.outcome.${outcome}`)}
+                                          </span>
+                                        )}
                                         {s.step_repaired_from_template && (
                                           <span
                                             className="arp-repair-icon"

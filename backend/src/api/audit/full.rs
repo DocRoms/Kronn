@@ -129,21 +129,40 @@ impl Drop for AuditDropGuard {
                     let tracker = self.tracker.clone();
                     let project_id = self.project_id.clone();
                     handle.spawn(async move {
-                        match db.with_conn(move |conn| {
-                            crate::db::audit_runs::mark_interrupted(
-                                conn, &run_id, "audit pipeline dropped before completion",
-                            )
-                        }).await {
-                            Ok(()) => {
+                        let mut last_error = None;
+                        for delay_ms in DROP_GUARD_RETRY_DELAYS_MS {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            let run_id = run_id.clone();
+                            match db.with_conn(move |conn| {
+                                crate::db::audit_runs::mark_interrupted(
+                                    conn, &run_id, "audit pipeline dropped before completion",
+                                )
+                            }).await {
+                                Ok(()) => {
+                                    last_error = None;
+                                    break;
+                                }
+                                Err(e) => last_error = Some(e),
+                            }
+                        }
+                        match last_error {
+                            None => {
                                 if leased {
                                     if let Ok(mut t) = tracker.lock() {
                                         t.release_lease(&project_id);
                                     }
                                 }
                             }
-                            Err(e) => tracing::error!(
-                                "Drop-guard failed to finalize audit run: {e} — lease kept (fail-closed) until restart"
-                            ),
+                            Some(e) => {
+                                tracing::error!(
+                                    "Drop-guard failed to finalize audit run: {e} — lease kept (fail-closed), offered to the cleanup action"
+                                );
+                                if leased {
+                                    if let Ok(mut t) = tracker.lock() {
+                                        t.orphaned_leases.insert(project_id.clone());
+                                    }
+                                }
+                            }
                         }
                     });
                 } else {
@@ -159,6 +178,10 @@ impl Drop for AuditDropGuard {
         }
     }
 }
+
+/// Delays before each attempt to settle a dropped run: one immediate try, then
+/// two retries before its lease is reported orphaned (KT-1134).
+const DROP_GUARD_RETRY_DELAYS_MS: [u64; 3] = [0, 500, 2_000];
 
 /// Wait (bounded) for the owning audit worker to acknowledge a cancel.
 ///
@@ -195,6 +218,43 @@ async fn wait_for_cancel_ack(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// KT-1134 — stop every agent still answering in a validation discussion linked
+/// to one of the project's audit runs: it writes `docs/`, which the audit
+/// starting now owns. Returns the discussions stopped.
+pub(crate) async fn stop_validation_agents(state: &AppState, project_id: &str) -> Vec<String> {
+    let pid = project_id.to_string();
+    let linked = state
+        .db
+        .with_conn(move |conn| {
+            let mut linked = Vec::new();
+            for id in crate::db::audit_runs::validation_discussion_ids(conn, &pid)? {
+                let active = crate::db::agent_dispatch::has_active_for_discussion(conn, &id)?;
+                linked.push((id, active));
+            }
+            Ok(linked)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Could not list the validation agents of project {project_id}: {e}");
+            Vec::new()
+        });
+    let stopped: Vec<String> = {
+        let registry = state.cancel_registry.lock().ok();
+        linked
+            .into_iter()
+            .filter(|(id, active)| {
+                *active || registry.as_ref().is_some_and(|map| map.contains_key(id))
+            })
+            .map(|(id, _)| id)
+            .collect()
+    };
+    for id in &stopped {
+        let _ = crate::api::discussions::stop_agent(State(state.clone()), Path(id.clone())).await;
+        tracing::warn!("Stopped the validation agent of discussion {id}: an audit of project {project_id} starts");
+    }
+    stopped
 }
 
 /// One-shot SSE error response, used for every pre-launch refusal (bad
@@ -277,6 +337,7 @@ pub async fn full_audit(
     };
 
     let resume_run_id_req = req.resume_run_id.clone();
+    let retry_steps_req = req.retry_steps.clone();
     let requested_kind = req.kind;
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
@@ -337,6 +398,14 @@ pub async fn full_audit(
         // KT-1130 — the carried steps the predecessor recorded `unchanged`.
         let mut already_unchanged_steps: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
+        // KT-1131 — carried steps a human accepted, with who and why.
+        let mut accepted_rows: Vec<AcceptedStep> = Vec::new();
+        if retry_steps_req.is_some() && resume_run_id_req.is_none() {
+            yield Event::default().event("error").data(
+                serde_json::json!({ "error": "retry_steps needs resume_run_id: only a step of an interrupted run can be retried alone" }).to_string(),
+            );
+            return;
+        }
         let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
             let fetched = db.with_conn({
                 let run_id = run_id.clone();
@@ -366,6 +435,7 @@ pub async fn full_audit(
                 Ok((plan, steps)) => {
                     already_succeeded_steps = already_succeeded_step_indices(&steps);
                     already_unchanged_steps = already_unchanged_step_indices(&steps);
+                    accepted_rows = accepted_steps(&steps);
                     plan
                 }
                 Err(msg) => {
@@ -418,6 +488,19 @@ pub async fn full_audit(
             }
         } else { Default::default() };
         for step in documentary_recovery.keys() { already_succeeded_steps.remove(step); }
+        accepted_rows.retain(|row| already_succeeded_steps.contains(&row.step));
+        let retry_only: Option<std::collections::BTreeSet<u32>> = match retry_steps_req.as_deref() {
+            None => None,
+            Some(requested) => match retry_selection(requested, total_steps as u32, &already_succeeded_steps) {
+                Ok(only) => Some(only),
+                Err(msg) => {
+                    yield Event::default().event("error").data(
+                        serde_json::json!({ "error": msg }).to_string(),
+                    );
+                    return;
+                }
+            },
+        };
         // A checkpoint beyond the pipeline is a corrupt/mismatched row, not a
         // request to skip everything — REFUSE it rather than clamp (a clamp
         // to total_steps would silently jump to validation-only on a run
@@ -486,6 +569,25 @@ pub async fn full_audit(
             }
         }
 
+        // KT-1131 — a single-step retry keeps the run's other failures on record.
+        if let Some(only) = retry_only.as_ref() {
+            let unretried: Vec<u32> = (1..=total_steps as u32)
+                .filter(|step| !already_succeeded_steps.contains(step) && !only.contains(step))
+                .collect();
+            let run_id = audit_run_id.clone();
+            let from_run_id = resume_run_id_req.clone().unwrap_or_default();
+            if let Err(e) = db.with_conn(move |conn| {
+                crate::db::audit_runs::carry_over_failed_steps(conn, &run_id, &from_run_id, &unretried)
+            }).await {
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!("Could not record the steps this retry leaves failed (db): {e} — launch refused.")
+                    }).to_string(),
+                );
+                return;
+            }
+        }
+
         // KT-1021 — what this run audits; a resume says whether the sources
         // moved since the run it continues.
         {
@@ -522,6 +624,10 @@ pub async fn full_audit(
                 Err(e) => tracing::warn!("Could not record the audit run's provenance: {e}"),
             }
         }
+
+        // KT-1134 — a validation agent of an earlier run writes docs/ too: it
+        // stops before this run touches them.
+        stop_validation_agents(&state_for_validation, &project_id).await;
 
         // CONTRACTUAL revocation (Codex A5): this run is about to mutate
         // docs/, so any prior "Validated" state is stale the moment we
@@ -893,7 +999,8 @@ pub async fn full_audit(
             already_succeeded_steps.iter().copied(),
         )
         .with_founding_step(founding_step_index(&steps))
-        .with_carried_unchanged(already_unchanged_steps.iter().copied());
+        .with_carried_unchanged(already_unchanged_steps.iter().copied())
+        .with_carried_accepted(accepted_rows.iter().map(|row| row.step));
         // The documentary-optimization gate (an invented path) blocks the
         // validation of the whole run — it is a run-level verdict, not a step's.
         let mut docs_blocked: bool = false;
@@ -1041,6 +1148,18 @@ pub async fn full_audit(
                 yield Event::default().event("step_skipped").data(
                     serde_json::json!({
                         "step": step, "total": total_steps, "file": file_label, "reason": "resume",
+                    }).to_string()
+                );
+                continue;
+            }
+            // KT-1131 — a failed step the user did not ask to retry stays failed.
+            if retry_only.as_ref().is_some_and(|only| !only.contains(&(step as u32))) {
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
+                }
+                yield Event::default().event("step_skipped").data(
+                    serde_json::json!({
+                        "step": step, "total": total_steps, "file": file_label, "reason": "not_retried",
                     }).to_string()
                 );
                 continue;
@@ -2587,6 +2706,24 @@ pub async fn full_audit(
             unchanged_steps_block(&unchanged_listed, total_steps as u32, &language),
             super::helpers::human_references_block(&human_references, &language)
         );
+        let accepted_listed: Vec<super::helpers::AcceptedStepLine> = accepted_rows
+            .iter()
+            .filter(|row| progress.accepted_steps().contains(&row.step))
+            .map(|row| super::helpers::AcceptedStepLine {
+                step: row.step,
+                file: steps
+                    .get(row.step as usize - 1)
+                    .map(|s| step_file_label(s).to_string())
+                    .unwrap_or_default(),
+                by: row.by.clone(),
+                reason: row.reason.clone(),
+                failure: row.failure.clone(),
+            })
+            .collect();
+        let validation_prompt = format!(
+            "{}{validation_prompt}",
+            super::helpers::accepted_steps_block(&accepted_listed, total_steps as u32, &language)
+        );
 
         let now = Utc::now();
         let discussion_id = Uuid::new_v4().to_string();
@@ -2758,6 +2895,9 @@ pub async fn full_audit(
         }
 
         // ── Terminal status durably persisted — side effects may fire. ──
+        // Progress goes first: the validation agent below is held back while an
+        // audit of the project shows progress (KT-1134).
+        if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
         let disc_id: Option<String> = pending_validation.as_ref().map(|(d, _)| d.id.clone());
         if let Some(vdisc) = disc_id.clone() {
             yield Event::default().event("validation_created").data(
@@ -2774,10 +2914,6 @@ pub async fn full_audit(
                 ).await;
             });
         }
-
-        // Audit fully complete — drop progress so UI polling can stop and
-        // `GET /audit-status` reports `None`.
-        if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
 
         // The row reached its terminal status — the guard has nothing left
         // to settle.
@@ -2873,6 +3009,8 @@ pub(crate) struct RunProgress {
     succeeded: std::collections::BTreeSet<u32>,
     /// The subset of `succeeded` whose target was already up to date (KT-1130).
     unchanged: std::collections::BTreeSet<u32>,
+    /// The subset of `succeeded` a human accepted as it stands (KT-1131).
+    accepted: std::collections::BTreeSet<u32>,
     /// Steps that ran THIS run and did not succeed, in execution order.
     failed: Vec<u32>,
     /// The step producing the entry point (`founding_step_index`), when the
@@ -2891,6 +3029,7 @@ impl RunProgress {
                 .filter(|step| (1..=total_steps).contains(step))
                 .collect(),
             unchanged: std::collections::BTreeSet::new(),
+            accepted: std::collections::BTreeSet::new(),
             failed: Vec::new(),
             founding_step: None,
         }
@@ -2906,6 +3045,16 @@ impl RunProgress {
         self
     }
 
+    /// Carried steps a human accepted.
+    pub(crate) fn with_carried_accepted(mut self, carried: impl IntoIterator<Item = u32>) -> Self {
+        let carried: Vec<u32> = carried
+            .into_iter()
+            .filter(|step| self.succeeded.contains(step))
+            .collect();
+        self.accepted.extend(carried);
+        self
+    }
+
     /// Name the step producing the entry point (`founding_step_index`).
     pub(crate) fn with_founding_step(mut self, step: Option<u32>) -> Self {
         self.founding_step = step;
@@ -2917,6 +3066,7 @@ impl RunProgress {
     pub(crate) fn record_success(&mut self, step: u32) -> u32 {
         self.failed.retain(|failed| *failed != step);
         self.unchanged.remove(&step);
+        self.accepted.remove(&step);
         self.succeeded.insert(step);
         self.succeeded_count()
     }
@@ -2939,7 +3089,13 @@ impl RunProgress {
     pub(crate) fn invalidate_success(&mut self, step: u32) {
         self.succeeded.remove(&step);
         self.unchanged.remove(&step);
+        self.accepted.remove(&step);
         self.record_failure(step);
+    }
+
+    /// Steps a human accepted, in step order.
+    pub(crate) fn accepted_steps(&self) -> Vec<u32> {
+        self.accepted.iter().copied().collect()
     }
 
     /// Steps that ended `unchanged`, in step order.
@@ -2948,18 +3104,20 @@ impl RunProgress {
     }
 
     /// The run's per-step outcomes as stored in `audit_runs.step_outcomes_json`:
-    /// requested = succeeded + unchanged + failed (failed counts every step not
-    /// done, the ones that never ran included).
+    /// requested = succeeded + unchanged + accepted + failed (failed counts
+    /// every step not done, the ones that never ran included).
     pub(crate) fn outcomes_json(&self) -> String {
         let succeeded: Vec<u32> = self
             .succeeded
-            .difference(&self.unchanged)
+            .iter()
+            .filter(|step| !self.unchanged.contains(step) && !self.accepted.contains(step))
             .copied()
             .collect();
         serde_json::json!({
             "requested": (1..=self.total_steps).collect::<Vec<u32>>(),
             "succeeded": succeeded,
             "unchanged": self.unchanged_steps(),
+            "accepted": self.accepted_steps(),
             "failed": self.steps_to_redo(),
         })
         .to_string()
@@ -3141,9 +3299,60 @@ pub(crate) fn already_succeeded_step_indices(
 ) -> std::collections::HashSet<u32> {
     steps
         .iter()
-        .filter(|s| s.cli_success && s.ended_at.is_some())
+        .filter(|s| (s.cli_success && s.ended_at.is_some()) || s.accepted_at.is_some())
         .map(|s| s.step_index)
         .collect()
+}
+
+/// KT-1131 — a carried step a human accepted as it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AcceptedStep {
+    pub step: u32,
+    pub by: String,
+    pub reason: Option<String>,
+    /// Why the step had failed, kept on its row.
+    pub failure: Option<String>,
+}
+
+/// KT-1131 — the predecessor's steps a human accepted.
+pub(crate) fn accepted_steps(steps: &[crate::models::AuditRunStep]) -> Vec<AcceptedStep> {
+    steps
+        .iter()
+        .filter(|s| s.accepted_at.is_some())
+        .map(|s| AcceptedStep {
+            step: s.step_index,
+            by: s.accepted_by.clone().unwrap_or_default(),
+            reason: s.accepted_reason.clone(),
+            failure: s.step_warning.clone(),
+        })
+        .collect()
+}
+
+/// KT-1131 — the steps a single-step retry runs: each one must exist and must
+/// not be done already (succeeded, unchanged or accepted).
+pub(crate) fn retry_selection(
+    requested: &[u32],
+    total_steps: u32,
+    done: &std::collections::HashSet<u32>,
+) -> Result<std::collections::BTreeSet<u32>, String> {
+    if requested.is_empty() {
+        return Err("retry_steps is empty: name the failed step to retry".into());
+    }
+    let mut only = std::collections::BTreeSet::new();
+    for step in requested {
+        if !(1..=total_steps).contains(step) {
+            return Err(format!(
+                "step {step} is not part of this {total_steps}-step audit"
+            ));
+        }
+        if done.contains(step) {
+            return Err(format!(
+                "step {step} is already done: only a failed step can be retried"
+            ));
+        }
+        only.insert(*step);
+    }
+    Ok(only)
 }
 
 /// KT-1130 — the subset of `already_succeeded_step_indices` that ended
@@ -3395,6 +3604,32 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
     Ok(())
 }
 
+/// KT-1134 — delete the validation discussion linked to `run_id`, when it
+/// belongs to the project. Earlier runs' validations are never touched.
+pub(crate) fn delete_run_validation_discussion(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    run_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(run) = crate::db::audit_runs::get_by_id(conn, run_id)? else {
+        return Ok(None);
+    };
+    let Some(disc_id) = run
+        .validation_discussion_id
+        .filter(|_| run.project_id == project_id)
+    else {
+        return Ok(None);
+    };
+    let owned = crate::db::discussions::get_discussion(conn, &disc_id)?
+        .is_some_and(|disc| disc.project_id.as_deref() == Some(project_id));
+    if !owned {
+        return Ok(None);
+    }
+    crate::db::discussions::delete_discussion(conn, &disc_id)?;
+    tracing::info!("Deleted validation discussion {disc_id} of cancelled run {run_id}");
+    Ok(Some(disc_id))
+}
+
 /// POST /api/projects/:id/cancel-audit
 /// Cancel a running audit and remove ALL files created by the audit.
 pub async fn cancel_audit(
@@ -3416,6 +3651,17 @@ pub async fn cancel_audit(
     };
 
     let project_id = project.id.clone();
+    // KT-1134 — the run this cancel stops: only its own validation discussion
+    // may go, never one an earlier run left for the user.
+    let cancelled_run_id = state
+        .db
+        .with_conn({
+            let pid = project_id.clone();
+            move |conn| crate::db::audit_runs::running_run_id(conn, &pid)
+        })
+        .await
+        .ok()
+        .flatten();
 
     // 1. REQUEST cancellation and kill any running agent process. We do NOT
     //    clear the flag or the live progress here: the worker that owns the
@@ -3523,28 +3769,16 @@ pub async fn cancel_audit(
         return Json(ApiResponse::err(e));
     }
 
-    // 3. Delete any validation discussion for this project
-    let pid = project_id.clone();
-    if let Err(e) = state
-        .db
-        .with_conn(move |conn| {
-            // Find and delete validation discussions for this project
-            let discussions = crate::db::discussions::list_discussions(conn)?;
-            for disc in discussions {
-                if disc.project_id.as_deref() == Some(&pid) && disc.title == "Validation audit AI" {
-                    crate::db::discussions::delete_discussion(conn, &disc.id)?;
-                    tracing::info!(
-                        "Deleted validation discussion {} for project {}",
-                        disc.id,
-                        pid
-                    );
-                }
-            }
-            Ok(())
-        })
-        .await
-    {
-        tracing::error!("Failed to delete validation discussions for project: {e}");
+    // 3. Delete the cancelled run's own validation discussion, if it has one.
+    if let Some(run_id) = cancelled_run_id {
+        let pid = project_id.clone();
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| delete_run_validation_discussion(conn, &pid, &run_id))
+            .await
+        {
+            tracing::error!("Failed to delete the cancelled run's validation discussion: {e}");
+        }
     }
 
     // 4. Defensive flag clear. The worker (or the timeout branch above)

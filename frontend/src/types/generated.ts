@@ -5,6 +5,19 @@
 // ║  Regenerate: `make typegen`. CI fails if this file drifts from the models.  ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 
+export type AcceptAuditStepRequest = {
+/**
+ * Why the step is accepted; optional.
+ */
+reason?: string, };
+
+export type AcceptAuditStepResponse = { step: number, accepted_by: string, accepted_at: string,
+/**
+ * Failed steps of the run still neither retried nor accepted. Empty: a
+ * resume now only finalizes the run.
+ */
+remaining_failed: Array<number>, };
+
 /**
  * `POST /api/projects/:id/citation-drift/acknowledge` body: the doc whose
  * citations were checked by hand and still hold.
@@ -1095,6 +1108,11 @@ step_repaired_from_template: boolean,
  */
 unchanged: boolean,
 /**
+ * A human accepted this failed step as it stands (KT-1131): when, who and
+ * why. It counts as done; `cli_success` and `step_warning` keep the failure.
+ */
+accepted_at?: string, accepted_by?: string, accepted_reason?: string,
+/**
  * The step's cost in millionths of a dollar, when its agent reported one.
  */
 cost_usd_micros?: number | null,
@@ -1146,7 +1164,12 @@ recorded_audits: Array<AuditEntry>, recorded_validated_at: string | null,
  * Completed, archived or not: the timeline offers to validate once it
  * has finished.
  */
-latest_validation: AuditTimelineValidation | null, };
+latest_validation: AuditTimelineValidation | null,
+/**
+ * The project's audit lease is held by a run that could not be settled:
+ * every launch is refused until the cleanup action releases it (KT-1134).
+ */
+lease_orphaned: boolean, };
 
 export type AuditTimelineValidation = { discussion_id: string,
 /**
@@ -4277,7 +4300,12 @@ custom_prompt?: string | null,
  * makes resume impossible to misuse: no client-supplied step count to
  * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
-resume_run_id?: string | null, };
+resume_run_id?: string | null,
+/**
+ * KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
+ * The run's other failed steps stay failed, unrun. Absent = every one.
+ */
+retry_steps?: Array<number>, };
 
 export type LaunchDiscussionActionRequest = { variables?: Record<string, string>,
 /**

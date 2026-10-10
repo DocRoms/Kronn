@@ -167,6 +167,7 @@ async fn full_resume_repairs_coverage_with_bounded_feedback_and_preserves_prior_
                     kind: None,
                     custom_prompt: None,
                     resume_run_id: Some("before-coverage".into()),
+                    retry_steps: None,
                 }),
             )
             .await

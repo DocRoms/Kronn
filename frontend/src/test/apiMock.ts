@@ -276,6 +276,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       }),
       validateAudit: resolve('NoTemplate'),
       cancelAudit: resolve('NoTemplate'),
+      acceptAuditStep: resolve({ step: 1, accepted_by: 'operator', accepted_at: '2026-10-11T00:00:00Z', remaining_failed: [] }),
+      auditRunsCleanup: resolve(0),
       checkDrift: resolve({ stale_steps: [], checksums_outdated: false }),
       getBriefing: resolve(null),
       startBriefing: resolve({ discussion_id: '' }),

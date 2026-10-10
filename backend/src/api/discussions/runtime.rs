@@ -490,6 +490,11 @@ pub(crate) async fn stream_claimed_dispatch_job(
         }
     }
 
+    if hold_validation_during_audit(&state, &job).await {
+        handoff_guard.disarm();
+        return None;
+    }
+
     let power_lease = crate::core::power_guard::acquire();
     let target_tier = {
         let trigger_message_id = job.trigger_message_id.clone();
@@ -1149,6 +1154,66 @@ async fn fail_dispatch_job_with_outcome_kind(
         }
     }
     state.agent_dispatch_notify.notify_waiters();
+}
+
+/// KT-1134 — seconds an audit validation agent waits, queued, while an audit of
+/// its project runs.
+const VALIDATION_HOLD_RETRY_DELAY_SECONDS: i64 = 5;
+
+/// KT-1134 — an agent answering in a validation discussion linked to an audit
+/// run writes `docs/`: it never starts while an audit of the same project
+/// shows progress. The claimed job goes back to the queue, its attempts intact.
+async fn hold_validation_during_audit(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) -> bool {
+    let discussion_id = job.discussion_id.clone();
+    let project = state
+        .db
+        .with_read_conn(move |conn| {
+            crate::db::audit_runs::project_of_validation_discussion(conn, &discussion_id)
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some(project_id) = project else {
+        return false;
+    };
+    let audit_running = state
+        .audit_tracker
+        .lock()
+        .map(|tracker| tracker.progress.contains_key(&project_id))
+        .unwrap_or(true);
+    if !audit_running {
+        return false;
+    }
+    let job_id = job.id.clone();
+    let held = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::agent_dispatch::defer_runtime_unavailable(
+                conn,
+                &job_id,
+                VALIDATION_HOLD_RETRY_DELAY_SECONDS,
+                "audit_running: an audit of this project is writing docs/",
+            )
+        })
+        .await;
+    match held {
+        Ok(true) => {
+            tracing::info!(
+                "Held validation dispatch {} for {}s: an audit of project {project_id} runs",
+                job.id,
+                VALIDATION_HOLD_RETRY_DELAY_SECONDS
+            );
+            true
+        }
+        Ok(false) => true,
+        Err(error) => {
+            tracing::error!("Unable to hold validation dispatch {}: {error}", job.id);
+            false
+        }
+    }
 }
 
 async fn defer_runtime_unavailable(

@@ -99,13 +99,41 @@ pub async fn audit_latest(
 ///
 /// Boot-time reconcile (30-min threshold) is automatic in
 /// `Database::open`. This endpoint is the manual escape hatch.
+///
+/// KT-1134 — the run of a live audit is spared, and a lease left held by a
+/// run that could not be settled (`AuditTracker::orphaned_leases`) is released
+/// once its rows are: the UI offers this action when a project is stuck.
 pub async fn audit_runs_cleanup(State(state): State<AppState>) -> Json<ApiResponse<u64>> {
+    let (live, orphaned): (Vec<String>, Vec<String>) = match state.audit_tracker.lock() {
+        Ok(t) => (
+            t.leased
+                .iter()
+                .filter(|id| !t.orphaned_leases.contains(*id))
+                .cloned()
+                .collect(),
+            t.orphaned_leases.iter().cloned().collect(),
+        ),
+        Err(_) => return Json(ApiResponse::err("audit tracker lock poisoned")),
+    };
     let result = state
         .db
-        .with_conn(crate::db::audit_runs::reconcile_all_running)
+        .with_conn(move |conn| crate::db::audit_runs::reconcile_running_except(conn, &live))
         .await;
     match result {
-        Ok(n) => Json(ApiResponse::ok(n)),
+        Ok(settled) => {
+            if let Ok(mut t) = state.audit_tracker.lock() {
+                for project_id in &orphaned {
+                    if t.orphaned_leases.contains(project_id) {
+                        t.release_lease(project_id);
+                        t.clear_progress(project_id);
+                        tracing::warn!(
+                            "Audit cleanup released the orphaned lease of project {project_id}"
+                        );
+                    }
+                }
+            }
+            Json(ApiResponse::ok(settled.len() as u64))
+        }
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
     }
 }
@@ -177,6 +205,9 @@ pub struct AuditTimelineData {
     /// Completed, archived or not: the timeline offers to validate once it
     /// has finished.
     pub latest_validation: Option<AuditTimelineValidation>,
+    /// The project's audit lease is held by a run that could not be settled:
+    /// every launch is refused until the cleanup action releases it (KT-1134).
+    pub lease_orphaned: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -193,6 +224,11 @@ pub async fn audit_timeline(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AuditTimelineData>> {
+    let lease_orphaned = state
+        .audit_tracker
+        .lock()
+        .map(|t| t.lease_orphaned(&id))
+        .unwrap_or(false);
     let result = state
         .db
         .with_read_conn(move |conn| {
@@ -245,6 +281,7 @@ pub async fn audit_timeline(
         recorded_audits,
         recorded_validated_at,
         latest_validation,
+        lease_orphaned,
     }))
 }
 
@@ -426,3 +463,7 @@ mod audit_status_tests {
         assert_eq!(agent.current_tool_call_count, Some(1), "the counts stay");
     }
 }
+
+#[cfg(test)]
+#[path = "run_states_tests.rs"]
+mod run_states_tests;

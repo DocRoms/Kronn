@@ -23,6 +23,10 @@ impl Drop for TemplatesEnv {
 /// nothing to fill; in `noop` mode it changes nothing. In `reverify` mode it
 /// does only what the prompt names: it drops the claims whose citation the
 /// documentary gate lists as stale, and it tries to rewrite a human-owned rule.
+/// A step whose number is listed in `fail` ends in a CLI error, its target
+/// untouched (KT-1131). Any other prompt — the validation — ends on the
+/// terminal signal, after settling the documents' leftover unknowns when
+/// `settle` exists.
 fn scripted_agent(tools: &Path, project: &Path) -> PathBuf {
     let state = tools.display();
     let project = project.display();
@@ -38,6 +42,10 @@ case "$prompt" in
       *) kind=fill ;;
     esac
     echo "$n $target $kind" >> '{state}/steps.log'
+    if grep -qx "$n" '{state}/fail' 2>/dev/null; then
+      printf '%s\n' '{{"type":"result","subtype":"error_during_execution","is_error":true,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
+      exit 1
+    fi
     if [ "$(cat '{state}/mode')" = reverify ]; then
       printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation path does not exist `\([^`]*\)`$/\1 [src: file: \2:/p' > '{state}/drop'
       printf '%s\n' "$prompt" | sed -n 's/^- `\([^`]*\)`: citation line `\([^`]*\)` is outside `\([^`]*\)`$/\1 [src: file: \3:\2]/p' >> '{state}/drop'
@@ -64,6 +72,17 @@ case "$prompt" in
       mv "$f.next" "$f"
     fi
     ;;
+  *)
+    if [ -f '{state}/settle' ]; then
+      find '{project}/docs' -name '*.md' -not -path '*/tech-debt/*' | while read -r f; do
+        sed -e 's/{{{{[A-Z0-9_]*}}}}/settled by the validation/g' -e 's/<!-- TODO:[^>]*-->//g' "$f" > "$f.next"
+        mv "$f.next" "$f"
+      done
+    fi
+    printf '%s\n' '{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"KRONN:VALIDATION_COMPLETE"}}}}}}'
+    printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}'
+    exit 0
+    ;;
 esac
 printf '%s\n' '{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"Done."}}}}}}'
 printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"usage":{{"input_tokens":1,"output_tokens":1}}}}'"#
@@ -76,9 +95,29 @@ fn arm(tools: &Path, mode: &str, targets: &[&str]) {
     std::fs::write(tools.join("mode"), mode).unwrap();
     std::fs::write(tools.join("targets"), targets.join("\n") + "\n").unwrap();
     std::fs::write(tools.join("counter"), "0").unwrap();
+    std::fs::write(tools.join("fail"), "").unwrap();
+}
+
+/// Let the validation agent settle the unknowns a human validation would.
+fn settle_on_validation(tools: &Path) {
+    std::fs::write(tools.join("settle"), "").unwrap();
+}
+
+/// Make the listed step prompts (their order in this run) end in a CLI error.
+fn fail_steps(tools: &Path, prompts: &[u32]) {
+    let lines: Vec<String> = prompts.iter().map(u32::to_string).collect();
+    std::fs::write(tools.join("fail"), lines.join("\n") + "\n").unwrap();
 }
 
 async fn run_full(state: &AppState, resume_run_id: Option<String>) -> String {
+    run_full_retrying(state, resume_run_id, None).await
+}
+
+async fn run_full_retrying(
+    state: &AppState,
+    resume_run_id: Option<String>,
+    retry_steps: Option<Vec<u32>>,
+) -> String {
     let response = crate::api::audit::full::full_audit(
         axum::extract::State(state.clone()),
         axum::extract::Path(PROJECT_ID.to_string()),
@@ -89,6 +128,7 @@ async fn run_full(state: &AppState, resume_run_id: Option<String>) -> String {
             kind: None,
             custom_prompt: None,
             resume_run_id,
+            retry_steps,
         }),
     )
     .await
@@ -535,4 +575,269 @@ async fn a_full_audit_never_creates_a_gitignore() {
     assert_eq!(done["status"], "complete", "{body}");
     assert!(!project.join(".gitignore").exists());
     assert!(std::fs::symlink_metadata(project.join(".gitignore")).is_err());
+}
+
+// ── KT-1131 — a failed step retried alone, or accepted by a human ────────────
+
+const ACCEPT_ROUTE: &str = "/api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept";
+
+/// A git repository the Full audit has documented once, every step green.
+struct Audited {
+    tools: tempfile::TempDir,
+    project: tempfile::TempDir,
+    state: AppState,
+    targets: Vec<&'static str>,
+    _route: crate::agents::runner::test_acp_routes::RouteGuard,
+    _restore: TemplatesEnv,
+}
+
+impl Audited {
+    async fn new() -> Self {
+        let Harness {
+            tools,
+            state,
+            project,
+            _route: route,
+            _restore: restore,
+        } = harness().await;
+        let targets: Vec<&'static str> =
+            crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+                .iter()
+                .map(|s| s.target_file)
+                .collect();
+        arm(tools.path(), "fill", &targets);
+        let first = run_full(&state, None).await;
+        let done = sse_events(&first, "done").pop().expect("terminal done");
+        validation_settled(&state, &done).await;
+        assert_eq!(done["status"], "complete", "{first}");
+        Self {
+            tools,
+            project,
+            state,
+            targets,
+            _route: route,
+            _restore: restore,
+        }
+    }
+
+    fn step_of(&self, target: &str) -> u32 {
+        self.targets.iter().position(|t| *t == target).unwrap() as u32 + 1
+    }
+
+    fn total(&self) -> u32 {
+        self.targets.len() as u32
+    }
+
+    /// A target that keeps a placeholder: its step fails the next audit.
+    fn break_target(&self, target: &str) {
+        let path = self.project.path().join(target);
+        let mut content = std::fs::read_to_string(&path).unwrap();
+        content.push_str("\n{{LEFTOVER}}\n");
+        std::fs::write(&path, content).unwrap();
+    }
+
+    async fn accept(
+        &self,
+        run_id: &str,
+        step: u32,
+        reason: Option<&str>,
+        agent: bool,
+    ) -> crate::models::ApiResponse<crate::api::audit::AcceptAuditStepResponse> {
+        let bridge = agent.then(|| {
+            axum::Extension(crate::core::bridge_token::BridgeCaller {
+                token_id: "t".into(),
+                project: Some(PROJECT_ID.into()),
+                own_discussions: vec![],
+                own_run: None,
+                agent: None,
+            })
+        });
+        crate::api::audit::accept_audit_step(
+            axum::extract::State(self.state.clone()),
+            axum::extract::Path((PROJECT_ID.to_string(), run_id.to_string(), step)),
+            bridge,
+            axum::Json(crate::api::audit::AcceptAuditStepRequest {
+                reason: reason.map(str::to_string),
+            }),
+        )
+        .await
+        .0
+    }
+
+    async fn validate(&self) -> crate::models::ApiResponse<crate::models::AiAuditStatus> {
+        crate::api::audit::validate_audit(
+            axum::extract::State(self.state.clone()),
+            axum::extract::Path(PROJECT_ID.to_string()),
+        )
+        .await
+        .0
+    }
+}
+
+fn started_steps(body: &str) -> Vec<u64> {
+    sse_events(body, "step_start")
+        .iter()
+        .map(|e| e["step"].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn a_failed_step_retried_alone_completes_the_run_and_the_project_validates() {
+    let fx = Audited::new().await;
+    let rules = fx.step_of("docs/coding-rules.md");
+    let testing = fx.step_of("docs/testing-quality.md");
+    fx.break_target("docs/coding-rules.md");
+    fx.break_target("docs/testing-quality.md");
+    arm(fx.tools.path(), "noop", &fx.targets);
+    let broken = run_full(&fx.state, None).await;
+    let done = sse_events(&broken, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{broken}");
+    assert_eq!(done["steps_to_redo"], json!([rules, testing]), "{broken}");
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+
+    // A target still at the template stage, or gone, cannot be accepted.
+    let refused = fx.accept(&interrupted, rules, None, false).await;
+    assert!(!refused.success);
+    assert!(refused.error.unwrap().contains("template placeholders"));
+    let testing_path = fx.project.path().join("docs/testing-quality.md");
+    let kept = std::fs::read_to_string(&testing_path).unwrap();
+    std::fs::remove_file(&testing_path).unwrap();
+    let refused = fx.accept(&interrupted, testing, None, false).await;
+    assert!(!refused.success);
+    assert!(refused.error.unwrap().contains("missing or empty"));
+    std::fs::write(&testing_path, kept).unwrap();
+
+    // Retrying one step runs that step only; the other failure stays failed.
+    arm(fx.tools.path(), "fill", &["docs/coding-rules.md"]);
+    let first_retry = run_full_retrying(&fx.state, Some(interrupted), Some(vec![rules])).await;
+    let done = sse_events(&first_retry, "done")
+        .pop()
+        .expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{first_retry}");
+    assert_eq!(started_steps(&first_retry), vec![rules as u64]);
+    assert_eq!(done["steps_to_redo"], json!([testing]), "{first_retry}");
+    let not_retried: Vec<Value> = sse_events(&first_retry, "step_skipped")
+        .into_iter()
+        .filter(|e| e["reason"] == "not_retried")
+        .collect();
+    assert_eq!(not_retried.len(), 1, "{first_retry}");
+    assert_eq!(not_retried[0]["step"], testing);
+    let still_interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, _) = persisted(&fx.state, &still_interrupted).await;
+    assert_eq!(run.status, "Interrupted");
+    let carried_failure = steps
+        .iter()
+        .find(|s| s.step_index == testing)
+        .expect("the failure the retry left is still on record");
+    assert!(!carried_failure.cli_success);
+    assert!(carried_failure.step_warning.is_some());
+
+    // The last failed step, retried alone, completes the run.
+    arm(fx.tools.path(), "fill", &["docs/testing-quality.md"]);
+    settle_on_validation(fx.tools.path());
+    let last_retry =
+        run_full_retrying(&fx.state, Some(still_interrupted), Some(vec![testing])).await;
+    let done = sse_events(&last_retry, "done")
+        .pop()
+        .expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "complete", "{last_retry}");
+    assert_eq!(started_steps(&last_retry), vec![testing as u64]);
+    let completed = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, _, _) = persisted(&fx.state, &completed).await;
+    assert_eq!(run.status, "Completed");
+    assert_eq!(run.last_completed_step, fx.total());
+
+    // Validated, without any global audit after the failure.
+    let validated = fx.validate().await;
+    assert!(validated.success, "{:?}", validated.error);
+    assert_eq!(
+        crate::core::scanner::detect_audit_status(&fx.project.path().display().to_string()),
+        crate::models::AiAuditStatus::Validated
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(kronn_templates_env)]
+async fn an_accepted_step_completes_the_run_and_the_project_validates() {
+    let fx = Audited::new().await;
+    let rules = fx.step_of("docs/coding-rules.md");
+    arm(fx.tools.path(), "noop", &fx.targets);
+    fail_steps(fx.tools.path(), &[rules]);
+    let broken = run_full(&fx.state, None).await;
+    let done = sse_events(&broken, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "interrupted", "{broken}");
+    assert_eq!(done["steps_to_redo"], json!([rules]), "{broken}");
+    let interrupted = done["audit_run_id"].as_str().unwrap().to_string();
+
+    // Never an agent's decision: off the bridge list, and refused in-handler.
+    assert!(crate::core::bridge_token::route_for("POST", ACCEPT_ROUTE).is_none());
+    let refused = fx.accept(&interrupted, rules, Some("agent"), true).await;
+    assert!(!refused.success);
+    assert!(refused.error.unwrap().contains("human decision"));
+
+    let before = chrono::Utc::now();
+    let accepted = fx
+        .accept(
+            &interrupted,
+            rules,
+            Some("  kept as written\nby hand "),
+            false,
+        )
+        .await;
+    assert!(accepted.success, "{:?}", accepted.error);
+    let accepted = accepted.data.unwrap();
+    assert_eq!(accepted.step, rules);
+    assert_eq!(accepted.remaining_failed, Vec::<u32>::new());
+    let (_, steps, _) = persisted(&fx.state, &interrupted).await;
+    let row = steps.iter().find(|s| s.step_index == rules).unwrap();
+    assert_eq!(row.accepted_by.as_deref(), Some("operator"));
+    assert_eq!(
+        row.accepted_reason.as_deref(),
+        Some("kept as written by hand")
+    );
+    assert!(row.accepted_at.unwrap() >= before - chrono::Duration::seconds(1));
+    assert!(!row.cli_success, "the failure stays on record");
+    let again = fx.accept(&interrupted, rules, None, false).await;
+    assert!(!again.success);
+    assert!(again.error.unwrap().contains("already done"));
+
+    // The resume now only finalizes: nothing runs, the run completes.
+    arm(fx.tools.path(), "noop", &[]);
+    settle_on_validation(fx.tools.path());
+    let finalized = run_full(&fx.state, Some(interrupted)).await;
+    let done = sse_events(&finalized, "done").pop().expect("terminal done");
+    validation_settled(&fx.state, &done).await;
+    assert_eq!(done["status"], "complete", "{finalized}");
+    assert!(started_steps(&finalized).is_empty(), "{finalized}");
+    let completed = done["audit_run_id"].as_str().unwrap().to_string();
+    let (run, steps, prompt) = persisted(&fx.state, &completed).await;
+    assert_eq!(run.status, "Completed");
+    assert_eq!(outcomes(&run)["accepted"], json!([rules]));
+    assert_eq!(outcomes(&run)["failed"], json!([]));
+    let carried = steps.iter().find(|s| s.step_index == rules).unwrap();
+    assert_eq!(carried.accepted_by.as_deref(), Some("operator"));
+    assert!(!carried.cli_success);
+    let prompt = prompt.expect("a Completed run has its validation discussion");
+    let section = prompt
+        .split("## ÉTAPES ACCEPTÉES")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no accepted section: {prompt}"));
+    let section = section.split("\n## ").next().unwrap();
+    assert!(section.contains(&format!("{rules}/{} — `docs/coding-rules.md`", fx.total())));
+    assert!(section.contains("kept as written by hand"), "{section}");
+    assert!(section.contains("operator"), "{section}");
+
+    let validated = fx.validate().await;
+    assert!(validated.success, "{:?}", validated.error);
+    assert_eq!(
+        crate::core::scanner::detect_audit_status(&fx.project.path().display().to_string()),
+        crate::models::AiAuditStatus::Validated
+    );
 }

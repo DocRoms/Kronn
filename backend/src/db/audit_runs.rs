@@ -566,6 +566,43 @@ pub fn reconcile_all_running(conn: &Connection) -> Result<u64> {
     Ok(affected as u64)
 }
 
+/// KT-1134 — `reconcile_all_running`, sparing the projects whose audit is
+/// live in this process: the cleanup action never settles a run under its
+/// own worker. Returns the projects whose rows it settled, one per row.
+pub fn reconcile_running_except(
+    conn: &Connection,
+    live_projects: &[String],
+) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let running: Vec<(String, String)> = {
+        let mut statement =
+            tx.prepare("SELECT id, project_id FROM audit_runs WHERE status = 'Running'")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let now = Utc::now().to_rfc3339();
+    let mut settled = Vec::new();
+    for (id, project_id) in running {
+        if live_projects.contains(&project_id) {
+            continue;
+        }
+        tx.execute(
+            "UPDATE audit_runs SET
+                status = 'Interrupted',
+                ended_at = ?2,
+                duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
+                report_path = COALESCE(report_path, 'stale: cleared by user via admin cleanup')
+             WHERE id = ?1 AND status = 'Running'",
+            params![id, now],
+        )?;
+        settled.push(project_id);
+    }
+    tx.commit()?;
+    Ok(settled)
+}
+
 /// 0.8.3 (#311) — the project's resumable run, if any. Mirrors the launch
 /// rule EXACTLY: only the project's most recent run (any status, same
 /// ordering as `list_recent`) is eligible, and it must be `Interrupted`
@@ -628,11 +665,14 @@ pub fn carry_over_steps(
                 (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
                  step_tokens, cli_success, input_tokens, output_tokens, cache_read_tokens,
                  cache_write_tokens, cost_usd_micros, carried_from_run_id, token_accounting,
-                 unchanged)
+                 unchanged, step_warning, accepted_at, accepted_by, accepted_reason)
              SELECT ?1, step_index, ?3, started_at, COALESCE(ended_at, ?4), duration_ms,
-                    step_tokens, 1, input_tokens, output_tokens, cache_read_tokens,
+                    step_tokens, CASE WHEN accepted_at IS NULL THEN 1 ELSE cli_success END,
+                    input_tokens, output_tokens, cache_read_tokens,
                     cache_write_tokens, cost_usd_micros, COALESCE(carried_from_run_id, ?5),
-                    token_accounting, unchanged
+                    token_accounting, unchanged,
+                    CASE WHEN accepted_at IS NULL THEN NULL ELSE step_warning END,
+                    accepted_at, accepted_by, accepted_reason
                FROM audit_run_steps WHERE audit_run_id = ?5 AND step_index = ?2",
             params![
                 audit_run_id,
@@ -661,6 +701,134 @@ pub fn carry_over_steps(
     update_last_completed_step(&tx, audit_run_id, steps.len() as u32)?;
     tx.commit()?;
     Ok(())
+}
+
+/// KT-1131 — a resume that retries only some steps keeps the other failed
+/// ones as they ended: their rows are copied verbatim (failure and reason
+/// included) so the timeline still shows why, and the next resume still finds
+/// them to redo. A step that never ran has no row to copy.
+pub fn carry_over_failed_steps(
+    conn: &Connection,
+    audit_run_id: &str,
+    from_run_id: &str,
+    steps: &[u32],
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for step_index in steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, duration_ms,
+                 step_tokens, cli_success, step_warning, step_repaired_from_template,
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 cost_usd_micros, carried_from_run_id, token_accounting, unchanged)
+             SELECT ?1, step_index, file_label, started_at, ended_at, duration_ms,
+                    step_tokens, cli_success, step_warning, step_repaired_from_template,
+                    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                    cost_usd_micros, COALESCE(carried_from_run_id, ?3), token_accounting, 0
+               FROM audit_run_steps
+              WHERE audit_run_id = ?3 AND step_index = ?2 AND accepted_at IS NULL",
+            params![audit_run_id, *step_index as i64, from_run_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// KT-1131 — record a human's acceptance of a failed step. The step keeps its
+/// failure (`cli_success`, `step_warning`) and gains who, when and why; a step
+/// that never ran gets a finished row carrying only the acceptance. The run's
+/// count of done steps includes it. Returns `false` when the step is already
+/// done (succeeded or accepted): nothing is written.
+pub fn accept_step(
+    conn: &Connection,
+    audit_run_id: &str,
+    step_index: u32,
+    file_label: &str,
+    by: &str,
+    reason: Option<&str>,
+    at: DateTime<Utc>,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let at = at.to_rfc3339();
+    let done: bool = tx
+        .query_row(
+            "SELECT (cli_success = 1 AND ended_at IS NOT NULL) OR accepted_at IS NOT NULL
+               FROM audit_run_steps WHERE audit_run_id = ?1 AND step_index = ?2",
+            params![audit_run_id, step_index as i64],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if done {
+        return Ok(false);
+    }
+    let updated = tx.execute(
+        "UPDATE audit_run_steps
+            SET accepted_at = ?3, accepted_by = ?4, accepted_reason = ?5,
+                ended_at = COALESCE(ended_at, ?3), cli_success = CASE
+                    WHEN ended_at IS NULL THEN 0 ELSE cli_success END
+          WHERE audit_run_id = ?1 AND step_index = ?2",
+        params![audit_run_id, step_index as i64, at, by, reason],
+    )?;
+    if updated == 0 {
+        tx.execute(
+            "INSERT INTO audit_run_steps
+                (audit_run_id, step_index, file_label, started_at, ended_at, cli_success,
+                 accepted_at, accepted_by, accepted_reason)
+             VALUES (?1, ?2, ?3, ?4, ?4, 0, ?4, ?5, ?6)",
+            params![audit_run_id, step_index as i64, file_label, at, by, reason],
+        )?;
+    }
+    tx.execute(
+        "UPDATE audit_runs SET last_completed_step = (
+            SELECT COUNT(*) FROM audit_run_steps WHERE audit_run_id = ?1 AND ended_at IS NOT NULL
+               AND (cli_success = 1 OR accepted_at IS NOT NULL)
+        ) WHERE id = ?1",
+        params![audit_run_id],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
+/// KT-1134 — the project's run still recorded `Running`, if any: the run a
+/// cancel targets.
+pub fn running_run_id(conn: &Connection, project_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM audit_runs WHERE project_id = ?1 AND status = 'Running'
+             ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            params![project_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// KT-1134 — validation discussions linked to the project's audit runs: the
+/// ones an audit agent may still be answering in.
+pub fn validation_discussion_ids(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT validation_discussion_id FROM audit_runs
+          WHERE project_id = ?1 AND validation_discussion_id IS NOT NULL",
+    )?;
+    let ids = statement
+        .query_map(params![project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(ids)
+}
+
+/// KT-1134 — the project an audit validation discussion belongs to, when the
+/// discussion is linked to one of its runs.
+pub fn project_of_validation_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT project_id FROM audit_runs WHERE validation_discussion_id = ?1 LIMIT 1",
+            params![discussion_id],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 /// What one audit step consumed, as its agent reported it (KT-927). Every part
@@ -971,7 +1139,8 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
                 duration_ms, step_tokens, cumulative_tokens, cli_success,
                 step_warning, step_repaired_from_template,
                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                cost_usd_micros, carried_from_run_id, token_accounting, unchanged
+                cost_usd_micros, carried_from_run_id, token_accounting, unchanged,
+                accepted_at, accepted_by, accepted_reason
          FROM audit_run_steps
          WHERE audit_run_id = ?1
          ORDER BY step_index ASC",
@@ -1008,6 +1177,13 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
             breakdown: None,
             token_accounting: row.get(17)?,
             unchanged: row.get::<_, i64>(18)? != 0,
+            accepted_at: row.get::<_, Option<String>>(19)?.and_then(|s| {
+                DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            }),
+            accepted_by: row.get(20)?,
+            accepted_reason: row.get(21)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1143,6 +1319,9 @@ mod tests {
                 carried_from_run_id TEXT,
                 token_accounting TEXT,
                 unchanged INTEGER NOT NULL DEFAULT 0,
+                accepted_at TEXT,
+                accepted_by TEXT,
+                accepted_reason TEXT,
                 FOREIGN KEY (audit_run_id) REFERENCES audit_runs(id) ON DELETE CASCADE
             );
             CREATE UNIQUE INDEX idx_audit_run_steps_run
@@ -1151,6 +1330,134 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn an_accepted_step_keeps_its_failure_counts_done_and_is_carried_as_accepted() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        insert_audit_step_start(&conn, "r1", 1, "docs/a.md", Utc::now()).unwrap();
+        finalize_audit_step(
+            &conn,
+            "r1",
+            1,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
+        insert_audit_step_start(&conn, "r1", 2, "docs/b.md", Utc::now()).unwrap();
+        finalize_audit_step(
+            &conn,
+            "r1",
+            2,
+            Utc::now(),
+            5,
+            &StepTokens::default(),
+            None,
+            false,
+            Some("placeholders remain"),
+            false,
+        )
+        .unwrap();
+        // Step 3 never ran; step 1 succeeded and cannot be accepted.
+        assert!(!accept_step(&conn, "r1", 1, "docs/a.md", "romu", None, Utc::now()).unwrap());
+        assert!(accept_step(
+            &conn,
+            "r1",
+            2,
+            "docs/b.md",
+            "romu",
+            Some("by hand"),
+            Utc::now()
+        )
+        .unwrap());
+        assert!(accept_step(&conn, "r1", 3, "docs/c.md", "romu", None, Utc::now()).unwrap());
+        assert!(!accept_step(&conn, "r1", 2, "docs/b.md", "romu", None, Utc::now()).unwrap());
+        let steps = list_audit_steps(&conn, "r1").unwrap();
+        assert!(!steps[1].cli_success);
+        assert_eq!(
+            steps[1].step_warning.as_deref(),
+            Some("placeholders remain")
+        );
+        assert_eq!(steps[1].accepted_by.as_deref(), Some("romu"));
+        assert_eq!(steps[1].accepted_reason.as_deref(), Some("by hand"));
+        assert!(steps[2].accepted_at.is_some() && steps[2].ended_at.is_some());
+        assert!(!steps[2].cli_success);
+        assert_eq!(
+            get_by_id(&conn, "r1").unwrap().unwrap().last_completed_step,
+            3
+        );
+
+        // A resume carries the acceptance, the failure and who decided.
+        insert_running(&conn, "r2", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let carried: Vec<(u32, String)> = (1..=3).map(|i| (i, format!("docs/{i}.md"))).collect();
+        carry_over_steps(&conn, "r2", "r1", &carried, Utc::now()).unwrap();
+        let steps = list_audit_steps(&conn, "r2").unwrap();
+        assert!(steps[0].cli_success && steps[0].accepted_at.is_none());
+        assert!(steps[0].step_warning.is_none());
+        assert!(!steps[1].cli_success);
+        assert_eq!(
+            steps[1].step_warning.as_deref(),
+            Some("placeholders remain")
+        );
+        assert_eq!(steps[1].accepted_reason.as_deref(), Some("by hand"));
+        assert_eq!(steps[1].carried_from_run_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn a_single_step_retry_carries_the_other_failures_verbatim() {
+        let conn = fresh_conn();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        for (step, ok) in [(1, false), (2, false)] {
+            insert_audit_step_start(&conn, "r1", step, "docs/x.md", Utc::now()).unwrap();
+            finalize_audit_step(
+                &conn,
+                "r1",
+                step,
+                Utc::now(),
+                5,
+                &StepTokens::default(),
+                None,
+                ok,
+                Some("rewrote nothing"),
+                false,
+            )
+            .unwrap();
+        }
+        insert_running(&conn, "r2", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        carry_over_failed_steps(&conn, "r2", "r1", &[2, 3]).unwrap();
+        let steps = list_audit_steps(&conn, "r2").unwrap();
+        assert_eq!(steps.len(), 1, "a step that never ran has no row to carry");
+        assert_eq!(steps[0].step_index, 2);
+        assert!(!steps[0].cli_success);
+        assert_eq!(steps[0].step_warning.as_deref(), Some("rewrote nothing"));
+        assert_eq!(steps[0].carried_from_run_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn the_cleanup_spares_the_runs_of_live_audits() {
+        let conn = fresh_conn();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Other', '/tmp/other')",
+            [],
+        )
+        .unwrap();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", Utc::now()).unwrap();
+        insert_running(&conn, "r2", "p2", "Full", "ClaudeCode", Utc::now()).unwrap();
+        let settled = reconcile_running_except(&conn, &["p2".to_string()]).unwrap();
+        assert_eq!(settled, vec!["p1".to_string()]);
+        assert_eq!(
+            get_by_id(&conn, "r1").unwrap().unwrap().status,
+            "Interrupted"
+        );
+        assert_eq!(get_by_id(&conn, "r2").unwrap().unwrap().status, "Running");
+        assert_eq!(running_run_id(&conn, "p2").unwrap().as_deref(), Some("r2"));
+        assert_eq!(running_run_id(&conn, "p1").unwrap(), None);
     }
 
     #[test]

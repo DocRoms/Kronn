@@ -440,6 +440,10 @@ export function ProjectCard({
   const [auditRecent, setAuditRecent] = useState<AuditRecentActivity | null>(null);
   const [auditStepBreakdown, setAuditStepBreakdown] = useState<AuditTokenBreakdown | null>(null);
   const [auditAbortController, setAuditAbortController] = useState<AbortController | null>(null);
+  // KT-1134 — a cancel the backend has not acknowledged: the run may still go on.
+  const [cancelPending, setCancelPending] = useState(false);
+  // Re-arms the status poll: an external launch, or a cancel left pending.
+  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   const [auditAgentChoice, setAuditAgentChoice] = useState<AgentType | undefined>(undefined);
   const [auditTierChoice, setAuditTierChoice] = useState<ModelTier>('reasoning');
   // KT-980 — the named external API connection picked for an HTTP agent.
@@ -497,7 +501,7 @@ export function ProjectCard({
       setResumableAudit(row);
     }).catch(() => { /* idle on error — button stays "Lancer" */ });
     return () => { cancelled = true; };
-  }, [proj.id, proj.audit_status, auditActive]);
+  }, [proj.id, proj.audit_status, auditActive, auditCompletedTick]);
 
   // KT-1181 — a documented repo never merged gets the template v2 merge before its audit.
   const templateMerge = useTemplateMergeOffer(
@@ -545,7 +549,9 @@ export function ProjectCard({
   // ProjectCard read "Validation en cours" on an audit that hadn't
   // actually produced anything past step 5. The resumable check
   // catches that state and forces the "Reprendre" CTA instead.
-  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit;
+  // Never "in progress" while an audit runs: a resume has no resumable run, and
+  // the partial validation it continues is not being worked on (KT-1134).
+  const validationInProgress = !!validationDisc && proj.audit_status === 'Audited' && !resumableAudit && !auditActive;
   const bootstrapDisc = projDiscussions.find(d => isBootstrapDisc(d.title) && !d.archived);
   const bootstrapInProgress = !!bootstrapDisc && proj.audit_status === 'TemplateInstalled';
   // Use the locale-aware detector — the backend's `start_briefing` emits
@@ -711,8 +717,21 @@ export function ProjectCard({
       await projectsApi.cancelAudit(proj.id);
       toast(t('audit.cancelled'), 'success');
     } catch (e) {
+      // Not acknowledged: the run may still go on. Keep showing it, pending,
+      // and let the status poll say when it really stops.
       console.warn('Cancel audit failed:', e);
+      setCancelPending(true);
+      setAuditAbortController(null);
+      toast(t('audit.cancelPending'), 'warning');
+      resumeSettledRef.current = false;
+      if (auditPollRef.current) {
+        clearInterval(auditPollRef.current);
+        auditPollRef.current = null;
+      }
+      setExternalAdoptTick(n => n + 1);
+      return;
     }
+    setCancelPending(false);
     auditActiveRef.current = false;
     setAuditActive(false);
     setAuditAbortController(null);
@@ -723,7 +742,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async () => {
+  const handleFullAudit = useCallback(async (options: { retrySteps?: number[]; fresh?: boolean } = {}) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -737,7 +756,8 @@ export function ProjectCard({
     // Resume support. When a resumable interrupted run exists we resume it
     // by id — the server derives the kind AND the checkpoint from that row,
     // so client state can never graft onto the wrong pipeline (Codex #3).
-    const resumeRunId = resumableAudit?.id ?? null;
+    // A fresh full audit ignores the resumable run on purpose (confirmed).
+    const resumeRunId = options.fresh ? null : resumableAudit?.id ?? null;
     // Progress-bar total: the UI now exposes the complete chained audit only;
     // a resumed legacy targeted run still keeps the kind stored by the server.
     const effectiveKind = resumeRunId ? resumableAudit?.kind : 'Full';
@@ -777,6 +797,8 @@ export function ProjectCard({
         // only the run id so the server remains authoritative for legacy runs.
         kind: resumeRunId ? null : 'Full',
         resume_run_id: resumeRunId,
+        // KT-1131 — retry only these failed steps of the resumed run.
+        retry_steps: resumeRunId && options.retrySteps ? options.retrySteps : undefined,
         connection_id: auditConnectionId ?? undefined,
       }, {
         onTemplateInstalled: () => {},
@@ -1028,7 +1050,6 @@ export function ProjectCard({
   // AFTER mount was invisible — the card even offered to start an audit
   // while one was running. The Dashboard fleet poll tells us one is live:
   // re-arm the same adoption poll and every existing badge/chip/CTA works.
-  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
   useEffect(() => {
     if (!externalAuditLive) return;
     if (auditActiveRef.current || auditPollRef.current) return; // already tracking
@@ -1116,6 +1137,7 @@ export function ProjectCard({
           const wasActive = auditActiveRef.current;
           auditActiveRef.current = false;
           setAuditActive(false);
+          setCancelPending(false);
           setAuditAuditor(null);
           setAuditStartedAt(null);
           // 0.8.3 (#274) — clear token chips when the audit wraps so
@@ -2430,10 +2452,32 @@ export function ProjectCard({
                       ? () => { onOpenDiscussion(briefingDisc.id); onNavigate('discussions'); }
                       : null}
                     onCancel={handleCancelAudit}
+                    cancelPending={cancelPending}
                     resumable={resumableAudit}
                     onLaunch={() => resumableAudit
                       ? void handleFullAudit()
                       : void templateMerge.gateLaunch(() => void handleFullAudit())}
+                    onRetryStep={(step) => void handleFullAudit({ retrySteps: [step] })}
+                    onRelaunchFull={() => void templateMerge.gateLaunch(() => void handleFullAudit({ fresh: true }))}
+                    onAcceptStep={async (step, reason) => {
+                      if (!resumableAudit) return;
+                      try {
+                        await projectsApi.acceptAuditStep(proj.id, resumableAudit.id, step, reason);
+                        toast(t('audit.stepAccepted', step), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
+                    onCleanupLease={async () => {
+                      try {
+                        await projectsApi.auditRunsCleanup();
+                        toast(t('auditTimeline.lease.released'), 'success');
+                        setAuditCompletedTick(n => n + 1);
+                      } catch (error) {
+                        toast(userError(error), 'error');
+                      }
+                    }}
                     validationInProgress={validationInProgress}
                     onValidate={() => {
                       if (validationInProgress && validationDisc) {

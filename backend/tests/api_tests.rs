@@ -23350,6 +23350,11 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         "/api/audit-runs/cleanup",
         serde_json::json!({ "keep_recent": 5 })
     );
+    envelope_post!(
+        accept_audit_step_unknown_project,
+        "/api/projects/nope/audit-runs/nope/steps/1/accept",
+        serde_json::json!({ "reason": "kept" })
+    );
 
     // ── audit/run.rs cold paths (audit-status, audit-history, audit-latest, …) ─
     envelope_get!(

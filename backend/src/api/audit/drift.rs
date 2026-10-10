@@ -394,6 +394,7 @@ pub async fn partial_audit(
             return;
         }
         drop_guard.set_run_id(audit_run_id.clone());
+        super::full::stop_validation_agents(&state, &project_id_for_progress).await;
         // CONTRACTUAL revocation (Codex A5) — AFTER the row insert, like the
         // full pipeline: if the insert fails the launch is refused with ZERO
         // mutation (Validated intact); if the revocation fails, the armed

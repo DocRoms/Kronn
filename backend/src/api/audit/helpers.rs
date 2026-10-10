@@ -426,6 +426,77 @@ pub(crate) fn unchanged_steps_block(
     format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
 }
 
+/// KT-1131 — one step a human accepted, as the validation prompt lists it.
+pub(crate) struct AcceptedStepLine {
+    pub step: u32,
+    pub file: String,
+    pub by: String,
+    pub reason: Option<String>,
+    pub failure: Option<String>,
+}
+
+/// KT-1131 — the steps a human accepted instead of fixing: the validation names
+/// them apart, with who accepted, why, and the failure they still carry.
+pub(crate) fn accepted_steps_block(
+    accepted: &[AcceptedStepLine],
+    total_steps: u32,
+    language: &str,
+) -> String {
+    if accepted.is_empty() {
+        return String::new();
+    }
+    let (title, intro, by_label, reason_label, failure_label, none, rule) = match language {
+        "en" => (
+            "## ACCEPTED STEPS — as they stand",
+            "A person accepted these steps although they failed: their document is kept as it is.",
+            "accepted by",
+            "reason",
+            "failure",
+            "none given",
+            "List them to the user in a separate section of your first message, with the failure each one still carries. Do not present them as succeeded and do not redo them.",
+        ),
+        "es" => (
+            "## PASOS ACEPTADOS — tal cual",
+            "Una persona acepto estos pasos aunque fallaron: su documento se conserva tal como esta.",
+            "aceptado por",
+            "motivo",
+            "fallo",
+            "sin motivo",
+            "Enumeralos al usuario en una seccion aparte de tu primer mensaje, con el fallo que cada uno conserva. No los presentes como exitosos y no los rehagas.",
+        ),
+        _ => (
+            "## ÉTAPES ACCEPTÉES — en l'état",
+            "Une personne a accepté ces étapes bien qu'elles aient échoué : leur document est gardé tel quel.",
+            "acceptée par",
+            "raison",
+            "échec",
+            "aucune",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message, avec l'échec que chacune garde. Ne les présente pas comme réussies et ne les refais pas.",
+        ),
+    };
+    let list = accepted
+        .iter()
+        .map(|line| {
+            let mut text = format!(
+                "- {}/{total_steps} — `{}` — {by_label} {} — {reason_label} : {}",
+                line.step,
+                line.file,
+                line.by,
+                line.reason
+                    .as_deref()
+                    .filter(|r| !r.trim().is_empty())
+                    .unwrap_or(none)
+            );
+            if let Some(failure) = line.failure.as_deref() {
+                text.push_str(&format!(" — {failure_label} : {failure}"));
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
 /// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
 /// version: a sub-audit only writes ONE index file + a handful of TD
 /// detail files, so Phase 1 (autonomous doc fix-up across 10 files)

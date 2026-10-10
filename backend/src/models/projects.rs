@@ -1154,6 +1154,17 @@ pub struct AuditRunStep {
     /// nothing to change (KT-1130). Neither a success that wrote nor a failure.
     #[serde(default)]
     pub unchanged: bool,
+    /// A human accepted this failed step as it stands (KT-1131): when, who and
+    /// why. It counts as done; `cli_success` and `step_warning` keep the failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub accepted_reason: Option<String>,
     /// The step's cost in millionths of a dollar, when its agent reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<u64>,
@@ -1480,6 +1491,11 @@ pub struct LaunchAuditRequest {
     /// oversize, and no way to graft a checkpoint onto the wrong pipeline.
     #[serde(default)]
     pub resume_run_id: Option<String>,
+    /// KT-1131 — with `resume_run_id`: retry only these 1-based failed steps.
+    /// The run's other failed steps stay failed, unrun. Absent = every one.
+    #[serde(default)]
+    #[ts(optional)]
+    pub retry_steps: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Deserialize, TS)]

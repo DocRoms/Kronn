@@ -1,4 +1,4 @@
-import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
+import type { AcceptAuditStepResponse, ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import type { WorkerConnectivity } from '../types/generated';
 import type { MergeBase, TemplateMergeAccepted, TemplateMergeAcceptRequest, TemplateMergeRequest, TemplateMergeView } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
@@ -1097,6 +1097,11 @@ export const projects = {
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
   cancelAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/cancel-audit`),
+  /** KT-1131 — a human accepts a failed step of the latest interrupted run. */
+  acceptAuditStep: (id: string, runId: string, step: number, reason: string | null) =>
+    api<AcceptAuditStepResponse>('POST', `/projects/${id}/audit-runs/${runId}/steps/${step}/accept`, { reason }),
+  /** KT-1134 — settle runs no worker runs any more and release an orphaned lease. */
+  auditRunsCleanup: () => api<number>('POST', '/audit-runs/cleanup'),
   /**
    * Returns the live progress of an in-flight audit for this project, or
    * `null` when nothing is running. Polled by ProjectCard every 2 s when a
@@ -1190,6 +1195,10 @@ export const projects = {
       cli_success: boolean;
       step_warning?: string | null;
       step_repaired_from_template: boolean;
+      unchanged?: boolean;
+      accepted_at?: string | null;
+      accepted_by?: string | null;
+      accepted_reason?: string | null;
     }>>('GET', `/audit-runs/${runId}/steps`),
   /**
    * 0.8.4 (#294) — cross-agent memory source bindings.

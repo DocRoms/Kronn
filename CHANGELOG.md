@@ -13,6 +13,20 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Added
 
+- After an audit with failed steps, a single step can be retried alone, or a
+  human can accept it as it stands (KT-1131). On each failed line of the
+  timeline, « Relancer cette étape » resumes the interrupted run with
+  `retry_steps` (the other failed steps stay failed and unrun), and
+  « Accepter en l'état » calls
+  `POST /api/projects/:id/audit-runs/:run_id/steps/:step/accept`, which
+  records who, when and an optional reason (migration 246). The route is off
+  the bridge list and refuses any agent token. It is refused when the target
+  is missing, empty or still a template. Once no failed step is left,
+  « Finaliser l'audit » completes the run without an agent step, so the
+  project can be validated without a global audit. The recap and the
+  validation discussion list accepted steps apart from succeeded and
+  unchanged ones.
+
 - A repository that already has its own docs can now receive the AI-doc
   template v2 by merge (KT-1172). `GET /api/projects/:id/template-merge/plan`
   shows, without writing anything, a correspondence table that maps each
@@ -61,6 +75,20 @@ Release notes for 0.9.3 and earlier are available in the
 - The `db-backup.md` cron recipe now creates the backup folder as `0700` and
   the copies as `0600` (`umask 077;`), with the `ls -la` result to expect
   (KT-1075). A copy holds the conversation history in clear.
+- The audit UI no longer gets stuck (KT-1134). Every run state offers an
+  action (see `docs/architecture/audit-run-states.md`). A first audit that
+  stopped can be resumed from the validation phase, and an interrupted
+  re-audit points validation to its failed steps instead of an unlinked
+  discussion. Relaunching the whole audit over an interrupted run asks first.
+  « Validation avec vous » is never « En cours » while an audit runs. A cancel
+  the backend did not acknowledge stays « annulation en attente » instead of
+  going idle. A cancel deletes only its own run's validation discussion,
+  never an earlier run's. A lease whose run could not be settled is retried,
+  then signalled with a « Débloquer » action wired to
+  `/api/audit-runs/cleanup`, which now spares live audits. Validation agents
+  are stopped when an audit starts and held while it runs, so they never
+  write `docs/` at the same time as the audit.
+
 - The release body no longer mentions GitHub accounts by accident (KT-1179).
   Multi-agent syntax examples in the CHANGELOG (an `at` sign followed by an
   agent alias) were read by GitHub as mentions of real accounts, listed under

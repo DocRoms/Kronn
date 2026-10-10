@@ -241,6 +241,10 @@ pub struct AuditTracker {
     /// idle, then both insert a Running row). Released by the run's
     /// drop-guard when it ends — normally, on cancel, or on abandonment.
     pub leased: HashSet<String>,
+    /// Leases whose run could not be settled (the drop guard's database write
+    /// failed): kept fail-closed, and named so the UI offers the cleanup that
+    /// releases them (KT-1134).
+    pub orphaned_leases: HashSet<String>,
 }
 
 impl AuditTracker {
@@ -254,6 +258,12 @@ impl AuditTracker {
     /// Release a project's audit lease. Idempotent.
     pub fn release_lease(&mut self, project_id: &str) {
         self.leased.remove(project_id);
+        self.orphaned_leases.remove(project_id);
+    }
+
+    /// Whether the project's lease is held by a run nobody can settle.
+    pub fn lease_orphaned(&self, project_id: &str) -> bool {
+        self.leased.contains(project_id) && self.orphaned_leases.contains(project_id)
     }
 
     /// Seed progress when an audit stream starts. Called from the `start`
@@ -1889,6 +1899,12 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/audit-runs/{run_id}/steps",
             get(api::audit::audit_run_steps),
+        )
+        // KT-1131 — a human accepts a failed step as it stands. Kept off the
+        // bridge route list: an agent's token is refused.
+        .route(
+            "/api/projects/{id}/audit-runs/{run_id}/steps/{step}/accept",
+            post(api::audit::accept_audit_step),
         )
         // 0.8.4 (#317 / B1) — admin: force-clear all `Running` audit_runs.
         // The boot hook handles the 30-min threshold automatically; this
