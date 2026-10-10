@@ -37,6 +37,12 @@ Release notes for 0.9.3 and earlier are available in the
 
 ### Fixed
 
+- A task execution's progress no longer exposes the raw name of the running
+  tool (KT-1124). `task_exec_status` returned it in
+  `TaskExecutionProgress.reason`, and an MCP name such as `mcp__github__...`
+  reveals the server. The reason is now a tool category (`Read`, `Mcp`,
+  `Kronn`...), stored as such and mapped at read time for rows written before.
+  The tool transcript is unchanged.
 - The `db-backup.md` cron recipe now creates the backup folder as `0700` and
   the copies as `0600` (`umask 077;`), with the `ls -la` result to expect
   (KT-1075). A copy holds the conversation history in clear.

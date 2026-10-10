@@ -8069,7 +8069,14 @@ fn execution_progress(
                 Some("upstream_wait") => TaskExecutionProgressPhase::UpstreamWait,
                 _ => TaskExecutionProgressPhase::Launching,
             };
-            (phase, job.progress_detail.clone(), None)
+            // A tool name never leaves as such: it can name an MCP server.
+            let reason = match (&phase, job.progress_detail.as_deref()) {
+                (TaskExecutionProgressPhase::ToolActivity, Some(detail)) => {
+                    Some(crate::agents::activity::stored_tool_detail_label(detail).to_string())
+                }
+                _ => job.progress_detail.clone(),
+            };
+            (phase, reason, None)
         }
         DispatchStatus::Completed => (TaskExecutionProgressPhase::Completed, None, None),
         DispatchStatus::Failed | DispatchStatus::Cancelled => (
@@ -15025,6 +15032,87 @@ pub(crate) mod tests {
             .await
             .unwrap();
         (reference, parent_id, project_id)
+    }
+
+    #[tokio::test]
+    async fn tool_progress_reason_is_a_category_never_a_raw_tool_name() {
+        let repo = init_repo();
+        let db = std::sync::Arc::new(Database::open_in_memory().unwrap());
+        let (task_ref, parent_id, _) = seed(&db, repo.path()).await;
+        let execution = provision_single_task_execution(
+            &db,
+            ProvisionInput {
+                task_reference: task_ref,
+                parent_discussion_id: parent_id,
+                worker: native_worker(),
+                base_rev: Some("main".into()),
+                idempotency_key: Some("progress-category".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let exec_id = execution.id.clone();
+        let dispatch_id = execution.dispatch_job_id.unwrap();
+        let started = dispatch_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::claim(conn, &started)?.unwrap();
+            crate::db::agent_dispatch::mark_agent_started(conn, &started)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        // Legacy raw values stored before the fix, then a value stored as a category.
+        for (stored, expected) in [
+            ("mcp__github__create_issue", "Mcp"),
+            ("mcp__kronn-internal__task_get", "Kronn"),
+            ("some_custom_tool", "Other"),
+            ("Bash", "Execute"),
+            ("Mcp", "Mcp"),
+            ("Search", "Search"),
+        ] {
+            let (id, value) = (dispatch_id.clone(), stored.to_string());
+            db.with_conn(move |conn| {
+                crate::db::agent_dispatch::mark_progress(conn, &id, "tool_activity", Some(&value))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let detail = db
+                .with_conn({
+                    let id = exec_id.clone();
+                    move |conn| execution_detail(conn, &id)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                detail.progress.reason.as_deref(),
+                Some(expected),
+                "{stored}"
+            );
+            let wire = serde_json::to_string(&detail.progress).unwrap();
+            assert!(!wire.contains("github"), "{wire}");
+            assert!(!wire.contains("create_issue"), "{wire}");
+        }
+
+        // Another phase's reason is not a tool name and passes through.
+        let id = dispatch_id.clone();
+        db.with_conn(move |conn| {
+            crate::db::agent_dispatch::mark_progress(
+                conn,
+                &id,
+                "upstream_wait",
+                Some("tool_completed"),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let detail = db
+            .with_conn(move |conn| execution_detail(conn, &exec_id))
+            .await
+            .unwrap();
+        assert_eq!(detail.progress.reason.as_deref(), Some("tool_completed"));
     }
 
     #[tokio::test]

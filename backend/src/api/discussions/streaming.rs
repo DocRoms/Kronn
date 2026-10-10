@@ -4336,7 +4336,8 @@ pub(super) async fn make_agent_stream_inner(
                             runner::StreamJsonEvent::ToolStart(name) => {
                                 if let Some(job_id) = dispatch_job_id.as_ref() {
                                     let progress_id = job_id.clone();
-                                    let progress_tool = name.clone();
+                                    let progress_tool =
+                                        crate::agents::activity::category_of(&name).as_str();
                                     if let Err(error) = state
                                         .db
                                         .with_conn(move |conn| {
@@ -4344,7 +4345,7 @@ pub(super) async fn make_agent_stream_inner(
                                                 conn,
                                                 &progress_id,
                                                 "tool_activity",
-                                                Some(&progress_tool),
+                                                Some(progress_tool),
                                             )?;
                                             Ok(())
                                         })
