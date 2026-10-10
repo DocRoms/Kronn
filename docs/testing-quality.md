@@ -48,7 +48,7 @@ Run from the repository root unless a working directory is shown.
 | Rust formatting | `cd backend && cargo fmt --all -- --check` | Clean |
 | Rust lint | `cd backend && cargo clippy --all-targets -- -D warnings` | Zero warnings (third-party code-generation parser notices are not clippy diagnostics) |
 | Backend tests | `make test-backend` (`cd backend && cargo nextest run --workspace`: library, binary and integration tests, one process per test, with CI's runner and `backend/.config/nextest.toml`, then `cargo test --doc`) | Entire Rust suite passes |
-| Backend coverage | `make test-backend-cov` (`cargo llvm-cov nextest` with CI's 83 % floors, then `scripts/check-keymgmt-coverage.sh`) | Both floors hold |
+| Backend coverage | `make test-backend-cov` (`cargo llvm-cov nextest` to a JSON summary, then `backend/scripts/ci/coverage_floors.py check`: 83 % total and the key-management file floors) | Both floors hold |
 | Python helpers | `make test-python` | Entire helper suite passes |
 | Shell | `make test-shell` | Entire bats suite passes |
 | Frontend native TS | `cd frontend && pnpm typecheck:native` | Clean |
@@ -99,15 +99,27 @@ TERM at this boundary for both the backend and the watcher.
 
 ## Backend CI timing SLO
 
-`test-backend` is the measured backend critical-path job and the only backend
-test pass: formatting, then every library, binary and integration test once
-under cargo-nextest with coverage instrumentation
-(`NEXTEST_PROFILE=ci cargo llvm-cov nextest`), the 83 % floors and the
-key-management per-file floors on that same run, then the generated-type drift
-check and the raw-command lint on the build it already made. `make
-test-backend-cov` runs the same command locally. Before this layout the suite ran
-twice, once in `test-backend` (`cargo test`) and once instrumented in
-`test-backend-coverage`; the history below measures that older layout.
+The backend suite runs once, in three stages. `build-backend-tests` checks
+formatting, compiles every library, binary, example and integration test
+target with coverage instrumentation, runs the raw-command lint on that build
+and uploads one nextest archive (`cargo llvm-cov nextest-archive`).
+`test-backend-partition` runs `hash:K/N` of the archive under `NEXTEST_PROFILE=ci`
+and uploads its JUnit report, a manifest (commit, archive digest) and its
+profraw pool. `test-backend`, the aggregate that keeps the check name, fails
+unless the build and every partition succeeded and
+`backend/scripts/ci/backend_partitions.py verify` finds every partition from
+the same archive and commit, with each test of the archive's inventory run
+once and green; it then merges the profiles and checks the floors once with
+`coverage_floors.py`. `test-backend-types` runs the ts-rs exports from the
+archive and checks generated-type drift. N comes from `BACKEND_TEST_PARTITIONS`
+(manual input `backend_partitions`, repository variable `CI_BACKEND_PARTITIONS`,
+default 2). A one-partition manual run of the same commit gives the
+non-partitioned reference: `coverage_floors.py compare` on the two
+`backend-coverage-summary` artifacts must find no difference. The timing
+observer measures `build-backend-tests` start to `test-backend` end. Before
+this layout the suite ran in one `test-backend` job, and before that twice
+(`cargo test`, then instrumented in `test-backend-coverage`); the history
+below measures those older layouts.
 Clippy and the project-specific budget checks run in `test-backend-quality`,
 in parallel, and stay blocking through `ci-quality-gates`.
 Its hot cache targets the three reusable directories of the instrumented

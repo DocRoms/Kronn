@@ -139,6 +139,34 @@ The ruleset already requires branches to be up to date, so a base branch that
 only advances (no pull-request event) still forces a new push, which re-runs
 both workflows.
 
+### Partitioned backend suite and E2E shards
+
+Under `ci-test`, one job builds the instrumented backend tests once and
+uploads them as a nextest archive; `test-backend-partition` jobs each run a
+share (`hash:K/N`) and `test-backend` merges their coverage, checks the floors
+once and fails if a partition, an artifact or a test of the archive's
+inventory is missing. `test-e2e-shard` jobs run the Playwright specs in shards
+against one shared dev build, and `test-e2e` merges their reports on failure.
+Repository variables, or the same inputs on a manual run of `CI Tests`, tune
+the measurement:
+
+| Variable (input) | Default | Effect |
+|---|---|---|
+| `CI_BACKEND_PARTITIONS` (`backend_partitions`) | 2 | Backend partitions; 1 is the non-partitioned reference |
+| `CI_E2E_SHARDS` (`e2e_shards`) | 2 | Playwright shards |
+| `CI_SCCACHE` (`sccache`) | off | Routes the instrumented build through sccache |
+| `CI_CARGO_CACHE_FALLBACK` (`cargo_cache_fallback`) | off | Restores another `Cargo.lock`'s backend cache on a miss |
+
+The aggregate's scripts run locally:
+
+```bash
+python3 backend/scripts/ci/test_backend_partitions.py
+python3 backend/scripts/ci/test_coverage_floors.py
+node scripts/ci/test_backend_ci_slo.mjs
+# Same commit, partitioned run vs. a one-partition run (backend-coverage-summary artifacts):
+python3 backend/scripts/ci/coverage_floors.py compare reference.json partitioned.json
+```
+
 ## Reporting Bugs
 
 Open an issue with:
