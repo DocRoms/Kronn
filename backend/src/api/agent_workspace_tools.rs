@@ -691,8 +691,16 @@ pub fn git_commit_payload_with_data_dir_lock(
     Ok(payload)
 }
 
+/// Built once, like the general catalogue: static declarations (KT-1161).
+static TOOL_DEFINITIONS: std::sync::LazyLock<Vec<Value>> =
+    std::sync::LazyLock::new(build_tool_definitions);
+
 /// The tool definitions this module contributes to the native catalogue.
 pub fn tool_definitions() -> Vec<Value> {
+    TOOL_DEFINITIONS.clone()
+}
+
+fn build_tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "type": "function",

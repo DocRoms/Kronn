@@ -489,7 +489,16 @@ pub(crate) fn tiered(catalogue: Vec<Value>) -> Vec<Value> {
     core
 }
 
+/// Built once: the declarations are static, and building them takes a
+/// ~90 KiB debug frame on whichever deep runner stack asks for them (KT-1161).
+static TOOL_CATALOGUE: std::sync::LazyLock<Vec<Value>> =
+    std::sync::LazyLock::new(build_tool_catalogue);
+
 pub fn tool_catalogue() -> Vec<Value> {
+    TOOL_CATALOGUE.clone()
+}
+
+fn build_tool_catalogue() -> Vec<Value> {
     let mut catalogue = vec![
         json!({
             "type": "function",

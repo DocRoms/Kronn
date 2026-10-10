@@ -35,6 +35,12 @@ Release notes for 0.9.3 and earlier are available in the
   change. `disc_meta`, `disc_list` and `disc_load_other` refuse an unexpected
   argument and point to the right tool (`disc_meta` reads only the current
   discussion).
+- An Agent step inside a foreach sub-workflow no longer crashes the backend
+  with a stack overflow (KT-1161). In a debug build each nested workflow run
+  takes about 1 MiB of stack, so a foreach child filled the 2 MiB default of a
+  runtime worker before its Agent step started. The backend and desktop
+  runtimes now give their threads 8 MiB, and the static tool catalogue is
+  built once instead of on the stack at every Agent step.
 
 ## [0.15.0] - 2026-10-10
 

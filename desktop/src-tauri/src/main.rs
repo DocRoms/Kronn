@@ -1182,8 +1182,7 @@ fn main() {
                 let backend_port = port;
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
+                    let rt = kronn::runtime_builder()
                         .build()
                         .expect("Failed to create Tokio runtime");
                     rt.block_on(async {

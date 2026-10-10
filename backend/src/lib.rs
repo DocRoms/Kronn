@@ -188,6 +188,20 @@ pub async fn bootstrap_external_api_connections(
 /// Default maximum concurrent agent processes.
 pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 
+/// Worker stack size. In a debug build one nested workflow run costs about
+/// 1 MiB of stack, so a foreach child overflowed the 2 MiB default (KT-1161).
+pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 << 20;
+
+/// The multi-threaded runtime the backend runs on, shared by the server and
+/// desktop entry points so both get the same worker configuration.
+pub fn runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .enable_all()
+        .thread_stack_size(RUNTIME_THREAD_STACK_SIZE);
+    builder
+}
+
 /// Tracks running audit processes so they can be cancelled AND inspected.
 ///
 /// `progress` is the data source for `GET /api/projects/:id/audit-status` —

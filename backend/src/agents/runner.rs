@@ -3954,14 +3954,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             .is_some();
 
     // Workspace access controls project-doc and memory guidance, regardless of transport.
+    // Only an HTTP agent reads the catalogue: a CLI step never builds it here.
+    let is_http = is_http_chat_agent(config.agent_type);
     let http_agent_reads_files = http_agent_reads_its_own_files(
-        is_http_chat_agent(config.agent_type),
-        config.tools.as_ref().is_some_and(|executor| {
-            executor
-                .catalogue()
-                .iter()
-                .any(|tool| tool["function"]["name"] == "read_file")
-        }),
+        is_http,
+        is_http
+            && config.tools.as_ref().is_some_and(|executor| {
+                executor
+                    .catalogue()
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "read_file")
+            }),
     );
 
     // 0.7.1 — user-scoped cross-project context : the `~/.kronn/user-context/`

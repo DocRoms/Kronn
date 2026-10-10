@@ -18,10 +18,7 @@ fn main() -> anyhow::Result<()> {
     let env_token = kronn::core::config::take_env_auth_token();
     // Same for the operator's raw key: kept in memory, never inherited.
     kronn::core::keyvault::take_env_kek();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(env_token))
+    kronn::runtime_builder().build()?.block_on(run(env_token))
 }
 
 async fn run(env_token: Option<String>) -> anyhow::Result<()> {
