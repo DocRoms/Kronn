@@ -95,6 +95,50 @@ This project uses an AI-optimized context system in `ai/`. Before making changes
    - E2E (Playwright, optional but recommended for UI changes): `make test-e2e` — requires the backend running. See [`frontend/e2e/README.md`](frontend/e2e/README.md) for the full setup + how to add a spec.
 5. Write a clear PR description with a summary and test plan
 
+## CI labels
+
+Pull-request CI runs under two labels:
+
+- **`ci-test`**: the fast loop, re-run on every push (formatting, clippy, the
+  backend suite and its coverage floors, browser E2E, frontend, shell, Python,
+  security, duplication and diff hygiene). `ci-quality-gates` is its required
+  check.
+- **`ci-build`**: the app builds (the backend in the real release profile,
+  macOS and Windows portability tests, the desktop crate, the Windows document
+  exporter). Required before merge: add it once the pull request is ready.
+  `ci-build-gates` is its required check and stays red without the label.
+
+Both labels persist: every push (`synchronize`) and every change of base
+branch re-runs both workflows for the new head. Adding or removing one label,
+or editing the title, never re-runs the other workflow: its run repeats the
+verdict an earlier run gave for the same pull request, head and base, and
+fails when there is none. Pushes to `main` and release tags run both.
+
+`main` is protected by repository ruleset 13870406, whose required checks are
+job names. A job skipped by its `if` reports as passing, so the job names
+moved to `ci-build.yml` (such as `test-docs-sidecar-windows`) enforce nothing
+without the label. Only the two aggregates enforce their workflow: they always
+run, and `ci-build-gates` fails while the `ci-build` label is missing. The app
+builds are therefore required before merge only once a maintainer adds both
+aggregates to the ruleset (repository settings, not code): read the ruleset,
+append `{"context": "ci-quality-gates", "integration_id": 15368}` and
+`{"context": "ci-build-gates", "integration_id": 15368}` to the
+`required_status_checks` rule's list, keep every other field, then:
+
+```bash
+gh api repos/DocRoms/Kronn/rulesets/13870406 \
+  | jq '{name, target, enforcement, conditions, bypass_actors, rules: [.rules[]
+        | if .type == "required_status_checks" then .parameters.required_status_checks
+            += [{context: "ci-quality-gates", integration_id: 15368},
+                {context: "ci-build-gates", integration_id: 15368}] else . end]}' \
+  > ruleset.json
+gh api -X PUT repos/DocRoms/Kronn/rulesets/13870406 --input ruleset.json
+```
+
+The ruleset already requires branches to be up to date, so a base branch that
+only advances (no pull-request event) still forces a new push, which re-runs
+both workflows.
+
 ## Reporting Bugs
 
 Open an issue with:

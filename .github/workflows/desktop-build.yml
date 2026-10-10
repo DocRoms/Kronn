@@ -65,6 +65,18 @@ jobs:
     with:
       ref: ${{ needs.release-checks.outputs.sha }}
 
+  # The app-build gate (portability, desktop crate, Windows exporter), which
+  # pull requests run under the `ci-build` label, on the same commit.
+  build-gates:
+    name: CI build gates on the release commit
+    needs: release-checks
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/ci-build.yml
+    with:
+      ref: ${{ needs.release-checks.outputs.sha }}
+
   build-desktop:
     needs: [release-checks, dependency-review]
     strategy:
@@ -395,7 +407,7 @@ jobs:
   # ─── Create GitHub Release on tag ─────────────────────────────────
 
   release:
-    needs: [release-checks, build-desktop, verify-installers, quality-gates]
+    needs: [release-checks, build-desktop, verify-installers, quality-gates, build-gates]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     env:

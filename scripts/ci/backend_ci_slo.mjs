@@ -3,14 +3,27 @@
 import assert from "node:assert/strict";
 
 export const BACKEND_JOB = "test-backend";
-export const SLO_MS = 15 * 60 * 1000;
+// The one backend test pass (nextest + coverage) on a hot cache.
+export const SLO_MS = 10 * 60 * 1000;
 export const HISTORY_LIMIT = 20;
 export const HOT_CACHE_HIT_STEP = "Record compiled cache hit";
+export const GATE_JOB = "ci-quality-gates";
 
 function milliseconds(startedAt, completedAt) {
   const start = Date.parse(startedAt ?? "");
   const end = Date.parse(completedAt ?? "");
   return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+
+/** Trigger to the aggregate gate's verdict: what a pull request waits. */
+export function fastLoopDurationMs(run, jobs) {
+  const gate = jobs.find((job) => job.name === GATE_JOB);
+  return gate ? milliseconds(run?.created_at, gate.completed_at) : null;
+}
+
+/** Billed runner time: every job of the run that started, summed. */
+export function runnerMilliseconds(jobs) {
+  return jobs.reduce((total, job) => total + (milliseconds(job.started_at, job.completed_at) ?? 0), 0);
 }
 
 export function formatDuration(durationMs) {
@@ -109,7 +122,7 @@ async function jobsForRun(runId) {
   return payload.jobs ?? [];
 }
 
-export function markdown(summary, currentJob, mode, compiledCacheHit) {
+export function markdown(summary, currentJob, mode, compiledCacheHit, runTotals = { fastLoopMs: null, runnerMs: null }) {
   const currentDuration = currentJob?.durationMs ?? null;
   const status = timingStatus(currentDuration);
   const cacheState = mode === "cold" ? "not applicable" : compiledCacheHit ? "hit" : "miss";
@@ -117,7 +130,7 @@ export function markdown(summary, currentJob, mode, compiledCacheHit) {
   const historyDescription = mode === "cold"
     ? "Current run only; cold measurements are intentionally excluded from historical hot-cache statistics."
     : "Successful pull-request runs from the same head branch whose compiled cache was restored; manual, failed, cancelled, cold, warmup/miss, and other-branch runs are excluded.";
-  return ["## Backend CI timing", "", `Effective measurement mode: **${mode}**. Compiled cache: **${cacheState}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, `Historical evidence: ${historyDescription}`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`, `| Historical hot sample size | ${summary.samples.length} completed runs |`, `| Historical hot median | ${formatDuration(summary.medianMs)} |`, `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`, `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
+  return ["## Backend CI timing", "", `Effective measurement mode: **${mode}**. Compiled cache: **${cacheState}**. The SLO is ${formatDuration(SLO_MS)} for \`${BACKEND_JOB}\`; this report never changes a functional gate.`, `Historical evidence: ${historyDescription}`, "", "| Metric | Value |", "| --- | --- |", `| Current backend critical path | ${formatDuration(currentDuration)} (${status}; ${mode}) |`, `| Trigger to ${GATE_JOB} | ${formatDuration(runTotals.fastLoopMs)} |`, `| Runner time, all jobs of this run | ${formatDuration(runTotals.runnerMs)} |`, `| Historical hot sample size | ${summary.samples.length} completed runs |`, `| Historical hot median | ${formatDuration(summary.medianMs)} |`, `| Historical hot P95 | ${formatDuration(summary.p95Ms)} |`, `| Historical hot consecutive SLO breaches | ${summary.consecutiveBreaches} |`, "", "### Current backend job steps", "", "| Step | Duration |", "| --- | --- |", ...stepRows, ""].join("\n");
 }
 
 async function main() {
@@ -140,7 +153,8 @@ async function main() {
   const priorJobs = await Promise.all(priorRunIds.map(jobsForRun));
   const currentJob = requireCurrentBackendJob(currentJobs);
   const summary = summarizeBackendJobs(priorJobs.flat().filter(hasRestoredCompiledCache));
-  const report = markdown(summary, currentJob, mode, compiledCacheHit);
+  const runTotals = { fastLoopMs: fastLoopDurationMs(currentRun, currentJobs), runnerMs: runnerMilliseconds(currentJobs) };
+  const report = markdown(summary, currentJob, mode, compiledCacheHit, runTotals);
   process.stdout.write(`${report}\n`);
   if (process.env.GITHUB_STEP_SUMMARY) await (await import("node:fs/promises")).appendFile(process.env.GITHUB_STEP_SUMMARY, `${report}\n`);
   if (currentJob.durationMs > SLO_MS) console.log(`::warning title=Backend CI SLO exceeded::${BACKEND_JOB} took ${formatDuration(currentJob.durationMs)} (SLO ${formatDuration(SLO_MS)}); functional gates remain authoritative.`);

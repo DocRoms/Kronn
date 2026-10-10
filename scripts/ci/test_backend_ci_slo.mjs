@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, formatDuration, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
+import { SLO_MS, comparableSuccessfulHotRuns, effectiveMeasurementMode, fastLoopDurationMs, formatDuration, runnerMilliseconds, hasRestoredCompiledCache, markdown, percentile, requireCurrentBackendJob, summarizeBackendJobs, timingStatus, validateCompiledCacheState } from "./backend_ci_slo.mjs";
 
 const at = (minutes) => `2026-08-31T00:${String(minutes).padStart(2, "0")}:00Z`;
 const job = (start, end) => ({ name: "test-backend", started_at: at(start), completed_at: at(end) });
-assert.equal(formatDuration(SLO_MS), "15m 0s");
+assert.equal(formatDuration(SLO_MS), "10m 0s");
 assert.equal(percentile([4, 1, 3, 2], 0.5), 2);
 assert.equal(percentile([4, 1, 3, 2], 0.95), 4);
-const summary = summarizeBackendJobs([job(0, 14), job(15, 31), job(32, 49), { name: "test-frontend", started_at: at(0), completed_at: at(59) }, { name: "test-backend", started_at: "invalid", completed_at: at(1) }]);
+const summary = summarizeBackendJobs([job(0, 9), job(15, 26), job(32, 44), { name: "test-frontend", started_at: at(0), completed_at: at(59) }, { name: "test-backend", started_at: "invalid", completed_at: at(1) }]);
 assert.equal(summary.samples.length, 3);
-assert.equal(summary.medianMs, 16 * 60 * 1000);
-assert.equal(summary.p95Ms, 17 * 60 * 1000);
+assert.equal(summary.medianMs, 11 * 60 * 1000);
+assert.equal(summary.p95Ms, 12 * 60 * 1000);
 assert.equal(summary.consecutiveBreaches, 2);
 assert.deepEqual(summarizeBackendJobs([]), { samples: [], medianMs: null, p95Ms: null, consecutiveBreaches: 0 });
 assert.equal(timingStatus(null), "unavailable");
@@ -50,3 +50,16 @@ assert.throws(() => validateCompiledCacheState("hot", "", false), /invalid or un
 assert.throws(() => validateCompiledCacheState("hot", "invalid", false), /invalid or unavailable/);
 assert.throws(() => validateCompiledCacheState("hot", "hit", false), /outputs disagree/);
 assert.throws(() => validateCompiledCacheState("hot", "miss", true), /outputs disagree/);
+
+const runJobs = [
+  { name: "test-backend", started_at: at(1), completed_at: at(12) },
+  { name: "test-frontend", started_at: at(1), completed_at: at(8) },
+  { name: "ci-quality-gates", started_at: at(13), completed_at: at(14) },
+  { name: "skipped", started_at: null, completed_at: null },
+];
+assert.equal(fastLoopDurationMs({ created_at: at(0) }, runJobs), 14 * 60 * 1000);
+assert.equal(fastLoopDurationMs({ created_at: at(0) }, runJobs.slice(0, 2)), null);
+assert.equal(runnerMilliseconds(runJobs), 19 * 60 * 1000);
+const totalsReport = markdown(summary, completedJob, "hot", true, { fastLoopMs: 14 * 60 * 1000, runnerMs: 19 * 60 * 1000 });
+assert.match(totalsReport, /Trigger to ci-quality-gates \| 14m 0s/);
+assert.match(totalsReport, /Runner time, all jobs of this run \| 19m 0s/);

@@ -103,10 +103,10 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             Path(__file__).resolve().parents[3]
             / ".github"
             / "workflows"
-            / "ci-test.yml"
+            / "ci-build.yml"
         ).read_text(encoding="utf-8")
         job = workflow.split("test-docs-sidecar-windows:", 1)[1].split(
-            "\n  test-frontend:", 1
+            "\n  test-backend-portability:", 1
         )[0]
 
         self.assertIn("runs-on: windows-latest", job)
@@ -148,7 +148,8 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
         self.assertIn("verify_artifacts.py artifacts", workflow)
         self.assertIn("verify-installers:", workflow)
         self.assertIn(
-            "needs: [release-checks, build-desktop, verify-installers, quality-gates]", workflow
+            "needs: [release-checks, build-desktop, verify-installers, quality-gates, build-gates]",
+            workflow,
         )
 
     def test_version_gate_runs_first_and_checks_the_tag(self) -> None:
@@ -194,7 +195,7 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             else:
                 self.assertEqual(ref, resolved, job)
         # The reusable workflows take the commit as an input and check it out.
-        for name in ("dependency-review.yml", "ci-test.yml"):
+        for name in ("dependency-review.yml", "ci-test.yml", "ci-build.yml"):
             checkouts = self._checkout_refs(name)
             self.assertTrue(checkouts, name)
             for job, _step, ref in checkouts:
@@ -210,12 +211,14 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             len(re.findall(
                 r"^      ref: \$\{\{ needs\.release-checks\.outputs\.sha \}\}$", workflow, re.M
             )),
-            2,
+            3,
         )
         self.assertIn("uses: ./.github/workflows/ci-test.yml", workflow)
+        self.assertIn("uses: ./.github/workflows/ci-build.yml", workflow)
         self.assertIn("uses: ./.github/workflows/dependency-review.yml", workflow)
         release_job = workflow[workflow.index("\n  release:\n"):]
         self.assertIn("quality-gates", release_job.split("steps:")[0])
+        self.assertIn("build-gates", release_job.split("steps:")[0])
         self.assertIn("release-checks", release_job.split("steps:")[0])
 
     def test_reusable_workflow_callers_grant_every_permission_their_jobs_declare(self) -> None:
@@ -228,7 +231,7 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
                 grants.update(re.findall(r"([a-z-]+): ([a-z]+)", block[1]))
             return grants
 
-        for callee in ("ci-test.yml", "dependency-review.yml"):
+        for callee in ("ci-test.yml", "ci-build.yml", "dependency-review.yml"):
             uses = caller.index(f"uses: ./.github/workflows/{callee}")
             headers = [m.start() for m in re.finditer(r"^  [a-z0-9-]+:\n", caller[:uses], re.M)]
             job = caller[headers[-1]:uses]
@@ -238,18 +241,21 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
             self.assertFalse(missing, f"desktop-build.yml must grant {sorted(missing)} to {callee}")
 
     def test_ci_runs_every_gate_when_called_for_a_release(self) -> None:
-        workflow = (
-            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ci-test.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("workflow_call:", workflow)
-        # Label-gated jobs run on a release call, not only on dispatch.
-        gated = re.findall(r"^    if: .*'ci-test'\)\)?$", workflow, re.MULTILINE)
-        self.assertGreaterEqual(len(gated), 10)
-        for condition in gated:
-            if "inputs.ref == ''" in condition:
-                continue  # the timing observer never runs for a release call
-            self.assertIn("inputs.ref != ''", condition)
-        self.assertIn('[ -n "$CI_REF" ]', workflow)
+        workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+        for name, label, minimum in (("ci-test.yml", "ci-test", 8), ("ci-build.yml", "ci-build", 4)):
+            workflow = (workflows / name).read_text(encoding="utf-8")
+            self.assertIn("workflow_call:", workflow)
+            # Label-gated jobs run on a release call: its event is never a
+            # pull request (the caller's push or dispatch).
+            gated = [
+                line for line in re.findall(r"^    if: (.*)$", workflow, re.MULTILINE)
+                if f"'{label}'" in line and "always()" not in line
+            ]
+            self.assertGreaterEqual(len(gated), minimum, name)
+            for condition in gated:
+                self.assertIn("github.event_name != 'pull_request' ||", condition, name)
+        ci_test = (workflows / "ci-test.yml").read_text(encoding="utf-8")
+        self.assertIn('[ "$EVENT_NAME" != "pull_request" ]', ci_test)
 
     def test_checkout_network_retry_is_bounded(self) -> None:
         workflow = (

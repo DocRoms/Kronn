@@ -364,12 +364,13 @@ require-nextest:
 	  || { echo "$(YELLOW)▸ cargo-nextest is required (the runner CI uses): run 'make install-dev-tools'.$(RESET)"; exit 1; }
 
 ## The CI coverage gate, locally: the instrumented nextest run with the same
-## floors, then the key-management per-file floors from the same data.
+## floors, then the key-management per-file floors from the same data. The
+## profile pool keeps one process per test from writing ~50 GB of profraw.
 test-backend-cov:
 	@cargo nextest --version >/dev/null 2>&1 && cargo llvm-cov --version >/dev/null 2>&1 \
 	  || { echo "$(YELLOW)▸ cargo-nextest and cargo-llvm-cov are required: run 'make install-dev-tools'.$(RESET)"; exit 1; }
 	@echo "$(CYAN)▸ Running the backend coverage gate (as CI)...$(RESET)"
-	cd backend && cargo llvm-cov nextest --workspace --summary-only \
+	cd backend && NEXTEST_PROFILE=ci LLVM_PROFILE_FILE_NAME='kronn-%8m.profraw' cargo llvm-cov nextest --workspace --summary-only \
 	  --fail-under-lines 83 --fail-under-functions 83 --fail-under-regions 83
 	scripts/check-keymgmt-coverage.sh
 
