@@ -1423,16 +1423,7 @@ async fn execute_run_body(
     // the template context so downstream steps see `{{steps.X.summary}}`
     // and `{{artifacts.Y}}` exactly as if the run had never paused.
     // Fresh runs have no prior step_results, so this is a no-op for them.
-    for prior in &run.step_results {
-        ctx.set_step_output(&prior.step_name, &prior.output);
-        let prior_agent = prior.step_agent.as_ref().map(|a| format!("{a:?}"));
-        ctx.set_step_meta(
-            &prior.step_name,
-            prior_agent.as_deref(),
-            prior.step_model.as_deref(),
-        );
-        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
-    }
+    replay_prior_results(&mut ctx, &run.step_results);
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
     // counters and verdicts the agent wrote in prior iterations so the
@@ -2347,6 +2338,11 @@ async fn execute_run_body(
                         &ctx,
                         workflow.project_id.as_deref(),
                         carrying_repository.as_deref(),
+                        super::exec_step::output_limit_for(
+                            step,
+                            &workflow.steps,
+                            &workflow.on_failure,
+                        ),
                     )
                     .await
                 }
@@ -3306,6 +3302,11 @@ async fn execute_run_body(
                         &ctx,
                         workflow.project_id.as_deref(),
                         carrying_repository.as_deref(),
+                        super::exec_step::output_limit_for(
+                            rb_step,
+                            &workflow.steps,
+                            &workflow.on_failure,
+                        ),
                     )
                     .await
                 }
@@ -3384,6 +3385,7 @@ async fn execute_run_body(
                 &mut rb_outcome.result,
                 Some(&agents_config.model_tiers),
             );
+            ctx.set_step_kind(&rb_step.name, rb_outcome.result.step_kind.as_deref());
             // 2026-06-10 (audit P1) — mark this result as COMPENSATION so the
             // UI renders it under a dedicated rollback section. Pre-fix a
             // green rollback step right after the failed step read as "the
@@ -4129,6 +4131,22 @@ pub(crate) fn persist_declared_artifacts(
     }
 }
 
+/// Replays a run's recorded step results into the context, in run order, as
+/// if the run had never paused.
+pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepResult]) {
+    for prior in results {
+        ctx.set_step_output(&prior.step_name, &prior.output);
+        ctx.set_step_kind(&prior.step_name, prior.step_kind.as_deref());
+        let prior_agent = prior.step_agent.as_ref().map(|a| format!("{a:?}"));
+        ctx.set_step_meta(
+            &prior.step_name,
+            prior_agent.as_deref(),
+            prior.step_model.as_deref(),
+        );
+        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
+    }
+}
+
 /// Stamp the step's "what was actually used here" metadata onto a
 /// freshly-produced [`StepResult`] so editing the workflow afterwards
 /// (swapping the agent, retargeting the plugin, changing the endpoint)
@@ -4155,6 +4173,7 @@ pub(crate) fn record_step_completion(
 ) {
     apply_step_snapshot(step, result, model_tiers);
     ctx.set_step_output(&step.name, &result.output);
+    ctx.set_step_kind(&step.name, result.step_kind.as_deref());
     let agent_name = result.step_agent.as_ref().map(|a| format!("{a:?}"));
     ctx.set_step_meta(
         &step.name,

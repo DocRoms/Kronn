@@ -45,6 +45,11 @@ pub struct TemplateContext {
     /// Values Kronn sets itself (`run.id`), looked up before anything else.
     builtins: HashMap<String, String>,
     time_anchor: DateTime<Utc>,
+    /// Recorded type of the step behind each `steps.<name>` output, so a sink
+    /// knows what produced the value it reads at run time.
+    step_kinds: HashMap<String, String>,
+    /// The step whose output `previous_step` currently holds.
+    previous_step_name: Option<String>,
 }
 
 impl Default for TemplateContext {
@@ -63,6 +68,8 @@ impl TemplateContext {
             values: HashMap::new(),
             builtins: HashMap::new(),
             time_anchor,
+            step_kinds: HashMap::new(),
+            previous_step_name: None,
         }
     }
 
@@ -175,13 +182,52 @@ impl TemplateContext {
         self.values.insert("previous_step.provenance".into(), json);
     }
 
+    /// Records the type of the step that produced `step_name`'s output; call
+    /// after [`Self::set_step_output`], which forgets the previous one.
+    pub fn set_step_kind(&mut self, step_name: &str, kind: Option<&str>) {
+        match kind {
+            Some(kind) => {
+                self.step_kinds
+                    .insert(step_name.to_string(), kind.to_string());
+            }
+            None => {
+                self.step_kinds.remove(step_name);
+            }
+        }
+    }
+
+    /// Recorded type of the step behind a `steps.<name>.…` or
+    /// `previous_step.…` path; `None` when it is not known.
+    pub fn producer_kind(&self, path: &str) -> Option<&str> {
+        if path.starts_with("previous_step.") {
+            let name = self.previous_step_name.as_deref()?;
+            return self.step_kinds.get(name).map(String::as_str);
+        }
+        let rest = path.strip_prefix("steps.")?;
+        self.step_kinds
+            .iter()
+            .filter(|(name, _)| {
+                rest.strip_prefix(name.as_str())
+                    .is_some_and(|tail| tail.starts_with('.'))
+            })
+            .max_by_key(|(name, _)| name.len())
+            .map(|(_, kind)| kind.as_str())
+    }
+
     pub fn set_step_output(&mut self, step_name: &str, output: &str) {
+        self.step_kinds.remove(step_name);
+        self.previous_step_name = Some(step_name.to_string());
         self.values
             .insert(format!("steps.{}.output", step_name), output.into());
         self.values
             .insert("previous_step.output".into(), output.into());
 
-        // Try to extract structured envelope
+        // An output without an envelope must not leave an older step's
+        // structured values behind under this step's name or `previous_step`.
+        for field in ["data", "summary", "status", "data_json"] {
+            self.values.remove(&format!("steps.{step_name}.{field}"));
+            self.values.remove(&format!("previous_step.{field}"));
+        }
         if let Some(envelope) = extract_step_envelope(output) {
             self.values
                 .insert(format!("steps.{}.data", step_name), envelope.data.clone());
@@ -1188,7 +1234,13 @@ fn split_exec_stdout(output: &str) -> Option<(&str, String, &str)> {
         return None;
     };
     let exec_keys = ["exit_code", "stdout", "stderr", "duration_ms"];
-    if data.len() != exec_keys.len() || !exec_keys.iter().all(|key| data.contains_key(*key)) {
+    // Outputs stored before the truncation flags existed lack them.
+    let flags = ["stdout_truncated", "stderr_truncated"];
+    if !exec_keys.iter().all(|key| data.contains_key(*key))
+        || !data
+            .keys()
+            .all(|key| exec_keys.contains(&key.as_str()) || flags.contains(&key.as_str()))
+    {
         return None;
     }
     let stdout = data.get("stdout")?.as_str()?.to_string();

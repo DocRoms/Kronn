@@ -117,7 +117,7 @@ mod tests {
         );
         let before: Vec<_> = HOST_ENV
             .iter()
-            .map(|name| crate::core::child_env::var_os(name))
+            .map(crate::core::child_env::var_os)
             .collect();
         let panicked = std::panic::catch_unwind(|| {
             let _env = HostEnv::explicit(
@@ -135,7 +135,7 @@ mod tests {
         assert!(panicked.is_err());
         let after: Vec<_> = HOST_ENV
             .iter()
-            .map(|name| crate::core::child_env::var_os(name))
+            .map(crate::core::child_env::var_os)
             .collect();
         assert_eq!(
             after, before,

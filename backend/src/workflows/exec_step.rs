@@ -21,8 +21,9 @@
 //!      `cd /` possible from inside the step.
 //!   5. **Timeout-bounded** via `tokio::time::timeout`. Default
 //!      300s, hard-capped at 1800s by the API validator.
-//!   6. **stdout/stderr captured + truncated** to ~100 KB combined
-//!      so a runaway step can't blow up the DB row.
+//!   6. **stdout/stderr streamed and bounded** to ~100 KB each (2 MiB when
+//!      a `PublishPageData` step reads the step) so a runaway step can't blow
+//!      up the DB row; a truncated stream is flagged in the envelope.
 //!
 //! Output format mirrors `notify_step.rs` — Structured envelope with
 //! `data: {exit_code, stdout, stderr, duration_ms}` so downstream
@@ -34,7 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::core::cmd::async_cmd;
 use crate::models::*;
@@ -55,6 +56,11 @@ const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 /// Collectors may legitimately return a larger typed document than a test log.
 /// Still bounded so one CLI cannot inflate a workflow run without limit.
 pub const MAX_COLLECT_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Limit for a step a `PublishPageData` reads: a page needs the whole
+/// document, and 2 MiB is also what `POST /api/pages/{id}/publish` accepts.
+pub const MAX_PUBLISH_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+/// Start of every truncation marker, whatever the limit.
+pub const TRUNCATION_MARKER_PREFIX: &str = "[... output tronqué — limite ";
 
 /// Added to a failed `gh` step whose project gave it no GitHub token.
 pub const GH_NOT_CONNECTED_HINT: &str = " — this project is not connected to GitHub in Kronn, so the step received no GitHub token (Projects → Overview → GitHub)";
@@ -161,6 +167,77 @@ pub async fn execute_exec_step_with_output_limit(
     .await
 }
 
+/// The steps around a publish, read before the run: `sequence` is the list
+/// the publish runs in, `other` the workflow's other list.
+#[derive(Clone, Copy)]
+struct StepLineage<'a> {
+    sequence: &'a [WorkflowStep],
+    other: &'a [WorkflowStep],
+}
+
+/// The step a typed source most likely reads: `steps.<name>.…` by name,
+/// `previous_step.…` as the step listed just before `consumer`.
+fn source_producer<'a>(
+    key: &str,
+    consumer: &str,
+    lineage: StepLineage<'a>,
+) -> Option<&'a WorkflowStep> {
+    let path = key.split_once("??").map_or(key, |(path, _)| path).trim();
+    if path.starts_with("previous_step.") {
+        let index = lineage
+            .sequence
+            .iter()
+            .position(|step| step.name == consumer)?;
+        return index.checked_sub(1).map(|before| &lineage.sequence[before]);
+    }
+    let rest = path.strip_prefix("steps.")?;
+    lineage
+        .sequence
+        .iter()
+        .chain(lineage.other)
+        .filter(|step| {
+            rest.strip_prefix(step.name.as_str())
+                .is_some_and(|tail| tail.starts_with('.'))
+        })
+        .max_by_key(|step| step.name.len())
+}
+
+/// Output limit for `step` in a workflow made of `steps` and `on_failure`:
+/// raised to [`MAX_PUBLISH_OUTPUT_BYTES`] when a `PublishPageData` write reads
+/// it, by name or as `previous_step`. Best effort, from list order: a jump can
+/// change what `previous_step` holds, and the publish then refuses a cut
+/// output from what the run recorded, never publishes it.
+pub fn output_limit_for(
+    step: &WorkflowStep,
+    steps: &[WorkflowStep],
+    on_failure: &[WorkflowStep],
+) -> usize {
+    use super::publish_page_step::typed_source_key;
+    let read_in = |sequence: &[WorkflowStep], other: &[WorkflowStep]| {
+        let lineage = StepLineage { sequence, other };
+        sequence
+            .iter()
+            .filter(|publish| publish.step_type == StepType::PublishPageData)
+            .any(|publish| {
+                publish
+                    .page_publish
+                    .iter()
+                    .flat_map(|config| &config.writes)
+                    .any(|write| {
+                        typed_source_key(&write.value_from)
+                            .ok()
+                            .and_then(|key| source_producer(key, &publish.name, lineage))
+                            .is_some_and(|producer| producer.name == step.name)
+                    })
+            })
+    };
+    if read_in(steps, on_failure) || read_in(on_failure, steps) {
+        MAX_PUBLISH_OUTPUT_BYTES
+    } else {
+        MAX_OUTPUT_BYTES
+    }
+}
+
 /// A workflow Exec step: the workflow author chose the command, so it gets
 /// the project's GitHub token when the project is connected, and none
 /// otherwise (D2). Other callers keep the inherited environment.
@@ -173,6 +250,7 @@ pub async fn execute_exec_step_for_project(
     ctx: &TemplateContext,
     project_id: Option<&str>,
     carrying_repository: Option<&str>,
+    output_limit_bytes: usize,
 ) -> StepOutcome {
     let github_env = crate::core::github_connection::env_for_launch(project_id).await;
     execute_exec_step_inner(
@@ -180,7 +258,7 @@ pub async fn execute_exec_step_for_project(
         workflow_allowlist,
         work_dir,
         ctx,
-        MAX_OUTPUT_BYTES,
+        output_limit_bytes,
         &github_env,
         carrying_repository,
     )
@@ -201,7 +279,13 @@ async fn execute_exec_step_inner(
     carrying_repository: Option<&str>,
 ) -> StepOutcome {
     let start = Instant::now();
-    let output_limit_bytes = output_limit_bytes.clamp(1, MAX_COLLECT_OUTPUT_BYTES);
+    let output_limit_bytes = output_limit_bytes.clamp(1, MAX_PUBLISH_OUTPUT_BYTES);
+    // The step's only credential is the project's GitHub token: never let an
+    // echo of it reach the run record or a published page.
+    let mut secrets = crate::core::secret_scrub::SecretSet::new();
+    for (_, value) in github_env {
+        secrets.add(value);
+    }
 
     // ── Validate config (also enforced at save time, but stale workflows happen) ──
     let raw_command = match step.exec_command.as_deref().map(str::trim) {
@@ -447,32 +531,36 @@ async fn execute_exec_step_inner(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let setup_output =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), sc.output()).await {
-                Ok(Ok(out)) => out,
-                Ok(Err(e)) => {
-                    return fail(
-                        step,
-                        start,
-                        format!(
-                            "Exec step `{}`: failed to spawn setup `{}`: {}",
-                            step.name, setup_cmd, e
-                        ),
-                    )
-                }
-                Err(_) => {
-                    return fail(
-                        step,
-                        start,
-                        format!(
-                            "Exec step `{}`: setup `{}` timed out after {}s.",
-                            step.name, setup_cmd, timeout_secs
-                        ),
-                    )
-                }
-            };
-        let setup_stdout = String::from_utf8_lossy(&setup_output.stdout).into_owned();
-        let setup_stderr = String::from_utf8_lossy(&setup_output.stderr).into_owned();
+        let setup_output = match tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            run_bounded(&mut sc, None, MAX_OUTPUT_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(out)) => out,
+            Ok(Err(e)) => {
+                return fail(
+                    step,
+                    start,
+                    format!(
+                        "Exec step `{}`: failed to spawn setup `{}`: {}",
+                        step.name, setup_cmd, e
+                    ),
+                )
+            }
+            Err(_) => {
+                return fail(
+                    step,
+                    start,
+                    format!(
+                        "Exec step `{}`: setup `{}` timed out after {}s.",
+                        step.name, setup_cmd, timeout_secs
+                    ),
+                )
+            }
+        };
+        let (setup_stdout, _) = captured_text(&setup_output.stdout, &secrets, MAX_OUTPUT_BYTES);
+        let (setup_stderr, _) = captured_text(&setup_output.stderr, &secrets, MAX_OUTPUT_BYTES);
         // Surface the setup head so the operator can scroll through it
         // in the run-detail panel — useful when install logs reveal a
         // missing tool or auth issue.
@@ -596,21 +684,7 @@ async fn execute_exec_step_inner(
     // drained concurrently — a write-all-then-read sequence would deadlock the
     // moment the payload + the child's own output exceed the pipe buffers
     // (~64 KB), i.e. exactly the large-backlog case this field exists for.
-    let output_future = async {
-        match stdin_bytes {
-            Some(bytes) => {
-                let mut child = cmd.spawn()?;
-                if let Some(mut si) = child.stdin.take() {
-                    tokio::spawn(async move {
-                        let _ = si.write_all(&bytes).await;
-                        let _ = si.shutdown().await;
-                    });
-                }
-                child.wait_with_output().await
-            }
-            None => cmd.output().await,
-        }
-    };
+    let output_future = run_bounded(&mut cmd, stdin_bytes, output_limit_bytes);
     let timed_out =
         match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
             Ok(Ok(out)) => Ok(out),
@@ -642,14 +716,8 @@ async fn execute_exec_step_inner(
     };
 
     let exit_code = output.status.code();
-    let stdout = truncate_to_limit_at(
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        output_limit_bytes,
-    );
-    let stderr = truncate_to_limit_at(
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        output_limit_bytes,
-    );
+    let (stdout, stdout_truncated) = captured_text(&output.stdout, &secrets, output_limit_bytes);
+    let (stderr, stderr_truncated) = captured_text(&output.stderr, &secrets, output_limit_bytes);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let success = output.status.success();
@@ -674,6 +742,8 @@ async fn execute_exec_step_inner(
             "exit_code": exit_code,
             "stdout": stdout,
             "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
             "duration_ms": duration_ms,
         },
         "status": if success { "OK" } else { "ERROR" },
@@ -782,6 +852,100 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
     }
 }
 
+/// Bytes read past the limit are counted, not kept, so a chatty command
+/// cannot grow the backend's memory; the margin keeps a secret straddling
+/// the cut whole for the scrubber.
+const CAPTURE_MARGIN_BYTES: usize = 4096;
+
+/// What a child stream left: at most the limit plus the margin, and how many
+/// bytes were dropped past that.
+struct Captured {
+    bytes: Vec<u8>,
+    dropped: u64,
+}
+
+struct BoundedOutput {
+    status: std::process::ExitStatus,
+    stdout: Captured,
+    stderr: Captured,
+}
+
+async fn read_bounded<R: AsyncRead + Unpin>(
+    mut reader: R,
+    keep: usize,
+) -> std::io::Result<Captured> {
+    let mut bytes = Vec::with_capacity(keep.min(64 * 1024));
+    let mut dropped = 0u64;
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buf).await?;
+        if read == 0 {
+            return Ok(Captured { bytes, dropped });
+        }
+        let take = keep.saturating_sub(bytes.len()).min(read);
+        bytes.extend_from_slice(&buf[..take]);
+        dropped += (read - take) as u64;
+    }
+}
+
+/// Spawns `cmd` and drains stdout and stderr concurrently with the stdin
+/// feed, keeping at most `limit` plus the margin of each.
+async fn run_bounded(
+    cmd: &mut tokio::process::Command,
+    stdin: Option<Vec<u8>>,
+    limit: usize,
+) -> std::io::Result<BoundedOutput> {
+    let keep = limit.saturating_add(CAPTURE_MARGIN_BYTES);
+    let mut child = cmd.spawn()?;
+    if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        tokio::spawn(async move {
+            let _ = pipe.write_all(&bytes).await;
+            let _ = pipe.shutdown().await;
+        });
+    }
+    let missing = || std::io::Error::other("child stream was not piped");
+    let stdout = child.stdout.take().ok_or_else(missing)?;
+    let stderr = child.stderr.take().ok_or_else(missing)?;
+    let (stdout, stderr, status) = tokio::try_join!(
+        read_bounded(stdout, keep),
+        read_bounded(stderr, keep),
+        child.wait()
+    )?;
+    Ok(BoundedOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Scrubbed text of a captured stream cut to `limit`, and whether it was cut.
+fn captured_text(
+    captured: &Captured,
+    secrets: &crate::core::secret_scrub::SecretSet,
+    limit: usize,
+) -> (String, bool) {
+    let text = secrets.scrub(&String::from_utf8_lossy(&captured.bytes));
+    if text.len() > limit {
+        (truncate_to_limit_at(text, limit), true)
+    } else if captured.dropped > 0 {
+        (truncate_marker_appended(text, limit), true)
+    } else {
+        (text, false)
+    }
+}
+
+fn truncate_marker_appended(mut text: String, limit: usize) -> String {
+    if limit == MAX_OUTPUT_BYTES {
+        text.push_str(TRUNCATION_MARKER);
+    } else {
+        text.push_str(&format!(
+            "\n\n[... output tronqué — limite {} KB ...]",
+            limit / 1024
+        ));
+    }
+    text
+}
+
 /// Truncate to [`MAX_OUTPUT_BYTES`] on a UTF-8 boundary, appending the
 /// truncation marker. UTF-8 boundary care matters: cutting a multibyte
 /// sequence yields invalid UTF-8 and crashes downstream JSON encoding.
@@ -798,15 +962,9 @@ fn truncate_to_limit_at(s: String, limit: usize) -> String {
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    let marker = if limit == MAX_OUTPUT_BYTES {
-        TRUNCATION_MARKER.to_string()
-    } else {
-        format!("\n\n[... output tronqué — limite {} KB ...]", limit / 1024)
-    };
-    let mut truncated = String::with_capacity(cut + marker.len());
-    truncated.push_str(&s[..cut]);
-    truncated.push_str(&marker);
-    truncated
+    let mut s = s;
+    s.truncate(cut);
+    truncate_marker_appended(s, limit)
 }
 
 /// 2026-06-11 — returns `Some(reason)` when a binary+args invocation is one
@@ -1025,6 +1183,7 @@ mod tests {
             &ctx,
             Some("r16-exec-off"),
             None,
+            MAX_OUTPUT_BYTES,
         )
         .await;
         assert_eq!(
@@ -1036,19 +1195,150 @@ mod tests {
         assert!(!off.result.output.contains("gho_machineTOKEN"));
 
         set_grant("r16-exec-on", GithubConnectionMode::GhLogin, None);
-        let on =
-            execute_exec_step_for_project(&step, &allow, work_dir, &ctx, Some("r16-exec-on"), None)
-                .await;
+        let on = execute_exec_step_for_project(
+            &step,
+            &allow,
+            work_dir,
+            &ctx,
+            Some("r16-exec-on"),
+            None,
+            MAX_OUTPUT_BYTES,
+        )
+        .await;
+        // `printenv` exits 0 only when the variable is set; its echo is scrubbed.
         assert_eq!(on.result.status, RunStatus::Success, "{}", on.result.output);
-        assert!(on.result.output.contains("gho_machineTOKEN"));
+        assert!(!on.result.output.contains("gho_machineTOKEN"));
+        assert!(on.result.output.contains("***"), "{}", on.result.output);
 
-        let none = execute_exec_step_for_project(&step, &allow, work_dir, &ctx, None, None).await;
+        let none = execute_exec_step_for_project(
+            &step,
+            &allow,
+            work_dir,
+            &ctx,
+            None,
+            None,
+            MAX_OUTPUT_BYTES,
+        )
+        .await;
         assert_eq!(
             none.result.status,
             RunStatus::Failed,
             "a project-less run gets no token"
         );
         override_machine_token_for_tests(None);
+    }
+
+    #[test]
+    fn the_output_limit_rises_only_for_a_step_a_publish_reads() {
+        let exec = exec_step("agrege", Some("cat"), vec![], None);
+        let other = exec_step("other", Some("cat"), vec![], None);
+        let publish = WorkflowStep {
+            name: "publish".into(),
+            step_type: StepType::PublishPageData,
+            page_publish: Some(PublishPageDataConfig {
+                page_id: "errors".into(),
+                writes: vec![PublishPageDataWrite {
+                    dataset: "errors".into(),
+                    operation: LivePageWriteOperation::Replace,
+                    value_from: "{{steps.agrege.data.stdout}}".into(),
+                    observed_at: None,
+                    dedupe_key: None,
+                    key_field: None,
+                }],
+            }),
+            ..WorkflowStep::default()
+        };
+        let steps = [exec.clone(), other.clone(), publish];
+        assert_eq!(
+            output_limit_for(&exec, &steps, &[]),
+            MAX_PUBLISH_OUTPUT_BYTES
+        );
+        assert_eq!(output_limit_for(&other, &steps, &[]), MAX_OUTPUT_BYTES);
+        // `previous_step` is the step listed just before the publish.
+        let mut alias = steps[2].clone();
+        alias.page_publish.as_mut().unwrap().writes[0].value_from =
+            "previous_step.data.stdout".into();
+        let steps = [exec.clone(), other.clone(), alias];
+        assert_eq!(
+            output_limit_for(&other, &steps, &[]),
+            MAX_PUBLISH_OUTPUT_BYTES
+        );
+        assert_eq!(output_limit_for(&exec, &steps, &[]), MAX_OUTPUT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn a_github_token_echoed_in_a_large_json_stdout_is_scrubbed() {
+        let token = "ghp_kt1105SecretTokenValue";
+        let mut step = exec_step("agrege", Some("cat"), vec![], Some(30));
+        let padding = "x".repeat(150 * 1024);
+        step.exec_stdin = Some(format!(r#"{{"token":"{token}","pad":"{padding}"}}"#));
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = execute_exec_step_inner(
+            &step,
+            &["cat".into()],
+            dir.path().to_str().unwrap(),
+            &TemplateContext::new(),
+            MAX_PUBLISH_OUTPUT_BYTES,
+            &[("GH_TOKEN".into(), token.into())],
+            None,
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(!outcome.result.output.contains(token));
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("agrege", &outcome.result.output);
+        let stdout = ctx.resolve_value("steps.agrege.data.stdout").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.as_str().unwrap()).unwrap();
+        assert_eq!(parsed["token"], "***");
+        assert_eq!(parsed["pad"].as_str().unwrap().len(), padding.len());
+        assert_eq!(
+            ctx.resolve_value("steps.agrege.data.stdout_truncated"),
+            Some(serde_json::Value::Bool(false))
+        );
+    }
+
+    /// KT-1047 — a stream of tens of MB is read through, never held.
+    #[tokio::test]
+    async fn a_bounded_read_keeps_the_limit_and_counts_the_rest() {
+        let total = 40 * 1024 * 1024u64;
+        let source = tokio::io::AsyncReadExt::take(tokio::io::repeat(b'x'), total);
+        let captured = read_bounded(source, 1000).await.unwrap();
+        assert_eq!(captured.bytes.len(), 1000);
+        assert_eq!(captured.dropped, total - 1000);
+    }
+
+    #[tokio::test]
+    async fn a_command_writing_tens_of_mb_is_cut_with_a_marker() {
+        let step = exec_step(
+            "chatty",
+            Some("head"),
+            vec!["-c", "31457280", "/dev/zero"],
+            Some(60),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = execute_exec_step(
+            &step,
+            &["head".into()],
+            dir.path().to_str().unwrap(),
+            &TemplateContext::new(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            &outcome.result.output[..200.min(outcome.result.output.len())]
+        );
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("chatty", &outcome.result.output);
+        let stdout = ctx.resolve_value("steps.chatty.data.stdout").unwrap();
+        let stdout = stdout.as_str().unwrap();
+        assert!(stdout.ends_with(TRUNCATION_MARKER));
+        assert!(stdout.len() <= MAX_OUTPUT_BYTES + TRUNCATION_MARKER.len());
+        assert_eq!(
+            ctx.resolve_value("steps.chatty.data.stdout_truncated"),
+            Some(serde_json::Value::Bool(true))
+        );
     }
 
     #[test]
@@ -1901,9 +2191,16 @@ mod tests {
         let work_dir = worktree.path().to_string_lossy().to_string();
         let home_dir = home.path().to_string_lossy().to_string();
 
-        let outcome =
-            execute_exec_step_for_project(&step, &allow, &work_dir, &ctx, None, Some(&home_dir))
-                .await;
+        let outcome = execute_exec_step_for_project(
+            &step,
+            &allow,
+            &work_dir,
+            &ctx,
+            None,
+            Some(&home_dir),
+            MAX_OUTPUT_BYTES,
+        )
+        .await;
         assert_eq!(
             outcome.result.status,
             RunStatus::Success,
@@ -1918,8 +2215,16 @@ mod tests {
         assert!(outcome.result.output.contains(&format!("WT={work_dir}")));
 
         // Without a carrying repository the declared scripts cannot be verified.
-        let refused =
-            execute_exec_step_for_project(&step, &allow, &work_dir, &ctx, None, None).await;
+        let refused = execute_exec_step_for_project(
+            &step,
+            &allow,
+            &work_dir,
+            &ctx,
+            None,
+            None,
+            MAX_OUTPUT_BYTES,
+        )
+        .await;
         assert_eq!(refused.result.status, RunStatus::Failed);
         assert!(refused.result.output.contains("no home project"));
     }

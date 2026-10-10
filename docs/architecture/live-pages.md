@@ -237,6 +237,28 @@ Supported operations:
 - `append`: add one value or every value of an input array as observations;
 - `upsert`: insert or replace collection entries using a declared key field.
 
+A write whose `value_from` reads an `Exec` stdout (`steps.<exec>.data.stdout`
+or `previous_step.data.stdout`) gets the whole document, never a cut one. The
+checks below follow what the run recorded: the type of the step that really
+produced the value (for `previous_step`, the step that ran last, also after a
+jump or a resume). When that type is unknown, a value with the Exec envelope
+shape is checked anyway. Any other source is published as is, whatever its
+field names. The 2 MiB raise is decided before the run from list order, so it
+is a best effort: after a jump, a cut output is refused, never published.
+`{{previous_step.data…}}` and `{{steps.<name>.data…}}` no longer read an older
+step's data after a step that produced no envelope. To read an earlier
+producer, name it with `steps.<producer>.data`, which works as long as that
+producer has not been re-run without an envelope. An `Exec` step that a
+`PublishPageData` write reads keeps up to 2 MiB of output (the size
+`POST /api/pages/{id}/publish` accepts) instead of 100 KB. A stdout cut at that
+limit (flagged `stdout_truncated` in the step envelope, or carrying the
+truncation marker) fails the publish step with an explicit message and the Page
+keeps its previous data. A stdout that starts with `{` or `[` is parsed and
+stored as the JSON value; if it does not parse, the step fails the same way.
+Other text is published as a string. The Exec output is scrubbed of the
+project's GitHub token before it reaches the run record or a Page.
+`[src: file: backend/src/workflows/publish_page_step.rs:1]`
+
 Every successful publication increments the Page data revision once and stores
 its workflow run id when available. Dedupe keys make replayed append writes
 idempotent. Retention is enforced in the same transaction with `max_points`

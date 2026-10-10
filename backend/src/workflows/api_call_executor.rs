@@ -1924,10 +1924,23 @@ async fn send_with_retry(
                     None => (Value::Null, link, Some(status.as_u16())),
                 });
             }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| format!("Response body read failed ({}): {e}", status.as_u16()))?;
+            let bytes = match read_body_capped(response, MAX_JSON_RESPONSE_BYTES).await {
+                Ok(CappedBody::Whole(bytes)) => bytes,
+                Ok(CappedBody::TooLarge(seen)) => {
+                    return Err(format!(
+                        "Response refused ({}): the JSON body exceeds {} MiB ({seen} bytes \
+                         read before stopping); narrow the request or paginate",
+                        status.as_u16(),
+                        MAX_JSON_RESPONSE_BYTES / (1024 * 1024)
+                    ))
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Response body read failed ({}): {e}",
+                        status.as_u16()
+                    ))
+                }
+            };
             if bytes.is_empty() {
                 return Ok((Value::Null, link, Some(status.as_u16())));
             }
@@ -1940,9 +1953,11 @@ async fn send_with_retry(
         let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         if !retryable || attempt >= max_retries {
             // An upstream error body may echo the credential it rejected.
-            let excerpt = transport
-                .secrets
-                .scrub(&response.text().await.unwrap_or_default());
+            let head = match read_body_capped(response, ERROR_BODY_READ_BYTES).await {
+                Ok(CappedBody::Whole(bytes)) => bytes,
+                _ => Vec::new(),
+            };
+            let excerpt = transport.secrets.scrub(&String::from_utf8_lossy(&head));
             let redacted_url = redact_url_query(url);
             return Err(format!(
                 "HTTP {} on {} {} — {}",
@@ -1955,6 +1970,36 @@ async fn send_with_retry(
         sleep_backoff(attempt).await;
         attempt += 1;
     }
+}
+
+/// A JSON response past this size fails the step before it is held whole.
+pub(crate) const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+/// An error body only feeds a 512-character excerpt.
+const ERROR_BODY_READ_BYTES: u64 = 64 * 1024;
+
+pub(crate) enum CappedBody {
+    Whole(Vec<u8>),
+    /// Bytes read when the cap was crossed (or the declared length).
+    TooLarge(u64),
+}
+
+/// Reads a body chunk by chunk and stops as soon as it crosses `max`.
+pub(crate) async fn read_body_capped(
+    mut response: reqwest::Response,
+    max: u64,
+) -> Result<CappedBody, reqwest::Error> {
+    if let Some(length) = response.content_length().filter(|length| *length > max) {
+        return Ok(CappedBody::TooLarge(length));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let total = (body.len() + chunk.len()) as u64;
+        if total > max {
+            return Ok(CappedBody::TooLarge(total));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(CappedBody::Whole(body))
 }
 
 /// Every request a step makes (each page, retry and hop) goes through one
@@ -5092,6 +5137,67 @@ mod tests {
             "{}",
             out.result.output
         );
+    }
+
+    /// KT-1047 — a JSON body past the cap fails the step explicitly.
+    #[tokio::test]
+    async fn a_json_response_past_the_cap_fails_the_step() {
+        let server = MockServer::start().await;
+        let body = format!("[\"{}\"]", "x".repeat(MAX_JSON_RESPONSE_BYTES as usize));
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("exceeds 16 MiB"),
+            "{}",
+            &out.result.output[..out.result.output.len().min(300)]
+        );
+    }
+
+    /// A chunked body with no declared length stops at the cap, not at its end.
+    #[tokio::test]
+    async fn a_chunked_body_stops_reading_at_the_cap() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await;
+            let chunk = format!("{:x}\r\n{}\r\n", 4096, "y".repeat(4096));
+            // Far more than the cap; the reader must stop long before the end.
+            for _ in 0..1024 {
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        assert_eq!(response.content_length(), None);
+        match read_body_capped(response, 64 * 1024).await.unwrap() {
+            CappedBody::TooLarge(seen) => assert!(seen <= 64 * 1024 + 8 * 4096, "{seen}"),
+            CappedBody::Whole(body) => panic!("read {} bytes past the cap", body.len()),
+        }
     }
 
     #[tokio::test]
