@@ -1990,7 +1990,11 @@ unmodelled_args_approved?: boolean, };
 
 export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, connection_id?: string | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
 
-export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
+export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null,
+/**
+ * Absent keeps the skill's project on update, `null` makes it global.
+ */
+project_id?: string | null, };
 
 export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, concurrency_key?: string | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
 /**
@@ -5991,6 +5995,15 @@ export type ProjectRepositorySkill = { id: string, name: string, slug: string, d
  */
 status: ProjectRepositoryResourceStatus,
 /**
+ * In the project's default skills: what a `default-skills` update resends.
+ */
+attached: boolean,
+/**
+ * A custom skill scoped to this project: listed here without being a
+ * default of its discussions, and offered to no other project.
+ */
+project_owned: boolean,
+/**
  * Proposed for this repository from its detected stack, not attached to
  * it: never an item to process, only a suggestion to attach.
  */
@@ -7662,7 +7675,12 @@ argument_hint?: string | null,
  * Kronn's own description of the arguments (label, default, control),
  * read from the `metadata.kronn-variables` JSON string.
  */
-variables?: Array<SkillVariable>, };
+variables?: Array<SkillVariable>,
+/**
+ * The one project a custom skill belongs to (`metadata.kronn-project`):
+ * offered and loaded only there. `None` = global.
+ */
+project_id?: string, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 

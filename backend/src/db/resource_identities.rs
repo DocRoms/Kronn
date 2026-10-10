@@ -191,8 +191,9 @@ pub fn resolve_symbolic_reference(
         return Ok(Some(id));
     }
     if kind == "skill" {
-        return Ok(crate::core::skills::get_skill(&format!("custom-{slug}"))
-            .or_else(|| crate::core::skills::get_skill(slug))
+        // Built-in skills last; another project's own skill never resolves.
+        return Ok(crate::core::skills::get_skill(slug)
+            .filter(|skill| skill.is_builtin)
             .map(|skill| skill.id));
     }
     Ok(None)
@@ -277,21 +278,37 @@ fn match_by_slug(
             }
         }
         "skill" => {
-            let Some(project_id) = scope_project else {
-                return Ok(None);
-            };
-            let Some(project) = crate::db::projects::get_project(conn, project_id)? else {
-                return Ok(None);
-            };
-            let root = crate::core::scanner::resolve_host_path(&project.path);
-            let present = !slug.contains(['/', '\\'])
-                && slug != "."
-                && slug != ".."
-                && crate::api::projects::resources::PROJECT_SKILL_ROOTS
-                    .iter()
-                    .filter(|skill_root| !(**skill_root == ".agents/skills" && slug == "kronn"))
-                    .any(|skill_root| root.join(skill_root).join(slug).join("SKILL.md").is_file());
-            return Ok(present.then(|| format!("repository:{project_id}:{slug}")));
+            // The scope's own custom skill (a project's, or a global one), by
+            // its id: two of one scope never share it, unlike a name.
+            // A published skill's folder already carries the `custom-` prefix.
+            let ids = [format!("custom-{slug}"), slug.to_string()];
+            let mut found: Vec<String> = ids
+                .iter()
+                .filter(|id| id.starts_with("custom-"))
+                .filter_map(|id| crate::core::skills::get_skill(id))
+                .filter(|skill| skill.project_id.as_deref() == scope_project)
+                .map(|skill| skill.id)
+                .collect();
+            if let Some(project_id) = scope_project {
+                if let Some(project) = crate::db::projects::get_project(conn, project_id)? {
+                    let root = crate::core::scanner::resolve_host_path(&project.path);
+                    let present = !slug.contains(['/', '\\'])
+                        && slug != "."
+                        && slug != ".."
+                        && crate::api::projects::resources::PROJECT_SKILL_ROOTS
+                            .iter()
+                            .filter(|skill_root| {
+                                !(**skill_root == ".agents/skills" && slug == "kronn")
+                            })
+                            .any(|skill_root| {
+                                root.join(skill_root).join(slug).join("SKILL.md").is_file()
+                            });
+                    if present {
+                        found.push(format!("repository:{project_id}:{slug}"));
+                    }
+                }
+            }
+            found
         }
         _ => Vec::new(),
     };
@@ -577,6 +594,82 @@ pub(crate) mod tests {
         // Without the project, only the catalogue is searched.
         assert_eq!(resolve(&conn, "skill:block-migration", None), None);
         assert_eq!(resolve(&conn, "skill:../escape", Some("proj-s")), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_skill_reference_resolves_the_project_skill_then_the_repository_then_the_global_one() {
+        let data = tempfile::tempdir().unwrap();
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", data.path());
+        let save = |name: &str, project: Option<&str>| {
+            crate::core::skills::save_custom_skill(
+                name,
+                "desc",
+                "S",
+                &crate::models::SkillCategory::Domain,
+                "Body.",
+                None,
+                None,
+                project,
+            )
+            .unwrap()
+        };
+        assert_eq!(save("Rev", Some("proj-s")), "custom-rev");
+        assert_eq!(save("Glob", None), "custom-glob");
+        assert_eq!(save("Other", Some("proj-o")), "custom-other");
+        let conn = conn();
+        let root = tempfile::tempdir().unwrap();
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-s", "name": "S", "path": root.path(),
+            "ai_config": {"detected": false, "configs": []},
+            "audit_status": "NoTemplate",
+            "created_at": timestamp(), "updated_at": timestamp()
+        }))
+        .unwrap();
+        crate::db::projects::insert_project(&conn, &project).unwrap();
+
+        assert_eq!(
+            resolve(&conn, "skill:rev", Some("proj-s")),
+            Some("custom-rev".into())
+        );
+        assert_eq!(
+            resolve(&conn, "skill:custom-rev", Some("proj-s")),
+            Some("custom-rev".into())
+        );
+        assert_eq!(
+            resolve(&conn, "skill:rev", None),
+            None,
+            "a project skill is not global"
+        );
+        assert_eq!(
+            resolve(&conn, "skill:other", Some("proj-s")),
+            None,
+            "nor another project's"
+        );
+        assert_eq!(
+            resolve(&conn, "skill:glob", Some("proj-s")),
+            Some("custom-glob".into())
+        );
+        assert_eq!(
+            resolve(&conn, "skill:glob", None),
+            Some("custom-glob".into())
+        );
+        assert_eq!(
+            resolve(&conn, "skill:rust", Some("proj-s")),
+            Some("rust".into())
+        );
+
+        let folder = root.path().join(".agents/skills/rev");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("SKILL.md"), "---\nname: rev\n---\nBody").unwrap();
+        let error = resolve_symbolic_reference(&conn, "skill:rev", Some("proj-s")).unwrap_err();
+        assert!(error.to_string().contains("ambiguous"), "{error}");
+
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        if let Some(value) = previous {
+            crate::core::child_env::set_var("KRONN_DATA_DIR", value);
+        }
     }
 
     #[test]

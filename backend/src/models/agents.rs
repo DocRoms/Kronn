@@ -66,6 +66,11 @@ pub struct Skill {
     /// read from the `metadata.kronn-variables` JSON string.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<SkillVariable>,
+    /// The one project a custom skill belongs to (`metadata.kronn-project`):
+    /// offered and loaded only there. `None` = global.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub project_id: Option<String>,
 }
 
 /// Kronn's description of one skill argument. Stored as JSON under the flat
@@ -131,6 +136,10 @@ pub struct CreateSkillRequest {
     pub license: Option<String>,
     #[serde(default)]
     pub allowed_tools: Option<String>,
+    /// Absent keeps the skill's project on update, `null` makes it global.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional, type = "string | null")]
+    pub project_id: Option<Option<String>>,
 }
 
 // ─── Agent Profiles (single-select) ────────────────────────────────────────

@@ -1182,6 +1182,43 @@ async fn preflight_workflow_launch(
     })
 }
 
+/// A step's catalog skill ids, and the repository skills it names taken from
+/// its run's pin: read from the default branch when the run started, so the
+/// checkout's branch or the run's worktree never changes them. One the pin
+/// lacks stops the step by name instead of running without it.
+pub(super) fn step_skills(
+    skill_ids: &[String],
+    project_id: Option<&str>,
+    run_id: Option<&str>,
+) -> Result<(Vec<String>, Vec<crate::models::Skill>)> {
+    use crate::api::projects::used_skills::parse_repository_skill_id;
+    let mut catalog = Vec::new();
+    let mut repository = Vec::new();
+    for id in skill_ids {
+        let Some((owner, slug)) = parse_repository_skill_id(id) else {
+            catalog.push(id.clone());
+            continue;
+        };
+        let pinned = run_id.and_then(|run| {
+            crate::core::skills::get_skills_snapshot(run, std::slice::from_ref(id)).pop()
+        });
+        match pinned {
+            Some(skill) if Some(owner) == project_id => repository.push(skill),
+            _ => anyhow::bail!(
+                "Repository skill `{slug}` cannot be loaded: {}",
+                if Some(owner) != project_id {
+                    "it belongs to another project"
+                } else if run_id.is_none() {
+                    "it is read from the default branch when a workflow run starts, and this launch is not a run"
+                } else {
+                    "it was not readable on the default branch when the run started (not committed there, or no longer used by the project)"
+                }
+            ),
+        }
+    }
+    Ok((catalog, repository))
+}
+
 /// Run an agent with optional stall timeout.
 /// Returns the agent output text and token usage.
 ///
@@ -1234,6 +1271,8 @@ async fn run_agent_with_timeout(
     let ollama_format = ollama_envelope_format(&step.output_format);
 
     let result = async {
+        let (catalog_skill_ids, repository_skills) =
+            step_skills(&step.skill_ids, project_id, run_id)?;
         let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
             provenance: Some(capture.clone()),
             activity: activity.cloned(),
@@ -1242,7 +1281,8 @@ async fn run_agent_with_timeout(
             read_only_dirs,
             step_tools: step.agent_settings.as_ref().and_then(|s| s.tools.as_ref()),
             full_access,
-            skill_ids: &step.skill_ids,
+            skill_ids: &catalog_skill_ids,
+            repository_skills: &repository_skills,
             directive_ids: &step.directive_ids,
             profile_ids: &step.profile_ids,
             tier: step
@@ -2057,6 +2097,70 @@ fn condition_description(keyword: &str) -> &str {
 mod tests {
     use super::*;
     use crate::models::{ConditionAction, StepConditionRule};
+
+    #[test]
+    fn a_step_loads_its_repository_skills_from_the_run_pin_and_names_a_missing_one() {
+        let run = "kt1128-step-skills-run";
+        let pinned = crate::models::Skill {
+            id: "repository:p1:block-migration".into(),
+            name: "Block migration".into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: crate::models::SkillCategory::Domain,
+            content: "Committed on main.".into(),
+            is_builtin: false,
+            token_estimate: 4,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+            arguments: vec![],
+            argument_hint: None,
+            variables: vec![],
+            project_id: None,
+        };
+        crate::core::skills::pin_skill_snapshot(run, &pinned.id, pinned.clone());
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        let (catalog, repository) = step_skills(
+            &ids(&["rust", "repository:p1:block-migration"]),
+            Some("p1"),
+            Some(run),
+        )
+        .unwrap();
+        assert_eq!(catalog, ids(&["rust"]));
+        assert_eq!(repository.len(), 1);
+        assert_eq!(repository[0].content, "Committed on main.");
+
+        for (skill_ids, project, run_id, reason) in [
+            (
+                ids(&["repository:p2:block-migration"]),
+                Some("p1"),
+                Some(run),
+                "another project",
+            ),
+            (
+                ids(&["repository:p1:other"]),
+                Some("p1"),
+                Some(run),
+                "not readable on the default branch",
+            ),
+            (
+                ids(&["repository:p1:block-migration"]),
+                Some("p1"),
+                None,
+                "this launch is not a run",
+            ),
+        ] {
+            let error = step_skills(&skill_ids, project, run_id)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+            assert!(error.starts_with("Repository skill `"), "{error}");
+        }
+        crate::core::skills::release_skills_snapshot(run);
+    }
 
     fn rule(contains: &str, action: ConditionAction) -> StepConditionRule {
         StepConditionRule {

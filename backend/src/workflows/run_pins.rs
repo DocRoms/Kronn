@@ -405,6 +405,9 @@ struct Deps {
     workflows: BTreeMap<String, Workflow>,
     resolutions: BTreeMap<String, Resolution>,
     skill_ids: BTreeSet<String>,
+    /// Repository skill ids by the project of the step naming them (`""` for
+    /// none): a sub-workflow of another project loads that project's skills.
+    repository_skill_ids: BTreeMap<String, BTreeSet<String>>,
     directive_ids: BTreeSet<String>,
     profile_ids: BTreeSet<String>,
     skills: BTreeMap<String, Skill>,
@@ -420,6 +423,21 @@ impl Deps {
         for skill in crate::core::skills::get_skills_by_ids(&skill_ids) {
             deps.skills.insert(skill.id.clone(), skill);
         }
+        // Repository skills enter the pin as read from the default branch now,
+        // each in the project of the step naming it; one that cannot be read is
+        // left out and stops its step by name.
+        for (context, ids) in &deps.repository_skill_ids {
+            let ids: Vec<String> = ids.iter().cloned().collect();
+            let repository = crate::api::projects::used_skills::resolve_repository_skills_from(
+                conn,
+                (!context.is_empty()).then_some(context.as_str()),
+                &ids,
+                crate::api::projects::used_skills::RepositorySkillSource::DefaultBranch,
+            )?;
+            for skill in repository.resolved {
+                deps.skills.insert(skill.id.clone(), skill);
+            }
+        }
         let directive_ids: Vec<String> = deps.directive_ids.iter().cloned().collect();
         for directive in crate::core::directives::get_directives_by_ids(&directive_ids) {
             deps.directives.insert(directive.id.clone(), directive);
@@ -432,8 +450,21 @@ impl Deps {
         Ok(deps)
     }
 
-    fn bindings(&mut self, skills: &[String], profiles: &[String], directives: &[String]) {
+    fn bindings(
+        &mut self,
+        project_id: Option<&str>,
+        skills: &[String],
+        profiles: &[String],
+        directives: &[String],
+    ) {
         self.skill_ids.extend(skills.iter().cloned());
+        let repository = skills.iter().filter(|id| {
+            crate::api::projects::used_skills::parse_repository_skill_id(id).is_some()
+        });
+        self.repository_skill_ids
+            .entry(project_id.unwrap_or_default().to_string())
+            .or_default()
+            .extend(repository.cloned());
         self.profile_ids.extend(profiles.iter().cloned());
         self.directive_ids.extend(directives.iter().cloned());
     }
@@ -483,7 +514,12 @@ fn collect(
             template,
         });
     for step in resolved.steps.iter().chain(resolved.on_failure.iter()) {
-        deps.bindings(&step.skill_ids, &step.profile_ids, &step.directive_ids);
+        deps.bindings(
+            project_id,
+            &step.skill_ids,
+            &step.profile_ids,
+            &step.directive_ids,
+        );
         let prompt_ids = step
             .quick_prompt_id
             .iter()
@@ -495,6 +531,7 @@ fn collect(
             }
             if let Some(prompt) = crate::db::quick_prompts::get_quick_prompt(conn, id)? {
                 deps.bindings(
+                    project_id,
                     &prompt.skill_ids,
                     &prompt.profile_ids,
                     &prompt.directive_ids,
@@ -512,7 +549,7 @@ fn collect(
                 continue;
             }
             if let Some(api) = crate::db::quick_apis::get_quick_api(conn, id)? {
-                deps.bindings(&[], &api.profile_ids, &api.directive_ids);
+                deps.bindings(project_id, &[], &api.profile_ids, &api.directive_ids);
                 deps.apis.insert(id.clone(), api);
             }
         }
@@ -935,6 +972,7 @@ mod tests {
             "GATHERED-BODY",
             None,
             None,
+            None,
         )
         .unwrap();
         let db = seeded().await;
@@ -955,6 +993,7 @@ mod tests {
                     "LATER-BODY",
                     None,
                     None,
+                    None,
                 )
                 .map_err(anyhow::Error::msg)?;
                 deps.store(conn, "run-1")?;
@@ -968,6 +1007,168 @@ mod tests {
         assert_eq!(before, after);
         assert!(stored.contains("GATHERED-BODY"), "{stored}");
         assert!(!stored.contains("LATER-BODY"), "{stored}");
+    }
+
+    fn test_project(id: &str, path: &str) -> crate::models::Project {
+        let now = Utc::now();
+        crate::models::Project {
+            id: id.into(),
+            name: id.into(),
+            path: path.into(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
+            audit_status: Default::default(),
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            path_exists: true,
+            write_access: None,
+            mcp_sync_report: None,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            workspace: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// A git repository whose default branch commits `body` as the
+    /// `block-migration` skill.
+    fn repository_with_skill(body: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = crate::core::cmd::git_cmd()
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let dir = root.path().join(".agents/skills/block-migration");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: block-migration\n---\n{body}\n"),
+        )
+        .unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "--", "."]);
+        git(&["commit", "-q", "-m", "skill"]);
+        root
+    }
+
+    /// A sub-workflow of another project loads that project's repository
+    /// skills; its parent's project still cannot load them directly.
+    #[tokio::test]
+    async fn a_sub_workflow_of_another_project_pins_that_project_s_repository_skill() {
+        let repo_b = repository_with_skill("B-BODY");
+        let db = seeded().await;
+        let path_b = repo_b.path().display().to_string();
+        let id = "repository:pB:block-migration";
+        db.with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &test_project("pA", "/nonexistent/a"))?;
+            crate::db::projects::insert_project(conn, &test_project("pB", &path_b))?;
+            crate::db::project_skill_references::upsert(
+                conn,
+                "pB",
+                "block-migration",
+                ".agents/skills/block-migration/SKILL.md",
+                "Block migration",
+                "2026-10-09T00:00:00Z",
+            )?;
+            let mut child = crate::db::workflows::get_workflow(conn, "child")?.unwrap();
+            child.project_id = Some("pB".into());
+            child.steps[0].skill_ids = vec![id.into()];
+            crate::db::workflows::update_workflow(conn, &child)?;
+            let mut parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+            parent.project_id = Some("pA".into());
+            parent.steps[0].skill_ids = vec![id.into()];
+            crate::db::workflows::update_workflow(conn, &parent)?;
+            let run = crate::db::workflows::get_run(conn, "run-1")?.unwrap();
+            pin_or_load(conn, &parent, &run)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // As after a restart: a fresh snapshot seeded from the stored pin.
+        let key = "kt1128-resume-key";
+        let seeded = db
+            .with_read_conn(move |conn| seed_resource_snapshots_as(conn, "run-1", key))
+            .await
+            .unwrap();
+        assert!(seeded);
+        let ids = vec![id.to_string()];
+        let (_, loaded) = super::super::steps::step_skills(&ids, Some("pB"), Some(key)).unwrap();
+        assert!(loaded[0].content.contains("B-BODY"));
+        let refused = super::super::steps::step_skills(&ids, Some("pA"), Some(key)).unwrap_err();
+        assert!(refused.to_string().contains("another project"), "{refused}");
+        crate::core::skills::release_skills_snapshot(key);
+    }
+
+    /// A repository skill enters the pin as committed on the default branch:
+    /// neither the checkout's branch nor a later commit changes what runs.
+    #[tokio::test]
+    async fn a_repository_skill_is_pinned_from_the_default_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = crate::core::cmd::git_cmd()
+                .args(args)
+                .current_dir(root.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let write = |body: &str| {
+            let dir = root.path().join(".agents/skills/block-migration");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: block-migration\n---\n{body}\n"),
+            )
+            .unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        write("COMMITTED-BODY");
+        git(&["add", "--", "."]);
+        git(&["commit", "-q", "-m", "skill"]);
+        git(&["checkout", "-q", "-b", "feature"]);
+        write("CHECKOUT-BODY");
+
+        let db = seeded().await;
+        let path = root.path().display().to_string();
+        let stored = db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &test_project("p1", &path))?;
+                crate::db::project_skill_references::upsert(
+                    conn,
+                    "p1",
+                    "block-migration",
+                    ".agents/skills/block-migration/SKILL.md",
+                    "Block migration",
+                    "2026-10-09T00:00:00Z",
+                )?;
+                let mut parent = crate::db::workflows::get_workflow(conn, "parent")?.unwrap();
+                parent.steps[0].skill_ids = vec!["repository:p1:block-migration".into()];
+                let deps = Deps::gather(conn, &parent, Some("p1"))?;
+                deps.store(conn, "run-1")?;
+                rows::get(conn, "run-1", SKILL, "repository:p1:block-migration")
+            })
+            .await
+            .unwrap()
+            .expect("the repository skill is pinned");
+        assert!(stored.contains("COMMITTED-BODY"), "{stored}");
+        assert!(!stored.contains("CHECKOUT-BODY"), "{stored}");
     }
 
     #[tokio::test]

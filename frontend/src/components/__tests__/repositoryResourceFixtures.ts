@@ -36,6 +36,10 @@ export const skill = (overrides: Partial<ProjectRepositorySkill> & Pick<ProjectR
   description: '',
   provenance: 'both',
   status: 'up_to_date',
+  // What the backend sends: a default skill of the project unless the
+  // repository alone holds it or the stack only suggests it.
+  attached: (overrides.provenance ?? 'both') !== 'repository' && !overrides.suggested,
+  project_owned: false,
   suggested: false,
   approval_required: false,
   approved: false,

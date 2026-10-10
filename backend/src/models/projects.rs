@@ -183,6 +183,13 @@ pub struct ProjectRepositorySkill {
     /// `kronn_only`, one found only in a repository folder is `repository_only`
     /// (`native_skill` when Kronn has no counterpart at all).
     pub status: ProjectRepositoryResourceStatus,
+    /// In the project's default skills: what a `default-skills` update resends.
+    #[serde(default)]
+    pub attached: bool,
+    /// A custom skill scoped to this project: listed here without being a
+    /// default of its discussions, and offered to no other project.
+    #[serde(default)]
+    pub project_owned: bool,
     /// Proposed for this repository from its detected stack, not attached to
     /// it: never an item to process, only a suggestion to attach.
     #[serde(default)]

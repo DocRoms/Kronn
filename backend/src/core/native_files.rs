@@ -777,6 +777,7 @@ mod tests {
             arguments: Vec::new(),
             argument_hint: None,
             variables: Vec::new(),
+            project_id: None,
         }
     }
 

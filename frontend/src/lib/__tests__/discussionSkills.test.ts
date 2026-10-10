@@ -91,6 +91,17 @@ describe('skillPickerModel — a discussion with a project', () => {
     expect(names(picked.used)).not.toContain('Elsewhere');
   });
 
+  it('never offers another project\'s own skill, and lists this project\'s one as used', () => {
+    const scoped = (id: string, name: string, project_id: string): Skill => ({ ...skill(id, name), is_builtin: false, project_id });
+    const picked = model({
+      catalog: [...CATALOG, scoped('custom-mine', 'Mine', 'p1'), scoped('custom-theirs', 'Theirs', 'p2')],
+    });
+    expect(names(picked.used)).toContain('Mine');
+    const offered = [...picked.used, ...picked.ticked, ...picked.available.flatMap(group => group.entries)];
+    expect(names(offered)).not.toContain('Theirs');
+    expect(picked.total).toBe(CATALOG.length + 2);
+  });
+
   it('a skill that left the repository is no longer listed', () => {
     const picked = model({ usedSkills: [] });
     expect(names(picked.used)).toEqual(['DevOps']);

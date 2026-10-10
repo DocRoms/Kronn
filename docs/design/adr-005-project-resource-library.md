@@ -250,6 +250,22 @@ tokens in every session and every sub-agent, and compete to trigger.
   (so `/review-pr` works in the CLI). Kronn projects skills to `.claude/skills`
   where needed.
 
+### Project skills kept in Kronn (KT-1128)
+
+A skill can belong to one project before it is published into that project's
+repository. It stays a custom skill of the library carrying
+`metadata.kronn-project`, with the same file and the same `custom-<slug>` id,
+so run pins (KT-1096) and references treat it like any custom skill. It is
+offered only in its project, listed on its AI & automation tab as a project
+skill without being a default of its discussions, and refused by name when an
+agent launch of another project names it.
+`[src: file: backend/src/core/skills.rs:624]`
+A workflow Agent step also loads the project's repository skills: the run pin
+reads each one as committed on the default branch and pins it, so neither the
+checkout's branch nor the run's worktree changes it; one the pin lacks stops
+the step by name. A discussion still reads the checkout as it is.
+`[src: file: backend/src/api/projects/used_skills.rs:410]`
+
 ## Identity
 
 - Every resource declares `kind` and an immutable `slug` in the file; the file

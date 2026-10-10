@@ -15,7 +15,7 @@ import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, RunStatus, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
-  JsonValue, Skill, UnsafeExecStep, WorkflowStep,
+  JsonValue, Skill, CreateSkillRequest, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -23,7 +23,7 @@ import {
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star, Trash2,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
-  PlugZap, MessageSquareText, TerminalSquare,
+  PlugZap, MessageSquareText, TerminalSquare, Sparkles,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
@@ -34,6 +34,7 @@ import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { SkillForm } from '../components/workflows/SkillForm';
 import { SkillCard, SkillSheet } from '../components/SkillSheet';
 import { RepositorySkillSheet } from '../components/RepositorySkillSheet';
 import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
@@ -493,6 +494,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       ? initialAutomationNavigation.resourceId
       : null,
   );
+  const [showCreateSkill, setShowCreateSkill] = useState(false);
+  const [editingSkill, setEditingSkill] = useState<Skill | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(
     initialAutomationNavigation.tab === 'skills'
       ? initialAutomationNavigation.resourceId
@@ -1563,6 +1566,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     return saved;
   };
 
+  const handleSaveSkill = async (request: CreateSkillRequest) => {
+    const saved = editingSkill
+      ? await skillsApi.update(editingSkill.id, request)
+      : await skillsApi.create(request);
+    setShowCreateSkill(false);
+    setEditingSkill(null);
+    if (saved?.id) setSelectedSkillId(saved.id);
+    refetchSkills();
+  };
+
   const handleSaveQE = async (request: CreateQuickExecRequest) => {
     const targetId = editingQE?.id ?? (!showCreateQE ? selectedQuickExecId : null);
     const saved = targetId
@@ -2107,9 +2120,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQA(null);
     setShowCreateQE(false);
     setEditingQE(null);
+    setShowCreateSkill(false);
+    setEditingSkill(null);
   };
 
-  const openAutomationCreation = (kind: Exclude<AutomationTab, 'skills'>) => {
+  const openAutomationCreation = (kind: AutomationTab) => {
     clearAutomationEditors();
     setShowAutomationActions(false);
     setSelectedId(null);
@@ -2122,7 +2137,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (kind === 'workflows') setShowCreate(true);
     else if (kind === 'quickPrompts') setShowCreateQP(true);
     else if (kind === 'quickApis') setShowCreateQA(true);
-    else setShowCreateQE(true);
+    else if (kind === 'quickExecs') setShowCreateQE(true);
+    else setShowCreateSkill(true);
   };
 
   // Choosing a type on the type chip also opens its list; "All" lifts it.
@@ -2609,6 +2625,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               >
                 <TerminalSquare size={18} />
                 <span><strong>{t('qe.new')}</strong><small>{t('qe.formHint')}</small></span>
+              </button>
+              <button
+                type="button"
+                className="automation-action-option"
+                aria-label={t('skills.new')}
+                onClick={() => openAutomationCreation('skills')}
+              >
+                <Sparkles size={18} />
+                <span><strong>{t('skills.new')}</strong><small>{t('skills.newHint')}</small></span>
               </button>
               <button
                 type="button"
@@ -4276,11 +4301,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {/* ═══ SKILLS TAB (KT-914) ═══
-          Read-only: a skill is opened, never launched. Editing stays in
-          Settings, the one screen that has an editor for it. */}
+          A skill is opened, never launched. */}
       {tab === 'skills' && (
         <div>
-          {selectedSkill && selectedSkillEntry ? (
+          {showCreateSkill || editingSkill ? (
+            <SkillForm
+              key={editingSkill?.id ?? 'new'}
+              editSkill={editingSkill ?? undefined}
+              projects={projects}
+              initialProjectId={projects.some(project => project.id === automationProjectFilter) ? automationProjectFilter : null}
+              onSave={handleSaveSkill}
+              onCancel={() => { setShowCreateSkill(false); setEditingSkill(null); }}
+            />
+          ) : selectedSkill && selectedSkillEntry ? (
             selectedSkillEntry.repository ? (
               <RepositorySkillSheet
                 key={selectedSkill.id}
@@ -4299,6 +4332,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 pinned={skillFavorites.has(selectedSkill.id)}
                 onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
                 onOpenSettings={onNavigateSettings}
+                onEdit={selectedSkill.is_builtin ? undefined : () => setEditingSkill(selectedSkill)}
                 onError={message => toastProp?.(message, 'error')}
                 onDelete={selectedSkill.is_builtin ? undefined : async () => {
                   await skillsApi.delete(selectedSkill.id);

@@ -458,6 +458,73 @@ fi
     }
 
     #[tokio::test]
+    #[serial_test::serial]
+    async fn a_project_skill_launches_only_in_its_own_project() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", data_dir.path());
+        let skill_id = crate::core::skills::save_custom_skill(
+            "Launch Scope Review",
+            "desc",
+            "🔎",
+            &crate::models::SkillCategory::Domain,
+            "Body.",
+            None,
+            None,
+            Some("p-front"),
+        )
+        .unwrap();
+        let fixture = Arc::new(NativeRouteFixture {
+            created: std::sync::atomic::AtomicUsize::new(0),
+            resumed: std::sync::atomic::AtomicUsize::new(0),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let project = tempfile::tempdir().unwrap();
+        let tokens = crate::models::setup::TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let agent = AgentType::OpenCode;
+        let skill_ids = vec![skill_id];
+        let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
+        let launch = |project_id: Option<&'static str>| {
+            start_agent_with_config(AgentStartConfig {
+                test_acp_transport: Some(fixture.clone()),
+                full_access: true,
+                skill_ids: &skill_ids,
+                project_id,
+                ..AgentStartConfig::new(&agent, project.path().to_str().unwrap(), "go", &tokens)
+            })
+        };
+
+        for elsewhere in [Some("p-other"), None] {
+            let error = launch(elsewhere)
+                .await
+                .err()
+                .expect("refused outside its project");
+            assert!(error.contains("'Launch Scope Review'"), "{error}");
+        }
+        assert_eq!(
+            fixture.created.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a refused launch starts nothing"
+        );
+        let mut started = launch(Some("p-front"))
+            .await
+            .expect("launched in its project");
+        while started.next_line().await.is_some() {}
+        assert_eq!(fixture.created.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        if let Some(value) = previous {
+            crate::core::child_env::set_var("KRONN_DATA_DIR", value);
+        }
+    }
+
+    #[tokio::test]
     async fn start_agent_with_config_native_route_uses_only_the_explicit_resume_delta() {
         let fixture = Arc::new(NativeRouteFixture {
             created: std::sync::atomic::AtomicUsize::new(0),
@@ -568,6 +635,7 @@ fi
             arguments: Vec::new(),
             argument_hint: None,
             variables: Vec::new(),
+            project_id: None,
         };
         let agent = AgentType::OpenCode;
         let _saved = crate::core::config::test_saved_access::set(&AgentType::OpenCode, true);
