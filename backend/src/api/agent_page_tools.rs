@@ -276,7 +276,9 @@ impl KronnToolExecutor {
                                     .unwrap_or_else(|| "Unable to load Page workflows".into()),
                             );
                         }
-                        let Json(discussions) = live_pages::discussions(state, Path(id)).await;
+                        let trusts_page = id.clone();
+                        let Json(discussions) =
+                            live_pages::discussions(state.clone(), Path(id)).await;
                         if !discussions.success {
                             return fail(
                                 call,
@@ -287,6 +289,20 @@ impl KronnToolExecutor {
                         }
                         detail["workflows"] = json!(workflows.data.unwrap_or_default());
                         detail["discussions"] = json!(discussions.data.unwrap_or_default());
+                        // Read-only for agents: which actions a human lets run without a card.
+                        match state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::live_page_action_trusts::summary_for_page(
+                                    conn,
+                                    &trusts_page,
+                                )
+                            })
+                            .await
+                        {
+                            Ok(trusted) => detail["trusted_actions"] = trusted,
+                            Err(error) => return fail(call, error.to_string()),
+                        }
                         self.scoped_links(&mut detail, scope).await;
                         ok(call, detail)
                     }

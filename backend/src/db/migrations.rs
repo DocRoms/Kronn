@@ -882,8 +882,16 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("sql/227_workflow_run_pins.sql"),
     ),
     (
+        "228_live_page_action_trusts",
+        include_str!("sql/228_live_page_action_trusts.sql"),
+    ),
+    (
         "229_workflow_run_tree_llm_calls",
         include_str!("sql/229_workflow_run_tree_llm_calls.sql"),
+    ),
+    (
+        "231_api_access_policies",
+        include_str!("sql/231_api_access_policies.sql"),
     ),
 ];
 

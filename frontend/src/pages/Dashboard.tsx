@@ -476,7 +476,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { driftByProject, refetchDrift: handleRefetchDrift } = useProjectDrift(page === 'projects', projects);
 
   const mcpRegistry = registry ?? [];
-  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
   const agents = agentList ?? [];
   const allDiscussions = useMemo(() => discussionList ?? [], [discussionList]);
   const allSkills = skillList ?? [];

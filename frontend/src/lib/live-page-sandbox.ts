@@ -796,6 +796,8 @@ export function createLivePageOpenLinkRelay(
     }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;
     if (message.type === 'kronn:page-action') {
+      // A click may launch without a card: only a proven live gesture counts.
+      if (navigator.userActivation?.isActive !== true) return;
       if (
         typeof message.action_ref !== 'string'
         || !LIVE_PAGE_ACTION_REF.test(message.action_ref)

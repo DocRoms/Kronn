@@ -64,21 +64,43 @@ pub fn pin_or_load(
         return Ok(Ok(workflow.clone()));
     }
     let tx = conn.unchecked_transaction()?;
+    let pinned = pin_fresh(&tx, workflow, run)?;
+    if pinned.is_ok() {
+        tx.commit()?;
+    }
+    Ok(pinned)
+}
+
+/// Pins `run` inside the caller's transaction, right after the caller inserted
+/// it: an admission check and the pin then see the same definitions (KT-1029).
+pub fn pin_within(
+    conn: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> Result<std::result::Result<Workflow, String>> {
+    pin_fresh(conn, workflow, run)
+}
+
+fn pin_fresh(
+    tx: &Connection,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> Result<std::result::Result<Workflow, String>> {
     let inherited = match run.parent_run_id.as_deref() {
-        Some(parent) if rows::has_pin(&tx, parent)? => {
-            rows::copy_dependencies(&tx, parent, &run.id)?;
+        Some(parent) if rows::has_pin(tx, parent)? => {
+            rows::copy_dependencies(tx, parent, &run.id)?;
             true
         }
         _ => false,
     };
     let mut fingerprint = None;
     if !inherited {
-        if let Some(reason) = changed_since(&tx, &workflow.id, run.started_at)? {
+        if let Some(reason) = changed_since(tx, &workflow.id, run.started_at)? {
             return Ok(Err(reason));
         }
         let project_id = run.project_id.as_deref().or(workflow.project_id.as_deref());
-        let deps = Deps::gather(&tx, workflow, project_id)?;
-        deps.store(&tx, &run.id)?;
+        let deps = Deps::gather(tx, workflow, project_id)?;
+        deps.store(tx, &run.id)?;
         fingerprint = Some(fingerprint_of(workflow, &deps)?);
     }
     let header = RunHeader {
@@ -87,13 +109,12 @@ pub fn pin_or_load(
         fingerprint,
     };
     rows::insert(
-        &tx,
+        tx,
         &run.id,
         rows::RUN_KIND,
         "",
         &serde_json::to_string(&header)?,
     )?;
-    tx.commit()?;
     Ok(Ok(workflow.clone()))
 }
 

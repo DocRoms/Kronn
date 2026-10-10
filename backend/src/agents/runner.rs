@@ -4196,6 +4196,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 }
             },
         );
+        // API access policies decide on the model this launch really runs.
+        if let Some(tools) = config.tools.as_ref() {
+            tools.bind_launch_identity(crate::core::api_access::AgentIdentity {
+                agent_type: config.agent_type.clone(),
+                model: Some(model.to_string()),
+            });
+        }
         return start_ollama_http_with_idle(
             config.agent_type,
             config.prompt,
@@ -4733,6 +4740,15 @@ fn mint_launch_bridge_token(
             .workflow_step_context
             .map(|context| context.run_id.clone()),
         project_id: config.project_id.map(str::to_owned),
+        agent: Some(crate::core::api_access::AgentIdentity {
+            agent_type: config.agent_type.clone(),
+            model: effective_model_flag(
+                config.model_override,
+                config.agent_type,
+                config.tier,
+                config.model_tiers,
+            ),
+        }),
     })
     .map_err(|error| format!("Agent launch refused: {error}"))
 }
@@ -4994,6 +5010,10 @@ pub(crate) async fn probe_native_acp_session(
             })?;
             let bridge = crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
                 project_id: project_id.map(str::to_owned),
+                agent: Some(crate::core::api_access::AgentIdentity {
+                    agent_type: agent_type.clone(),
+                    model: None,
+                }),
                 ..Default::default()
             })
             .map_err(|error| failed(AcpStartPhase::Start, error))?;

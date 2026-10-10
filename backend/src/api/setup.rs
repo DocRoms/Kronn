@@ -1697,6 +1697,11 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .with_read_conn(crate::db::assistant_conversations::list_links)
         .await
         .map_err(|e| format!("DB error: {}", e))?;
+    let api_access_policies = state
+        .db
+        .with_read_conn(crate::db::api_access_policies::list)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter()
@@ -1738,6 +1743,7 @@ pub(crate) async fn build_export(state: &AppState) -> Result<DbExport, String> {
         quick_prompt_versions,
         learning_rejections,
         assistant_conversations,
+        api_access_policies: Some(api_access_policies),
     })
 }
 
@@ -2175,6 +2181,21 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let learnings = data.learnings.clone();
     let learning_rejections = data.learning_rejections.clone();
     let assistant_conversations = data.assistant_conversations.clone();
+    // Checked before the transaction: a policy that would not be accepted by
+    // the settings route is not restored either.
+    let api_access_policies = match &data.api_access_policies {
+        Some(entries) => Some(
+            entries
+                .iter()
+                .map(|entry| {
+                    crate::core::api_access::normalize_policy(entry.policy.clone())
+                        .map(|policy| (entry.server_id.clone(), policy))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Import refused: invalid API access policy: {e}"))?,
+        ),
+        None => None,
+    };
     let (pruned, dropped_github) = state
         .db
         .with_conn(move |conn| {
@@ -2210,6 +2231,13 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
             }
             for c in &mcp_configs {
                 crate::db::mcps::insert_config(&tx, c).map_err(|e| fail("MCP config", e))?;
+            }
+            if let Some(entries) = &api_access_policies {
+                tx.execute("DELETE FROM api_access_policies", [])?;
+                for (server_id, policy) in entries {
+                    crate::db::api_access_policies::set(&tx, server_id, policy)
+                        .map_err(|e| fail("API access policy", e))?;
+                }
             }
             for (w, disabled_because) in &workflows {
                 if let Err(e) = crate::db::workflows::insert_workflow(&tx, w) {
@@ -3815,6 +3843,166 @@ mod tests {
         assert_eq!(rej_count, 2, "anti-repetition threshold stays armed");
     }
 
+    /// A plugin with a stored credential, on a fresh instance keyed by `secret`.
+    async fn access_policy_state(secret: &str, base_url: &str) -> crate::AppState {
+        use crate::models::*;
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let mut config = crate::core::config::default_config();
+        config.encryption_secret = Some(secret.to_string());
+        let state = crate::AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(config)),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let env = std::collections::HashMap::from([("TOKEN".to_string(), "kt1026-t".to_string())]);
+        let encrypted = crate::db::mcps::encrypt_env(&env, secret).unwrap();
+        let plugin = McpServer {
+            id: "custom-notes".into(),
+            name: "Notes".into(),
+            description: String::new(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Manual,
+            api_spec: Some(ApiSpec {
+                base_url: base_url.into(),
+                auth: ApiAuthKind::Bearer {
+                    env_key: "TOKEN".into(),
+                },
+                endpoints: vec![ApiEndpoint {
+                    method: "GET".into(),
+                    path: "/users/me".into(),
+                    description: String::new(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+                default_headers: vec![],
+                test_endpoint: None,
+            }),
+        };
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::mcps::upsert_server(conn, &plugin)?;
+                crate::db::mcps::insert_config(
+                    conn,
+                    &McpConfig {
+                        id: "cfg-notes".into(),
+                        server_id: "custom-notes".into(),
+                        label: "Notes".into(),
+                        env_keys: vec!["TOKEN".into()],
+                        env_encrypted: encrypted,
+                        args_override: None,
+                        is_global: true,
+                        include_general: true,
+                        config_hash: "kt1026".into(),
+                        project_ids: Vec::new(),
+                        host_sync: HostSyncMode::None,
+                    },
+                )
+            })
+            .await
+            .unwrap();
+        state
+    }
+
+    #[tokio::test]
+    async fn export_round_trips_access_policies_and_the_restore_still_refuses() {
+        use crate::models::*;
+        use wiremock::{matchers::any, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let secret = crate::core::crypto::generate_secret();
+        let source = access_policy_state(&secret, &server.uri()).await;
+        let blocked = ApiAccessPolicy {
+            access: ApiAccessRule::Blocked,
+            endpoints: vec![],
+        };
+        let stored = blocked.clone();
+        source
+            .db
+            .with_conn(move |conn| {
+                crate::db::api_access_policies::set(conn, "custom-notes", &stored)
+            })
+            .await
+            .unwrap();
+        let export = build_export(&source).await.expect("export");
+        assert_eq!(export.version, 7);
+        let json = serde_json::to_string(&export).unwrap();
+        let export: DbExport = serde_json::from_str(&json).unwrap();
+
+        let target = access_policy_state(&secret, &server.uri()).await;
+        do_import_db(&target, &export).await.expect("import");
+        let restored = target
+            .db
+            .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
+            .await
+            .unwrap();
+        assert_eq!(restored, Some(blocked));
+
+        let step = WorkflowStep {
+            name: "call".into(),
+            step_type: StepType::ApiCall,
+            api_plugin_slug: Some("custom-notes".into()),
+            api_config_id: Some("cfg-notes".into()),
+            api_endpoint_path: Some("/users/me".into()),
+            api_max_retries: Some(0),
+            ..WorkflowStep::default()
+        };
+        let outcome = crate::workflows::api_call_executor::execute_api_call_step_with_db(
+            &step,
+            None,
+            &target,
+            &crate::workflows::template::TemplateContext::new(),
+            crate::workflows::api_call_executor::SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::unidentified_agent(),
+        )
+        .await;
+        assert_eq!(outcome.result.status, RunStatus::Failed);
+        assert!(
+            outcome.result.output.contains("Access policy"),
+            "{}",
+            outcome.result.output
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_export_keeps_local_access_policies() {
+        use crate::models::*;
+        let secret = crate::core::crypto::generate_secret();
+        let state = access_policy_state(&secret, "https://api.example.com").await;
+        let local = ApiAccessPolicy {
+            access: ApiAccessRule::LocalOnly,
+            endpoints: vec![],
+        };
+        let stored = local.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::api_access_policies::set(conn, "custom-notes", &stored)
+            })
+            .await
+            .unwrap();
+        // A v6 archive has no `api_access_policies` field at all.
+        let mut old = serde_json::to_value(empty_export()).unwrap();
+        old.as_object_mut().unwrap().remove("api_access_policies");
+        old["version"] = serde_json::json!(6);
+        let old: DbExport = serde_json::from_value(old).unwrap();
+        assert!(old.api_access_policies.is_none());
+        do_import_db(&state, &old).await.expect("v6 import");
+        let kept = state
+            .db
+            .with_conn(|conn| crate::db::api_access_policies::get(conn, "custom-notes"))
+            .await
+            .unwrap();
+        assert_eq!(kept, Some(local));
+    }
+
     #[tokio::test]
     async fn export_round_trips_assistant_conversations_and_reads_older_archives() {
         use crate::db::assistant_conversations as assistant;
@@ -3992,6 +4180,7 @@ mod tests {
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
             assistant_conversations: vec![],
+            api_access_policies: None,
             trust_seal: None,
         }
     }
@@ -4188,6 +4377,7 @@ mod tests {
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
             assistant_conversations: vec![],
+            api_access_policies: None,
             trust_seal: None,
             projects: vec![],
             discussions: vec![],
@@ -4841,6 +5031,7 @@ mod tests {
             quick_prompt_versions: vec![],
             learning_rejections: vec![],
             assistant_conversations: vec![],
+            api_access_policies: None,
             trust_seal: None,
             projects: vec![],
             discussions: vec![],

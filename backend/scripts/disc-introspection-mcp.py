@@ -2249,7 +2249,7 @@ TOOLS = [
                 },
                 "endpoint_path": {
                     "type": "string",
-                    "description": "Endpoint path exactly as the plugin's ApiSpec declares it (e.g. `/rest/api/3/issue/{{issue_key}}`); anything else is refused.",
+                    "description": "Endpoint path as the ApiSpec declares it (e.g. `/rest/api/3/issue/{{issue_key}}`); an access policy refuses undeclared paths.",
                 },
                 "method": {
                     "type": "string",
@@ -7719,6 +7719,51 @@ def call_page_add_dataset(args):
     return _unwrap(_http("POST", f"/api/pages/{encoded}/datasets", body))
 
 
+def _describe_access_rule(rule):
+    """Mirror of `core::api_access::describe_rule` (KT-1026)."""
+    kind = (rule or {}).get("kind")
+    if kind == "agents":
+        names = []
+        for subject in rule.get("agents") or []:
+            model = (subject.get("model") or "").strip()
+            names.append(f"{subject.get('agent')} ({model})" if model else str(subject.get("agent")))
+        return "only " + (", ".join(names) or "no agent")
+    return {"local_only": "local models only", "blocked": "blocked"}.get(kind, "all agents")
+
+
+def _endpoint_key(path):
+    path = (path or "").split("?")[0].strip().strip("/")
+    return [segment for segment in path.split("/")] if path else []
+
+
+def _apply_access_policy(server_out, policy):
+    """Show a plugin's access policy to the agent: who may call it, per
+    endpoint, and that undeclared paths are refused (strict mode)."""
+    rules = policy.get("endpoints") or []
+
+    def rule_for(method, path):
+        for rule in rules:
+            if (rule.get("method") or "").upper() == (method or "").upper() and _endpoint_key(rule.get("path")) == _endpoint_key(path):
+                return rule.get("access")
+        return policy.get("access")
+
+    for endpoint in server_out["endpoints"]:
+        endpoint["access"] = _describe_access_rule(rule_for(endpoint.get("method"), endpoint.get("path")))
+    for rule in rules:
+        if not any(
+            (e.get("method") or "").upper() == (rule.get("method") or "").upper()
+            and _endpoint_key(e.get("path")) == _endpoint_key(rule.get("path"))
+            for e in server_out["endpoints"]
+        ):
+            server_out["endpoints"].append({
+                "path": rule.get("path"),
+                "method": rule.get("method"),
+                "access": _describe_access_rule(rule.get("access")),
+            })
+    server_out["access"] = _describe_access_rule(policy.get("access"))
+    server_out["strict"] = "only the listed endpoints can be called"
+
+
 def call_mcp_list(_args):
     # 0.8.5 — wired MCP configs (the API plugin slug + config id the
     # workflow ApiCall steps need). Drops env values (secrets) and
@@ -7749,6 +7794,10 @@ def call_mcp_list(_args):
     # (server_id starting with `api-custom-`) are included via the same
     # shape — they ship their own docs_url + description at create-time.
     out_servers = []
+    policies = {
+        entry.get("server_id"): entry.get("policy") or {}
+        for entry in data.get("access_policies") or []
+    }
     for s in data.get("servers") or []:
         spec = s.get("api_spec") or {}
         if not spec:
@@ -7787,9 +7836,8 @@ def call_mcp_list(_args):
         # plugin, docs_url set, endpoints not yet declared).
         if endpoints:
             hint = (
-                "READY: endpoints are declared and the ApiCall executor "
-                "will allow-list them. You can draft an ApiCall step "
-                "using one of the listed paths directly."
+                "READY: endpoints are declared. You can draft an ApiCall "
+                "step using one of the listed paths directly."
             )
         elif docs_url:
             hint = (
@@ -7888,6 +7936,8 @@ def call_mcp_list(_args):
             "endpoints": endpoints,
             "hint": hint,
         })
+        if s.get("id") in policies:
+            _apply_access_policy(out_servers[-1], policies[s.get("id")])
     return {
         "captured_at": captured_at,
         "configs": out_configs,
@@ -9978,6 +10028,12 @@ TOOL_MANUALS = {
         "`{{now-24h|floor:hour}}` alias defaults to UTC/RFC 3339. "
         "Formats are generic: never write `fmt:adobe`; its no-zone ISO shape "
         "is `fmt:local_iso_ms`. `workflow_step_schema` is the canonical spec.\n\n"
+        "**Access policy** — without one, any valid path on the plugin's API is "
+        "forwarded. A plugin under a policy (`mcp_list` shows `access` and "
+        "`strict`) accepts only its declared endpoints, and only for the agents "
+        "its rules admit (named agents, local models only, or blocked). Kronn "
+        "decides from the identity it gave you at launch. If you are not "
+        "admitted, tell the user the API is reserved instead of trying.\n\n"
         "This is NOT the mechanism for credentials. Secrets are injected by the "
         "plugin's auth spec and never appear in a call you compose."
     ),

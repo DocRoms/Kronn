@@ -2291,6 +2291,8 @@ async fn execute_run_body(
                     // 0.8.6 (#59) — stamp source=workflow + run_id on the
                     // api_call_logs row so the audit table can filter by
                     // run.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::api_call_executor::execute_api_call_step_with_db_as(
                         step,
                         workflow.project_id.as_deref(),
@@ -2298,6 +2300,7 @@ async fn execute_run_body(
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -2568,12 +2571,15 @@ async fn execute_run_body(
                     // items. Zero tokens, parallel HTTP, idempotency-by-prompt
                     // moved to idempotency-by-construction. See
                     // batch_apicall_step.rs for the executor.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::batch_apicall_step::execute_batch_apicall_step(
                         step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -2584,6 +2590,8 @@ async fn execute_run_body(
                     super::json_data_step::execute_json_data_step(step).await
                 }
                 StepType::CollectApiData => {
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::collect_api_data_step::execute_collect_api_data_step(
                         step,
                         workflow.project_id.as_deref(),
@@ -2592,6 +2600,7 @@ async fn execute_run_body(
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
+                        &api_caller,
                     )
                     .await
                 }
@@ -3481,6 +3490,8 @@ async fn execute_run_body(
                     // 0.8.6 (#59) — same audit stamping as the primary
                     // step dispatch above. This is the rollback / branch
                     // step replay path.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::api_call_executor::execute_api_call_step_with_db_as(
                         rb_step,
                         workflow.project_id.as_deref(),
@@ -3488,6 +3499,7 @@ async fn execute_run_body(
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -3592,12 +3604,15 @@ async fn execute_run_body(
                     // (e.g. POST /issue/{key}/transitions = "Cancelled" over
                     // every ticket the failed run had created). Same plugin
                     // wiring as the linear path.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::batch_apicall_step::execute_batch_apicall_step(
                         rb_step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -3608,6 +3623,8 @@ async fn execute_run_body(
                     super::json_data_step::execute_json_data_step(rb_step).await
                 }
                 StepType::CollectApiData => {
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::collect_api_data_step::execute_collect_api_data_step(
                         rb_step,
                         workflow.project_id.as_deref(),
@@ -3616,6 +3633,7 @@ async fn execute_run_body(
                         super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
+                        &api_caller,
                     )
                     .await
                 }

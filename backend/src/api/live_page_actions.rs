@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use crate::core::launch_context::LaunchContext;
 use crate::db::discussion_actions::{DiscussionActionKind, DiscussionActionState};
 use crate::db::kronn_action_engine::ActionCompletion;
+use crate::db::live_page_action_trusts::{
+    LivePageActionTrust, LivePageActionTrustRefusal, LivePageActionTrustState,
+};
 use crate::db::live_page_actions::{
     LaunchLivePageActionRequest, LivePageAction, LivePageActionClaimOutcome,
 };
@@ -138,6 +141,14 @@ pub async fn launch(
     Json(request): Json<LaunchLivePageActionRequest>,
 ) -> Json<ApiResponse<LivePageAction>> {
     let step_agents = request.step_agents.unwrap_or_default();
+    let trusted = request.trusted == Some(true);
+    // A launch without a card runs only what was approved: nothing typed.
+    if trusted && (!step_agents.is_empty() || !request.variables.is_empty()) {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "A trusted launch takes no typed value and no agent choice",
+        ));
+    }
     if !step_agents.is_empty() {
         if let Err(error) = precheck_step_agents(&state, &action_id, &step_agents).await {
             return Json(ApiResponse::err(error));
@@ -149,7 +160,11 @@ pub async fn launch(
     let claimed = state
         .db
         .with_conn(move |conn| {
-            crate::db::live_page_actions::claim_launch(conn, &claim_id, &supplied, &bindings)
+            if trusted {
+                crate::db::live_page_actions::claim_trusted_launch(conn, &claim_id, &bindings)
+            } else {
+                crate::db::live_page_actions::claim_launch(conn, &claim_id, &supplied, &bindings)
+            }
         })
         .await;
     let (action, variables) = match claimed {
@@ -213,6 +228,36 @@ async fn persist_completion(state: &AppState, action_id: String, completion: Act
     {
         tracing::error!(action_id = %logged_action_id, error = %error, "live page action completion failed");
     }
+}
+
+/// A trusted launch's run: admitted, inserted and pinned in one transaction
+/// against the approval it was claimed with, so no later edit or revocation
+/// can make it execute anything else (KT-1029).
+async fn start_trusted_run(
+    state: &AppState,
+    action: &LivePageAction,
+    variables: HashMap<String, String>,
+    launch: LaunchContext,
+) -> Result<crate::models::WorkflowRun, String> {
+    let launch_id = action.id.clone();
+    let admission: crate::api::workflows::RunAdmission = Box::new(move |conn, snapshot| {
+        Ok(
+            crate::db::live_page_action_trusts::admit_run(conn, &launch_id, snapshot)?
+                .map_err(|refusal| refusal.to_string()),
+        )
+    });
+    let (workflow, run) = crate::api::workflows::create_manual_run_admitted(
+        state,
+        &action.target_id,
+        variables,
+        Default::default(),
+        launch,
+        uuid::Uuid::new_v4().to_string(),
+        Some(admission),
+    )
+    .await?;
+    crate::api::workflows::spawn_manual_run(state, workflow, run.clone(), None, false);
+    Ok(run)
 }
 
 /// A QP launched from a Page creates a discussion rather than a shared run.
@@ -305,6 +350,7 @@ async fn execute_claimed_action(
                     workflow_run_id: None,
                     agent: None,
                     launch: Some(launch.clone()),
+                    caller: None,
                 }),
             )
             .await
@@ -407,16 +453,20 @@ async fn execute_claimed_action(
             }
         }
         DiscussionActionKind::Workflow => {
-            match crate::api::workflows::start_manual_run(
-                &state,
-                &action.target_id,
-                variables,
-                Default::default(),
-                None,
-                launch.clone(),
-            )
-            .await
-            {
+            let started = if action.trusted == Some(true) {
+                start_trusted_run(&state, &action, variables, launch.clone()).await
+            } else {
+                crate::api::workflows::start_manual_run(
+                    &state,
+                    &action.target_id,
+                    variables,
+                    Default::default(),
+                    None,
+                    launch.clone(),
+                )
+                .await
+            };
+            match started {
                 Ok(run) => {
                     let deep_link = format!("automation:workflow:{}", run.id);
                     persist_completion(
@@ -472,3 +522,93 @@ async fn execute_claimed_action(
         }
     }
 }
+
+/// Every current offer of a Page with its eligibility and human approval.
+/// On the writer: an approval found out of date is invalidated as it is read.
+pub async fn trusts_for_live_page(
+    State(state): State<AppState>,
+    Path(page_id): Path<String>,
+) -> Json<ApiResponse<Vec<LivePageActionTrustState>>> {
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::live_page_action_trusts::list_for_page(conn, &page_id))
+        .await;
+    match result {
+        Ok(states) => Json(ApiResponse::ok(states)),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to list Page action approvals: {error}"),
+        )),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TrustLivePageActionRequest {
+    /// The fingerprint the human reviewed; a different current one is refused.
+    pub fingerprint: String,
+}
+
+/// Human only: a bridge token never reaches this route, and is refused here too.
+pub async fn trust(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path(action_id): Path<String>,
+    Json(request): Json<TrustLivePageActionRequest>,
+) -> Json<ApiResponse<LivePageActionTrust>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can approve a Page action to run without confirmation",
+        ));
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_page_action_trusts::approve(conn, &action_id, &request.fingerprint)
+        })
+        .await;
+    match result {
+        Ok(trust) => Json(ApiResponse::ok(trust)),
+        Err(error) if error.is::<LivePageActionTrustRefusal>() => Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            error.to_string(),
+        )),
+        Err(error) if error.to_string() == "Action not found" => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Action not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to approve Page action: {error}"),
+        )),
+    }
+}
+
+/// Withdraw an approval; the next click opens the card again.
+pub async fn revoke_trust(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path(action_id): Path<String>,
+) -> Json<ApiResponse<bool>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can change a Page action's approval",
+        ));
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::live_page_action_trusts::revoke(conn, &action_id))
+        .await;
+    match result {
+        Ok(removed) => Json(ApiResponse::ok(removed)),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to withdraw Page action approval: {error}"),
+        )),
+    }
+}
+
+#[cfg(test)]
+#[path = "live_page_action_trust_api_tests.rs"]
+mod trust_api_tests;

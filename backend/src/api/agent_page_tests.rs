@@ -44,6 +44,7 @@ async fn native_pages_follow_mcp_project_scope_inheritance_and_selector_contract
     assert_eq!(by_id.content["discussions"][0]["discussion_id"], "room-a");
     assert_eq!(by_id.content["discussions"][0]["relation"], "created_from");
     assert_eq!(by_id.content["workflows"], json!([]));
+    assert_eq!(by_id.content["trusted_actions"], json!([]));
     let list = call(&same_project, "page_list", json!({})).await;
     assert!(list.ok);
     assert_eq!(list.content.as_array().unwrap().len(), 1);

@@ -459,6 +459,51 @@ Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
 and runtime limits.
 
+#### Trusted actions (KT-1029)
+
+A human may approve, from the Page's details, that one action runs on a click
+without its card. The approval lives in `live_page_action_trusts`, never in the
+HTML, and is human only: its routes (`GET /api/pages/{id}/action-trusts`,
+`POST|DELETE /api/live-page-actions/{id}/trust`) are absent from the
+bridge-token list and the handlers refuse a bridge caller.
+[src: file: backend/src/api/live_page_actions.rs:1]
+
+- **Scope.** One declaration (`page + action_ref`), bound to a SHA-256 over the
+  block (kind, target, project, values), the Page's project and the workflow's
+  shared revision identity (`run_pins::revision_fingerprint`, KT-1096). The UI
+  sends the fingerprint it showed; a different current one is refused. Each
+  approval gets a new `approval_id`.
+- **Eligibility.** Workflow targets only; every step must be of a type known
+  to run no agent (ApiCall, Notify, Gate, Exec, BatchApiCall, JsonData,
+  CollectApiData, TransformData, PublishPageData): any other type, including
+  a future one, is refused by default, as is any Quick Prompt or sub-workflow
+  reference; no skill, profile or directive; no
+  CollectApiData Quick Exec source (a run does not pin it); no `user_input`,
+  `project_env` or overridable value; target, block and Page in one project;
+  workflow enabled.
+- **Invalidation.** Any fingerprint difference or lost eligibility marks the
+  approval invalidated with a reason, for good. SQLite triggers on `workflows`
+  and `quick_apis` invalidate at write time through
+  `live_page_action_trust_deps`: every column but `pinned` and `updated_at`
+  is compared, so a pin change in the same write as a content change still
+  counts, and a change undone before anything reads it still counts. A test
+  keeps the compared columns equal to the tables' columns.
+- **Launch.** The host relay forwards an action only with positive
+  `navigator.userActivation.isActive`; the Kronn UI sends `trusted: true` with
+  no typed value, and ignores an answer that arrives after the reader changed
+  Page or opened another card. The claim records the approval id and
+  fingerprint. `create_manual_run_admitted` then runs `admit_run`, inserts the
+  run and pins it (`run_pins::pin_within`) in one transaction, against the
+  definition it read: a claim from an older approval, an edit or a revocation
+  before that point is refused, and nothing after it changes what runs. A row
+  in flight is never relaunched; one row waits 2 s between trusted launches
+  and one action allows 30 per minute.
+- **Revocation.** Deletes the row; the next click opens the card.
+[src: file: backend/src/db/live_page_action_trusts.rs:1]
+
+Embed permission (third-party embeds) is a separate mechanism and is not
+affected by action trust.
+
 ### Third-party embeds
 
 A player nested inside a Page (for example `https://suno.com/embed/<id>`)

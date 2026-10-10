@@ -104,13 +104,8 @@ project_id?: string | null,
  */
 api_plugin_slug?: string | null, api_config_id?: string | null, quick_api_id?: string | null,
 /**
- * Endpoint path on the plugin's API. NOTE (2026-06-24): the declared
- * `ApiSpec.endpoints` are INDICATIVE, not an allow-list — the executor
- * does NOT reject undeclared paths; it forwards ANY path to the plugin's
- * base URL with auth injected (the declared list only drives method
- * resolution + display). So agents can call valid-but-undeclared
- * endpoints; the API itself is the real authority. The host-match +
- * public-IP `SecurityPolicy` is the actual guard, not the endpoint list.
+ * Endpoint path on the plugin's API. Without an access policy any path
+ * is forwarded; under one, only declared endpoints are (KT-1026).
  */
 endpoint_path: string,
 /**
@@ -474,6 +469,27 @@ export type AiSearchResult = { path: string, match_count: number, };
 
 export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, item_answers?: Array<DiscussionQuestionItemAnswer>, text?: string | null, idempotency_key: string, };
 
+/**
+ * A plugin's access policy. Its presence switches the broker to strict mode:
+ * only declared endpoints (the spec's and these) may be called.
+ */
+export type ApiAccessPolicy = { access: ApiAccessRule, endpoints: Array<ApiEndpointAccess>, };
+
+/**
+ * A stored policy, as the overview lists it.
+ */
+export type ApiAccessPolicyEntry = { server_id: string, policy: ApiAccessPolicy, };
+
+/**
+ * Who may reach a plugin, or one of its endpoints, through Kronn.
+ */
+export type ApiAccessRule = { "kind": "all" } | { "kind": "agents", agents: Array<ApiAccessSubject>, } | { "kind": "local_only" } | { "kind": "blocked" };
+
+/**
+ * One allowed agent; `model: None` admits every model of that agent.
+ */
+export type ApiAccessSubject = { agent: AgentType, model?: string, };
+
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
  * Optional encrypted config key used only if the local CLI cannot
@@ -554,6 +570,11 @@ export type ApiEndpoint = { path: string,
  * that want to call a rare verb.
  */
 method: string, description: string, };
+
+/**
+ * A rule for one endpoint (method + path template), overriding the plugin's.
+ */
+export type ApiEndpointAccess = { method: string, path: string, access: ApiAccessRule, };
 
 export type ApiKey = { id: string, name: string, provider: string, active: boolean, };
 
@@ -2119,6 +2140,11 @@ learning_rejections: Array<LearningRejection>,
  * Older archives have none: their discussions import as ordinary ones.
  */
 assistant_conversations: Array<AssistantConversationLink>,
+/**
+ * v7 (KT-1026) — plugin access policies. `None` (an older export) keeps
+ * the local policies; `Some` replaces them, an empty list included.
+ */
+api_access_policies?: Array<ApiAccessPolicyEntry>,
 /**
  * KT-1017 — a MAC, under this instance's key, over the workflows and
  * Quick Execs: a restore keeps their approvals only when it verifies.
@@ -4128,7 +4154,12 @@ bindings?: Record<string, string>,
 /**
  * A workflow action's agents for some Agent steps, this launch only (KT-1025).
  */
-step_agents?: { [key in string]: StepAgentOverride }, };
+step_agents?: { [key in string]: StepAgentOverride },
+/**
+ * Launch without a card, under the action's human approval (KT-1029).
+ * Refused unless that approval matches the action as it stands.
+ */
+trusted?: boolean, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
@@ -4345,7 +4376,40 @@ stale_source: boolean,
  * U+001F, empty for an unbound CTA. `None` on a declaration, which belongs
  * to every row at once.
  */
-binding_key: string | null, };
+binding_key: string | null,
+/**
+ * `Some(true)` for a launch a human-approved trust started without its
+ * card (KT-1029); omitted otherwise.
+ */
+trusted?: boolean, };
+
+/**
+ * A stored approval.
+ */
+export type LivePageActionTrust = { action_id: string, live_page_id: string, action_ref: string, project_id: string | null, target_id: string, fingerprint: string,
+/**
+ * New on every approval: launches claimed under an older one never run.
+ */
+approval_id: string, approved_at: string, invalidated_at: string | null, invalidated_reason: LivePageActionTrustRefusal | null, };
+
+/**
+ * Why an action cannot be (or no longer is) trusted. Serialized as a stable
+ * code the UI translates.
+ */
+export type LivePageActionTrustRefusal = "not_workflow" | "not_launchable" | "stale_source" | "target_missing" | "workflow_disabled" | "agent_step" | "agent_context" | "unpinned_dependency" | "user_input" | "secret_value" | "cross_project" | "changed" | "not_trusted" | "rate_limited";
+
+/**
+ * One current offer of a Page, as the trust panel and the click path read it.
+ */
+export type LivePageActionTrustState = { action_id: string, action_ref: string, target_name: string,
+/**
+ * What a human approves now; `None` when the action is not eligible.
+ */
+fingerprint: string | null, refusal: LivePageActionTrustRefusal | null, trust: LivePageActionTrust | null,
+/**
+ * True only when a valid approval matches the current fingerprint.
+ */
+active: boolean, };
 
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
@@ -4610,7 +4674,11 @@ incompatibilities: Array<McpIncompatibility>,
  * UI surfaces them as warnings so the operator can complete the
  * config or remove the entry.
  */
-incomplete_configs: Array<McpIncompleteConfig>, };
+incomplete_configs: Array<McpIncompleteConfig>,
+/**
+ * Plugins under an agent access policy (KT-1026).
+ */
+access_policies: Array<ApiAccessPolicyEntry>, };
 
 export type McpProbeCheck = { id: string, label: string, ok: boolean,
 /**
@@ -7560,6 +7628,11 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
  * `None` or an empty string restores the built-in color.
  */
 color?: string | null, };
+
+/**
+ * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.
+ */
+export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
 

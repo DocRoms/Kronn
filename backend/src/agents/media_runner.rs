@@ -448,6 +448,7 @@ async fn download_asset(
                 attach_body: &attach,
                 has_body: false,
                 pinned_base: None,
+                hop_guard: None,
             },
         )
         .await

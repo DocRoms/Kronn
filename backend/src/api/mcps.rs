@@ -73,12 +73,14 @@ pub async fn overview(
                 Vec::new()
             };
 
+            let access_policies = db::api_access_policies::list(conn)?;
             Ok(McpOverview {
                 servers,
                 configs,
                 customized_contexts,
                 incompatibilities,
                 incomplete_configs,
+                access_policies,
             })
         })
         .await
@@ -90,6 +92,42 @@ pub async fn overview(
             Json(ApiResponse::ok(data))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// `PUT /api/mcps/servers/{server_id}/access-policy` — set or remove a
+/// plugin's agent access policy (KT-1026). Never a bridge route: only a person
+/// grants or widens access.
+pub async fn set_access_policy(
+    State(state): State<AppState>,
+    Path(server_id): Path<String>,
+    Json(req): Json<crate::models::SetApiAccessPolicyRequest>,
+) -> Json<ApiResponse<Option<crate::models::ApiAccessPolicy>>> {
+    let policy = match req.policy.map(crate::core::api_access::normalize_policy) {
+        Some(Err(error)) => return Json(ApiResponse::err(error)),
+        Some(Ok(policy)) => Some(policy),
+        None => None,
+    };
+    let stored = policy.clone();
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let servers = db::mcps::list_servers(conn)?;
+            let Some(server) = servers.iter().find(|s| s.id == server_id) else {
+                anyhow::bail!("plugin `{server_id}` not found");
+            };
+            if server.api_spec.is_none() {
+                anyhow::bail!("plugin `{server_id}` has no API to restrict");
+            }
+            match &stored {
+                Some(policy) => db::api_access_policies::set(conn, &server_id, policy),
+                None => db::api_access_policies::delete(conn, &server_id),
+            }
+        })
+        .await;
+    match result {
+        Ok(()) => Json(ApiResponse::ok(policy)),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
     }
 }
 
@@ -1995,12 +2033,14 @@ pub async fn refresh(
             let incomplete_configs =
                 mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, &secret);
 
+            let access_policies = db::api_access_policies::list(&tx)?;
             let overview = McpOverview {
                 servers,
                 configs,
                 customized_contexts,
                 incompatibilities,
                 incomplete_configs,
+                access_policies,
             };
 
             if dry_run {

@@ -2495,6 +2495,49 @@ class McpListEnrichedOutputTests(unittest.TestCase):
         self.assertIn("necessary but not sufficient", out["api_call_contract"])
         self.assertIn("api_spec", out["api_call_contract"])
 
+    def test_mcp_list_shows_each_plugin_and_endpoint_access_policy(self):
+        fake_backend = {
+            "success": True,
+            "data": {
+                "configs": [],
+                "servers": [
+                    {
+                        "id": "custom-notion",
+                        "name": "Notion",
+                        "api_spec": {"endpoints": [
+                            {"path": "/users/me", "method": "GET"},
+                            {"path": "/pages/{id}", "method": "GET"},
+                        ]},
+                    },
+                    {"id": "open-api", "name": "Open", "api_spec": {"endpoints": [
+                        {"path": "/x", "method": "GET"},
+                    ]}},
+                ],
+                "access_policies": [{
+                    "server_id": "custom-notion",
+                    "policy": {
+                        "access": {"kind": "local_only"},
+                        "endpoints": [
+                            {"method": "GET", "path": "/users/me", "access": {"kind": "all"}},
+                            {"method": "POST", "path": "/search", "access": {
+                                "kind": "agents", "agents": [{"agent": "Ollama", "model": "qwen3:8b"}]}},
+                        ],
+                    },
+                }],
+            },
+        }
+        with mock.patch.object(self.mod, "_http", return_value=fake_backend):
+            out = self.mod.call_mcp_list({})
+        notion, other = out["servers_with_api"]
+        self.assertEqual(notion["access"], "local models only")
+        self.assertIn("only the listed endpoints", notion["strict"])
+        by_path = {(e["method"], e["path"]): e["access"] for e in notion["endpoints"]}
+        self.assertEqual(by_path[("GET", "/users/me")], "all agents")
+        self.assertEqual(by_path[("GET", "/pages/{id}")], "local models only")
+        self.assertEqual(by_path[("POST", "/search")], "only Ollama (qwen3:8b)")
+        self.assertNotIn("access", other)
+        self.assertNotIn("strict", other)
+
     def test_mcp_list_surfaces_docs_url_description_and_custom_flag(self):
         fake_backend = {
             "success": True,

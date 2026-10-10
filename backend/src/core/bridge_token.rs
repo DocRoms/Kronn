@@ -43,6 +43,8 @@ pub struct BridgeScope {
     /// The launch's project when it names no discussion, execution or run
     /// (audits, document agents). Ignored otherwise.
     pub project_id: Option<String>,
+    /// The agent and model Kronn launched, for API access policies (KT-1026).
+    pub agent: Option<crate::core::api_access::AgentIdentity>,
 }
 
 impl BridgeScope {
@@ -154,6 +156,19 @@ pub struct BridgeCaller {
     pub own_discussions: Vec<String>,
     /// The launch's own workflow run, when it is one.
     pub own_run: Option<String>,
+    /// The agent and model Kronn launched.
+    pub agent: Option<crate::core::api_access::AgentIdentity>,
+}
+
+impl BridgeCaller {
+    /// This launch as an API broker caller.
+    pub fn api_caller(&self) -> crate::core::api_access::ApiCaller {
+        crate::core::api_access::ApiCaller::Agent {
+            identity: self.agent.clone(),
+            discussion_ids: self.own_discussions.clone(),
+            workflow_run_id: self.own_run.clone(),
+        }
+    }
 }
 
 /// Holds a live token; dropping it revokes the token.

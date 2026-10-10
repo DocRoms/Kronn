@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication } from '../../types/generated';
 
 const page: LivePage = {
@@ -273,6 +275,28 @@ describe('PagesPage', () => {
       .toHaveClass('disc-sidebar', 'live-pages-list');
     expect(document.querySelector('.live-pages-viewer-header'))
       .toHaveClass('collection-detail-header');
+  });
+
+  it('keeps the Page id in the title block, apart from the header buttons, with wrapping rules (KT-1141)', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const header = document.querySelector('.live-pages-viewer-header')!;
+    const idPill = header.querySelector('.live-pages-identity .copy-id-pill');
+    expect(idPill).toHaveClass('live-pages-id-pill');
+    expect(idPill).toHaveAttribute('title', expect.stringContaining('pages.copyId'));
+    expect(idPill!.closest('.live-pages-title-block')).not.toBeNull();
+    expect(idPill!.closest('.live-pages-header-actions')).toBeNull();
+    expect(header.querySelector('.live-pages-header-actions .live-pages-open-tab-label')).not.toBeNull();
+
+    const css = readFileSync(resolve(__dirname, '../PagesPage.css'), 'utf8');
+    // Joins every unindented block whose selector line ends with this selector.
+    const rule = (selector: string) => [...css.matchAll(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'g'))]
+      .map(match => match[1]).join(';');
+    expect(rule('.live-pages-viewer-header')).toContain('flex-wrap: wrap');
+    expect(rule('.live-pages-title-block')).toContain('min-width: 0');
+    expect(rule('.live-pages-header-actions')).toContain('flex: 0 1 auto');
+    expect(rule('.live-pages-id-pill span')).toContain('text-overflow: ellipsis');
+    expect(css).toMatch(/@container live-page-viewer \(max-width: 480px\)[^@]*\.live-pages-open-tab-label \{ display: none; \}/);
   });
 
   it('uses the shared Discussions-style search with shortcut and inline clear', async () => {

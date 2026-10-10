@@ -9,7 +9,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 // Mock API
 vi.mock('../../lib/api', () => ({
   mcps: {
-    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], project_links: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] }),
+    overview: vi.fn().mockResolvedValue({ servers: [], configs: [], project_links: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] }),
     registry: vi.fn().mockResolvedValue([]),
     refresh: vi.fn(),
     createConfig: vi.fn(),
@@ -137,7 +137,7 @@ const listedConfigIds = (container: HTMLElement) => Array.from(
 
 describe('McpPage', () => {
   it('keeps the built-in plugin visible when no configurable plugin exists', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByTestId('mcp-kronn-internal-card')).toHaveTextContent('Intégré');
     // The sidebar's own empty-filter message (KT-855: Plugins now has its own
@@ -164,7 +164,7 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('c1', 'github', 'GitHub')],
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     // Fake timers here: findBy* would poll on a clock that never advances.
@@ -183,7 +183,7 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('c1', 'github', 'GitHub')],
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     await act(async () => {});
@@ -196,7 +196,7 @@ describe('McpPage', () => {
       makeConfig('c1', 'github', 'GitHub'),
       makeConfig('c2', 'slack', 'Slack'),
     ];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getAllByText('GitHub')).not.toHaveLength(0);
     expect(screen.getAllByText('Slack')).not.toHaveLength(0);
@@ -207,7 +207,7 @@ describe('McpPage', () => {
       makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' }),
       makeConfig('c2', 'github', 'GitHub', { label: 'GitHub Secondary' }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Cards are always visible (no accordion)
@@ -220,7 +220,7 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [config],
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -247,7 +247,7 @@ describe('McpPage', () => {
       include_general: false, project_ids: ['p2'], project_names: ['Beta'],
     });
     const overview: McpOverview = {
-      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')], configs: [config, other], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')], configs: [config, other], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -273,7 +273,7 @@ describe('McpPage', () => {
     });
     const overview: McpOverview = {
       servers: [makeServer('alpha-server', 'Alpha plugin'), makeServer('beta-server', 'Beta plugin')],
-      configs: [alpha, beta], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs: [alpha, beta], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     vi.mocked(mcpsApi.probeConfig).mockResolvedValue({
       server_id: 'alpha-server', ready: true, checks: [{ id: 'mcp', label: 'MCP', ok: true, required: true, detail: 'raw', code: 'ok' }],
@@ -296,7 +296,7 @@ describe('McpPage', () => {
   });
 
   it('previews a rescan before applying it', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     vi.mocked(mcpsApi.refresh)
       .mockResolvedValueOnce({ dry_run: true, configs_created: 2, configs_merged: 1, configs_deleted: 0, projects_affected: 1, overview })
       .mockResolvedValueOnce({ dry_run: false, configs_created: 2, configs_merged: 1, configs_deleted: 0, projects_affected: 1, projects_rewritten: 1, overview });
@@ -312,7 +312,7 @@ describe('McpPage', () => {
   it('surfaces a label save failure and keeps the editor open', async () => {
     const config = makeConfig('c1', 'github', 'GitHub');
     const overview: McpOverview = {
-      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     vi.mocked(mcpsApi.updateConfig).mockRejectedValueOnce(new Error('save unavailable'));
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -329,14 +329,14 @@ describe('McpPage', () => {
   it('covers the narrow rail, empty overview, selection, and open menu on the real Plugins page', async () => {
     vi.stubGlobal('matchMedia', vi.fn().mockImplementation((query: string) => ({ matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     const emptyOverview: McpOverview = {
-      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const view = wrap(<McpPage projects={[]} mcpOverview={emptyOverview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.getByTestId('mcp-kronn-internal-card')).toBeInTheDocument();
 
     const config = makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' });
     const overview: McpOverview = {
-      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [makeServer('github', 'GitHub')], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     view.rerender(<I18nProvider><McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} /></I18nProvider>);
     fireEvent.click(screen.getByRole('button', { name: 'Plus d’actions' }));
@@ -356,7 +356,7 @@ describe('McpPage', () => {
     ];
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub'), makeServer('slack', 'Slack')],
-      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={vi.fn()} />);
     await act(async () => {});
@@ -390,12 +390,12 @@ describe('McpPage', () => {
   it('keeps restored favorites while the plugin overview is still loading', () => {
     localStorage.setItem('kronn:collection-favorites:plugins', JSON.stringify(['c1']));
     const emptyOverview: McpOverview = {
-      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const loadedOverview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' })],
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const { rerender } = wrap(<McpPage projects={[]} mcpOverview={emptyOverview} mcpRegistry={[]} refetchMcps={noop} favoritesReady={false} />);
 
@@ -412,7 +412,7 @@ describe('McpPage', () => {
     const config = makeConfig('c1', 'github', 'GitHub', { label: 'GitHub Main' });
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
-      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const refetchMcps = vi.fn();
     const { container } = wrap(
@@ -454,7 +454,7 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: configs.map(config => makeServer(config.server_id, config.server_name)),
       configs,
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const projects = [makeProject('p1', 'Alpha'), makeProject('p2', 'Beta'), makeProject('p3', 'Gamma')];
     const first = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -507,7 +507,7 @@ describe('McpPage', () => {
     ];
     const overview: McpOverview = {
       servers: configs.map(config => makeServer(config.server_id, config.server_name)),
-      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -534,7 +534,7 @@ describe('McpPage', () => {
     });
     const overview: McpOverview = {
       servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin'), makeServer('shared', 'Shared plugin')],
-      configs: [alpha, beta, shared], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs: [alpha, beta, shared], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     const ids = () => listedConfigIds(container).sort();
@@ -605,7 +605,7 @@ describe('McpPage', () => {
     ];
     const overview: McpOverview = {
       servers: [makeServer('alpha', 'Alpha plugin'), makeServer('beta', 'Beta plugin')],
-      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     const view = wrap(<McpPage projects={[makeProject('p1', 'Alpha'), makeProject('p2', 'Beta')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     setFilter('Projet', 'p1');
@@ -620,7 +620,7 @@ describe('McpPage', () => {
 
   it('opens plugin creation in an accessible modal and restores focus when it closes', () => {
     const overview: McpOverview = {
-      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     const trigger = getAddPluginButton();
@@ -657,7 +657,7 @@ describe('McpPage', () => {
       configs,
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     wrap(
       <McpPage projects={[makeProject('p1', 'my-app')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />,
@@ -682,7 +682,7 @@ describe('McpPage', () => {
       configs: [config],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     const probeResponse: McpProbeResponse = {
       server_id: 'mcp-fastly',
@@ -735,7 +735,7 @@ describe('McpPage', () => {
       },
     });
     const overview: McpOverview = {
-      servers: [server], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      servers: [server], configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -762,7 +762,7 @@ describe('McpPage', () => {
     });
     const overview: McpOverview = {
       servers: [makeServer('mcp-microsoft-365', 'Microsoft 365')],
-      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      configs: [config], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -780,7 +780,7 @@ describe('McpPage', () => {
       configs: [makeConfig('github-config', 'github', 'GitHub')],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -809,7 +809,7 @@ describe('McpPage', () => {
       ],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     const { container } = wrap(
@@ -902,7 +902,7 @@ describe('McpPage', () => {
       ],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -921,7 +921,7 @@ describe('McpPage', () => {
     const overview: McpOverview = {
       servers: [makeServer('github', 'GitHub')],
       configs: [makeConfig('github-config', 'github', 'GitHub')],
-      customized_contexts: [], incompatibilities: [], incomplete_configs: [],
+      customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -939,7 +939,7 @@ describe('McpPage', () => {
       configs: [makeConfig('github-config', 'github', 'GitHub')],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -983,7 +983,7 @@ describe('McpPage', () => {
       configs: [config],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     const refetch = vi.fn().mockResolvedValue(undefined);
     (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue(config);
@@ -1030,7 +1030,7 @@ describe('McpPage', () => {
       })],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -1046,7 +1046,7 @@ describe('McpPage', () => {
       configs: [makeConfig('cfg-a', 'a', 'Alpha'), makeConfig('cfg-b', 'b', 'Bravo')],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -1089,7 +1089,7 @@ describe('McpPage', () => {
       ],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(
       <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[cliDefinition]} refetchMcps={noop} />,
@@ -1121,7 +1121,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { is_global: true }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Global badge should be rendered on the card
@@ -1143,7 +1143,7 @@ describe('McpPage', () => {
       configs: [config],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -1169,7 +1169,7 @@ describe('McpPage', () => {
       configs: [config],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Resend — Voir les détails' }));
@@ -1182,7 +1182,7 @@ describe('McpPage', () => {
   });
 
   it('"Add MCP" button opens the add form', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const registry: McpDefinition[] = [
       { id: 'test-mcp', name: 'Test MCP', description: 'A test server', transport: { Stdio: { command: 'node', args: [] } }, env_keys: [], tags: ['core'], token_url: null, token_help: null, publisher: 'Anthropic', official: false },
     ];
@@ -1200,7 +1200,7 @@ describe('McpPage', () => {
     // kronn-internal is auto-injected into every project — surfaced as a
     // read-only system card on the MAIN Plugins view (not behind "Ajouter"),
     // visible even with zero configs.
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // No interaction: the card is present immediately on the default view.
@@ -1222,7 +1222,7 @@ describe('McpPage', () => {
       configs: [config],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -1237,7 +1237,7 @@ describe('McpPage', () => {
     const configs = [makeConfig('c1', 'mcp-gitlab', 'GitLab')];
     const overview: McpOverview = {
       servers, configs, customized_contexts: [],
-      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'Empty tool schemas — incompatible with Bedrock' }], incomplete_configs: [],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'Empty tool schemas — incompatible with Bedrock' }], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -1253,7 +1253,7 @@ describe('McpPage', () => {
     const configs = [makeConfig('c1', 'mcp-github', 'GitHub')];
     const overview: McpOverview = {
       servers, configs, customized_contexts: [],
-      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'test' }], incomplete_configs: [],
+      incompatibilities: [{ server_id: 'mcp-gitlab', agent: 'Kiro' as AgentType, reason: 'test' }], incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
@@ -1268,7 +1268,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { project_ids: ['p1'], project_names: ['my-app'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('github', 'GitHub')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={projects} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Card shows project count badge
@@ -1281,7 +1281,7 @@ describe('McpPage', () => {
       makeConfig('c1', 'context7', 'Context7', { label: 'Context7 Main' }),
       makeConfig('c2', 'context7', 'Context7', { label: 'Context7 Dev', env_keys: ['CONTEXT7_KEY'] }),
     ];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // All cards are visible immediately (no accordion to expand)
@@ -1295,7 +1295,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Card shows key count (2 env keys)
@@ -1306,7 +1306,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Click card to expand detail panel
@@ -1323,7 +1323,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1341,7 +1341,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1367,7 +1367,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1393,7 +1393,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'test', 'TestMCP', { env_keys: ['MY_KEY'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1420,7 +1420,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'test', 'TestMCP', { env_keys: ['TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail, enter edit mode
@@ -1443,7 +1443,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_API_URL', 'GITLAB_PERSONAL_ACCESS_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail
@@ -1459,7 +1459,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'gitlab', 'GitLab', { env_keys: ['GITLAB_TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('gitlab', 'GitLab')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1481,7 +1481,7 @@ describe('McpPage', () => {
     const configs = [
       makeConfig('c1', 'test', 'TestMCP', { env_keys: ['TOKEN'] }),
     ];
-    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [makeServer('test', 'TestMCP')], configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const { container } = wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
 
     // Open detail panel
@@ -1504,7 +1504,7 @@ describe('McpPage', () => {
   /* ── Publisher / official badge tests ── */
 
   it('shows official badge for vendor-built MCP in registry', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const registry: McpDefinition[] = [
       { id: 'mcp-fastly', name: 'Fastly', description: 'CDN server', transport: { Stdio: { command: 'fastly-mcp', args: [] } }, env_keys: [], tags: ['cdn'], token_url: null, token_help: null, publisher: 'Fastly', official: true },
     ];
@@ -1570,7 +1570,7 @@ describe('McpPage', () => {
       ],
       customized_contexts: [],
       incompatibilities: [],
-      incomplete_configs: [],
+      incomplete_configs: [], access_policies: [],
     };
     const { container } = wrap(
       <McpPage
@@ -1594,7 +1594,7 @@ describe('McpPage', () => {
   });
 
   it('shows community badge for third-party MCP in registry', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const registry: McpDefinition[] = [
       { id: 'mcp-github', name: 'GitHub', description: 'GitHub server', transport: { Stdio: { command: 'npx', args: ['-y', 'server'] } }, env_keys: ['TOKEN'], tags: ['git'], token_url: null, token_help: null, publisher: 'Anthropic', official: false },
     ];
@@ -1607,7 +1607,7 @@ describe('McpPage', () => {
   it('shows publisher badge in detail panel of installed MCP', () => {
     const servers = [makeServer('mcp-redis', 'Redis')];
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const registry: McpDefinition[] = [
       { id: 'mcp-redis', name: 'Redis', description: 'Cache server', transport: { Stdio: { command: 'uvx', args: ['redis-mcp'] } }, env_keys: [], tags: ['cache'], token_url: null, token_help: null, publisher: 'Redis Ltd', official: true },
     ];
@@ -1621,7 +1621,7 @@ describe('McpPage', () => {
   it('danger-zone cancel keeps the plugin sheet open without deleting', async () => {
     const servers = [makeServer('mcp-redis', 'Redis')];
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     openPlugin('Redis');
@@ -1641,7 +1641,7 @@ describe('McpPage', () => {
   it('Delete confirmed → API called + success toast', async () => {
     const servers = [makeServer('mcp-redis', 'Redis')];
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
 
     vi.mocked(mcpsApi.deleteConfig).mockResolvedValue(undefined);
 
@@ -1676,6 +1676,7 @@ describe('McpPage', () => {
         missing_keys: ['ADOBE_COMPANY_ID', 'ADOBE_RSID'],
         reason: '2 clé(s) requise(s) manquante(s) ou vide(s)',
       }],
+      access_policies: [],
     };
 
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
@@ -1693,7 +1694,7 @@ describe('McpPage', () => {
     // the banner must not appear unless explicitly populated.
     const servers = [makeServer('mcp-redis', 'Redis')];
     const configs = [makeConfig('c1', 'mcp-redis', 'Redis')];
-    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers, configs, customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     expect(screen.queryByTestId('mcp-incomplete-banner')).toBeNull();
   });
@@ -1706,7 +1707,7 @@ describe('McpPage', () => {
   // contract (see `materialize_custom_server` in backend/src/api/mcps.rs).
 
   it('Custom API: clicking the pinned tile opens the freeform form', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom',
       name: 'Custom API',
@@ -1736,7 +1737,7 @@ describe('McpPage', () => {
   });
 
   it('Custom API: submit posts custom_spec with the form payload', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom',
       name: 'Custom API',
@@ -1785,7 +1786,7 @@ describe('McpPage', () => {
   });
 
   it('Custom API: assistant conversations survive a failed create and attach on the retry (KT-1111)', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom', name: 'Custom API', description: 'Define your own API.', transport: 'ApiOnly',
       env_keys: [], tags: ['custom', 'api'], token_url: null, token_help: null, publisher: 'You', official: false,
@@ -1817,7 +1818,7 @@ describe('McpPage', () => {
   });
 
   it('Custom API: declared default headers are sent, blank rows are dropped', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom',
       name: 'Custom API',
@@ -1856,7 +1857,7 @@ describe('McpPage', () => {
 
   it('Add flow: the scope editor proposes specific projects, and the created fiche opens once it appears', async () => {
     const project = makeProject('p1', 'Website');
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom',
       name: 'Custom API',
@@ -1904,7 +1905,7 @@ describe('McpPage', () => {
 
   it('Add flow: an MCP can select both projects and local CLI sync before creation', async () => {
     const project = makeProject('p1', 'Website');
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const definition: McpDefinition = {
       id: 'test-mcp',
       name: 'Test MCP',
@@ -1940,7 +1941,7 @@ describe('McpPage', () => {
   });
 
   it('Add flow: merging into an existing identical config is announced, not silently reported as "created"', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     const customApi: McpDefinition = {
       id: 'api-custom',
       name: 'Custom API',
@@ -2012,7 +2013,7 @@ describe('McpPage', () => {
       servers: [customServer],
       configs: [config],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
 
     (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockResolvedValue([
@@ -2080,7 +2081,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [makeConfig('cfg-notion', serverId, 'Notion', { env_keys: ['API_KEY'] })],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Notion — Voir les détails' }));
@@ -2111,7 +2112,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [makeConfig('cfg-notion', serverId, 'Notion', { env_keys: ['API_KEY'] })],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Notion — Voir les détails' }));
@@ -2365,7 +2366,7 @@ describe('McpPage', () => {
       servers: [vendorServer],
       configs: [cfg],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(screen.getByRole('button', { name: 'Chartbeat — Voir les détails' }));
@@ -2400,7 +2401,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [cfg],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     openPlugin('LegacyAPI');
@@ -2432,7 +2433,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [cfg],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     openPlugin('GoodAPI');
@@ -2462,7 +2463,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [makeConfig('cfg-exportme', 'custom-exportme-aaa11111', 'ExportMe')],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
   };
 
@@ -2474,7 +2475,7 @@ describe('McpPage', () => {
   });
 
   it('the Add panel import tile opens the bundle import instead of a paste form', () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     fireEvent.click(getAddPluginButton());
     fireEvent.click(document.querySelector('[data-testid="mcp-import-bundle-tile"]') as HTMLElement);
@@ -2491,7 +2492,7 @@ describe('McpPage', () => {
   });
 
   it('reports created, merged, rewritten and removed after applying a rescan', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     vi.mocked(mcpsApi.refresh)
       .mockResolvedValueOnce({ dry_run: true, configs_created: 2, configs_merged: 1, configs_deleted: 3, projects_affected: 4, overview })
       .mockResolvedValueOnce({ dry_run: false, configs_created: 2, configs_merged: 1, configs_deleted: 3, projects_affected: 4, projects_rewritten: 5, overview });
@@ -2504,7 +2505,7 @@ describe('McpPage', () => {
   });
 
   it('shows a rescan failure on screen and keeps the preview', async () => {
-    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
     vi.mocked(mcpsApi.refresh)
       .mockResolvedValueOnce({ dry_run: true, configs_created: 0, configs_merged: 0, configs_deleted: 0, projects_affected: 0, overview })
       .mockRejectedValueOnce(new Error('disk full'));
@@ -2541,7 +2542,7 @@ describe('McpPage', () => {
       servers: [server],
       configs: [cfg],
       customized_contexts: [],
-      incompatibilities: [], incomplete_configs: [],
+      incompatibilities: [], incomplete_configs: [], access_policies: [],
     };
     wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
     openPlugin('Chartbeat');
@@ -2593,7 +2594,7 @@ describe('McpPage', () => {
     };
 
     it('renders 4 filter pills (All / MCP / API / CLI) with All active by default', async () => {
-      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
       wrap(<McpPage projects={[]} mcpOverview={overview}
         mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
       await openAddMcpPanel();
@@ -2610,7 +2611,7 @@ describe('McpPage', () => {
     });
 
     it('CLI filter narrows registry to only plugins with the cli tag', async () => {
-      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
       wrap(<McpPage projects={[]} mcpOverview={overview}
         mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
       await openAddMcpPanel();
@@ -2625,7 +2626,7 @@ describe('McpPage', () => {
     });
 
     it('API filter narrows to ApiOnly plugins', async () => {
-      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
       wrap(<McpPage projects={[]} mcpOverview={overview}
         mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
       await openAddMcpPanel();
@@ -2637,7 +2638,7 @@ describe('McpPage', () => {
     });
 
     it('MCP filter narrows to non-CLI non-API plugins (pure MCP + hybrid)', async () => {
-      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
       wrap(<McpPage projects={[]} mcpOverview={overview}
         mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
       await openAddMcpPanel();
@@ -2652,7 +2653,7 @@ describe('McpPage', () => {
     });
 
     it('pinned Custom API tile follows the kind filter (visible under All/API, hidden under MCP/CLI)', async () => {
-      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
+      const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [], access_policies: [] };
       wrap(<McpPage projects={[]} mcpOverview={overview}
         mcpRegistry={[mcpServer, apiServer, cliServer]} refetchMcps={noop} />);
       await openAddMcpPanel();

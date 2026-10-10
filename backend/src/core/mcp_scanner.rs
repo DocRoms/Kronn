@@ -3853,6 +3853,15 @@ fn interpolate_env_template(
 /// config can be interpolated. Auth values may be present in that map but
 /// this pure renderer must never read or emit them.
 pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
+    build_api_context_block_with_policies(plugins_with_env, &[])
+}
+
+/// [`build_api_context_block`], with each plugin's access policy (KT-1026)
+/// shown so an agent it excludes says so instead of trying.
+pub fn build_api_context_block_with_policies(
+    plugins_with_env: &[ActiveApiPlugin],
+    policies: &[crate::models::ApiAccessPolicyEntry],
+) -> String {
     use crate::models::{ApiAuthKind, ApiSpec};
 
     // Filter to plugins that actually have an ApiSpec — a hybrid plugin's
@@ -4064,11 +4073,16 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
         // CURRENT surface (APIs add/change endpoints over time). ⚠ A path NOT
         // in the list defaults to GET, so for a WRITE on an undeclared path
         // you MUST pass `api_method` explicitly (e.g. POST).
-        out.push_str(
-            "The list is INDICATIVE (common calls), NOT exhaustive — any valid path on this API \
-             works via `api_call`; check the API's own docs for the rest (and for updates). \
-             For a non-GET on an UNLISTED path, set `api_method` explicitly (unlisted paths default to GET).\n",
-        );
+        match policies.iter().find(|entry| entry.server_id == server.id) {
+            Some(entry) => {
+                out.push_str(&crate::core::api_access::describe_policy(&entry.policy))
+            }
+            None => out.push_str(
+                "The list is INDICATIVE (common calls), NOT exhaustive — any valid path on this API \
+                 works via `api_call`; check the API's own docs for the rest (and for updates). \
+                 For a non-GET on an UNLISTED path, set `api_method` explicitly (unlisted paths default to GET).\n",
+            ),
+        }
 
         if let Some(docs) = &spec.docs_url {
             out.push_str(&format!("Full reference: {}\n", docs));

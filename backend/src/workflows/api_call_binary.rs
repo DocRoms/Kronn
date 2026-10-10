@@ -461,6 +461,7 @@ mod broker_tests {
             state,
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result
@@ -694,6 +695,7 @@ mod broker_tests {
             &context,
             ApiCallLogContext::workflow(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result;

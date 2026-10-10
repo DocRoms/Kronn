@@ -92,3 +92,13 @@
   color: var(--kr-text-primary);
   text-decoration: underline;
 }
+
+.live-page-action-overlay__trust-notice {
+  margin: 0 24px 6px 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(var(--kr-warning-rgb), .4);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-warning-bg);
+  color: var(--kr-text-secondary);
+  font-size: 11px;
+}
