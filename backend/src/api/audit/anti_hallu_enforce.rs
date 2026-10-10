@@ -233,6 +233,23 @@ pub(super) fn is_human_owned_marker(line: &str) -> bool {
     line.contains("owner=\"human\"") || line.contains("curated=\"human\"")
 }
 
+/// `content` with every human-owned section blanked (line count kept), and
+/// each of those sections as `(name, text)`, markers included.
+pub fn split_human_owned_sections(content: &str) -> (String, Vec<(String, String)>) {
+    let mut lines: Vec<&str> = content.split('\n').collect();
+    let scan = code_line_mask(content, false);
+    let mut human = Vec::new();
+    for span in parse_named_sections(&lines, &scan.in_fence) {
+        if span.is_human {
+            human.push((span.name, lines[span.start..=span.end].join("\n")));
+            for line in &mut lines[span.start..=span.end] {
+                *line = "";
+            }
+        }
+    }
+    (lines.join("\n"), human)
+}
+
 pub fn contains_human_owned_section(content: &str) -> bool {
     let lines: Vec<&str> = content.split('\n').collect();
     let scan = code_line_mask(content, false);

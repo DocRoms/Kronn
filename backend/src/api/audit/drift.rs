@@ -475,7 +475,8 @@ pub async fn partial_audit(
             // as a full chained run — a partial re-run of a sub-audit that no
             // longer applies must still write its one-line "Not applicable".
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
+            let reverify = super::reverifies_target(&project_path, step, analysis_step);
+            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));

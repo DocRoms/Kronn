@@ -90,4 +90,31 @@ describe('AuditTimeline — unchanged steps', () => {
     await openGroups(container);
     await waitFor(() => expect(screen.getByTestId('audit-timeline-step-2')).toHaveClass('is-unchanged'));
   });
+
+  // KT-1132 — on an audited project the launch re-verifies the docs, and says so before it starts.
+  it('an audited project offers « Revérifier la doc » and explains it before launch', async () => {
+    mockSteps([{ id: 'run-1', kind: 'Full' }], [step(1)]);
+    const onLaunch = vi.fn();
+    wrap(<AuditTimeline {...props({ onLaunch })} />);
+    const launch = await screen.findByTestId('audit-timeline-launch');
+    expect(launch).toHaveTextContent(fr['auditTimeline.relaunch']);
+    expect(fr['auditTimeline.relaunch']).toBe('Revérifier la doc');
+    expect(screen.getByTestId('audit-timeline-reverify-hint')).toHaveTextContent(fr['auditTimeline.reverifyHint']);
+    expect(onLaunch).not.toHaveBeenCalled();
+    fireEvent.click(launch);
+    expect(onLaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a first audit, a resume or a running audit carry no re-verification hint', async () => {
+    mockSteps([], []);
+    const { rerender } = wrap(<AuditTimeline {...props({ auditStatus: 'TemplateInstalled' })} />);
+    expect(await screen.findByTestId('audit-timeline-launch')).toHaveTextContent(fr['audit.startFullAudit']);
+    expect(screen.queryByTestId('audit-timeline-reverify-hint')).toBeNull();
+    rerender(<I18nProvider><AuditTimeline {...props({ auditActive: true })} /></I18nProvider>);
+    expect(screen.queryByTestId('audit-timeline-reverify-hint')).toBeNull();
+    rerender(<I18nProvider><AuditTimeline {...props({
+      resumable: { id: 'run-1', last_completed_step: 3, steps_to_redo: [] },
+    })} /></I18nProvider>);
+    expect(screen.queryByTestId('audit-timeline-reverify-hint')).toBeNull();
+  });
 });

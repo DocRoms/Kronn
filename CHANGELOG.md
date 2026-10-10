@@ -118,6 +118,28 @@ Release notes for 0.9.3 and earlier are available in the
   anti-hallucination spec its `docs/AGENTS.md` links to, so the documentary
   check no longer blocks step 1. The outdated "no template to restore" advice
   is gone from the step-failure toast.
+- A re-audit now re-checks the documentation it already wrote against the
+  current code, instead of looking only for template placeholders
+  (KT-1132). When the target of steps 1 to 7 is already filled, the step gets a
+  re-verification prompt: check each fact and each citation against the code,
+  correct what is false or stale, keep what is still true word for word,
+  never touch `owner="human"` sections, and leave a still-accurate file as it
+  is so that the step ends **Inchangé**. Before the agent runs, Kronn lists the
+  target's citations that no longer resolve (deleted file, line past the end
+  of the file) and hands them to the step. Such a document can no longer end
+  unchanged: the step corrects it in the same run, or fails after three
+  attempts, where it used to end unchanged and block the run at the final
+  documentary check. A dead link or citation inside an `owner="human"`
+  section is never handed to the agent and never blocks a step or the run,
+  since no step may rewrite that section: it is reported as a
+  `human_section_reference` warning naming the section, and the validation
+  discussion lists it for the section's owner to fix. On a project already
+  audited, the timeline's launch
+  button reads "Revérifier la doc" and explains what it does before you
+  start. A Full audit no longer writes `docs/var/` into the project
+  `.gitignore`: it goes into the local `info/exclude`, like Kronn's other
+  private paths (KT-1125), so an audit leaves your `.gitignore` byte-identical,
+  or absent.
 - `kronn dev` stops on Ctrl-C or TERM in every phase (KT-1145). Under bash
   5.2 the backend supervisor could drop a TERM that arrived while it expanded
   a command substitution, right after its Cargo build, and keep running. It

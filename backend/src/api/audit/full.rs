@@ -735,7 +735,7 @@ pub async fn full_audit(
                 Ok((report,)) => report,
             };
 
-            crate::core::mcp_scanner::ensure_gitignore_public(&project_path_str, "docs/var/");
+            crate::core::mcp_scanner::ensure_local_exclude(&project_path_str, "docs/var/");
 
             // 0.8.3 (#272) — surface the legacy-docs migration so the
             // frontend can show a toast + list of moved entries. The
@@ -1083,7 +1083,8 @@ pub async fn full_audit(
             // dimension foreign to the project must cost one line, not a
             // full agent pass.
             let gate = super::gate_for_step(step, first_chained_step);
-            let mut full_prompt = super::dated_step_prompt(gate, analysis_step.prompt, Utc::now());
+            let reverify = super::reverifies_target(&project_path, step, analysis_step);
+            let mut full_prompt = super::dated_step_prompt(gate, &super::step_prompt_body(analysis_step, reverify), Utc::now());
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
@@ -1189,7 +1190,18 @@ pub async fn full_audit(
             // Correct blockers before final validation, at most twice per
             // step. Full's documentary gate also applies in off/warn mode;
             // the global provenance setting still controls the enforce gate.
-            let recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
+            let mut recovery_targets = documentary_recovery.get(&(step as u32)).cloned().unwrap_or_default();
+            if reverify && should_optimize_documents(kind) {
+                match super::document_repair::with_stale_target(&project_path, analysis_step.target_file, recovery_targets.clone()) {
+                    Ok(targets) => recovery_targets = targets,
+                    // The end-of-run documentary gate still checks this document.
+                    Err(e) => tracing::warn!("Audit step {} ({}): stale citation check skipped: {}", step, file_label, e),
+                }
+                tracing::info!(
+                    "Audit step {} ({}) re-verifies a filled target: {} stale reference(s) before the agent",
+                    step, file_label, recovery_targets.iter().filter(|d| d.path == analysis_step.target_file).count()
+                );
+            }
             let documentary_snapshot = if should_optimize_documents(kind) {
                 match super::document_repair::snapshot_for_recovery(&project_path, &recovery_targets) {
                     Ok(snapshot) => Some(snapshot),
@@ -2282,6 +2294,7 @@ pub async fn full_audit(
         // KT-931 — a run with failed steps is validated too (for the steps that
         // succeeded), so the invented-path guard covers it as well: only a run
         // where nothing succeeded has no document to check.
+        let mut human_references = Vec::new();
         if outcome != RunOutcome::Nothing && should_optimize_documents(kind) {
             let pp = project_path.clone();
             let optimization = tokio::task::spawn_blocking(move || {
@@ -2289,6 +2302,9 @@ pub async fn full_audit(
             }).await;
             match optimization {
                 Ok(Ok(report)) => {
+                    human_references = report.diagnostics.iter()
+                        .filter(|d| d.code == crate::core::document_optimization::HUMAN_SECTION_REFERENCE)
+                        .cloned().collect();
                     let blocking: Vec<_> = report.blocking_diagnostics().cloned().collect();
                     yield Event::default().event("documentary_optimization").data(
                         serde_json::json!({
@@ -2567,8 +2583,9 @@ pub async fn full_audit(
             })
             .collect();
         let validation_prompt = format!(
-            "{}{validation_prompt}",
-            unchanged_steps_block(&unchanged_listed, total_steps as u32, &language)
+            "{}{}{validation_prompt}",
+            unchanged_steps_block(&unchanged_listed, total_steps as u32, &language),
+            super::helpers::human_references_block(&human_references, &language)
         );
 
         let now = Utc::now();

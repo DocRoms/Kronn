@@ -761,6 +761,9 @@ export function AuditTimeline(props: AuditTimelineProps) {
                 </div>
               </div>
             )}
+            {audited && !resumable && !auditActive && (
+              <p className="audit-tl-muted" data-testid="audit-timeline-reverify-hint">{t('auditTimeline.reverifyHint')}</p>
+            )}
             <button
               type="button"
               className="audit-tl-btn audit-tl-btn-primary"

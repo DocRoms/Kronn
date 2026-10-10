@@ -46,6 +46,23 @@ pub(super) fn recovery_plan(
     plan
 }
 
+/// Adds the target's blocking diagnostics found before the agent runs, so a
+/// re-verified document whose citations no longer resolve cannot end
+/// `unchanged`: the step is told what is stale and stays blocked until fixed.
+pub(super) fn with_stale_target(
+    project: &Path,
+    target: &str,
+    mut recovery: Vec<Diagnostic>,
+) -> Result<Vec<Diagnostic>, String> {
+    let report = document_optimization::analyze(project)?;
+    for diagnostic in report.blocking_diagnostics().filter(|d| d.path == target) {
+        if !recovery.contains(diagnostic) {
+            recovery.push(diagnostic.clone());
+        }
+    }
+    Ok(recovery)
+}
+
 pub(super) fn feedback(diagnostics: &[Diagnostic]) -> String {
     let mut text = String::from("## Documentary gate — targeted correction required\n\n");
     for d in diagnostics {

@@ -1226,6 +1226,49 @@ pub(crate) fn dated_step_prompt(
     .replace("set to today's date", &format!("set to {today}"))
 }
 
+/// Steps 1 to 7 fill a documentation template. Once their target is filled,
+/// a later audit re-verifies it instead of looking for placeholders.
+pub(crate) const REVERIFIED_STEPS: usize = 7;
+
+pub(crate) const REVERIFY_BLOCK: &str = "\
+# RE-VERIFICATION MODE (the target is already filled)\n\
+`{target}` has no template placeholder left: a previous audit wrote it. The step below lists what this file must cover; use it as the checklist to verify, not as a fill job.\n\
+1. Check every fact and every `[src: …]` citation against the current code: open the cited file at the cited line.\n\
+2. Correct what is false or stale (moved line, renamed or deleted file, changed command or version), add what the checklist requires and the file lacks, remove what no longer exists.\n\
+3. Keep every statement that is still true exactly as written: no rephrasing, reordering or restyling.\n\
+4. Never touch a section marked `owner=\"human\"`.\n\
+5. If everything is still accurate, leave the file byte-identical: the step then ends unchanged, a valid result.\n";
+
+/// Whether this step re-verifies its target rather than filling it: a
+/// documentary step whose target exists with no raw placeholder left.
+pub(crate) fn reverifies_target(
+    project: &std::path::Path,
+    step_1_based: usize,
+    step: &AnalysisStep,
+) -> bool {
+    (1..=REVERIFIED_STEPS).contains(&step_1_based)
+        && std::fs::read_to_string(project.join(step.target_file)).is_ok_and(|content| {
+            !content.trim().is_empty() && validation::count_raw_placeholders(&content) == 0
+        })
+}
+
+/// The step's own instructions, headed by the re-verification block when the
+/// target is already filled.
+pub(crate) fn step_prompt_body(
+    step: &AnalysisStep,
+    reverify: bool,
+) -> std::borrow::Cow<'static, str> {
+    if reverify {
+        std::borrow::Cow::Owned(format!(
+            "{}\n{}",
+            REVERIFY_BLOCK.replace("{target}", step.target_file),
+            step.prompt
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(step.prompt)
+    }
+}
+
 /// 0.9.0 — the chained audit: a Full run = the 9 foundation steps PLUS
 /// every focused sub-audit appended, so one launch covers everything and
 /// the single validation discussion at the end confirms the WHOLE TD set.
@@ -2629,6 +2672,75 @@ mod prompt_tests {
             );
             assert!(!prompt.contains("YYYYMMDD=today"), "step {}", index + 1);
         }
+    }
+
+    #[test]
+    fn a_filled_target_gets_the_reverification_prompt_and_a_template_the_fill_prompt() {
+        let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
+        let project = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let prompt_of = |index: usize| {
+            let step = &ANALYSIS_STEPS[index - 1];
+            let reverify = reverifies_target(project.path(), index, step);
+            dated_step_prompt("", &step_prompt_body(step, reverify), now)
+        };
+        for (index, step) in ANALYSIS_STEPS.iter().enumerate().take(REVERIFIED_STEPS) {
+            let index = index + 1;
+            let target = project.path().join(step.target_file);
+            // Absent: the template is installed before the step, nothing to verify.
+            assert!(
+                !prompt_of(index).contains("RE-VERIFICATION MODE"),
+                "step {index}"
+            );
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let template = std::fs::read_to_string(templates.join(step.target_file)).unwrap();
+            assert!(
+                validation::count_raw_placeholders(&template) > 0,
+                "{}",
+                step.target_file
+            );
+            std::fs::write(&target, &template).unwrap();
+            assert!(
+                !prompt_of(index).contains("RE-VERIFICATION MODE"),
+                "step {index}"
+            );
+            std::fs::write(
+                &target,
+                "# Filled\n\nVerified fact [src: file: README.md:1]\n",
+            )
+            .unwrap();
+            let prompt = prompt_of(index);
+            assert!(
+                prompt.contains(&format!(
+                    "RE-VERIFICATION MODE (the target is already filled)\n`{}`",
+                    step.target_file
+                )),
+                "step {index}"
+            );
+            let checklist = step.prompt.lines().next().unwrap();
+            assert!(
+                prompt.contains(checklist),
+                "the checklist stays: step {index}"
+            );
+        }
+        // Step 8 keeps its own anti-repetition logic, never this block.
+        let tech_debt = &ANALYSIS_STEPS[REVERIFIED_STEPS];
+        assert!(tech_debt
+            .target_file
+            .ends_with("inconsistencies-tech-debt.md"));
+        let target = project.path().join(tech_debt.target_file);
+        std::fs::write(&target, "# Filled\n").unwrap();
+        assert!(!reverifies_target(
+            project.path(),
+            REVERIFIED_STEPS + 1,
+            tech_debt
+        ));
+        // A placeholder left anywhere still means filling, digits included.
+        let rules = project.path().join("docs/coding-rules.md");
+        std::fs::write(&rules, "# Rules\n\n## {{LANGUAGE_1}}\n").unwrap();
+        assert!(!prompt_of(4).contains("RE-VERIFICATION MODE"));
+        // Bounded: the block adds at most a few hundred tokens per step.
+        assert!(REVERIFY_BLOCK.split_whitespace().count() < 160);
     }
 
     /// Extract every literal (non-wildcard) `{{UPPER_SNAKE}}` token a prompt

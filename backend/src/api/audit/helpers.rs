@@ -357,6 +357,40 @@ pub(crate) fn partial_run_block(
     block
 }
 
+/// Dead references inside human-owned sections: the audit may not fix them,
+/// so the human is asked to. Empty when there is none.
+pub(crate) fn human_references_block(
+    items: &[crate::core::document_optimization::Diagnostic],
+    language: &str,
+) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let list = items
+        .iter()
+        .map(|d| format!("- `{}` — {}", d.path, d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (title, intro, rule) = match language {
+        "en" => (
+            "## DEAD REFERENCES IN HUMAN SECTIONS — for their owner",
+            "These `owner=\"human\"` sections cite a file or a line that no longer exists. The audit may not edit them, and they do not block it.",
+            "List them to the user in a separate section of your first message: the user corrects or confirms these sections. Do not edit them yourself.",
+        ),
+        "es" => (
+            "## REFERENCIAS MUERTAS EN SECCIONES HUMANAS — para su autor",
+            "Estas secciones `owner=\"human\"` citan un archivo o una linea que ya no existe. La auditoria no puede modificarlas y no la bloquean.",
+            "Enumeralas al usuario en una seccion aparte de tu primer mensaje: el usuario corrige o confirma esas secciones. No las modifiques tu.",
+        ),
+        _ => (
+            "## RÉFÉRENCES MORTES DANS DES SECTIONS HUMAINES — pour leur auteur",
+            "Ces sections `owner=\"human\"` citent un fichier ou une ligne qui n'existe plus. L'audit n'a pas le droit de les modifier, et elles ne le bloquent pas.",
+            "Liste-les à l'utilisateur dans une section à part de ton premier message : c'est lui qui corrige ou confirme ces sections. Ne les modifie pas toi-même.",
+        ),
+    };
+    format!("{title}\n{intro}\n{list}\n\n{rule}\n\n")
+}
+
 /// KT-1130 — the steps that verified their document and had nothing to
 /// change, listed apart so the human confirms them. Empty when there is none.
 pub(crate) fn unchanged_steps_block(
