@@ -377,6 +377,18 @@ fn parse_codex_line(line: &str) -> CodexLineEvent {
     }
 }
 
+/// Codex's "upgrade" advice for a model it will not serve can be wrong; the
+/// rewrite names the model and the CLI version instead (KT-667).
+fn name_model_refusal(message: String) -> String {
+    match crate::core::model_catalog::codex_model_refusal_message(&message) {
+        Some(named) => {
+            tracing::warn!("Codex refused a model: {message}");
+            named
+        }
+        None => message,
+    }
+}
+
 #[async_trait]
 impl AcpTransport for CodexAcpAdapter {
     async fn initialize(
@@ -593,7 +605,9 @@ impl AcpTransport for CodexAcpAdapter {
                     // Reasoning and other items shown to no one still prove
                     // the run alive to its inactivity watchdog.
                     CodexLineEvent::Skip => {
-                        if crate::acp::is_runtime_frame(&line) {
+                        if crate::agents::activity::is_reasoning_frame(&line) {
+                            let _ = events.send(AcpSessionEvent::Thought).await;
+                        } else if crate::acp::is_runtime_frame(&line) {
                             let _ = events.send(AcpSessionEvent::Activity).await;
                         }
                     }
@@ -610,12 +624,20 @@ impl AcpTransport for CodexAcpAdapter {
         let status = self.process.wait(&cancel).await?;
 
         if let Some(message) = fatal {
-            return Err(AcpError::Transport(message));
+            return Err(AcpError::Transport(name_model_refusal(message)));
         }
         if !status.success() {
-            return Err(stderr
-                .into_error("codex", format!("codex exited with status {status}"))
-                .await);
+            return Err(
+                match stderr
+                    .into_error("codex", format!("codex exited with status {status}"))
+                    .await
+                {
+                    AcpError::Transport(message) => {
+                        AcpError::Transport(name_model_refusal(message))
+                    }
+                    other => other,
+                },
+            );
         }
         stderr.discard("codex").await;
         let _ = events.send(AcpSessionEvent::Completed).await;
@@ -991,6 +1013,25 @@ mod tests {
         );
         assert!(error.contains("before reading its prompt"), "{error}");
         assert!(error.contains("not logged in, run codex login"), "{error}");
+    }
+
+    /// KT-667 — Codex's "upgrade" advice for a model it will not serve is
+    /// replaced by the model and the CLI constraint before it reaches anyone.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_model_refusal_names_the_model_instead_of_advising_an_upgrade() {
+        let error = prompt_fixture(
+            "cat >/dev/null\ncat <<'JSON'\n{\"type\":\"error\",\"message\":\"The 'gpt-5.6-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.\"}\nJSON\nexit 1",
+            "hi",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("Codex refused model `gpt-5.6-sol`"),
+            "{error}"
+        );
+        assert!(!error.contains("Please upgrade"), "{error}");
     }
 
     #[tokio::test]

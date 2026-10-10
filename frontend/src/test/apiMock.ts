@@ -41,6 +41,7 @@ export const API_NAMESPACES = [
   'agents',
   'mcps',
   'discussions',
+  'assistantConversations',
   'discussionActions',
   'planning',
   'workflows',
@@ -103,6 +104,7 @@ interface DefaultMock {
   agents: Record<string, AnyFn>;
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
+  assistantConversations: Record<string, AnyFn>;
   discussionActions: Record<string, AnyFn>;
   planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
@@ -183,7 +185,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       saveGlobalContext: resolve(undefined),
       getGlobalContextMode: resolve('always'),
       saveGlobalContextMode: resolve(undefined),
-      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30 }),
+      getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off', agent_handoffs_enabled: false, agent_handoff_paid_limit: 1, agent_handoff_paid_unlimited: false, agent_handoff_blocked_agents: [], execution_variable_retention_days: 30, timezone: null, timezone_effective: 'UTC', timezone_detected: 'UTC' }),
       setServerConfig: resolve(undefined),
       getNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
       setNetworkExposure: resolve({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
@@ -481,6 +483,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       unsafeSteps: resolve([]),
+      safetyCheck: resolve([]),
+      cronPreview: resolve({ timezone: 'UTC', inherited: true, next: [] }),
       execLineCheck: resolve({ unmodelled_program: null, covered: [] }),
       execScriptStatus: resolve([]),
       create: resolve({}),
@@ -510,6 +514,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       get: resolve(null),
       workflows: resolve([]),
       create: resolve({}),
+      update: resolve({}),
       updateHtml: resolve({}),
       publish: resolve({}),
     },
@@ -786,6 +791,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     // coverage figure, and "no sessions" is the honest neutral state.
     telemetry: {
       coverage: resolve([]),
+    },
+    assistantConversations: {
+      list: resolve([]),
+      update: resolve(null),
     },
     discussionActions: {
       list: resolve([]),

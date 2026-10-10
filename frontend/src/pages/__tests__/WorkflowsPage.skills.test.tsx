@@ -102,6 +102,7 @@ const PROMPT = {
 } as QuickPrompt;
 
 const FAVORITES_KEY = 'kronn:automationSkillFavorites';
+const AUTOMATION_ACTIONS = 'Créer ou importer';
 
 beforeEach(() => {
   mockSkillsApi.list.mockResolvedValue(SKILLS);
@@ -337,12 +338,13 @@ describe('WorkflowsPage — skills (KT-914)', () => {
 
     const viewer = document.querySelector('.automation-viewer') as HTMLElement;
     expect(within(viewer).queryByTestId('skill-sheet')).toBeNull();
-    expect(openButtons(viewer)).toEqual(['Ouvrir Review', 'Ouvrir Rust']);
+    // Kronn's skills first, then the user's (KT-1140).
+    expect(openButtons(viewer)).toEqual(['Ouvrir Rust', 'Ouvrir Review']);
     // The cards fold the unused skills away as the list does.
     const toggle = availableToggle(2, viewer);
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await act(async () => { fireEvent.click(toggle); });
-    expect(openButtons(viewer)).toEqual(['Ouvrir Review', 'Ouvrir Rust', 'Ouvrir Orphan', 'Ouvrir Spare']);
+    expect(openButtons(viewer)).toEqual(['Ouvrir Rust', 'Ouvrir Review', 'Ouvrir Orphan', 'Ouvrir Spare']);
     await act(async () => { fireEvent.click(within(viewer).getByRole('button', { name: 'Ouvrir Rust' })); });
     expect(screen.getByRole('heading', { level: 2, name: 'Rust' })).toBeInTheDocument();
   });
@@ -353,6 +355,54 @@ describe('WorkflowsPage — skills (KT-914)', () => {
     await wrap(page({ onNavigateSettings }));
     fireEvent.click(screen.getByRole('button', { name: 'Ouvrir dans Config' }));
     expect(onNavigateSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a skill from the Automation menu, for the project picked or for every project', async () => {
+    const created = skill({ id: 'custom-pr-review', name: 'PR review', project_id: 'p-beta' });
+    mockSkillsApi.create.mockResolvedValue(created);
+    await wrap(page());
+    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: AUTOMATION_ACTIONS })[0]); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Nouveau skill' })); });
+    const form = screen.getByRole('region', { name: 'Nouveau skill' });
+    const save = within(form).getByRole('button', { name: 'Ajouter un skill' });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(within(form).getByRole('textbox', { name: 'Nom *' }), { target: { value: ' PR review ' } });
+    fireEvent.change(within(form).getByRole('textbox', { name: 'Contenu (system prompt) *' }), { target: { value: 'Review it.' } });
+    const project = within(form).getByRole('combobox', { name: /^Projet/ });
+    expect(project).toHaveValue('');
+    expect(within(form).getByText('Proposé dans tous les projets.')).toBeInTheDocument();
+    fireEvent.change(project, { target: { value: 'p-beta' } });
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, created]);
+    await act(async () => { fireEvent.click(save); });
+
+    expect(mockSkillsApi.create).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'PR review', content: 'Review it.', project_id: 'p-beta',
+    }));
+    expect(screen.queryByRole('region', { name: 'Nouveau skill' })).toBeNull();
+    expect(screen.getByTestId('skill-project')).toHaveTextContent('Projet : Beta');
+  });
+
+  it('edits a skill the user wrote from its sheet and can make it global', async () => {
+    const scoped = skill({ id: 'custom-pr-review', name: 'PR review', project_id: 'p-beta', license: 'MIT' });
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, scoped]);
+    mockSkillsApi.update.mockResolvedValue({ ...scoped, project_id: undefined });
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'custom-pr-review' }));
+    await wrap(page());
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Modifier' })); });
+    const form = screen.getByRole('region', { name: 'Modifier le skill' });
+    expect(within(form).getByRole('combobox', { name: /^Projet/ })).toHaveValue('p-beta');
+    fireEvent.change(within(form).getByRole('combobox', { name: /^Projet/ }), { target: { value: '' } });
+    await act(async () => { fireEvent.click(within(form).getByRole('button', { name: 'Enregistrer' })); });
+    expect(mockSkillsApi.update).toHaveBeenCalledWith('custom-pr-review', expect.objectContaining({
+      project_id: null, license: 'MIT',
+    }));
+  });
+
+  it('offers no edit for a built-in skill', async () => {
+    localStorage.setItem('kronn:automationNavigation', JSON.stringify({ tab: 'skills', resourceId: 'rust' }));
+    await wrap(page());
+    expect(screen.queryByRole('button', { name: 'Modifier' })).toBeNull();
   });
 
   it('deletes a skill the user wrote from its sheet, and leaves a built-in one alone', async () => {
@@ -566,5 +616,71 @@ describe('WorkflowsPage — skills used from a repository (KT-921)', () => {
     mockProjectsApi.usedSkills.mockRejectedValue(new Error('offline'));
     await wrap(page());
     expect(openButtons(group('kind:skills'))).toEqual(['Ouvrir Review', 'Ouvrir Rust']);
+  });
+});
+
+// KT-1140 — the cards split Kronn's built-in skills from the user's, with the
+// project card's groups, labels and badges.
+describe('WorkflowsPage — Kronn skills apart from the user\'s (KT-1140)', () => {
+  const PROJECT_SKILL = skill({ id: 'custom-beta-only', name: 'Beta only', project_id: 'p-beta' });
+  const REPOSITORY_SKILL: ProjectUsedSkill = {
+    project_id: 'p-alpha', slug: 'block-migration', name: 'block-migration',
+    root: '.agents/skills', relative_path: '.agents/skills/block-migration/SKILL.md', referenced: true, published: false,
+  };
+
+  const showCards = async () => {
+    await wrap(page());
+    const skillsOption = within(typeList()).getByRole('option', { name: /^Skills \(/ });
+    await act(async () => { fireEvent.click(skillsOption); });
+    return document.querySelector('.automation-viewer') as HTMLElement;
+  };
+  const skillGroup = (viewer: HTMLElement, name: string) => within(viewer).getByRole('region', { name });
+  const cardOf = (scope: HTMLElement, name: string) => (
+    within(scope).getByRole('button', { name: `Ouvrir ${name}` }).closest('.skill-card') as HTMLElement
+  );
+
+  beforeEach(() => {
+    mockSkillsApi.list.mockResolvedValue([...SKILLS, PROJECT_SKILL]);
+    mockProjectsApi.usedSkills.mockResolvedValue([REPOSITORY_SKILL]);
+  });
+
+  it('lists the built-in skills under « Skills Kronn » and the custom, project and repository ones under « Mes skills »', async () => {
+    const viewer = await showCards();
+    const groups = Array.from(viewer.querySelectorAll('.skill-group-title')).map(title => title.textContent);
+    expect(groups).toEqual(['Skills Kronn 1', 'Mes skills 3']);
+    expect(openButtons(skillGroup(viewer, 'Skills Kronn'))).toEqual(['Ouvrir Rust']);
+    expect(openButtons(skillGroup(viewer, 'Mes skills'))).toEqual(['Ouvrir Beta only', 'Ouvrir block-migration', 'Ouvrir Review']);
+  });
+
+  it('badges a project skill « Projet » and a repository skill « Dépôt », and a built-in one with neither', async () => {
+    const viewer = await showCards();
+    const mine = skillGroup(viewer, 'Mes skills');
+    expect(within(cardOf(mine, 'Beta only')).getByTestId('skill-group-badge-project')).toHaveTextContent('Projet');
+    expect(within(cardOf(mine, 'block-migration')).getByTestId('skill-group-badge-repository')).toHaveTextContent('Dépôt');
+    expect(within(cardOf(mine, 'Review')).queryByTestId(/^skill-group-badge-/)).toBeNull();
+    expect(within(cardOf(skillGroup(viewer, 'Skills Kronn'), 'Rust')).queryByTestId(/^skill-group-badge-/)).toBeNull();
+  });
+
+  it('badges « Pas synchro » a skill a project reports in conflict or moved in the repository', async () => {
+    mockProjectsApi.usedSkills.mockResolvedValue([
+      REPOSITORY_SKILL,
+      { project_id: 'p-alpha', skill_id: 'rust', slug: 'rust', name: 'Rust', root: '.agents/skills',
+        relative_path: '.agents/skills/rust/SKILL.md', referenced: false, published: false, sync_status: 'repository_newer' },
+      { project_id: 'p-alpha', skill_id: 'review', slug: 'review', name: 'Review', root: '.agents/skills',
+        relative_path: '.agents/skills/review/SKILL.md', referenced: false, published: true, sync_status: 'up_to_date' },
+      { project_id: 'p-beta', skill_id: 'review', slug: 'review', name: 'Review', root: '.agents/skills',
+        relative_path: '.agents/skills/review/SKILL.md', referenced: false, published: true, sync_status: 'conflict' },
+    ] satisfies ProjectUsedSkill[]);
+    const viewer = await showCards();
+    expect(within(cardOf(skillGroup(viewer, 'Skills Kronn'), 'Rust')).getByTestId('skill-group-badge-unsynced')).toHaveTextContent('Pas synchro');
+    expect(within(cardOf(skillGroup(viewer, 'Mes skills'), 'Review')).getByTestId('skill-group-badge-unsynced')).toHaveTextContent('Pas synchro');
+    expect(within(cardOf(skillGroup(viewer, 'Mes skills'), 'block-migration')).queryByTestId('skill-group-badge-unsynced')).toBeNull();
+  });
+
+  it('keeps the unused skills folded below both groups, and opens a card from either group', async () => {
+    const viewer = await showCards();
+    expect(availableToggle(2, viewer)).toHaveAttribute('aria-expanded', 'false');
+    await act(async () => { fireEvent.click(within(skillGroup(viewer, 'Mes skills')).getByRole('button', { name: 'Ouvrir Review' })); });
+    expect(screen.getByRole('heading', { level: 2, name: 'Review' })).toBeInTheDocument();
   });
 });

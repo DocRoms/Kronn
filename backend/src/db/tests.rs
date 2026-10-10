@@ -1891,6 +1891,7 @@ fn mcp_config_hash_changes_on_args_override() {
 pub(crate) fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
+        retention: None,
         project_scope: None,
         pinned: false,
         id: id.into(),
@@ -1956,11 +1957,13 @@ pub(crate) fn sample_workflow(id: &str) -> Workflow {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -2067,6 +2070,7 @@ fn workflows_pinned_roundtrip() {
 pub(crate) fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
+        outcome: None,
         id: id.into(),
         workflow_id: workflow_id.into(),
         status: RunStatus::Running,
@@ -3051,6 +3055,8 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         StepResult {
             step_name: "deploy".into(),
@@ -3073,6 +3079,8 @@ fn listings_drop_step_outputs_but_keep_the_steps_themselves() {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
     ];
     crate::db::workflows::insert_run(&conn, &run).unwrap();
@@ -3223,6 +3231,8 @@ fn workflow_runs_update() {
         cached_prompt_tokens: None,
         cache_write_prompt_tokens: None,
         last_activity: None,
+        quota_wait: None,
+        terminal_stop: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
@@ -3543,6 +3553,7 @@ fn workflow_runs_delete_all() {
 fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
     let now = Utc::now();
     WorkflowRun {
+        outcome: None,
         id: id.into(),
         workflow_id: format!("qp:{}", qp_id),
         status: RunStatus::Running,
@@ -5473,6 +5484,7 @@ fn workflow_multi_step_roundtrip() {
     let conn = test_db();
     let now = Utc::now();
     let wf = Workflow {
+        retention: None,
         project_scope: None,
         pinned: false,
         id: "wm1".into(),
@@ -5539,11 +5551,13 @@ fn workflow_multi_step_roundtrip() {
                 collect_api_data: None,
                 transform_data: None,
                 page_publish: None,
+                task_board: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
                 read_only_repos: vec![],
+                delegate_subtasks: None,
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
                 exec_agent_written: None,
@@ -5612,11 +5626,13 @@ fn workflow_multi_step_roundtrip() {
                 collect_api_data: None,
                 transform_data: None,
                 page_publish: None,
+                task_board: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
                 read_only_repos: vec![],
+                delegate_subtasks: None,
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
                 exec_agent_written: None,
@@ -5682,11 +5698,13 @@ fn workflow_multi_step_roundtrip() {
                 collect_api_data: None,
                 transform_data: None,
                 page_publish: None,
+                task_board: None,
                 sub_workflow_id: None,
                 sub_workflow_foreach_file: None,
                 multi_agent_review: None,
                 room_id: None,
                 read_only_repos: vec![],
+                delegate_subtasks: None,
                 exec_script_files: vec![],
                 exec_unmodelled_args_approved: None,
                 exec_agent_written: None,
@@ -5807,11 +5825,13 @@ fn workflow_update_steps_count() {
         collect_api_data: None,
         transform_data: None,
         page_publish: None,
+        task_board: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        delegate_subtasks: None,
         exec_script_files: vec![],
         exec_unmodelled_args_approved: None,
         exec_agent_written: None,

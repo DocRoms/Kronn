@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { LivePage, LivePageAction, LivePageDetail, LivePagePublication } from '../../types/generated';
 
 const page: LivePage = {
@@ -17,6 +19,7 @@ const detail: LivePageDetail = {
     current: { total: 1240 }, schema: null, max_points: 50_000, max_age_days: null,
     updated_at: page.updated_at, points: [], data_size_bytes: 1536,
   }],
+  slug_aliases: [],
 };
 const publications: LivePagePublication[] = [3, 2, 1].map(dataRevision => ({
   id: `publication-${dataRevision}`,
@@ -48,13 +51,18 @@ vi.mock('../../lib/api', () => ({
     list: vi.fn(), get: vi.fn(), revisions: vi.fn(), workflows: vi.fn(), publications: vi.fn(), discussions: vi.fn(),
     actions: vi.fn(), actionLaunches: vi.fn(() => Promise.resolve([])), getAction: vi.fn(), cancelAction: vi.fn(), launchAction: vi.fn(),
     update: vi.fn(), delete: vi.fn(), updateHtml: vi.fn(),
+    datasetUsage: vi.fn(() => Promise.resolve([])), deleteDataset: vi.fn(), updateDataset: vi.fn(), publish: vi.fn(),
     exportArtifact: vi.fn(), previewImport: vi.fn(), importArtifact: vi.fn(),
+    defaultTodo: vi.fn(() => Promise.resolve({ state: 'installed', page_id: null, workflow_ids: [], own_page_id: null })),
+    installDefaultTodo: vi.fn(),
   },
   // The card reads a workflow's Agent steps (KT-1025); none here.
   workflows: { triggerStream: vi.fn(), get: vi.fn(() => Promise.resolve({ steps: [] })) },
   agents: { detect: vi.fn(() => Promise.resolve([])) },
 }));
 vi.mock('../../lib/downloadBlob', () => ({ triggerDownload: vi.fn() }));
+// The embed allow-list (KT-1115) listens on the WebSocket; no socket here.
+vi.mock('../../hooks/useWebSocket', () => ({ useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })) }));
 vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({
     locale: 'fr',
@@ -270,6 +278,28 @@ describe('PagesPage', () => {
       .toHaveClass('disc-sidebar', 'live-pages-list');
     expect(document.querySelector('.live-pages-viewer-header'))
       .toHaveClass('collection-detail-header');
+  });
+
+  it('keeps the Page id in the title block, apart from the header buttons, with wrapping rules (KT-1141)', async () => {
+    render(<PagesPage />);
+    await screen.findByTestId('live-page-frame');
+    const header = document.querySelector('.live-pages-viewer-header')!;
+    const idPill = header.querySelector('.live-pages-identity .copy-id-pill');
+    expect(idPill).toHaveClass('live-pages-id-pill');
+    expect(idPill).toHaveAttribute('title', expect.stringContaining('pages.copyId'));
+    expect(idPill!.closest('.live-pages-title-block')).not.toBeNull();
+    expect(idPill!.closest('.live-pages-header-actions')).toBeNull();
+    expect(header.querySelector('.live-pages-header-actions .live-pages-open-tab-label')).not.toBeNull();
+
+    const css = readFileSync(resolve(__dirname, '../PagesPage.css'), 'utf8');
+    // Joins every unindented block whose selector line ends with this selector.
+    const rule = (selector: string) => [...css.matchAll(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, '\\$&')}\\s*\\{([^}]*)\\}`, 'g'))]
+      .map(match => match[1]).join(';');
+    expect(rule('.live-pages-viewer-header')).toContain('flex-wrap: wrap');
+    expect(rule('.live-pages-title-block')).toContain('min-width: 0');
+    expect(rule('.live-pages-header-actions')).toContain('flex: 0 1 auto');
+    expect(rule('.live-pages-id-pill span')).toContain('text-overflow: ellipsis');
+    expect(css).toMatch(/@container live-page-viewer \(max-width: 480px\)[^@]*\.live-pages-open-tab-label \{ display: none; \}/);
   });
 
   it('uses the shared Discussions-style search with shortcut and inline clear', async () => {

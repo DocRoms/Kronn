@@ -308,6 +308,8 @@ pub fn refused_outcome(step: &WorkflowStep, error: String, duration_ms: u64) -> 
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }

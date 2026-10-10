@@ -275,6 +275,31 @@ pub enum WsMessage {
         warned_steps: Vec<u32>,
         discussion_id: Option<String>,
     },
+    /// A discussion reply's live progress (KT-1108), coalesced by its run.
+    /// Local only: never relayed to a peer.
+    AgentRunProgress {
+        discussion_id: String,
+        /// The durable dispatch the run executes, when it has one.
+        dispatch_id: Option<String>,
+        trigger_message_id: Option<String>,
+        agent_type: super::AgentType,
+        /// One launch; a retry of the same dispatch gets another.
+        run_id: String,
+        /// When the launch started: the latest attempt of a dispatch is the one shown.
+        started_at: DateTime<Utc>,
+        /// Increases with every frame of one run.
+        seq: u32,
+        progress: super::AgentRunProgress,
+    },
+    /// The allowed embed sites changed: open tabs re-read the list. Carries
+    /// no origin. Local only: never relayed to a peer.
+    EmbedOriginsChanged,
+    /// A Page's datasets changed: open views of that Page re-read it at once
+    /// instead of waiting for their poll (KT-1030). Local only.
+    LivePageDataChanged {
+        page_id: String,
+        data_revision: u64,
+    },
 }
 
 impl WsMessage {
@@ -355,6 +380,16 @@ mod tests {
     }
 
     #[test]
+    fn embed_origins_change_names_the_category_only_and_stays_local() {
+        let frame = WsMessage::EmbedOriginsChanged;
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({ "type": "embed_origins_changed" })
+        );
+        assert!(!frame.is_peer_relayable());
+    }
+
+    #[test]
     fn only_shared_disc_traffic_is_peer_relayable() {
         // Presence must NOT cross the wire — that bounce is the flap root cause.
         assert!(!presence("kronn:a@h:1").is_peer_relayable());
@@ -372,6 +407,18 @@ mod tests {
         assert!(!WsMessage::ContextFilesChanged {
             discussion_id: "local-d".into(),
             message_id: "m".into(),
+        }
+        .is_peer_relayable());
+        // KT-1108 — a reply's live progress stays on this machine.
+        assert!(!WsMessage::AgentRunProgress {
+            discussion_id: "d".into(),
+            dispatch_id: None,
+            trigger_message_id: None,
+            agent_type: crate::models::AgentType::OpenCode,
+            run_id: "r".into(),
+            started_at: chrono::Utc::now(),
+            seq: 1,
+            progress: crate::agents::run_progress::RunProgress::new().snapshot(),
         }
         .is_peer_relayable());
         // Shared-discussion traffic is the only thing relayed.

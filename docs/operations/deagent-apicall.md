@@ -175,6 +175,14 @@ The whole path, with a mock server that requires the credential, is covered by
   broker-level tests
 - `backend/src/workflows/api_call_security.rs` — SSRF host allowlist,
   public-IP check with fast-path, `ResolvedAuth` redact, URL query redact
+- `backend/src/core/api_access.rs` — agent access policy (KT-1026): per
+  plugin and per endpoint, all agents / named agents (and model) / local
+  models only / blocked. A plugin with a policy is strict (declared endpoints
+  only). Enforced in `execute_api_call_step_with_db_inner` before token
+  exchange, for every caller: MCP `api_call`, Quick API runs, workflow
+  ApiCall / BatchApiCall / CollectApiData (deciding for the workflow's Agent
+  steps). Stored in `api_access_policies` (migration 231), written only by
+  `PUT /api/mcps/servers/{id}/access-policy`, never a bridge route.
 - `backend/src/workflows/api_call_executor.rs` — `execute_api_call_step_core`
   (no DB) + `execute_api_call_step_with_db` (DB + OAuth2 cache wrapper).
   `SecurityPolicy::production()` vs `::allow_loopback_for_tests()`
@@ -289,7 +297,8 @@ therefore keep the same instant.
 ```
 
 - `shift:+1d|-24h|-7d` uses fixed durations with `s`, `m`, `h`, `d` or `w`.
-- `tz:` accepts an IANA timezone and defaults to UTC.
+- `tz:` accepts an IANA timezone and defaults to Kronn's global timezone
+  (Settings, the machine's zone unless set).
 - `floor:` accepts `minute`, `hour` or `day`; daily flooring is local-time aware.
 - `fmt:` accepts `rfc3339`, `local_iso_ms`, `date`, `unix` or `unix_ms`.
 - `{{now-24h|floor:hour}}` is the compact alias. A declared variable named

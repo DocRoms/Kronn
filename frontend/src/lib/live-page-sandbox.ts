@@ -18,6 +18,9 @@ export const LIVE_PAGE_CSP = [
 export interface LivePageRuntimeData {
   version: 1;
   page: { id: string; slug: string; title: string; data_revision: number; params?: Record<string, string> };
+  /** Display preferences the host keeps for this Page (KT-1030); the
+   * sandbox has no storage of its own. */
+  prefs?: Partial<Record<LivePagePrefKey, boolean>>;
   datasets: Record<string, {
     kind: string;
     current: unknown;
@@ -45,6 +48,43 @@ interface LivePageExportResponse {
   error?: string;
 }
 
+/** The only preferences a Page may ask the host to remember: display-only
+ * flags, never an action or a value the host would act on. */
+export const LIVE_PAGE_PREF_KEYS = ['notice-dismissed'] as const;
+export type LivePagePrefKey = typeof LIVE_PAGE_PREF_KEYS[number];
+const PAGE_PREF_STORAGE = 'kronn:page-pref:';
+
+function prefStorageKey(pageId: string, key: LivePagePrefKey): string {
+  return `${PAGE_PREF_STORAGE}${pageId}:${key}`;
+}
+
+/** The preferences the host stored for a Page; empty when storage is refused. */
+export function readLivePagePrefs(pageId: string): Partial<Record<LivePagePrefKey, boolean>> {
+  const prefs: Partial<Record<LivePagePrefKey, boolean>> = {};
+  for (const key of LIVE_PAGE_PREF_KEYS) {
+    try {
+      const raw = window.localStorage.getItem(prefStorageKey(pageId, key));
+      if (raw === 'true' || raw === 'false') prefs[key] = raw === 'true';
+    } catch { /* storage refused: the Page shows its default */ }
+  }
+  return prefs;
+}
+
+export function writeLivePagePref(pageId: string, key: LivePagePrefKey, value: boolean): void {
+  try {
+    window.localStorage.setItem(prefStorageKey(pageId, key), String(value));
+  } catch { /* storage refused: the preference lasts this view only */ }
+}
+
+interface LivePagePrefRequest {
+  type: 'kronn:page-pref';
+  version: 1;
+  channel_id: string;
+  page_id: string;
+  key: string;
+  value: unknown;
+}
+
 interface LivePageOpenLinkRequest {
   type: 'kronn:page-open-link';
   version: 1;
@@ -58,6 +98,7 @@ interface LivePageActionRequest {
   channel_id: string;
   action_ref: string;
   bindings: Record<string, string>;
+  binding_labels?: Record<string, string>;
   anchor: { left: number; top: number; width: number; height: number };
 }
 
@@ -74,6 +115,9 @@ interface LivePageActionAnchorRequest {
 export interface LivePageActionIntent {
   actionRef: string;
   bindings: Record<string, string>;
+  /** Display text the Page gives a binding (`data-kronn-binding-labels`): shown
+   * on the card only, never sent to the server, which resolves the selector. */
+  bindingLabels?: Record<string, string>;
   anchor: LivePageActionAnchor;
 }
 
@@ -164,6 +208,18 @@ const MAX_LIVE_PAGE_LINK_CHARS = 8 * 1024;
 /** The row a click is bound to, spelled exactly as the backend stores a
  * launch's `binding_key`: sorted `name=selector` pairs joined by U+001F, empty
  * for an unbound CTA. The iframe bridge below computes the same string. */
+export const LIVE_PAGE_BINDING_LABEL_MAX = 200;
+
+/** Labels for bindings the click actually carries; anything else is dropped. */
+function parseBindingLabels(raw: unknown, bindings: Record<string, string>): Record<string, string> | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const labels = Object.fromEntries(Object.entries(raw as Record<string, unknown>).filter(([key, value]) => (
+    Object.hasOwn(bindings, key) && typeof value === 'string' && value.trim() !== ''
+      && value.length <= LIVE_PAGE_BINDING_LABEL_MAX
+  ))) as Record<string, string>;
+  return Object.keys(labels).length > 0 ? labels : null;
+}
+
 export function liveActionBindingKey(bindings: Record<string, string>): string {
   return Object.entries(bindings).map(([name, selector]) => `${name}=${selector}`).sort().join('\u001f');
 }
@@ -266,6 +322,7 @@ export function runtimeData(detail: LivePageDetail, params?: Record<string, stri
       // Only the standalone tab has a URL of its own to carry view parameters.
       ...(params ? { params: { ...params } } : {}),
     },
+    prefs: readLivePagePrefs(detail.id),
     datasets: Object.fromEntries(detail.datasets.map(dataset => [dataset.name, {
       kind: dataset.kind,
       current: dataset.current,
@@ -417,6 +474,18 @@ export function buildSandboxDocument(
       }
       return bindings;
     };
+    const readBindingLabels=(element,bindings)=>{
+      const labels={};
+      const raw=getAttribute.call(element,'data-kronn-binding-labels');
+      if(!raw)return labels;
+      try{
+        const parsed=parseJson(raw);
+        if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed)){
+          objectEntries(parsed).forEach(([key,value])=>{if(typeof bindings[key]==='string'&&typeof value==='string'&&value.length<=${LIVE_PAGE_BINDING_LABEL_MAX})labels[key]=value;});
+        }
+      }catch(_error){}
+      return labels;
+    };
     const bindingKey=bindings=>objectEntries(bindings).map(([name,selector])=>name+'='+selector).sort().join('\\u001f');
     const markActions=()=>{
       document.querySelectorAll('[data-kronn-action]').forEach(element=>{
@@ -495,7 +564,7 @@ export function buildSandboxDocument(
         const bindings=readBindings(action);
         anchored=action;
         anchoredAt={ref:actionRef,key:bindingKey(bindings)};
-        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,anchor:anchorRect(action)});
+        portPost.call(linkPort,{type:'kronn:page-action',version:1,channel_id:channel,action_ref:actionRef,bindings,binding_labels:readBindingLabels(action,bindings),anchor:anchorRect(action)});
         return;
       }
       const anchor=element&&element.closest?element.closest('a[href]'):null;
@@ -503,6 +572,17 @@ export function buildSandboxDocument(
       event.preventDefault();
       relayOpenLink(anchor.href);
     },true);
+    // A display preference for this Page, remembered by the host: one
+    // allow-listed key, a boolean, after a live click.
+    const prefKeys=${JSON.stringify(LIVE_PAGE_PREF_KEYS)};
+    try{
+      Object.defineProperty(window,'KronnPagePref',{configurable:false,writable:false,value:(key,value)=>{
+        if(!linkPort||(userActivation&&!userActivation.isActive))return false;
+        if(prefKeys.indexOf(key)<0||typeof value!=='boolean'||!latest||!latest.page||typeof latest.page.id!=='string')return false;
+        portPost.call(linkPort,{type:'kronn:page-pref',version:1,channel_id:channel,page_id:latest.page.id,key,value});
+        return true;
+      }});
+    }catch(_error){}
     try{
       Object.defineProperty(window,'open',{configurable:false,writable:false,value:url=>relayOpenLink(url)});
     }catch(_error){}
@@ -750,6 +830,8 @@ export interface LivePageOpenLinkRelayOptions {
   /** Follows a link to another Kronn screen; same-tab hash navigation by default. */
   navigateInternal?: (url: string) => unknown;
   onEmbeds?: (embeds: LivePageEmbedPlacement[]) => void;
+  /** The Page the frame shows now: a preference is stored only for it. */
+  pageId?: () => string | null | undefined;
 }
 
 export function createLivePageOpenLinkRelay(
@@ -761,13 +843,14 @@ export function createLivePageOpenLinkRelay(
     onHeight,
     navigateInternal = navigateInternalKronnLink,
     onEmbeds,
+    pageId,
   }: LivePageOpenLinkRelayOptions = {},
 ): LivePageOpenLinkRelay {
   let activePort: MessagePort | null = null;
   const validAnchor = (anchor: LivePageActionAnchor | undefined): anchor is LivePageActionAnchor => (
     Boolean(anchor) && [anchor?.left, anchor?.top, anchor?.width, anchor?.height].every(Number.isFinite)
   );
-  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest | LivePageActionAnchorRequest | LivePageEmbedsRequest) => {
+  const onMessage = (message: LivePageOpenLinkRequest | LivePageActionRequest | LivePageActionAnchorRequest | LivePageEmbedsRequest | LivePagePrefRequest) => {
     if (
       !message
       || message.version !== 1
@@ -795,7 +878,17 @@ export function createLivePageOpenLinkRelay(
       return;
     }
     if (navigator.userActivation && !navigator.userActivation.isActive) return;
+    // Stored, never acted on: one known key, a boolean, for the Page shown.
+    if (message.type === 'kronn:page-pref') {
+      const current = pageId?.();
+      const key = (LIVE_PAGE_PREF_KEYS as readonly string[]).find(known => known === message.key) as LivePagePrefKey | undefined;
+      if (!current || message.page_id !== current || !key || typeof message.value !== 'boolean') return;
+      writeLivePagePref(current, key, message.value);
+      return;
+    }
     if (message.type === 'kronn:page-action') {
+      // A click may launch without a card: only a proven live gesture counts.
+      if (navigator.userActivation?.isActive !== true) return;
       if (
         typeof message.action_ref !== 'string'
         || !LIVE_PAGE_ACTION_REF.test(message.action_ref)
@@ -808,7 +901,8 @@ export function createLivePageOpenLinkRelay(
       ))) as Record<string, string>;
       const anchor = message.anchor;
       if (!validAnchor(anchor)) return;
-      onAction?.({ actionRef: message.action_ref, bindings, anchor });
+      const bindingLabels = parseBindingLabels(message.binding_labels, bindings);
+      onAction?.({ actionRef: message.action_ref, bindings, ...(bindingLabels ? { bindingLabels } : {}), anchor });
       return;
     }
     if (message.type !== 'kronn:page-open-link') return;

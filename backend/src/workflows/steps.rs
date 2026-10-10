@@ -64,6 +64,46 @@ fn with_runtime_notices(output: String, notices: &[String]) -> String {
 /// Optional sender for streaming partial agent output during step execution.
 pub type ProgressSender = tokio::sync::mpsc::Sender<String>;
 
+/// The refusal of a native ACP step agent whose full-access setting is off,
+/// read as the runner reads it; `None` when the agent may start.
+pub(crate) fn native_full_access_refusal_for(agent: &AgentType) -> Option<String> {
+    (runner::requires_explicit_full_access(agent) && !crate::core::config::saved_full_access(agent))
+        .then(|| runner::native_full_access_refusal(agent))
+}
+
+/// The step fails once on that refusal (`native_full_access_required: …`):
+/// the same on every attempt, so never retried and never a quota wait; an
+/// ordinary failure otherwise, so `on_failure` still runs.
+fn native_full_access_outcome(step: &WorkflowStep, refusal: String) -> StepOutcome {
+    StepOutcome {
+        result: StepResult {
+            step_name: step.name.clone(),
+            status: RunStatus::Failed,
+            output: refusal,
+            tokens_used: Some(0),
+            duration_ms: 0,
+            started_at: None,
+            condition_result: None,
+            envelope_detected: None,
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+            agent_provenance: Some(Box::default()),
+            native_tool_calls: Box::default(),
+            cached_prompt_tokens: None,
+            cache_write_prompt_tokens: None,
+            last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
+        },
+        condition_action: None,
+    }
+}
+
 pub(crate) fn step_model_override(
     step: &WorkflowStep,
     connection: Option<&ExternalApiConnection>,
@@ -220,6 +260,10 @@ pub async fn execute_step(
 ) -> StepOutcome {
     let start = Instant::now();
 
+    if let Some(refusal) = native_full_access_refusal_for(&step.agent) {
+        return native_full_access_outcome(step, refusal);
+    }
+
     // Build prompt (template render + output-format addendum + triage
     // addendum). Errors map to a Failed StepOutcome.
     let mut prompt = match build_step_prompt(step, ctx) {
@@ -247,6 +291,8 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 },
                 condition_action: None,
             };
@@ -344,6 +390,8 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 },
                 condition_action: None,
             };
@@ -389,6 +437,8 @@ pub async fn execute_step(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 },
                 condition_action: None,
             };
@@ -749,6 +799,8 @@ pub async fn execute_step(
                                         cached_prompt_tokens,
                                         cache_write_prompt_tokens,
                                         last_activity: None,
+                                        quota_wait: None,
+                                        terminal_stop: None,
                                     },
                                     condition_action: None,
                                 };
@@ -891,6 +943,8 @@ pub async fn execute_step(
                         cached_prompt_tokens,
                         cache_write_prompt_tokens,
                         last_activity: None,
+                        quota_wait: None,
+                        terminal_stop: None,
                     },
                     condition_action,
                 };
@@ -903,6 +957,38 @@ pub async fn execute_step(
                     attempt + 1,
                     last_error
                 );
+                // KT-811 — a quota refusal does not clear within the retry
+                // backoff; retrying only spends the run's attempts.
+                if let Some(quota) = super::quota_wait::classify(&last_error, chrono::Utc::now()) {
+                    provenance.selected_attempt = None;
+                    return StepOutcome {
+                        result: StepResult {
+                            step_name: step.name.clone(),
+                            status: RunStatus::Failed,
+                            output: format!("Provider quota or session limit: {last_error}"),
+                            tokens_used: None,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            started_at: None,
+                            condition_result: None,
+                            envelope_detected: None,
+                            step_kind: None,
+                            step_agent: None,
+                            step_model: None,
+                            step_api_plugin_slug: None,
+                            step_api_endpoint_path: None,
+                            is_rollback: false,
+                            child_run_id: None,
+                            agent_provenance: Some(Box::new(provenance)),
+                            native_tool_calls: Box::default(),
+                            cached_prompt_tokens: None,
+                            cache_write_prompt_tokens: None,
+                            last_activity: None,
+                            quota_wait: Some(quota),
+                            terminal_stop: None,
+                        },
+                        condition_action: None,
+                    };
+                }
             }
         }
     }
@@ -939,6 +1025,8 @@ pub async fn execute_step(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -1105,6 +1193,7 @@ async fn preflight_workflow_launch(
             requested_model: model.clone(),
             effective_model: model,
             warning: None,
+            notice: None,
         });
     };
     let runtime_target_id = connection
@@ -1135,6 +1224,43 @@ async fn preflight_workflow_launch(
             serde_json::to_string(&failure).unwrap_or_default()
         )
     })
+}
+
+/// A step's catalog skill ids, and the repository skills it names taken from
+/// its run's pin: read from the default branch when the run started, so the
+/// checkout's branch or the run's worktree never changes them. One the pin
+/// lacks stops the step by name instead of running without it.
+pub(super) fn step_skills(
+    skill_ids: &[String],
+    project_id: Option<&str>,
+    run_id: Option<&str>,
+) -> Result<(Vec<String>, Vec<crate::models::Skill>)> {
+    use crate::api::projects::used_skills::parse_repository_skill_id;
+    let mut catalog = Vec::new();
+    let mut repository = Vec::new();
+    for id in skill_ids {
+        let Some((owner, slug)) = parse_repository_skill_id(id) else {
+            catalog.push(id.clone());
+            continue;
+        };
+        let pinned = run_id.and_then(|run| {
+            crate::core::skills::get_skills_snapshot(run, std::slice::from_ref(id)).pop()
+        });
+        match pinned {
+            Some(skill) if Some(owner) == project_id => repository.push(skill),
+            _ => anyhow::bail!(
+                "Repository skill `{slug}` cannot be loaded: {}",
+                if Some(owner) != project_id {
+                    "it belongs to another project"
+                } else if run_id.is_none() {
+                    "it is read from the default branch when a workflow run starts, and this launch is not a run"
+                } else {
+                    "it was not readable on the default branch when the run started (not committed there, or no longer used by the project)"
+                }
+            ),
+        }
+    }
+    Ok((catalog, repository))
 }
 
 /// Run an agent with optional stall timeout.
@@ -1189,6 +1315,8 @@ async fn run_agent_with_timeout(
     let ollama_format = ollama_envelope_format(&step.output_format);
 
     let result = async {
+        let (catalog_skill_ids, repository_skills) =
+            step_skills(&step.skill_ids, project_id, run_id)?;
         let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
             provenance: Some(capture.clone()),
             activity: activity.cloned(),
@@ -1197,7 +1325,8 @@ async fn run_agent_with_timeout(
             read_only_dirs,
             step_tools: step.agent_settings.as_ref().and_then(|s| s.tools.as_ref()),
             full_access,
-            skill_ids: &step.skill_ids,
+            skill_ids: &catalog_skill_ids,
+            repository_skills: &repository_skills,
             directive_ids: &step.directive_ids,
             profile_ids: &step.profile_ids,
             tier: step
@@ -1289,6 +1418,8 @@ async fn run_agent_with_timeout(
         model_applied: runtime.model_applied,
         observed_models: runtime.observed_models,
         format_fallback: runtime.format_fallback,
+        npx_fallback_command: runtime.npx_fallback_command,
+        npx_fallback_version: runtime.npx_fallback_version,
         started_at,
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         succeeded: result.is_ok(),
@@ -1990,6 +2121,8 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     })
@@ -2008,6 +2141,70 @@ fn condition_description(keyword: &str) -> &str {
 mod tests {
     use super::*;
     use crate::models::{ConditionAction, StepConditionRule};
+
+    #[test]
+    fn a_step_loads_its_repository_skills_from_the_run_pin_and_names_a_missing_one() {
+        let run = "kt1128-step-skills-run";
+        let pinned = crate::models::Skill {
+            id: "repository:p1:block-migration".into(),
+            name: "Block migration".into(),
+            description: String::new(),
+            icon: "📂".into(),
+            category: crate::models::SkillCategory::Domain,
+            content: "Committed on main.".into(),
+            is_builtin: false,
+            token_estimate: 4,
+            license: None,
+            allowed_tools: None,
+            auto_triggers: None,
+            external: false,
+            source_url: None,
+            arguments: vec![],
+            argument_hint: None,
+            variables: vec![],
+            project_id: None,
+        };
+        crate::core::skills::pin_skill_snapshot(run, &pinned.id, pinned.clone());
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        let (catalog, repository) = step_skills(
+            &ids(&["rust", "repository:p1:block-migration"]),
+            Some("p1"),
+            Some(run),
+        )
+        .unwrap();
+        assert_eq!(catalog, ids(&["rust"]));
+        assert_eq!(repository.len(), 1);
+        assert_eq!(repository[0].content, "Committed on main.");
+
+        for (skill_ids, project, run_id, reason) in [
+            (
+                ids(&["repository:p2:block-migration"]),
+                Some("p1"),
+                Some(run),
+                "another project",
+            ),
+            (
+                ids(&["repository:p1:other"]),
+                Some("p1"),
+                Some(run),
+                "not readable on the default branch",
+            ),
+            (
+                ids(&["repository:p1:block-migration"]),
+                Some("p1"),
+                None,
+                "this launch is not a run",
+            ),
+        ] {
+            let error = step_skills(&skill_ids, project, run_id)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+            assert!(error.starts_with("Repository skill `"), "{error}");
+        }
+        crate::core::skills::release_skills_snapshot(run);
+    }
 
     fn rule(contains: &str, action: ConditionAction) -> StepConditionRule {
         StepConditionRule {
@@ -2085,7 +2282,10 @@ mod tests {
         use crate::models::{OnInvalid, StepOutputFormat};
         let data_schema = serde_json::json!({
             "type": "object",
-            "properties": { "score": { "type": "integer" } },
+            "properties": {
+                "score": { "type": "integer" },
+                "note": { "type": "string" }
+            },
             "required": ["score"]
         });
         let of = StepOutputFormat::TypedSchema {
@@ -2093,18 +2293,28 @@ mod tests {
             on_invalid: OnInvalid::Continue,
         };
         let wrapped = ollama_envelope_format(&of).expect("TypedSchema → envelope schema");
-        // The author schema becomes `data`; status/summary are added; data +
-        // status are required so extract_step_envelope strategy-2 recovers it.
-        assert_eq!(wrapped["properties"]["data"], data_schema);
-        assert_eq!(wrapped["properties"]["status"]["type"], "string");
-        assert_eq!(wrapped["properties"]["summary"]["type"], "string");
-        let required: Vec<&str> = wrapped["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(required.contains(&"data") && required.contains(&"status"));
+        assert_eq!(
+            wrapped,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "data": data_schema,
+                    "status": { "type": "string" },
+                    "summary": { "type": "string" }
+                },
+                "required": ["data", "status"]
+            })
+        );
+
+        let openai =
+            crate::agents::chat_codec::build_openai_chat_body("m", "", "hi", Some(&wrapped), false);
+        assert_eq!(openai["response_format"]["json_schema"]["strict"], false);
+        assert_eq!(openai["response_format"]["json_schema"]["schema"], wrapped);
+
+        let ollama = runner::build_ollama_chat_body("m", "", "hi", Some(&wrapped), 8192, None);
+        assert_eq!(ollama["format"], wrapped);
+        assert_eq!(ollama["stream"], false);
+        assert!(ollama.get("response_format").is_none());
     }
 
     #[test]
@@ -2139,6 +2349,97 @@ mod tests {
         );
         assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
         assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
+    }
+
+    // ─── Catalogue near-miss refusal reaches the workflow step launch path ────
+
+    #[tokio::test]
+    #[serial_test::serial(model_catalog_reasoning_modes)]
+    async fn workflow_step_reasoning_effort_override_names_the_catalogue_spelling_on_launch() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let target = crate::db::model_catalog::agent_runtime_target_id(&AgentType::ClaudeCode);
+        db.with_conn({
+            let target = target.clone();
+            move |conn| {
+                crate::db::model_catalog::create_manual(
+                    conn,
+                    &crate::models::UpsertManualModelRequest {
+                        runtime_target_id: target,
+                        agent_type: AgentType::ClaudeCode,
+                        model_id: "manual-model".into(),
+                        display_name: "Manual model".into(),
+                        capabilities: vec!["chat".into()],
+                        reasoning_modes: vec!["high".into()],
+                        default_reasoning_mode: Some("high".into()),
+                        tier_assignment: None,
+                        cost_hint: None,
+                        privacy_note: None,
+                    },
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        crate::core::model_catalog::refresh_runtime_cache(&db)
+            .await
+            .unwrap();
+
+        let step = WorkflowStep {
+            agent: AgentType::ClaudeCode,
+            agent_settings: Some(AgentSettings {
+                model: Some("manual-model".into()),
+                tier: Some(ModelTier::Default),
+                reasoning_effort: Some("High".into()),
+                max_tokens: None,
+                connection_id: None,
+                tools: None,
+            }),
+            ..WorkflowStep::default()
+        };
+        let mut provenance = WorkflowAgentProvenance::default();
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+        let tokens = TokensConfig {
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: Vec::new(),
+            disabled_overrides: Vec::new(),
+        };
+        let error = run_agent_with_timeout(
+            &step,
+            &project,
+            None,
+            &project,
+            "does it matter",
+            &[],
+            &tokens,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("manual-model"),
+            None,
+            &mut provenance,
+            WorkflowAgentAttemptRole::Initial,
+            0,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a case-mismatched override must still be refused, never silently applied");
+        assert!(
+            error
+                .to_string()
+                .contains("the catalogue lists 'high', not 'High'"),
+            "the refusal must name the actual mismatch, not the generic catalogue-absence reason: {error}"
+        );
     }
 
     #[test]
@@ -2441,11 +2742,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

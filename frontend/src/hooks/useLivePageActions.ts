@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { pages as pagesApi } from '../lib/api';
-import type { LivePageAction, LivePageDetail } from '../types/generated';
+import type {
+  LivePageAction, LivePageActionTrustRefusal, LivePageActionTrustState, LivePageDetail,
+} from '../types/generated';
 import {
   hostTheme,
   hostThemeTokens,
@@ -16,6 +18,8 @@ export interface LivePageActiveActionState {
   activation: number;
   actionRef: string;
   bindings: Record<string, string>;
+  /** The Page's display text for its bindings, for the card only. */
+  bindingLabels?: Record<string, string>;
   anchor: LivePageActionAnchor;
   /** What this click turned into once launched or declined — its own launch,
    * never written back over the offer the other buttons still draw from. */
@@ -24,12 +28,17 @@ export interface LivePageActiveActionState {
   previous?: LivePageAction;
   /** Starting values the Page draws from its data for this row's fields. */
   prefill?: Record<string, string>;
+  /** Why this click opened a card although the action has a human approval. */
+  trustNotice?: LivePageActionTrustRefusal;
 }
 
 export interface UseLivePageActionsResult {
   actions: LivePageAction[];
   /** The latest launch of every row that has run, for the buttons' state. */
   launches: LivePageAction[];
+  /** Each offer's human approval to run without its card (KT-1029). */
+  trusts: LivePageActionTrustState[];
+  reloadTrusts: () => Promise<void>;
   activeAction: LivePageActiveActionState | null;
   selectedAction: LivePageAction | null;
   /** The offer behind the open card, even once that card shows a launch. */
@@ -46,6 +55,14 @@ const IN_FLIGHT = new Set<LivePageAction['state']>(['launching', 'running']);
 // A decline is not a run: it never marks a button nor stands for its row.
 const NOT_A_RUN = new Set<LivePageAction['state']>(['proposed', 'cancelled']);
 const LAUNCH_REFRESH_MS = 3_000;
+// A launch that ended at once: its card shows why, since no card was open.
+const ENDED_AT_ONCE = new Set<LivePageAction['state']>(['failed', 'preflight_failed']);
+const TRUST_REFUSAL = /trusted launch refused: ([a-z_]+)/;
+
+function trustRefusal(cause: unknown): LivePageActionTrustRefusal {
+  const code = TRUST_REFUSAL.exec(cause instanceof Error ? cause.message : String(cause))?.[1];
+  return (code ?? 'not_trusted') as LivePageActionTrustRefusal;
+}
 
 /** An editable field the Page fills from its own data for the clicked row. */
 function prefillsFromPage(action: LivePageAction): boolean {
@@ -84,6 +101,13 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
   const [activeAction, setActiveActionState] = useState<LivePageActiveActionState | null>(null);
   const activeActionRef = useRef<LivePageActiveActionState | null>(null);
   const activationRef = useRef(0);
+  const [trusts, setTrusts] = useState<LivePageActionTrustState[]>([]);
+  const trustsRef = useRef<LivePageActionTrustState[]>([]);
+  // Rows whose trusted launch request is still on the wire.
+  const trustedPendingRef = useRef(new Set<string>());
+  // Bumped on every Page change: a launch answer from an earlier Page is dropped.
+  const pageGenerationRef = useRef(0);
+  const launchTrustedRef = useRef<(offer: LivePageAction, intent: LivePageActionIntent, bindingKey: string) => void>(() => {});
   const pageIdRef = useRef<string | null>(null);
   const onUnavailableRef = useRef(onUnavailable);
   useEffect(() => { onUnavailableRef.current = onUnavailable; });
@@ -101,20 +125,25 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
 
   const reload = useCallback(async (pageId: string | null) => {
     const samePage = pageIdRef.current === pageId;
+    if (!samePage) pageGenerationRef.current += 1;
     pageIdRef.current = pageId;
-    const [nextActions, nextLaunches] = pageId
+    const [nextActions, nextLaunches, nextTrusts] = pageId
       ? await Promise.all([
         pagesApi.actions(pageId),
         // The buttons' state is a comfort: a failure to read it must never
         // cost the Page its actions.
         Promise.resolve().then(() => pagesApi.actionLaunches(pageId)).catch(() => [] as LivePageAction[]),
+        // Without approvals every click opens its card, which is the safe side.
+        Promise.resolve().then(() => pagesApi.actionTrusts(pageId)).catch(() => [] as LivePageActionTrustState[]),
       ])
-      : [[], []];
+      : [[], [], []];
     // The answer for a Page the reader has since left must not replace this one.
     if (pageIdRef.current !== pageId) return;
     setActions(nextActions);
     actionsRef.current = nextActions;
     setLaunches(nextLaunches);
+    trustsRef.current = nextTrusts;
+    setTrusts(nextTrusts);
     // A periodic refresh keeps the open card, and what was typed in it, while
     // the Page still offers its action.
     const current = activeActionRef.current;
@@ -122,6 +151,15 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       setActiveAction(null);
     }
   }, [setActiveAction, setLaunches]);
+
+  const reloadTrusts = useCallback(async () => {
+    const pageId = pageIdRef.current;
+    if (!pageId) return;
+    const next = await pagesApi.actionTrusts(pageId).catch(() => [] as LivePageActionTrustState[]);
+    if (pageIdRef.current !== pageId) return;
+    trustsRef.current = next;
+    setTrusts(next);
+  }, []);
 
   const moveAnchor = useCallback((anchor: LivePageActiveActionState['anchor']) => {
     const current = activeActionRef.current;
@@ -152,6 +190,14 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
     const latest = launchesRef.current.find(launch =>
       launch.action_ref === intent.actionRef && launch.binding_key === bindingKey);
     const running = latest && IN_FLIGHT.has(latest.state) ? latest : undefined;
+    const offer = actionsRef.current.find(action => action.action_ref === intent.actionRef);
+    const trust = trustsRef.current.find(state => state.action_ref === intent.actionRef);
+    // The host owns the gesture: this intent only exists after the relay saw
+    // a live user activation. The server re-checks the approval itself.
+    if (!running && offer && trust?.active) {
+      launchTrustedRef.current(offer, intent, bindingKey);
+      return;
+    }
     activationRef.current += 1;
     const activation = activationRef.current;
     setActiveAction({
@@ -159,8 +205,8 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
       activation,
       card: running,
       previous: running ? undefined : latest,
+      trustNotice: !running && trust?.trust?.invalidated_reason ? trust.trust.invalidated_reason : undefined,
     });
-    const offer = actionsRef.current.find(action => action.action_ref === intent.actionRef);
     if (running || !offer || !prefillsFromPage(offer)) return;
     // The card opens at once; its fields fill when the row's values arrive.
     void pagesApi.actionPrefill(offer.id, intent.bindings)
@@ -192,6 +238,39 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
     }));
   }, [setActiveAction, setLaunches]);
 
+  // A trusted click: no card unless the server refuses or the launch fails at once.
+  useEffect(() => {
+    launchTrustedRef.current = (offer, intent, bindingKey) => {
+      const generation = pageGenerationRef.current;
+      const key = `${offer.live_page_id}\n${launchKey(intent.actionRef, bindingKey)}`;
+      if (trustedPendingRef.current.has(key)) return;
+      trustedPendingRef.current.add(key);
+      const activationAtLaunch = activationRef.current;
+      const current = () => pageGenerationRef.current === generation;
+      const openCard = (card: LivePageAction | undefined, trustNotice?: LivePageActionTrustRefusal) => {
+        // A card the reader opened since is newer than this answer.
+        if (activationRef.current !== activationAtLaunch) return;
+        activationRef.current += 1;
+        setActiveAction({ ...intent, activation: activationRef.current, card, trustNotice });
+      };
+      void pagesApi.launchAction(offer.id, { variables: {}, bindings: intent.bindings, trusted: true })
+        .then(launched => {
+          if (!current()) return;
+          handleChanged(launched, -1);
+          if (ENDED_AT_ONCE.has(launched.state)) openCard(launched);
+        })
+        .catch(cause => {
+          if (!current()) return;
+          const refusal = trustRefusal(cause);
+          // A double gesture on one row is dropped, not turned into a card.
+          if (refusal === 'rate_limited') return;
+          openCard(undefined, refusal);
+          void reloadTrusts();
+        })
+        .finally(() => { trustedPendingRef.current.delete(key); });
+    };
+  }, [handleChanged, reloadTrusts, setActiveAction]);
+
   const close = useCallback(() => setActiveAction(null), [setActiveAction]);
 
   // While any row runs, keep the buttons honest even with no card open.
@@ -214,7 +293,7 @@ export function useLivePageActions(onUnavailable: () => void): UseLivePageAction
   const selectedAction = activeAction ? activeAction.card ?? selectedOffer : null;
 
   return {
-    actions, launches, activeAction, selectedAction, selectedOffer,
+    actions, launches, trusts, reloadTrusts, activeAction, selectedAction, selectedOffer,
     handleIntent, handleChanged, close, reload, moveAnchor,
   };
 }

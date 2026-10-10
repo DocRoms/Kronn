@@ -160,7 +160,7 @@ pub fn parent_refuses_children(
         )
         .optional()?;
     Ok(match status.as_deref() {
-        Some("Running" | "Pending" | "WaitingApproval") => None,
+        Some("Running" | "Pending" | "WaitingApproval" | "WaitingQuota") => None,
         Some(other) => Some(format!("parent run {parent} is {other}")),
         None => Some(format!("parent run {parent} no longer exists")),
     })

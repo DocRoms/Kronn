@@ -461,6 +461,7 @@ mod broker_tests {
             state,
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result
@@ -694,6 +695,7 @@ mod broker_tests {
             &context,
             ApiCallLogContext::workflow(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result;
@@ -762,6 +764,7 @@ mod broker_tests {
     async fn insert_workflow_run(state: &crate::AppState, steps: Vec<WorkflowStep>) {
         let now = chrono::Utc::now();
         let workflow = Workflow {
+            retention: None,
             project_scope: None,
             id: "wf-team".into(),
             name: "Team board thumbnails".into(),
@@ -789,6 +792,7 @@ mod broker_tests {
             updated_at: now,
         };
         let run = WorkflowRun {
+            outcome: None,
             id: "run-1".into(),
             workflow_id: "wf-team".into(),
             status: RunStatus::Running,

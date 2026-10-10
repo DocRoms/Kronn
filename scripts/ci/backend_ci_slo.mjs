@@ -18,7 +18,9 @@ function milliseconds(startedAt, completedAt) {
 /** Trigger to the aggregate gate's verdict: what a pull request waits. */
 export function fastLoopDurationMs(run, jobs) {
   const gate = jobs.find((job) => job.name === GATE_JOB);
-  return gate ? milliseconds(run?.created_at, gate.completed_at) : null;
+  // A re-run (CI Verdict starts one when the label came later) keeps the
+  // first attempt's created_at; run_started_at is this attempt's trigger.
+  return gate ? milliseconds(run?.run_started_at ?? run?.created_at, gate.completed_at) : null;
 }
 
 /** Billed runner time: every job of the run that started, summed. */

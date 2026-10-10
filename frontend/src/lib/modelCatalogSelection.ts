@@ -24,10 +24,26 @@ export function resolveCatalogTier(
     || (http ? target.modelTiers?.default : null)
     || (target.connectionId ? '' : modelForAgentTier(target.agent, tier, familyTiers, ''));
   const entry = catalogTierEntry(view, tier, configured, http);
+  // The backend's launch verdict, computed by the preflight's own decision.
+  // It applies only when it judged the same model this picker resolves.
+  const verdict = target.connectionId ? undefined : view?.tier_verdicts?.find(candidate =>
+    candidate.tier === tier && (candidate.requested_model ?? '') === (configured || entry?.model_id || ''));
+  const replacementId = verdict?.launchable && verdict.effective_model
+    && verdict.effective_model !== verdict.requested_model ? verdict.effective_model : null;
+  const replacement = replacementId
+    ? view?.models.find(model => model.model_id === replacementId) : undefined;
   return {
     configured, entry, view,
-    model: entry?.display_alias ?? entry?.display_name ?? entry?.model_id ?? configured,
-    unavailable: entry?.availability === 'unavailable',
+    model: replacementId
+      ? replacement?.display_alias ?? replacement?.display_name ?? replacementId
+      : entry?.display_alias ?? entry?.display_name ?? entry?.model_id ?? configured,
+    unavailable: verdict ? !verdict.launchable : entry?.availability === 'unavailable',
+    /** Model that runs instead of the configured one, when the catalogue replaces it. */
+    replacement: replacementId,
+    /** Why the launch would be refused, as the preflight words it. */
+    refusal: verdict && !verdict.launchable ? verdict.detail ?? null : null,
+    /** Pre-launch warning that does not block, e.g. absent from the CLI's listing. */
+    notice: verdict?.launchable ? verdict.notice ?? null : null,
     provenance: entry ? catalogModelProvenance(entry, view) : null,
   };
 }

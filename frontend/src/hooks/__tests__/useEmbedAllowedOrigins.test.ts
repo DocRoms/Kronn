@@ -1,16 +1,19 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ read: vi.fn(), change: vi.fn() }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), change: vi.fn(), ws: vi.fn() }));
 vi.mock('../../lib/api', () => ({ config: { getEmbedOrigins: mocks.read, changeEmbedOrigins: mocks.change } }));
+vi.mock('../useWebSocket', () => ({ useWebSocket: mocks.ws }));
 
 import {
   changeEmbedAllowedOrigins,
+  embedOriginsFramableByThisDocument,
   invalidateEmbedAllowedOrigins,
   refreshEmbedAllowedOrigins,
   resetEmbedAllowedOriginsForTests,
   useEmbedAllowedOrigins,
 } from '../useEmbedAllowedOrigins';
+import { resetServedFrameOriginsForTests } from '../../lib/served-frame-policy';
 
 /** A server answer the test releases when it wants. */
 function deferred<T>() {
@@ -26,10 +29,42 @@ beforeEach(() => {
   resetEmbedAllowedOriginsForTests();
   mocks.read.mockReset();
   mocks.change.mockReset();
+  mocks.ws.mockReset();
+  mocks.ws.mockReturnValue({ connected: true, connectionState: 'connected' });
 });
 afterEach(() => resetEmbedAllowedOriginsForTests());
 
 describe('allowed embed sites store', () => {
+  it('re-reads on the backend event and on reconnect; the framable list is the served one, never a read', async () => {
+    const meta = document.createElement('meta');
+    meta.name = 'kronn-served-frame-src';
+    meta.content = "'self' https://suno.com https://b.example";
+    document.head.append(meta);
+    resetServedFrameOriginsForTests();
+    mocks.read.mockResolvedValueOnce(['https://suno.com']);
+    const { result } = renderHook(() => useEmbedAllowedOrigins());
+    await waitFor(() => expect(listed(result)).toEqual(['https://suno.com']));
+    const [onMessage, onConnect] = mocks.ws.mock.calls.at(-1)!;
+
+    mocks.read.mockResolvedValueOnce([]);
+    await act(async () => { onMessage({ type: 'audit_finished' }); });
+    expect(mocks.read).toHaveBeenCalledTimes(1);
+    // Two mounted views get the same frame: a single read.
+    await act(async () => {
+      onMessage({ type: 'embed_origins_changed' });
+      onMessage({ type: 'embed_origins_changed' });
+    });
+    await waitFor(() => expect(listed(result)).toEqual([]));
+    expect(mocks.read).toHaveBeenCalledTimes(2);
+
+    mocks.read.mockResolvedValueOnce(['https://suno.com', 'https://player.example']);
+    act(() => { onConnect(); });
+    await waitFor(() => expect(listed(result)).toEqual(['https://suno.com', 'https://player.example']));
+    expect([...embedOriginsFramableByThisDocument()!]).toEqual(['https://suno.com', 'https://b.example']);
+    meta.remove();
+    resetServedFrameOriginsForTests();
+  });
+
   it('a read that started before a revocation cannot bring the site back', async () => {
     mocks.read.mockResolvedValueOnce(['https://suno.com']);
     const { result } = renderHook(() => useEmbedAllowedOrigins());

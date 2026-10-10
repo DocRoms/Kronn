@@ -14,9 +14,11 @@ pub mod big_ticket_template;
 pub mod cancellation;
 pub mod collect_api_data_step;
 pub mod concurrency;
+pub mod delegate_subtasks_step;
 pub mod exec_step;
 pub mod gate_checkpoint;
 pub mod gate_step;
+pub mod guard_counters;
 pub mod interrupted_worktrees;
 pub mod json_data_step;
 pub mod notify_step;
@@ -24,20 +26,27 @@ pub mod project_scope;
 pub mod publish_page_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
+pub mod quota_wait;
+pub mod readiness;
 pub mod run_artifacts;
+pub mod run_effect;
+pub mod run_pins;
 pub mod run_scope;
 pub mod runner;
+pub mod safety;
 pub mod step_agents;
 pub mod step_output_format;
 pub mod step_room;
 pub mod steps;
 pub mod sub_workflow_step;
+pub mod task_board_step;
 pub mod template;
 pub mod tracker;
 pub mod transform_data_step;
 pub mod triage;
 pub mod trigger;
 pub mod trigger_workflow_step;
+pub mod watch_trigger;
 pub mod workspace;
 
 use chrono::Utc;
@@ -49,6 +58,12 @@ use crate::db::Database;
 use crate::models::*;
 use crate::AppState;
 
+/// What a run's admission records atomically with its insert.
+pub(crate) enum AdmissionMark {
+    TrackerIssue(String),
+    WatchOccurrence(crate::db::workflow_watch_state::WatchOccurrence),
+}
+
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
 pub struct WorkflowEngine {
     state: AppState,
@@ -59,6 +74,8 @@ pub struct WorkflowEngine {
     /// a tick that errors mid-way drops its window rather than re-firing
     /// already-spawned runs on the retry).
     last_trigger_check: tokio::sync::Mutex<chrono::DateTime<Utc>>,
+    /// Outbound policy of Watch polls; tests point it at a local server.
+    api_policy: api_call_executor::SecurityPolicy,
 }
 
 impl WorkflowEngine {
@@ -66,6 +83,7 @@ impl WorkflowEngine {
         Self {
             state,
             last_trigger_check: tokio::sync::Mutex::new(Utc::now()),
+            api_policy: api_call_executor::SecurityPolicy::production(),
         }
     }
 
@@ -95,6 +113,7 @@ impl WorkflowEngine {
             if let Err(e) = self.check_triggers().await {
                 tracing::error!("Workflow engine tick error: {}", e);
             }
+            quota_wait::wake_due_runs(&self.state, Utc::now()).await;
         }
     }
 
@@ -172,13 +191,14 @@ impl WorkflowEngine {
 
         let db = self.db().clone();
         let workflows = db.with_conn(crate::db::workflows::list_workflows).await?;
+        let default_tz = crate::core::timezone::current();
 
         for wf in workflows {
             if !wf.enabled {
                 continue;
             }
 
-            if !trigger::should_fire(&wf.trigger, since, now) {
+            if !trigger::should_fire(&wf.trigger, default_tz, since, now) {
                 continue;
             }
 
@@ -196,7 +216,7 @@ impl WorkflowEngine {
         Ok(())
     }
 
-    /// Fires one due workflow: a cron run, or a tracker poll.
+    /// Fires one due workflow: a cron run, a tracker poll or a watch poll.
     async fn fire_trigger(&self, wf: &Workflow) -> anyhow::Result<()> {
         // Advisory per-workflow check; a keyed limit is only known once the
         // run's variables are resolved, so spawn_run enforces it.
@@ -256,6 +276,7 @@ impl WorkflowEngine {
                     .await?;
             }
             WorkflowTrigger::Manual => {}
+            WorkflowTrigger::Watch(watch) => self.handle_watch_trigger(wf, watch).await?,
         }
         Ok(())
     }
@@ -339,7 +360,12 @@ impl WorkflowEngine {
             });
 
             if let Err(error) = self
-                .spawn_run(wf, trigger_ctx, Some(issue.id.clone()), project_id.clone())
+                .spawn_run(
+                    wf,
+                    trigger_ctx,
+                    Some(AdmissionMark::TrackerIssue(issue.id.clone())),
+                    project_id.clone(),
+                )
                 .await
             {
                 tracing::warn!(
@@ -353,13 +379,15 @@ impl WorkflowEngine {
         Ok(())
     }
 
-    /// Create and execute a workflow run in a background task. `tracker_issue`
-    /// is marked processed only when the run is admitted. Returns whether it was.
+    /// Create and execute a workflow run in a background task. `mark` (a
+    /// tracker issue, a watch change) is recorded in the transaction that
+    /// admits the run, and an already-recorded one admits nothing. Returns
+    /// whether the run was admitted.
     async fn spawn_run(
         &self,
         wf: &Workflow,
         mut trigger_ctx: serde_json::Value,
-        tracker_issue: Option<String>,
+        mark: Option<AdmissionMark>,
         run_project_id: Option<String>,
     ) -> anyhow::Result<bool> {
         let now = Utc::now();
@@ -422,6 +450,7 @@ impl WorkflowEngine {
             );
         }
         let mut run = WorkflowRun {
+            outcome: None,
             id: run_id,
             workflow_id: wf.id.clone(),
             status: RunStatus::Pending,
@@ -460,9 +489,26 @@ impl WorkflowEngine {
         let inserted = db
             .with_conn(move |conn| {
                 let tx = conn.unchecked_transaction()?;
+                if let Some(AdmissionMark::WatchOccurrence(occurrence)) = &mark {
+                    if crate::db::workflow_watch_state::is_admitted(&tx, &admission.id, occurrence)?
+                    {
+                        return Ok(Err("this change already has its run".to_string()));
+                    }
+                }
                 let admitted = concurrency::insert_run_within_limit(&tx, &admission, &r)?;
-                if let (Ok(()), Some(issue_id)) = (&admitted, tracker_issue.as_deref()) {
-                    crate::db::workflows::mark_issue_processed(&tx, &admission.id, issue_id)?;
+                match (&admitted, &mark) {
+                    (Ok(()), Some(AdmissionMark::TrackerIssue(issue_id))) => {
+                        crate::db::workflows::mark_issue_processed(&tx, &admission.id, issue_id)?;
+                    }
+                    (Ok(()), Some(AdmissionMark::WatchOccurrence(occurrence))) => {
+                        crate::db::workflow_watch_state::mark_admitted(
+                            &tx,
+                            &admission.id,
+                            occurrence,
+                            &r.id,
+                        )?;
+                    }
+                    _ => {}
                 }
                 tx.commit()?;
                 Ok::<_, anyhow::Error>(admitted)
@@ -554,6 +600,8 @@ mod tests {
                 StepType::PublishPageData => "PublishPageData",
                 StepType::SubWorkflow => "SubWorkflow",
                 StepType::TriggerWorkflow => "TriggerWorkflow",
+                StepType::DelegateSubtasks => "DelegateSubtasks",
+                StepType::TaskBoard => "TaskBoard",
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
@@ -570,6 +618,8 @@ mod tests {
             StepType::PublishPageData,
             StepType::SubWorkflow,
             StepType::TriggerWorkflow,
+            StepType::DelegateSubtasks,
+            StepType::TaskBoard,
         ]
         .iter()
         .map(variant_name)
@@ -608,6 +658,7 @@ mod tests {
     fn scheduled_workflow(id: &str, trigger: WorkflowTrigger, age_minutes: i64) -> Workflow {
         let at = Utc::now() - chrono::Duration::minutes(age_minutes);
         Workflow {
+            retention: None,
             project_scope: None,
             id: id.into(),
             name: id.into(),
@@ -687,6 +738,7 @@ mod tests {
         let engine = engine_for_tests();
         let every_minute = || WorkflowTrigger::Cron {
             schedule: "* * * * *".into(),
+            timezone: None,
         };
         // Listed first (most recently updated) and refused by its preflight.
         let mut failing = scheduled_workflow("wf-cron-failing", every_minute(), 0);
@@ -721,6 +773,7 @@ mod tests {
         let mut wf = scheduled_workflow("wf-tracker-limit", WorkflowTrigger::Manual, 0);
         wf.concurrency_limit = Some(1);
         let mut active = crate::models::WorkflowRun {
+            outcome: None,
             id: "run-active".into(),
             workflow_id: wf.id.clone(),
             status: RunStatus::Running,
@@ -847,6 +900,7 @@ mod tests {
             "wf-cron-multi",
             WorkflowTrigger::Cron {
                 schedule: "* * * * *".into(),
+                timezone: None,
             },
             0,
         );
@@ -989,11 +1043,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -1112,6 +1168,7 @@ mod tests {
     fn workflow_run_initial_state() {
         let now = Utc::now();
         let run = WorkflowRun {
+            outcome: None,
             id: Uuid::new_v4().to_string(),
             workflow_id: "wf-123".into(),
             status: RunStatus::Pending,
@@ -1161,6 +1218,7 @@ mod tests {
             "issue_number": 42,
         });
         let run = WorkflowRun {
+            outcome: None,
             id: "test-id".into(),
             workflow_id: "wf-1".into(),
             status: RunStatus::Pending,

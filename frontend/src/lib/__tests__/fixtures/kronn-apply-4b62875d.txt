@@ -1,0 +1,43 @@
+J'ai trouvé la doc officielle ([Eureka Search API](https://academy.insiderone.com/docs/eureka-search-api)). Je n'ai pas pu appeler l'API, faute de credentials, donc rien n'est testé en réel. Les points non vérifiés sont marqués `❔ non vérifié` dans les descriptions.
+
+- **Base URL** : `https://ineureka.api.useinsider.com`. Ce n'est pas `inone.useinsider.com`, qui est le panel.
+- **Authentification** : header `X-AUTH-TOKEN`. Le token se trouve dans les Account Settings du panel InOne.
+- **Paramètres obligatoires** : `q` (2 à 280 caractères), `p` (Partner ID), `l` (locale, ex. `en_US`) et `c` (devise, ex. `USD`).
+- **Paramètres optionnels** : `ps` (1 à 100, 6 par défaut), `pf` (offset), `a` (filtres `champ~valeur`), `st` (tri), `sid` (stratégie de merchandising), `u`, `uuid`, `oi`, `qs`, `dpp`.
+- **POST** : à utiliser si l'URL dépasse 2048 caractères ou si une valeur de filtre contient une virgule.
+- **Limite** : 350 requêtes par seconde par couple compte/locale.
+
+```json
+KRONN:APPLY
+```
+```json
+{
+  "name": "Insider Eureka Search",
+  "base_url": "https://ineureka.api.useinsider.com",
+  "description": "API de recherche produit Insider (Eureka). Auth : header X-AUTH-TOKEN (token des Account Settings InOne). Params obligatoires en query : q (2-280 car.), p (Partner ID), l (locale ex. en_US), c (devise ex. USD). Rate limit : 350 req/s par couple compte/locale. Réponse enveloppée : {status, data:{items, aggregations, navigation, sortings}, redirection, appliedSearchStrategy}.",
+  "docs_url": "https://academy.insiderone.com/docs/eureka-search-api",
+  "fields": [
+    {"label": "X-AUTH-TOKEN", "value": ""},
+    {"label": "Partner ID (p)", "value": ""},
+    {"label": "Locale (l)", "value": ""},
+    {"label": "Currency (c)", "value": ""}
+  ],
+  "endpoints": [
+    {"path": "/api/web/search", "method": "GET", "description": "Recherche produits. Query : q, p, l, c (obligatoires) ; ps (1-100, défaut 6), pf (offset), a=champ~valeur (répétable), st (Relevancy|PriceAsc|PriceDesc|MostPopularFirst|BestRatedFirst|MostRatedFirst|NewestFirst|MostFavoriteFirst|MostDiscountedFirst), sid, u, uuid, oi, qs, dpp. Résultats volumineux : projeter data.items[].itemId / itemProperties.item_card, ou oi=true pour n'avoir que les IDs. ❔ non vérifié : appel réel non testé."},
+    {"path": "/api/web/search", "method": "POST", "description": "Même recherche en JSON body {q, p, l, c, a:[\"champ~valeur\"]}. À utiliser si l'URL dépasse 2048 car. ou si une valeur de filtre contient une virgule. ❔ non vérifié : appel réel non testé."}
+  ],
+  "default_headers": []
+}
+```
+
+**Il manque encore, pour finaliser :**
+1. **`test_endpoint`** : je ne l'ai pas renseigné. Ce GET exige `q`, `p`, `l` et `c`, donc sans query string il renverrait un 400 et le bouton « Tester » serait trompeur. Si tu me donnes le Partner ID, la locale et la devise (ce ne sont pas des secrets), je pourrai proposer un chemin du type `/api/web/search?q=test&p=…&l=…&c=…`.
+2. **Les valeurs des fields** : tu les saisis toi-même. `p`, `l` et `c` sont des query params, pas des headers, donc il faudra que les agents ou workflows les passent à chaque appel. Si tu as plusieurs locales ou devises, dis-le-moi et on les gérera autrement.
+3. **L'authentification** : dans la section auth du formulaire, déclare le token comme header `X-AUTH-TOKEN` (pas de `Authorization: Bearer`).
+4. **`default_headers`** : la doc n'en impose aucun, donc je n'en ai pas inventé.
+
+Tu as d'autres endpoints Insider à ajouter, par exemple l'[Event Collection API](https://academy.insiderone.com/docs/eureka-event-collection-api) ? Je ne l'ai pas inclus, car il sert à écrire des événements et pas à lire.
+
+Sources :
+- [Eureka Search API](https://academy.insiderone.com/docs/eureka-search-api)
+- [Integrate the Eureka Search API](https://academy.insiderone.com/v1/docs/integrate-the-eureka-search-api)

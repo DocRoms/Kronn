@@ -26,6 +26,8 @@ mod anti_hallu_tiers_and_counts;
 mod anti_hallu_utf8_unicode;
 #[path = "anti_hallu_verify_outcomes.rs"]
 mod anti_hallu_verify_outcomes;
+#[path = "api_access_policy_scope.rs"]
+mod api_access_policy_scope;
 #[path = "api_tests.rs"]
 mod api_tests;
 #[path = "bridge_token_effect_log.rs"]
@@ -62,6 +64,8 @@ mod model_catalog_migration;
 mod ollama_model_catalog;
 #[path = "orchestration_handoff_e2e.rs"]
 mod orchestration_handoff_e2e;
+#[path = "power_guard_orphan.rs"]
+mod power_guard_orphan;
 #[path = "real_agent_e2e.rs"]
 mod real_agent_e2e;
 #[path = "reasoning_effort_runtime.rs"]

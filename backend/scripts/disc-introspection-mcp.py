@@ -52,7 +52,7 @@ import uuid
 
 MAX_DISC_APPEND_ATTACHMENTS = 8
 MAX_DISC_APPEND_ATTACHMENT_BYTES = 10 * 1024 * 1024
-BRIDGE_TOOL_SURFACE_VERSION = "0.3.10"
+BRIDGE_TOOL_SURFACE_VERSION = "0.3.11"
 
 
 class BridgeStaleError(RuntimeError):
@@ -70,9 +70,55 @@ _BRIDGE_ARTIFACT_FD_ENV = "_KRONN_MCP_ARTIFACT_FD"
 _BRIDGE_ARTIFACT_SHA_ENV = "_KRONN_MCP_ARTIFACT_SHA256"
 _BRIDGE_HANDOFF_VERSION = 3
 _BRIDGE_HANDOFF_MAX_BYTES = 1024 * 1024
-_BRIDGE_PENDING_MAX_BYTES = 256 * 1024
+# Size contract (KT-1139): one JSON-RPC line, newline excluded, in UTF-8 bytes.
+# A longer line is drained and answered with `request_too_large`, never run.
+_BRIDGE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# A reload carries at most this much of an unfinished line; more defers it.
+_BRIDGE_HANDOFF_PENDING_MAX_BYTES = 256 * 1024
 _BRIDGE_SOURCE_PATH = os.environ.get(_BRIDGE_SOURCE_ENV) or os.path.abspath(__file__)
 _BRIDGE_ARTIFACT_FD = None
+# A runtime that starts MCP servers without its own environment (Vibe) names
+# an owner-only file holding the launch's secrets instead (KT-1082).
+_BRIDGE_SECRET_ENV_FILE_ENV = "KRONN_BRIDGE_SECRET_ENV_FILE"
+_BRIDGE_SECRET_ENV_NAMES = ("KRONN_BRIDGE_TOKEN", "KRONN_WORKFLOW_STEP_CONTEXT")
+
+
+def _load_bridge_secret_env():
+    """Set the named secrets from the launch's file, never over a held value.
+
+    Only an owner-only regular file is read; anything else is ignored.
+    """
+    path = os.environ.get(_BRIDGE_SECRET_ENV_FILE_ENV)
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return
+        if os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+            sys.stderr.write("kronn-internal: secrets file is not owner-only, ignored\n")
+            return
+        with os.fdopen(fd, "rb") as handle:
+            fd = None
+            values = json.loads(handle.read(64 * 1024))
+    except (OSError, ValueError):
+        return
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not isinstance(values, dict):
+        return
+    for name in _BRIDGE_SECRET_ENV_NAMES:
+        value = values.get(name)
+        if isinstance(value, str) and value and not os.environ.get(name):
+            os.environ[name] = value
+
+
+_load_bridge_secret_env()
 
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
@@ -856,9 +902,9 @@ TOOLS = [
         "description": (
             "List the worker identities this principal room can pass verbatim to "
             "task_exec_prepare: native HTTP providers, host CLIs and exact joined CLI "
-            "sessions. Reports configured/reachable/available separately with stable, "
-            "secret-free reason codes. Call this before choosing a worker; then preflight "
-            "the selected `worker` object."
+            "sessions. Reports configured, probed reachable and available separately with "
+            "secret-free reason codes. Call this before choosing a worker, then preflight its "
+            "`worker` object."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
@@ -1337,40 +1383,30 @@ TOOLS = [
     {
         "name": "workflow_list",
         "description": (
-            "List every workflow in the user's Kronn instance — compact "
-            "view (id, name, enabled, project_id, trigger_type, "
-            "step_count, step_names, last_run_status, last_run_at). "
-            "Use this to (a) avoid drafting a duplicate workflow, (b) "
-            "surface the existing workflow id when the user asks "
-            "'have I already built something like X?'."
+            "List every workflow, compact: id, name, enabled, project, "
+            "trigger_type, step_count, blocker counts, last run. Use it to "
+            "avoid a duplicate and to find an existing workflow's id."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "workflow_active_runs",
         "description": (
-            "In-flight board: list every workflow run that is NOT finished "
-            "right now (status Running / WaitingApproval / Pending), across "
-            "ALL workflows — so you can see what else is happening before "
-            "you act (avoid stepping on a run another agent started, or "
-            "wait on a gate). Returns [{workflow_id, workflow_name, "
-            "project_id, run_id, status, started_at}]. For the live step of "
-            "a given run, drill down with `workflow_run_status(run_id)`. "
-            "(Shows the latest run per workflow.)"
+            "Unfinished runs (Running, WaitingApproval, Pending) across all "
+            "workflows, the latest per workflow: [{workflow_id, workflow_name, "
+            "project_id, run_id, status, started_at}]. Check it before acting so "
+            "you never step on another agent's run; drill down with "
+            "`workflow_run_status`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "workflow_runs",
         "description": (
-            "RUN HISTORY of one workflow (most recent first) — the past runs, "
-            "not just active (`workflow_active_runs`) or the latest. Lean per-run "
-            "summary: status · run_type · started/finished · tokens · batch "
-            "counts · parent_run_id. Use it to debrief a cron/scheduled workflow "
-            "(how many runs, which failed). To enumerate the foreach/batch "
-            "CHILDREN of a parent run, call this on the CHILD workflow's id and "
-            "filter by `parent_run_id == <parent run id>`. Drill into one run "
-            "with `workflow_run_get`."
+            "Run history of one workflow, newest first: status, run_type, "
+            "start/finish, tokens, batch counts, parent_run_id. Foreach/batch "
+            "children belong to the CHILD workflow: list it and filter on "
+            "`parent_run_id`. One run's detail: `workflow_run_get`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1476,11 +1512,9 @@ TOOLS = [
     {
         "name": "page_list",
         "description": (
-            "List Live Pages (all, or one project's with `project_id`): id, "
-            "title, slug, project_id, data_revision, updated_at and "
-            "last_published_at. Before authoring a PublishPageData step, "
-            "reuse a matching page_id: several workflows may publish into "
-            "the same Page."
+            "List Live Pages (all, or one project's): id, title, slug, "
+            "project_id, data_revision, timestamps. Reuse a matching page_id "
+            "before authoring PublishPageData; several workflows may feed one Page."
         ),
         "inputSchema": {
             "type": "object",
@@ -1490,10 +1524,9 @@ TOOLS = [
     {
         "name": "page_get",
         "description": (
-            "Fetch one Live Page by id or slug, including its current HTML "
-            "revision, declared datasets, retained points and every saved "
-            "workflow step that targets it. Read this before changing the HTML "
-            "or wiring another workflow into the Page."
+            "Fetch a Live Page by id or slug: current HTML revision, datasets, "
+            "retained points and workflow steps targeting it. Read before "
+            "editing the HTML or wiring a workflow."
         ),
         "inputSchema": {
             "type": "object",
@@ -1509,9 +1542,8 @@ TOOLS = [
             "Create a sandboxed Live Page and its first immutable HTML revision. "
             "Call `page_list` first. Data arrives through `window.KronnPageData` "
             "and `kronn:page-data`; use the returned id in PublishPageData. Scope "
-            "inherits from a bound discussion, while host CLIs may create standalone "
-            "Pages. Typed inline QP/QA/QE/Workflow CTAs are documented by "
-            "`tool_manual({tool: \"page_create\"})`."
+            "inherits a bound discussion's; host CLIs may create standalone Pages. "
+            "Inline QP/QA/QE/Workflow buttons: `tool_manual({tool: \"page_create\"})`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1544,25 +1576,26 @@ TOOLS = [
     {
         "name": "page_update_html",
         "description": (
-            "New immutable HTML revision of a Live Page; datasets and publication "
-            "history are kept. Call page_get first and send the complete "
-            "self-contained HTML, not a patch. Action buttons: "
+            "New immutable HTML revision of a Live Page; datasets and history "
+            "are kept. Call page_get first; send the complete HTML, "
+            "not a patch. `slug` renames it. Manual: "
             "`tool_manual({tool: \"page_update_html\"})`."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "page_id": {"type": "string", "description": "Page id or slug from page_list."},
-                "html": {"type": "string", "description": "Complete replacement HTML document (1 MB max)."},
+                "html": {"type": "string", "description": "Complete HTML document (1 MB max)."},
+                "slug": {"type": "string"},
             },
-            "required": ["page_id", "html"],
+            "required": ["page_id"],
         },
     },
     {
         "name": "page_add_dataset",
         "description": (
-            "Attach a dataset to an existing Page so PublishPageData can write "
-            "to it. Idempotent on name+kind; reusing a name with another kind conflicts."
+            "Attach a dataset PublishPageData can write. Idempotent on "
+            "name+kind; a name reused with another kind conflicts."
         ),
         "inputSchema": {
             "type": "object",
@@ -1576,6 +1609,18 @@ TOOLS = [
                 "max_age_days": {"type": "integer"},
             },
             "required": ["page_id", "name", "kind"],
+        },
+    },
+    {
+        "name": "page_delete_dataset",
+        "description": (
+            "Irreversible: deletes a dataset and its data. Refused, listing "
+            "users, while a workflow, the HTML or a button uses it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}, "name": {"type": "string"}},
+            "required": ["page_id", "name"],
         },
     },
     {
@@ -1593,13 +1638,11 @@ TOOLS = [
     {
         "name": "convention_get",
         "description": (
-            "Fetch the canonical Kronn documentation convention — how to "
-            "author `docs/AGENTS.md`: the `kronn:section` markers, the "
-            "`[src: …]` provenance grammar, and the curated ownership rules. "
-            "Returns the markdown spec verbatim.\n\n"
-            "⚠ Call this BEFORE writing to a `curated=\"ai\"` section: the "
-            "embedded spec is the source of truth for THIS installation, "
-            "which is what it lints against."
+            "Fetch the Kronn convention for authoring `docs/AGENTS.md` "
+            "(`kronn:section` markers, `[src: ...]` provenance grammar, curated "
+            "ownership rules) as verbatim markdown. Call this BEFORE writing to a "
+            "`curated=\"ai\"` section: THIS installation lints against this "
+            "embedded spec."
         ),
         "inputSchema": {
             "type": "object",
@@ -1638,7 +1681,8 @@ TOOLS = [
             "TriggerWorkflow**. "
             "Call `workflow_step_schema` before composing steps. Prefer adapting a real "
             "workflow via `workflow_get`/`workflow_clone`. Full authoring contract: "
-            "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON."
+            "`tool_manual({tool: \"workflow_create_draft\"})`. Returns the created JSON; "
+            "its `kronn_readiness` says if it can start: never claim ready otherwise."
         ),
         "inputSchema": {
             "type": "object",
@@ -1695,32 +1739,41 @@ TOOLS = [
     {
         "name": "workflow_get",
         "description": (
-            "Fetch a workflow's FULL definition (every step + all fields) "
-            "by id. Unlike `workflow_list` (compact summary, no steps), "
-            "this returns the exact shape `workflow_create_draft` / "
-            "`workflow_update` accept — so READ a real workflow here "
-            "before cloning or patching, instead of guessing the step "
-            "schema and discovering required fields one 422 at a time."
+            "Fetch a workflow's full definition, the exact shape "
+            "`workflow_create_draft`/`workflow_update` accept. Read a real "
+            "workflow here before cloning or patching it."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workflow_id": {"type": "string", "description": "Workflow id (from `workflow_list`, or the user can copy it from the #-prefixed pill in the workflow detail header)."},
+                "step_name": {"type": "string", "description": "Return this step only."},
+                "step_index": {"type": "integer", "description": "1-based position."},
+                "on_failure": {"type": "boolean", "description": "From the rollback chain."},
             },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_validate",
+        "description": (
+            "Can this saved workflow start? `ready` plus every blocker in it, "
+            "its sub-workflows and rollbacks, each with step and action. "
+            "`human_only` blockers need the user; you cannot approve them."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"workflow_id": {"type": "string"}},
             "required": ["workflow_id"],
         },
     },
     {
         "name": "workflow_clone",
         "description": (
-            "Duplicate an existing workflow. Mints fresh ids, re-bundles "
-            "and rewrites referenced Quick Prompt ids, strips per-user "
-            "notify URLs. The clone lands DISABLED with a distinct name "
-            "(default `<name> (copie)`) so it never auto-fires and you "
-            "never get two identically-named workflows. Typical loop: "
-            "`workflow_clone` → `workflow_update` (patch a few fields) → "
-            "the user enables it. Cheaper + safer than "
-            "re-authoring from scratch."
+            "Duplicate a workflow with fresh ids and rewritten Quick Prompt "
+            "ids, minus per-user notify URLs. The clone lands DISABLED as "
+            "`<name> (copie)` by default. Then `workflow_update` it; the "
+            "user enables it."
         ),
         "inputSchema": {
             "type": "object",
@@ -1735,14 +1788,10 @@ TOOLS = [
     {
         "name": "workflow_update",
         "description": (
-            "Patch an existing workflow IN PLACE. TRUE patch semantics: "
-            "any field you omit keeps its current value; send a field to "
-            "replace it. Same field shapes as `workflow_create_draft` "
-            "(name, trigger, steps, variables, guards, on_failure, "
-            "exec_allowlist, artifacts, …) plus `enabled`. NOTE: `steps` "
-            "is replaced WHOLESALE, not merged — to edit one step, fetch "
-            "the full `steps` via `workflow_get`, change what you need, "
-            "and send the whole array back."
+            "Patch a workflow in place: an omitted field keeps its value. "
+            "Same shapes as `workflow_create_draft`. `steps` is replaced "
+            "whole: fetch it with `workflow_get`, edit, send it all back. "
+            "Read `kronn_readiness` in the result."
         ),
         "inputSchema": {
             "type": "object",
@@ -1764,6 +1813,26 @@ TOOLS = [
                 "actions": {"type": "array"},
             },
             "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_update_step",
+        "description": (
+            "Change one step of a saved workflow: sent fields replace the "
+            "step's, null clears one, the rest is kept. Prefer it to resending "
+            "every step through `workflow_update`, whose rules and result it "
+            "shares; a JSON-RPC request over 8 MiB is refused unexecuted."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string"},
+                "step_name": {"type": "string", "description": "Step to change, or use step_index."},
+                "step_index": {"type": "integer", "description": "1-based position."},
+                "fields": {"type": "object", "description": "Step fields, shaped as in `workflow_get`."},
+                "on_failure": {"type": "boolean", "description": "Target the rollback chain."},
+            },
+            "required": ["workflow_id", "fields"],
         },
     },
     {
@@ -1926,8 +1995,8 @@ TOOLS = [
             "Create a CUSTOM skill in the user's library. Required: `name`, "
             "`description`, `icon`, `category` (one of Language/Domain/Business), "
             "`content` (the markdown skill body). Optional: `license`, "
-            "`allowed_tools`. The new skill is immediately bindable via an Agent "
-            "step's / QP's `skill_ids`. Returns the created skill incl its id."
+            "`allowed_tools`, `project_id` (used in that project only). "
+            "Bind it via an Agent step's / QP's `skill_ids`. Returns the skill incl its id."
         ),
         "inputSchema": {
             "type": "object",
@@ -1939,6 +2008,7 @@ TOOLS = [
                 "content": {"type": "string", "description": "Markdown body of the skill."},
                 "license": {"type": "string"},
                 "allowed_tools": {"type": "string"},
+                "project_id": {"type": "string"},
             },
             "required": ["name", "description", "icon", "category", "content"],
         },
@@ -1946,9 +2016,8 @@ TOOLS = [
     {
         "name": "skill_update",
         "description": (
-            "Patch a CUSTOM skill (load-merge-write; only fields you pass change). "
-            "Builtin skills are rejected. ⚠ The backend recreates the skill so its "
-            "id CHANGES — use the id in the returned object afterwards."
+            "Patch a CUSTOM skill in place, same id (only fields you pass change; "
+            "`project_id` \"\" makes it global). Builtins are rejected."
         ),
         "inputSchema": {
             "type": "object",
@@ -1961,6 +2030,7 @@ TOOLS = [
                 "content": {"type": "string"},
                 "license": {"type": "string"},
                 "allowed_tools": {"type": "string"},
+                "project_id": {"type": "string"},
             },
             "required": ["skill_id"],
         },
@@ -2075,16 +2145,11 @@ TOOLS = [
     {
         "name": "workflow_step_schema",
         "description": (
-            "Return the CANONICAL WorkflowStep schema as a tool RESULT (never "
-            "truncated, unlike a tool description): the closed 12-set of "
-            "`step_type`s, the flat shape, the required + optional fields PER "
-            "type, and the RUNTIME CONTRACTS that break a workflow at run time "
-            "if missed (e.g. SubWorkflow foreach → the engine writes each item "
-            "to the fixed path `.kronn/current_task.json`), plus the complete "
-            "run-anchored `time.now` grammar. Zero args. Call this "
-            "BEFORE authoring or editing a workflow instead of inferring the "
-            "schema from one `workflow_get` sample or from the (possibly "
-            "client-truncated) `workflow_create_draft` description."
+            "The canonical WorkflowStep schema as an untruncated result: the "
+            "closed set of `step_type`s, required and optional fields per type, "
+            "the runtime contracts that break a run when missed, and the "
+            "`time.now` grammar. Call it before authoring or editing a workflow "
+            "rather than inferring the schema from one `workflow_get` sample."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -2247,7 +2312,7 @@ TOOLS = [
                 },
                 "endpoint_path": {
                     "type": "string",
-                    "description": "Endpoint path exactly as the plugin's ApiSpec declares it (e.g. `/rest/api/3/issue/{{issue_key}}`); anything else is refused.",
+                    "description": "Endpoint path as the ApiSpec declares it (e.g. `/rest/api/3/issue/{{issue_key}}`); an access policy refuses undeclared paths.",
                 },
                 "method": {
                     "type": "string",
@@ -2512,12 +2577,9 @@ TOOLS = [
             "workflow's `BatchQuickPrompt` fan-out). Returns `{run_id, "
             "disc_count, discussions: [{disc_id, title, agent, "
             "message_count, archived, created_at}]}`.\n\n"
-            "Empty list for a pure linear workflow (those have no child "
-            "discs — read `workflow_run_status({run_id}).steps[]` "
-            "instead). After getting the list, `disc_load_other(disc_id)` "
-            "to read any child's full conversation.\n\n"
-            "Pairs with `qp_batch_run` / `workflow_trigger` : trigger → "
-            "wait/poll → `workflow_run_discussions` → read children."
+            "Empty for a linear workflow: read "
+            "`workflow_run_status({run_id}).steps[]` instead. Read a child with "
+            "`disc_load_other(disc_id)`."
         ),
         "inputSchema": {
             "type": "object",
@@ -2832,7 +2894,7 @@ def _restore_reload_handoff():
                 or not all(isinstance(rid, (str, int, float)) and not isinstance(rid, bool)
                            for rid in cancelled)
                 or not isinstance(pending_hex, str)
-                or len(pending_hex) > _BRIDGE_PENDING_MAX_BYTES * 2
+                or len(pending_hex) > _BRIDGE_HANDOFF_PENDING_MAX_BYTES * 2
                 or not isinstance(stdin_eof, bool)):
             raise RuntimeError("bridge reload handoff payload is invalid")
         try:
@@ -4281,6 +4343,11 @@ def _unwrap(envelope):
     notice = envelope.get("notice")
     if notice and isinstance(data, dict):
         data = {**data, "kronn_notice": notice}
+    # Whether the saved workflow can start, put first so it is read before
+    # the definition; the backend computes it, the bridge never re-derives it.
+    readiness = envelope.get("readiness")
+    if readiness and isinstance(data, dict):
+        data = {"kronn_readiness": readiness, **data}
     return data
 
 
@@ -5345,6 +5412,16 @@ def call_disc_append(args):
     _binding = _read_binding()
     if isinstance(_binding, dict) and _binding.get("resume_token"):
         append_body["session_credential"] = _binding["resume_token"]
+    # KT-1151 — a native runner's live post belongs to its own running turn.
+    # The backend verifies this env-injected context against the running job;
+    # a missing or broken one keeps the ordinary peer routing.
+    if is_live_single:
+        try:
+            room_agent = _room_agent_context("disc_append")
+        except RuntimeError:
+            room_agent = None
+        if room_agent is not None and room_agent["discussion_id"] == disc_id:
+            append_body["room_agent"] = room_agent
     # KT-619 — a `kronn-important` card also needs a publication GRANT and a
     # single-use proof issued over this exact body. The grant lives in a 0600
     # file the operator placed; it is never a tool parameter, never logged, and
@@ -7034,6 +7111,7 @@ def _wait_once(args):
 # cannot service control traffic (ping/cancel/progress), so each slice is
 # kept small and everything is serviced between slices.
 _WAIT_POLL_SECS = 15
+_WAIT_MIN_QUIET_POLL_SECS = 1.0
 _WAIT_PROGRESS_SLICE_SECS = 10
 
 
@@ -7125,25 +7203,6 @@ def _wait_abort_reason():
     if rid is not None and _is_cancelled(rid):
         return "cancelled"
     return _service_control_traffic()
-
-
-def _wait_sleep(delay, polls, started):
-    """Sleep `delay` seconds in short slices; the abort reason, else None.
-
-    Emits a progress heartbeat every ~10 s so a client never sees a
-    silent gap approaching its tool-call timeout during long pacing.
-    """
-    end = time.monotonic() + max(0, delay)
-    next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
-    while time.monotonic() < end:
-        reason = _wait_abort_reason()
-        if reason:
-            return reason
-        if time.monotonic() >= next_progress:
-            _emit_wait_progress(polls, int(time.monotonic() - started))
-            next_progress = time.monotonic() + _WAIT_PROGRESS_SLICE_SECS
-        time.sleep(min(1.0, max(0.0, end - time.monotonic())))
-    return _wait_abort_reason()
 
 
 # A wait ended by a queued tools/call: the host may have backgrounded it and
@@ -7366,6 +7425,7 @@ def call_disc_wait_for_peer(args):
         _emit_wait_progress(polls, int(time.monotonic() - started))
         poll_args["timeout_secs"] = poll_secs
         poll_args["_retry_deadline"] = deadline
+        poll_started = time.monotonic()
         try:
             result = _wait_once(poll_args)
         except _WaitAborted as aborted:
@@ -7420,23 +7480,12 @@ def call_disc_wait_for_peer(args):
         if deadline is not None and time.monotonic() >= deadline:
             result["hint"] = _wait_budget_hint(started, polls)
             return result
-        # Follow the server's pacing between polls; presence eligibility is
-        # derived from next_poll_at + grace, so honoring it keeps the
-        # session an eligible responder while it sleeps.
-        pacing = result.get("pacing") or {}
-        delay = pacing.get("next_delay_seconds")
-        try:
-            delay = min(max(int(delay), 0), 480) if delay is not None else 0
-        except (TypeError, ValueError):
-            delay = 0
-        if deadline is not None:
-            delay = min(delay, max(0, int(deadline - time.monotonic())))
-        sleep_reason = _wait_sleep(delay, polls, started) if delay else None
-        if sleep_reason:
-            if sleep_reason != "cancelled":
-                result["hint"] = interrupted_hint
-                _mark_wait_interrupted(result, sleep_reason)
-            return result
+        # KT-703 — re-poll at once: server pacing sizes model-turn re-arms, and
+        # sleeping it here left the bridge deaf for up to 8 min per quiet cycle.
+        early = _WAIT_MIN_QUIET_POLL_SECS - (time.monotonic() - poll_started)
+        if early > 0:
+            # A server that answers before the window would otherwise spin.
+            time.sleep(early)
         # Resume from what this poll actually observed so replays stay exact.
         latest = result.get("latest_sort_order")
         if isinstance(latest, int):
@@ -7490,7 +7539,30 @@ def call_workflow_list(_args):
             "last_run_status": (w.get("last_run") or {}).get("status"),
             "last_run_started_at": (w.get("last_run") or {}).get("started_at"),
         })
+        # Diagnostic counters pass through as the backend sent them, zero
+        # included; an older backend that omits one leaves it absent, not 0.
+        for key in _WORKFLOW_DIAGNOSTIC_COUNTS:
+            if key in w:
+                out[-1][key] = w[key]
     return out
+
+
+_WORKFLOW_DIAGNOSTIC_COUNTS = (
+    "misconfigured_step_count",
+    "unsafe_step_count",
+    "blocker_count",
+    "human_approval_count",
+)
+
+
+def call_workflow_validate(args):
+    """Readiness of a saved workflow: `ready` plus every blocker of it, its
+    sub-workflows and rollback chains, as computed by the backend's runtime
+    validators. Read-only: it never approves anything."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_validate: missing required 'workflow_id'")
+    return _unwrap(_http("GET", f"/api/workflows/{wid}/readiness"))
 
 
 def call_workflow_active_runs(_args):
@@ -7682,18 +7754,49 @@ def call_page_create(args):
     return _unwrap(_http("POST", "/api/pages", body))
 
 
+_PAGE_HTML_MAX_BYTES = 1_000_000  # same limit as PUT /api/pages/{id}/html
+
+
 def call_page_update_html(args):
-    """Create an immutable replacement HTML revision for a Page."""
+    """New HTML revision for a Page, and/or a new slug (the old one keeps resolving)."""
     encoded = _page_selector(args, "page_update_html")
     html = args.get("html")
-    if not isinstance(html, str) or not html.strip():
-        raise RuntimeError("page_update_html: missing required 'html'")
-    actor = _agent_type_for_session()
-    body = {
-        "html": html,
-        "created_by_agent": None if actor == "Unknown" else actor,
+    slug = args.get("slug")
+    if slug is not None and not isinstance(slug, str):
+        raise RuntimeError("page_update_html: 'slug' must be a string")
+    if html is None and slug is None:
+        raise RuntimeError("page_update_html: missing required 'html' (or 'slug' to rename)")
+    # Provided HTML is checked before any write, so a rename never lands alone
+    # because of HTML the server would refuse anyway.
+    if html is not None:
+        if not isinstance(html, str) or not html.strip():
+            raise RuntimeError("page_update_html: missing required 'html'")
+        if len(html.encode("utf-8")) > _PAGE_HTML_MAX_BYTES:
+            raise RuntimeError("page_update_html: 'html' exceeds 1 MB")
+    result = None
+    if slug is not None:
+        result = _unwrap(_http("PATCH", f"/api/pages/{encoded}", {"slug": slug}))
+        # Address the page by its id from here, whatever selector was given.
+        encoded = urllib.parse.quote(result.get("id") or slug.strip(), safe="")
+    if html is not None:
+        actor = _agent_type_for_session()
+        body = {
+            "html": html,
+            "created_by_agent": None if actor == "Unknown" else actor,
+        }
+        try:
+            return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
+        except Exception as error:
+            if result is None:
+                raise
+            raise RuntimeError(
+                f"page_update_html: page '{result.get('id')}' was already renamed to slug "
+                f"'{result.get('slug')}', but the HTML revision failed: {error}"
+            ) from error
+    return {
+        key: result.get(key)
+        for key in ("id", "title", "slug", "slug_aliases", "project_id", "updated_at")
     }
-    return _unwrap(_http("PUT", f"/api/pages/{encoded}/html", body))
 
 
 def call_page_add_dataset(args):
@@ -7712,6 +7815,61 @@ def call_page_add_dataset(args):
         if field in args:
             body[field] = args[field]
     return _unwrap(_http("POST", f"/api/pages/{encoded}/datasets", body))
+
+
+def call_page_delete_dataset(args):
+    """Delete a dataset nothing uses; a forced deletion is a human's."""
+    encoded = _page_selector(args, "page_delete_dataset")
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise RuntimeError("page_delete_dataset: missing required 'name'")
+    path = f"/api/pages/{encoded}/datasets/{urllib.parse.quote(name.strip(), safe='')}"
+    return _unwrap(_http("DELETE", path))
+
+
+def _describe_access_rule(rule):
+    """Mirror of `core::api_access::describe_rule` (KT-1026)."""
+    kind = (rule or {}).get("kind")
+    if kind == "agents":
+        names = []
+        for subject in rule.get("agents") or []:
+            model = (subject.get("model") or "").strip()
+            names.append(f"{subject.get('agent')} ({model})" if model else str(subject.get("agent")))
+        return "only " + (", ".join(names) or "no agent")
+    return {"local_only": "local models only", "blocked": "blocked"}.get(kind, "all agents")
+
+
+def _endpoint_key(path):
+    path = (path or "").split("?")[0].strip().strip("/")
+    return [segment for segment in path.split("/")] if path else []
+
+
+def _apply_access_policy(server_out, policy):
+    """Show a plugin's access policy to the agent: who may call it, per
+    endpoint, and that undeclared paths are refused (strict mode)."""
+    rules = policy.get("endpoints") or []
+
+    def rule_for(method, path):
+        for rule in rules:
+            if (rule.get("method") or "").upper() == (method or "").upper() and _endpoint_key(rule.get("path")) == _endpoint_key(path):
+                return rule.get("access")
+        return policy.get("access")
+
+    for endpoint in server_out["endpoints"]:
+        endpoint["access"] = _describe_access_rule(rule_for(endpoint.get("method"), endpoint.get("path")))
+    for rule in rules:
+        if not any(
+            (e.get("method") or "").upper() == (rule.get("method") or "").upper()
+            and _endpoint_key(e.get("path")) == _endpoint_key(rule.get("path"))
+            for e in server_out["endpoints"]
+        ):
+            server_out["endpoints"].append({
+                "path": rule.get("path"),
+                "method": rule.get("method"),
+                "access": _describe_access_rule(rule.get("access")),
+            })
+    server_out["access"] = _describe_access_rule(policy.get("access"))
+    server_out["strict"] = "only the listed endpoints can be called"
 
 
 def call_mcp_list(_args):
@@ -7744,6 +7902,10 @@ def call_mcp_list(_args):
     # (server_id starting with `api-custom-`) are included via the same
     # shape — they ship their own docs_url + description at create-time.
     out_servers = []
+    policies = {
+        entry.get("server_id"): entry.get("policy") or {}
+        for entry in data.get("access_policies") or []
+    }
     for s in data.get("servers") or []:
         spec = s.get("api_spec") or {}
         if not spec:
@@ -7782,9 +7944,8 @@ def call_mcp_list(_args):
         # plugin, docs_url set, endpoints not yet declared).
         if endpoints:
             hint = (
-                "READY: endpoints are declared and the ApiCall executor "
-                "will allow-list them. You can draft an ApiCall step "
-                "using one of the listed paths directly."
+                "READY: endpoints are declared. You can draft an ApiCall "
+                "step using one of the listed paths directly."
             )
         elif docs_url:
             hint = (
@@ -7883,6 +8044,8 @@ def call_mcp_list(_args):
             "endpoints": endpoints,
             "hint": hint,
         })
+        if s.get("id") in policies:
+            _apply_access_policy(out_servers[-1], policies[s.get("id")])
     return {
         "captured_at": captured_at,
         "configs": out_configs,
@@ -7971,7 +8134,7 @@ def call_workflow_create_draft(args):
     # tick while a run is active) unless the agent set it explicitly. To allow
     # overlap, pass a higher concurrency_limit on purpose.
     trig_type = (args.get("trigger") or {}).get("type")
-    if trig_type in ("Cron", "Tracker") and args.get("concurrency_limit") is None:
+    if trig_type in ("Cron", "Tracker", "Watch") and args.get("concurrency_limit") is None:
         body["concurrency_limit"] = 1
     # 0.8.8 — fill PromptVariable's required label/placeholder (see
     # _normalize_variables) so launch-time vars don't 422 on `{name}` alone.
@@ -8071,7 +8234,37 @@ def call_workflow_get(args):
     wid = args.get("workflow_id") or args.get("id")
     if not wid:
         raise RuntimeError("workflow_get: missing required 'workflow_id'")
-    return _unwrap(_http("GET", f"/api/workflows/{wid}"))
+    workflow = _unwrap(_http("GET", f"/api/workflows/{wid}"))
+    if "step_name" not in args and "step_index" not in args:
+        return workflow
+    return _one_workflow_step(workflow, args)
+
+
+def _one_workflow_step(workflow, args):
+    """One step of a workflow (KT-1139): the read paired with
+    `workflow_update_step`, so a large definition is never read whole."""
+    chain = (workflow or {}).get("on_failure" if args.get("on_failure") else "steps") or []
+    name, index = args.get("step_name"), args.get("step_index")
+    if (name is None) == (index is None):
+        raise RuntimeError("workflow_get: name the step with exactly one of step_name or step_index")
+    if name is not None:
+        at = next((i for i, step in enumerate(chain) if step.get("name") == name), None)
+    else:
+        at = index - 1 if isinstance(index, int) and 1 <= index <= len(chain) else None
+    if at is None:
+        names = ", ".join(str(step.get("name")) for step in chain)
+        raise RuntimeError(f"workflow_get: no such step. Steps: {names}")
+    # The readiness verdict and notice of the whole workflow travel with it.
+    kept = {key: workflow[key] for key in ("kronn_readiness", "kronn_notice") if key in workflow}
+    return {
+        **kept,
+        "workflow_id": workflow.get("id"),
+        "name": workflow.get("name"),
+        "enabled": workflow.get("enabled"),
+        "step_index": at + 1,
+        "step_count": len(chain),
+        "step": chain[at],
+    }
 
 
 def _run_summary(r):
@@ -8090,6 +8283,7 @@ def _run_summary(r):
         "batch_failed": r.get("batch_failed"),
         "parent_run_id": r.get("parent_run_id"),
         "produced_branches": r.get("produced_branches"),
+        "outcome": r.get("outcome"),
     }
 
 
@@ -8200,6 +8394,22 @@ def call_workflow_update(args):
     if "variables" in body:
         body["variables"] = _normalize_variables(body["variables"])
     return _unwrap(_http("PUT", f"/api/workflows/{wid}", body))
+
+
+def call_workflow_update_step(args):
+    """Patch one step (KT-1139): the backend merges it into the stored list and
+    saves through the same path as `workflow_update`."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_update_step: missing required 'workflow_id'")
+    fields = args.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        raise RuntimeError("workflow_update_step: 'fields' must be a non-empty object")
+    body = {"fields": _normalize_steps([fields])[0]}
+    for key in ("step_name", "step_index", "on_failure"):
+        if key in args:
+            body[key] = args[key]
+    return _unwrap(_http("PATCH", f"/api/workflows/{urllib.parse.quote(str(wid), safe='')}/step", body))
 
 
 def call_workflow_clone(args):
@@ -8992,10 +9202,9 @@ _AGENT_LIB = {
     "skill": {
         "path": "/api/skills",
         "required": ("name", "description", "icon", "category", "content"),
-        "optional": ("license", "allowed_tools"),
+        "optional": ("license", "allowed_tools", "project_id"),
         "categories": ("Language", "Domain", "Business"),
-        # skill update = delete+recreate server-side → the id CHANGES.
-        "update_remints_id": True,
+        "update_remints_id": False,
     },
     "profile": {
         "path": "/api/profiles",
@@ -9079,7 +9288,7 @@ def _lib_delete(kind, args):
 def call_skill_create(args):
     """Create a custom SKILL (POST /api/skills). Required: name, description,
     icon, category (Language|Domain|Business), content (the markdown body).
-    Optional: license, allowed_tools. Use to author a reusable skill an Agent
+    Optional: license, allowed_tools, project_id. Use to author a reusable skill an Agent
     step / QP can then bind via `skill_ids`. Returns the created skill (incl id)."""
     return _lib_create("skill", args)
 
@@ -9657,6 +9866,12 @@ TOOL_MANUALS = {
         "read-only discovery call. For Ollama, discovery also does not prove that the exact "
         "resolved tag is already pulled locally; a missing tag fails explicitly at `/api/chat`, "
         "so treat catalogue availability and model presence as separate facts.\n\n"
+        "HTTP entries carry `connectivity.state`: `verified` (a bounded probe answered), "
+        "`unreachable` (with `unreachable_reason`: dns, refused, timeout, tls, http_status, "
+        "invalid_endpoint or connect) or `unverified` (no fresh probe). `reachable` is true "
+        "only when verified: a saved address is configuration, never connectivity. A named "
+        "connection that is not verified stays listed, media included, but is not "
+        "`available`.\n\n"
         "Unavailable entries remain visible with stable `reasons[].code`; details are fixed "
         "backend phrases and never contain keys, endpoints, hostnames or raw upstream errors. "
         "Provider probes run in parallel under a short global bound. After choosing an "
@@ -9875,6 +10090,9 @@ TOOL_MANUALS = {
         "\n\n" + _PAGE_ACTION_CONTRACT
     ),
     "page_update_html": (
+        "`slug` renames the Page, alone or with `html`: lowercase ASCII letters, digits and "
+        "single '-', unique across every project. The former slug keeps opening the Page and "
+        "stays reserved for it, so existing links, workflow steps and calls still work.\n\n"
         "The new revision replaces the whole document. Keep each action block's "
         "`data-action-id` and its button's `data-kronn-action` unchanged across "
         "revisions: the reference is what ties a button to its past launches. A block "
@@ -9909,7 +10127,29 @@ TOOL_MANUALS = {
         "pass `sub_workflow_variables: {childVariable: template}`; a child's required "
         "variables must be mapped. "
         "Every referenced plugin, binding, Quick API, Quick Exec and Page must come from its "
-        "current list tool; unresolved bindings require asking the user, never guessing."
+        "current list tool; unresolved bindings require asking the user, never guessing.\n\n"
+        "Four separate facts: saved (the call succeeded), enabled (a human's "
+        "authorization to run: a disabled workflow refuses every launch, manual or "
+        "scheduled), ready (`kronn_readiness.ready`, the configuration diagnosis over the "
+        "workflow, its sub-workflows and rollbacks) and the run result "
+        "(`workflow_run_get`). Neither saving nor enabling proves a run can start. "
+        "Before saying a workflow is ready, read `kronn_readiness` (or `workflow_validate`): "
+        "fix every blocker with `human_only:false` and save again; list every "
+        "`human_only:true` blocker to the user by workflow and step and ask them to approve "
+        "it in the editor. You can never approve a line, pin a script hash or mark a line as "
+        "human-written, and you must not rewrite a line to dodge an approval. `ready:true` "
+        "means no known refusal, not a guaranteed run.\n\n"
+        "Exec: inline code (`python3 -c`, `bash -c`, `node -e`) is code and takes no run "
+        "value; values travel as later arguments or on `exec_stdin`, which must be read as "
+        "data (`json.load(sys.stdin)`). An Exec line you write that takes a run value is "
+        "saved but waits for a human approval, even in that data-only shape.\n\n"
+        "`retention: {no_op_hours?, success_days?, failure_days?}` (absent inherits the global "
+        "setting, 0 keeps forever) sets how long a new draft's finished runs are kept. A run "
+        "that changed nothing ends with `outcome: no_op` and goes after 24 h by default: an "
+        "Exec step declares it with a `KRONN_NOOP` line on stdout or stderr, an Agent step "
+        "with `\"no_change\": true` in its envelope; an identical Page publish is inferred. "
+        "On an existing workflow retention is human-only: `workflow_update` does not take it; "
+        "ask the user to change it in the editor (\"Run retention\")."
     ),
     "qp_run": (
         "Call `qp_list` first to resolve the QP id and its required variables. Pass values "
@@ -9971,6 +10211,12 @@ TOOL_MANUALS = {
         "`{{now-24h|floor:hour}}` alias defaults to UTC/RFC 3339. "
         "Formats are generic: never write `fmt:adobe`; its no-zone ISO shape "
         "is `fmt:local_iso_ms`. `workflow_step_schema` is the canonical spec.\n\n"
+        "**Access policy** — without one, any valid path on the plugin's API is "
+        "forwarded. A plugin under a policy (`mcp_list` shows `access` and "
+        "`strict`) accepts only its declared endpoints, and only for the agents "
+        "its rules admit (named agents, local models only, or blocked). Kronn "
+        "decides from the identity it gave you at launch. If you are not "
+        "admitted, tell the user the API is reserved instead of trying.\n\n"
         "This is NOT the mechanism for credentials. Secrets are injected by the "
         "plugin's auth spec and never appear in a call you compose."
     ),
@@ -10208,10 +10454,27 @@ _GUARDED_ORCHESTRATION_TOOLS = frozenset({
 })
 
 
+def _transport_contract():
+    """The documented size limits (KT-1139), as clients may read them."""
+    return {
+        "request_max_bytes": _BRIDGE_REQUEST_MAX_BYTES,
+        "reload_pending_max_bytes": _BRIDGE_HANDOFF_PENDING_MAX_BYTES,
+        "reload_handoff_max_bytes": _BRIDGE_HANDOFF_MAX_BYTES,
+    }
+
+
+def _server_capabilities():
+    return {
+        "tools": {"listChanged": True},
+        "experimental": {"kronnTransport": _transport_contract()},
+    }
+
+
 def call_bridge_info(_args):
     freshness = _bridge_freshness()
     mtime_now = freshness["mtime_now"]
     return {
+        "transport": _transport_contract(),
         "script_path": _BRIDGE_SOURCE_PATH,
         "loaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_LOADED_AT)),
         "script_mtime_at_load": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_SCRIPT_MTIME_AT_LOAD)),
@@ -10639,6 +10902,7 @@ DISPATCH = {
     "page_create": call_page_create,
     "page_update_html": call_page_update_html,
     "page_add_dataset": call_page_add_dataset,
+    "page_delete_dataset": call_page_delete_dataset,
     "mcp_list": call_mcp_list,
     # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
     # called; lets agents about to author AGENTS.md sections pull the
@@ -10657,6 +10921,7 @@ DISPATCH = {
     "workflow_get": call_workflow_get,
     "workflow_clone": call_workflow_clone,
     "workflow_update": call_workflow_update,
+    "workflow_update_step": call_workflow_update_step,
     "workflow_set_enabled": call_workflow_set_enabled,
     "qp_update": call_qp_update,
     "qp_get": call_qp_get,
@@ -10666,6 +10931,7 @@ DISPATCH = {
     # schema doc) gets client-truncated mid-text, hiding the SubWorkflow
     # foreach runtime contract. Cf. [[project_mcp_workflow_crud_gap]].
     "workflow_step_schema": call_workflow_step_schema,
+    "workflow_validate": call_workflow_validate,
     # 0.8.8 (2026-06-24) — enumerate the Agent-step bindings (skill_ids /
     # profile_ids / directive_ids). Before this the create_draft desc said
     # "see the workflow-architect skill for the canonical lists" but the
@@ -10812,6 +11078,11 @@ def _perform_scheduled_bridge_reload():
         _STDIN_READ_LOCK.acquire()
         queued = []
         stdin_eof = False
+        if (_STDIN_OVERSIZED is not None
+                or len(_STDIN_PENDING) > _BRIDGE_HANDOFF_PENDING_MAX_BYTES):
+            # A line too long to hand over: reload once it has been read.
+            _STDIN_READ_LOCK.release()
+            return False
         while True:
             try:
                 item = _REQUEST_QUEUE.get_nowait()
@@ -10830,6 +11101,24 @@ def _perform_scheduled_bridge_reload():
                 rid for rid, ts in _CANCELLED_REQUEST_IDS.items()
                 if rid in queued_ids and time.monotonic() - ts <= _CANCELLATION_TTL_SECS
             ]
+        handoff_nonce = secrets.token_hex(32)
+        state = json.dumps({
+            "version": _BRIDGE_HANDOFF_VERSION,
+            "nonce": handoff_nonce,
+            "client_info": dict(_CLIENT_INFO),
+            "requests": queued,
+            "cancelled_request_ids": cancelled,
+            "pending_hex": bytes(_STDIN_PENDING).hex(),
+            "stdin_eof": stdin_eof,
+        }, separators=(",", ":"))
+        if len(state.encode("utf-8")) > _BRIDGE_HANDOFF_MAX_BYTES:
+            # Large queued requests are served first; the reload stays scheduled.
+            for item in queued:
+                _REQUEST_QUEUE.put(item)
+            if stdin_eof:
+                _REQUEST_QUEUE.put(None)
+            _STDIN_READ_LOCK.release()
+            return False
         handoff_fd, handoff_path = tempfile.mkstemp(prefix="kronn-mcp-reload-", suffix=".json")
         try:
             # Same fd-only rule as the executable artifact: never write the
@@ -10838,17 +11127,8 @@ def _perform_scheduled_bridge_reload():
             handoff_path = None
             if os.fstat(handoff_fd).st_nlink != 0:
                 raise RuntimeError("bridge reload handoff could not be unlinked")
-            handoff_nonce = secrets.token_hex(32)
             with os.fdopen(os.dup(handoff_fd), "w", encoding="utf-8") as handoff:
-                json.dump({
-                    "version": _BRIDGE_HANDOFF_VERSION,
-                    "nonce": handoff_nonce,
-                    "client_info": dict(_CLIENT_INFO),
-                    "requests": queued,
-                    "cancelled_request_ids": cancelled,
-                    "pending_hex": bytes(_STDIN_PENDING).hex(),
-                    "stdin_eof": stdin_eof,
-                }, handoff, separators=(",", ":"))
+                handoff.write(state)
                 handoff.flush()
                 os.fsync(handoff.fileno())
                 if os.fstat(handoff.fileno()).st_size > _BRIDGE_HANDOFF_MAX_BYTES:
@@ -10977,6 +11257,9 @@ def _bridge_stale_result(rid, tool_name, message):
 _REQUEST_QUEUE: "queue.Queue[dict | None]" = queue.Queue()
 _STDIN_READ_LOCK = threading.Lock()
 _STDIN_PENDING = bytearray()
+# The line being drained past the size contract, if any (reader thread only).
+_STDIN_OVERSIZED = None
+_READER_FAILED = threading.Event()
 # id → monotonic arrival time. Entries expire so a cancellation landing
 # AFTER its response was sent can never poison a later reuse of the id.
 # Guarded by _CANCELLED_LOCK: the reader thread inserts/prunes while the
@@ -11011,6 +11294,18 @@ def _consume_cancellation(rid):
 
 
 def _stdin_reader():
+    # A reader that dies would leave main waiting forever: end the process
+    # instead, visibly, without echoing any of the input.
+    try:
+        _read_stdin()
+    except Exception as exc:
+        _READER_FAILED.set()
+        print(f"kronn-internal: stdin reader failed ({type(exc).__name__}); exiting",
+              file=sys.stderr)
+        _REQUEST_QUEUE.put(None)
+
+
+def _read_stdin():
     while True:
         try:
             ready, _, _ = select.select([sys.stdin], [], [], 0.1)
@@ -11035,17 +11330,169 @@ def _stdin_reader():
 
 
 def _consume_stdin_chunk(chunk):
-    """Consume complete lines while retaining a reexec-safe partial line."""
-    _STDIN_PENDING.extend(chunk)
-    while True:
-        newline = _STDIN_PENDING.find(b"\n")
+    """Split stdin into JSON-RPC lines, keeping a reexec-safe partial line.
+
+    A line past `_BRIDGE_REQUEST_MAX_BYTES` is drained to its newline without
+    being kept, then refused; the lines after it are served normally.
+    """
+    global _STDIN_OVERSIZED
+    pos = 0
+    while pos < len(chunk):
+        newline = chunk.find(b"\n", pos)
+        end = len(chunk) if newline < 0 else newline
+        piece = chunk[pos:end]
+        if (_STDIN_OVERSIZED is None
+                and len(_STDIN_PENDING) + len(piece) > _BRIDGE_REQUEST_MAX_BYTES):
+            _STDIN_OVERSIZED = _OversizedLine()
+            _STDIN_OVERSIZED.feed(bytes(_STDIN_PENDING))
+            _STDIN_PENDING.clear()
+        if _STDIN_OVERSIZED is not None:
+            _STDIN_OVERSIZED.feed(piece)
+        else:
+            _STDIN_PENDING.extend(piece)
         if newline < 0:
-            if len(_STDIN_PENDING) > _BRIDGE_PENDING_MAX_BYTES:
-                raise RuntimeError("partial JSON-RPC line exceeds bridge limit")
             return
-        raw_line = bytes(_STDIN_PENDING[:newline])
-        del _STDIN_PENDING[:newline + 1]
-        _enqueue_stdin_line(raw_line.decode("utf-8", errors="replace"))
+        pos = newline + 1
+        try:
+            if _STDIN_OVERSIZED is not None:
+                oversized, _STDIN_OVERSIZED = _STDIN_OVERSIZED, None
+                _refuse_oversized_line(oversized)
+            else:
+                raw_line = bytes(_STDIN_PENDING)
+                _STDIN_PENDING.clear()
+                _enqueue_stdin_line(raw_line.decode("utf-8", errors="replace"))
+        except Exception as exc:
+            # One malformed line must not stop the lines after it.
+            print(f"kronn-internal: JSON-RPC line dropped ({type(exc).__name__})",
+                  file=sys.stderr)
+
+
+class _OversizedLine:
+    """Drains a line too long to keep, retaining only its top-level members.
+
+    Nested values become `null`, so the JSON-RPC `id` and `method` can be read
+    back from a few bytes whatever the size of `params`.
+    """
+
+    _SKELETON_MAX_BYTES = 64 * 1024
+    _OUTSIDE = re.compile(rb'["{}\[\]]')
+    _INSIDE = re.compile(rb'["\\]')
+
+    def __init__(self):
+        self.size = 0
+        self.depth = 0
+        self.in_string = False
+        self.escaped = False
+        self.skeleton = bytearray()
+        self.truncated = False
+
+    def _keep(self, data):
+        if self.depth != 1 or not data:
+            return
+        if len(self.skeleton) + len(data) > self._SKELETON_MAX_BYTES:
+            self.truncated = True
+        else:
+            self.skeleton.extend(data)
+
+    def feed(self, data):
+        self.size += len(data)
+        i, n = 0, len(data)
+        while i < n:
+            if self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                    self._keep(data[i:i + 1])
+                    i += 1
+                    continue
+                match = self._INSIDE.search(data, i)
+                end = match.start() if match else n
+                self._keep(data[i:end + (1 if match else 0)])
+                if not match:
+                    return
+                i = end + 1
+                if data[end] == 0x5C:
+                    self.escaped = True
+                else:
+                    self.in_string = False
+                continue
+            match = self._OUTSIDE.search(data, i)
+            end = match.start() if match else n
+            self._keep(data[i:end])
+            if not match:
+                return
+            char = data[end:end + 1]
+            i = end + 1
+            if char == b'"':
+                self._keep(char)
+                self.in_string = True
+            elif char in (b"{", b"["):
+                self._keep(b"null")
+                self.depth += 1
+                if self.depth == 1:
+                    self._keep(char)
+            else:
+                if self.depth == 1:
+                    self._keep(char)
+                self.depth -= 1
+
+    def envelope(self):
+        """`(has_id, id, method)` read from the skeleton, or `(True, None, None)`
+        when it cannot be read: JSON-RPC then answers with a null id."""
+        if self.truncated or self.depth != 0 or self.in_string:
+            return True, None, None
+        try:
+            head = json.loads(bytes(self.skeleton).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return True, None, None
+        if not isinstance(head, dict):
+            return True, None, None
+        rid = head.get("id")
+        if rid is not None and (isinstance(rid, bool) or not isinstance(rid, (str, int, float))):
+            rid = None
+        method = head.get("method") if isinstance(head.get("method"), str) else None
+        return "id" in head or method is None, rid, method
+
+
+_REQUEST_TOO_LARGE_METHOD = "$/kronn/request_too_large"
+
+
+def _refuse_oversized_line(oversized):
+    print(f"kronn-internal: JSON-RPC line of {oversized.size} bytes refused "
+          f"(limit {_BRIDGE_REQUEST_MAX_BYTES})", file=sys.stderr)
+    has_id, rid, method = oversized.envelope()
+    if not has_id:
+        return  # a notification gets no response, even a refusal
+    _REQUEST_QUEUE.put({
+        "jsonrpc": "2.0",
+        "id": rid,
+        "method": _REQUEST_TOO_LARGE_METHOD,
+        "params": {"received_bytes": oversized.size, "request_method": method},
+    })
+
+
+def _request_too_large_response(req):
+    params = req.get("params") if isinstance(req.get("params"), dict) else {}
+    payload = {
+        "error_code": "request_too_large",
+        "mutation_applied": False,
+        "limit_bytes": _BRIDGE_REQUEST_MAX_BYTES,
+        "received_bytes": params.get("received_bytes"),
+        "action": (
+            "Nothing was executed. Send less per call: edit one workflow step with "
+            "`workflow_update_step` instead of resending the definition, and split "
+            "other content across calls."
+        ),
+    }
+    if params.get("request_method") == "tools/call":
+        return {"jsonrpc": "2.0", "id": req.get("id"), "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+        }}
+    return {"jsonrpc": "2.0", "id": req.get("id"), "error": {
+        "code": -32600,
+        "message": f"Request exceeds {_BRIDGE_REQUEST_MAX_BYTES} bytes; nothing was executed.",
+        "data": payload,
+    }}
 
 
 def _enqueue_stdin_line(raw):
@@ -11055,7 +11502,8 @@ def _enqueue_stdin_line(raw):
     try:
         req = json.loads(line)
     except json.JSONDecodeError:
-        print(f"kronn-internal: bad JSON-RPC line ignored: {line[:120]}", file=sys.stderr)
+        print(f"kronn-internal: bad JSON-RPC line of {len(line)} chars ignored",
+              file=sys.stderr)
         return
     if not isinstance(req, dict):
         return
@@ -11119,6 +11567,8 @@ def _service_control_traffic():
 def _handle(req):
     method = req.get("method") or ""
     rid = req.get("id")
+    if method == _REQUEST_TOO_LARGE_METHOD:
+        return _request_too_large_response(req)
     if method == "initialize":
         # 0.8.6 phase 2 — capture the client's identity. Used by
         # `_agent_type_for_session` so `disc_join` knows whether the
@@ -11135,7 +11585,7 @@ def _handle(req):
                 "id": rid,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": True}},
+                    "capabilities": _server_capabilities(),
                     "serverInfo": {
                         "name": "kronn-internal",
                         "version": BRIDGE_TOOL_SURFACE_VERSION,
@@ -11162,7 +11612,7 @@ def _handle(req):
                 "id": rid,
                 "result": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {"listChanged": True}},
+                    "capabilities": _server_capabilities(),
                     "serverInfo": {
                         "name": "kronn-internal",
                         "version": BRIDGE_TOOL_SURFACE_VERSION,
@@ -11185,7 +11635,7 @@ def _handle(req):
             "id": rid,
             "result": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {"tools": {"listChanged": True}},
+                "capabilities": _server_capabilities(),
                 # Tool-surface version, intentionally distinct from the Kronn
                 # app release. Bumping it tells clients that cache tools/list
                 # to refresh after the Planning contract was added.
@@ -11218,7 +11668,7 @@ def _handle(req):
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 12 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected). Quick Execs: `qe_list`/`qe_run`/`qe_create_draft`/`qe_update` for saved shell-free CLI collectors.\n"
-                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"
+                    "• Live Pages (shared HTML reports): `page_list` · `page_get` · `page_create` · `page_update_html` · `page_add_dataset` · `page_delete_dataset`. Resolve or create the Page before authoring a `PublishPageData` step. A Page button can launch a real QP/QA/QE/Workflow for each data row and shows that row's live state and outcome: `tool_manual({tool: \"page_create\"})`.\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
                     "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
                     "**API actions — order to avoid burning tokens:** "
@@ -11394,8 +11844,8 @@ def main():
         })
     while True:
         req = _REQUEST_QUEUE.get()
-        if req is None:  # EOF — client closed our stdin
-            return
+        if req is None:  # EOF — client closed our stdin, or the reader failed
+            return 1 if _READER_FAILED.is_set() else None
         resp = _handle(req)
         if resp is not None:
             _send(resp)
@@ -11405,4 +11855,4 @@ def main():
 
 if __name__ == "__main__":
     if os.environ.pop(_BRIDGE_PREFLIGHT_ENV, None) != "1":
-        main()
+        sys.exit(main())

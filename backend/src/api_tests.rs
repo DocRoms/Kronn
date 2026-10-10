@@ -1505,6 +1505,134 @@ mod tests {
         assert_eq!(resp.headers()["cache-control"], "no-store");
     }
 
+    /// Removing an allowed site tells open tabs at once, by category only.
+    #[tokio::test]
+    #[serial]
+    async fn changing_allowed_sites_announces_it_to_open_tabs() {
+        isolate_config_dir();
+        let state = test_state();
+        state.config.write().await.embed_allowed_origins = vec!["https://suno.com".to_string()];
+        let mut bus = state.ws_broadcast.subscribe();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/embed-origins")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"add":[],"remove":["https://suno.com"]}"#))
+            .unwrap();
+        let (status, body) = send(state.clone(), false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"], serde_json::json!([]));
+        assert!(matches!(
+            bus.try_recv(),
+            Ok(crate::models::WsMessage::EmbedOriginsChanged)
+        ));
+
+        // A refused change announces nothing.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config/embed-origins")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"add":["https://x.example/path"],"remove":[]}"#,
+            ))
+            .unwrap();
+        let (_, body) = send(state, false, req).await;
+        assert_eq!(body["success"], false);
+        assert!(bus.try_recv().is_err());
+    }
+
+    /// The desktop serves its documents through `serve_app_documents`: each one
+    /// carries the frame policy built from the allowed list, never a 304.
+    #[tokio::test]
+    async fn app_documents_carry_the_host_frame_policy() {
+        let dist = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dist.path().join("index.html"),
+            "<!doctype html><html><head><title>k</title></head></html>",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dist.path().join("assets")).unwrap();
+        std::fs::write(dist.path().join("assets/app.js"), "export {};").unwrap();
+        let state = test_state();
+        state.config.write().await.embed_allowed_origins = vec![
+            "https://suno.com".to_string(),
+            "http://only-http.example".to_string(),
+        ];
+        let app = crate::api::live_pages::serve_app_documents(dist.path(), state.clone());
+        let expected = "frame-src 'self' https://suno.com; child-src 'self' https://suno.com; worker-src 'self' blob:";
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.headers()["content-security-policy"], expected);
+        assert!(first.headers().get("etag").is_none());
+        assert!(first.headers().get("last-modified").is_none());
+        // The marker carries exactly the sources of the header it came with.
+        let csp = first.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = String::from_utf8(
+            first
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        let marker = body
+            .split("<meta name=\"kronn-served-frame-src\" content=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("marker after <head>")
+            .replace("&#39;", "'");
+        assert_eq!(csp, crate::core::embed_origins::policy_for_sources(&marker));
+        assert_eq!(marker, "'self' https://suno.com");
+
+        // A cached copy never comes back as a 304 with an older policy.
+        state.config.write().await.embed_allowed_origins.clear();
+        let reload = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("accept", "text/html")
+                    .header("if-modified-since", "Sat, 01 Jan 2100 00:00:00 GMT")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reload.status(), StatusCode::OK);
+        assert_eq!(
+            reload.headers()["content-security-policy"],
+            "frame-src 'self'; child-src 'self'; worker-src 'self' blob:"
+        );
+
+        let asset = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert!(asset.headers().contains_key("content-security-policy"));
+    }
+
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
     /// agent Install button — installs land in the container under Docker, so
     /// the UI must point to the host-side CLI instead. Health is unauthed.
@@ -2871,6 +2999,122 @@ mod tests {
         assert!(first["name"].is_string());
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn a_skill_names_a_known_project_and_an_update_keeps_or_clears_it() {
+        isolate_config_dir();
+        let state = test_state();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "skill-proj".into(),
+                    name: "Skill Project".into(),
+                    path: "/tmp/skill-project".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    write_access: None,
+                    mcp_sync_report: None,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    workspace: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let call = |method: &str, uri: String, body: serde_json::Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let skill = |extra: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "name": "Project Scope Api Review",
+                "description": "Review a PR.",
+                "icon": "🔎",
+                "category": "Domain",
+                "content": "Body."
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            body
+        };
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "POST",
+                "/api/skills".into(),
+                skill(serde_json::json!({"project_id": "nope"})),
+            ),
+        )
+        .await;
+        assert_eq!(body["success"], false, "{body}");
+        assert_eq!(body["error"], "Project not found");
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "POST",
+                "/api/skills".into(),
+                skill(serde_json::json!({"project_id": "skill-proj"})),
+            ),
+        )
+        .await;
+        assert_eq!(body["data"]["project_id"], "skill-proj", "{body}");
+        let id = body["data"]["id"].as_str().unwrap().to_string();
+
+        let uri = format!("/api/skills/{id}");
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call("PUT", uri.clone(), skill(serde_json::json!({}))),
+        )
+        .await;
+        assert_eq!(
+            body["data"]["project_id"], "skill-proj",
+            "absent keeps it: {body}"
+        );
+        let (_, body) = send(
+            state.clone(),
+            false,
+            call(
+                "PUT",
+                uri.clone(),
+                skill(serde_json::json!({"project_id": null})),
+            ),
+        )
+        .await;
+        assert!(
+            body["data"].get("project_id").is_none(),
+            "null makes it global: {body}"
+        );
+
+        crate::core::skills::delete_custom_skill(&id).unwrap();
+    }
+
     // ─── Q11: Profiles API integration tests ──────────────────────────────────
 
     #[tokio::test]
@@ -2937,6 +3181,97 @@ mod tests {
             .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "set server config: {body}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn config_server_timezone_is_returned_validated_and_saved() {
+        isolate_config_dir();
+        let state = test_state();
+        let post = |tz: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/config/server")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "timezone": tz }).to_string(),
+                ))
+                .unwrap()
+        };
+        let get = || {
+            Request::builder()
+                .method("GET")
+                .uri("/api/config/server")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (_, body) = send(state.clone(), false, get()).await;
+        assert_eq!(body["data"]["timezone"], serde_json::Value::Null);
+        assert!(body["data"]["timezone_detected"]
+            .as_str()
+            .is_some_and(|z| !z.is_empty()));
+
+        // UTC keeps the process zone this test binary already uses.
+        let (_, body) = send(state.clone(), false, post(" UTC ")).await;
+        assert_eq!(body["success"], true, "{body}");
+        let (_, body) = send(state.clone(), false, get()).await;
+        assert_eq!(body["data"]["timezone"], "UTC");
+        assert_eq!(body["data"]["timezone_effective"], "UTC");
+
+        let (_, body) = send(state.clone(), false, post("Europe/Atlantis")).await;
+        assert_eq!(body["success"], false);
+        assert!(body["error"].as_str().unwrap().contains("Europe/Atlantis"));
+        assert_eq!(
+            state.config.read().await.server.timezone.as_deref(),
+            Some("UTC")
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_preview_returns_the_zone_and_the_next_three_firings() {
+        let state = test_state();
+        let preview = |body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/workflows/cron-preview")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let (_, body) = send(
+            state.clone(),
+            false,
+            preview(serde_json::json!({ "schedule": "0 7 * * 1-5", "timezone": "Europe/Paris" })),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        assert_eq!(body["data"]["timezone"], "Europe/Paris");
+        assert_eq!(body["data"]["inherited"], false);
+        let next = body["data"]["next"].as_array().unwrap();
+        assert_eq!(next.len(), 3);
+        assert!(next
+            .iter()
+            .all(|at| at.as_str().unwrap().contains("T07:00:00+0")));
+
+        let (_, body) = send(
+            state.clone(),
+            false,
+            preview(serde_json::json!({ "schedule": "*/5 * * * *" })),
+        )
+        .await;
+        assert_eq!(body["data"]["inherited"], true);
+        assert_eq!(
+            body["data"]["timezone"],
+            crate::core::timezone::current().name()
+        );
+
+        let (_, body) = send(
+            state,
+            false,
+            preview(serde_json::json!({ "schedule": "0 7 * * *", "timezone": "Mars/Olympus" })),
+        )
+        .await;
+        assert_eq!(body["success"], false);
     }
 
     #[tokio::test]
@@ -6783,6 +7118,503 @@ mod tests {
             "$request ",
         ] {
             assert!(!format.contains(leak), "{leak} would log the token");
+        }
+    }
+
+    // ─── KT-1111: assistant conversations are masked server-side ─────────────
+
+    const ASSISTANT_TYPED: &str = "typed-Secret-4f9a2b7c";
+    const ASSISTANT_STORED: &str = "stored-Secret-91c3d5e8";
+
+    fn assistant_state() -> AppState {
+        let state = test_state();
+        let key = crate::core::crypto::generate_secret();
+        state.config.try_write().unwrap().encryption_secret = Some(key.clone());
+        let db = state.db.clone();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(db.with_conn(move |conn| {
+                crate::db::mcps::upsert_server(
+                    conn,
+                    &crate::models::McpServer {
+                        id: "custom-svc".into(),
+                        name: "Svc".into(),
+                        description: String::new(),
+                        transport: crate::models::McpTransport::ApiOnly,
+                        source: crate::models::McpSource::Manual,
+                        api_spec: None,
+                    },
+                )?;
+                let mut env = std::collections::HashMap::new();
+                env.insert("API_TOKEN".to_string(), ASSISTANT_STORED.to_string());
+                crate::db::mcps::insert_config(
+                    conn,
+                    &crate::models::McpConfig {
+                        id: "cfg-svc".into(),
+                        server_id: "custom-svc".into(),
+                        label: "Svc".into(),
+                        env_keys: vec!["API_TOKEN".into()],
+                        env_encrypted: crate::db::mcps::encrypt_env(&env, &key).unwrap(),
+                        args_override: None,
+                        is_global: true,
+                        include_general: true,
+                        config_hash: "h".into(),
+                        project_ids: vec![],
+                        host_sync: crate::models::HostSyncMode::None,
+                    },
+                )
+            }))
+        })
+        .unwrap();
+        state
+    }
+
+    fn json_post(uri: &str, body: Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn stored_text(state: &AppState) -> String {
+        state
+            .db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT content FROM messages UNION ALL SELECT title FROM discussions
+                     UNION ALL SELECT target_label FROM assistant_conversations",
+                )?;
+                let rows: Vec<String> = stmt
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(rows.join("\n"))
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn discussion_count(state: &AppState) -> i64 {
+        state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM discussions", [], |row| row.get(0))?)
+            })
+            .await
+            .unwrap()
+    }
+
+    fn assistant_create(secrets: Value) -> Value {
+        serde_json::json!({
+            "project_id": null,
+            "title": format!("helper {ASSISTANT_TYPED}"),
+            "agent": "ClaudeCode",
+            "language": "en",
+            "initial_prompt": format!(
+                "context: token={ASSISTANT_TYPED} stored={ASSISTANT_STORED} b64={}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ASSISTANT_TYPED)
+            ),
+            "no_agent": true,
+            "assistant": {
+                "kind": "custom_api",
+                "target_id": "custom-svc",
+                "target_label": "Svc",
+                "secrets": secrets,
+            }
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assistant_creation_masks_typed_and_stored_secrets_before_storing() {
+        let state = assistant_state();
+        let (_, body) = send(
+            state.clone(),
+            false,
+            json_post(
+                "/api/discussions",
+                assistant_create(serde_json::json!([ASSISTANT_TYPED])),
+            ),
+        )
+        .await;
+        assert_eq!(body["success"], true, "{body}");
+        let id = body["data"]["id"].as_str().unwrap().to_string();
+        let returned = body.to_string();
+        let stored = stored_text(&state).await;
+        for text in [&returned, &stored] {
+            assert!(!text.contains(ASSISTANT_TYPED), "typed secret kept: {text}");
+            assert!(
+                !text.contains(ASSISTANT_STORED),
+                "stored secret kept: {text}"
+            );
+            assert!(!text.contains(&base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                ASSISTANT_TYPED
+            )));
+        }
+        assert!(stored.contains("context: token=***"));
+        let linked = state
+            .db
+            .with_conn(move |conn| crate::db::assistant_conversations::get(conn, &id))
+            .await
+            .unwrap()
+            .expect("linked in the creation");
+        assert_eq!(linked.target_id.as_deref(), Some("custom-svc"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_later_assistant_message_is_masked_before_it_is_stored() {
+        let state = assistant_state();
+        let mut create = assistant_create(serde_json::json!([]));
+        create["title"] = serde_json::json!("helper");
+        create["initial_prompt"] = serde_json::json!("system prompt");
+        let (_, body) = send(state.clone(), false, json_post("/api/discussions", create)).await;
+        let id = body["data"]["id"].as_str().unwrap().to_string();
+        // The typed value travels with the message; the stored one is known
+        // to the server through the linked plugin; the Bearer one by shape.
+        let message = serde_json::json!({
+            "content": format!(
+                "why 401? {ASSISTANT_TYPED} {ASSISTANT_STORED} Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123"
+            ),
+            "assistant_secrets": [ASSISTANT_TYPED],
+        });
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            send(
+                state.clone(),
+                false,
+                json_post(&format!("/api/discussions/{id}/messages"), message),
+            ),
+        )
+        .await;
+        assert!(sent.is_ok(), "message request did not finish");
+        let stored = stored_text(&state).await;
+        assert!(stored.contains("why 401?"), "message not stored: {stored}");
+        assert!(!stored.contains(ASSISTANT_TYPED));
+        assert!(!stored.contains(ASSISTANT_STORED));
+        assert!(!stored.contains("abcdefghijklmnopqrstuvwxyz0123"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_assistant_link_leaves_no_discussion_behind() {
+        let state = assistant_state();
+        let mut invalid = assistant_create(serde_json::json!([ASSISTANT_TYPED]));
+        invalid["assistant"]["target_step"] = serde_json::json!("bad\nstep");
+        let (_, body) = send(state.clone(), false, json_post("/api/discussions", invalid)).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(discussion_count(&state).await, 0);
+
+        // A link that fails inside the transaction rolls the discussion back.
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute_batch("DROP TABLE assistant_conversations")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (_, body) = send(
+            state.clone(),
+            false,
+            json_post(
+                "/api/discussions",
+                assistant_create(serde_json::json!([ASSISTANT_TYPED])),
+            ),
+        )
+        .await;
+        assert_eq!(body["success"], false, "{body}");
+        assert_eq!(discussion_count(&state).await, 0);
+    }
+
+    // ─── KT-1111 R2: every writer of an assistant conversation masks ─────────
+
+    async fn send_raw(state: AppState, req: Request<Body>) -> (StatusCode, String) {
+        let app = build_router_with_auth(state, false);
+        let resp = app.oneshot(req).await.expect("oneshot failed");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn create_assistant(state: &AppState) -> String {
+        let mut create = assistant_create(serde_json::json!([]));
+        create["title"] = serde_json::json!("helper");
+        create["initial_prompt"] = serde_json::json!("system prompt");
+        let (_, body) = send(state.clone(), false, json_post("/api/discussions", create)).await;
+        body["data"]["id"].as_str().expect("created").to_string()
+    }
+
+    async fn write_agent_reply(state: &AppState, id: &str, content: String) {
+        let id = id.to_string();
+        state
+            .db
+            .with_conn(move |conn| {
+                let msg = crate::models::DiscussionMessage {
+                    recovered_partial: false,
+                    session_tokens_at_message: None,
+                    author_cli_ordinal: None,
+                    model: None,
+                    lint_report: None,
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: crate::models::MessageRole::Agent,
+                    channel: crate::models::MessageChannel::Main,
+                    content,
+                    agent_type: Some(crate::models::AgentType::ClaudeCode),
+                    timestamp: chrono::Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
+                };
+                crate::db::discussions::insert_message(conn, &id, &msg)?;
+                // A streamed checkpoint is a persistence point too.
+                crate::db::discussions::set_partial_response(conn, &id, Some(&msg.content), None)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_agent_reply_echoing_a_stored_secret_is_masked_everywhere() {
+        let state = assistant_state();
+        let id = create_assistant(&state).await;
+        write_agent_reply(&state, &id, format!("the tool returned {ASSISTANT_STORED}")).await;
+
+        let (_, detail) = send_raw(
+            state.clone(),
+            Request::builder()
+                .uri(format!("/api/discussions/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(detail.contains("the tool returned ***"), "{detail}");
+        let (_, portable) = send_raw(
+            state.clone(),
+            Request::builder()
+                .uri(format!("/api/discussions/{id}/export"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let export = crate::api::setup::build_export(&state).await.unwrap();
+        let partial: Option<String> = state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT partial_response FROM discussions WHERE id = ?1",
+                        [id],
+                        |row| row.get(0),
+                    )?)
+                }
+            })
+            .await
+            .unwrap();
+        for text in [
+            detail,
+            portable,
+            serde_json::to_string(&export).unwrap(),
+            stored_text(&state).await,
+            partial.unwrap_or_default(),
+        ] {
+            assert!(
+                !text.contains(ASSISTANT_STORED),
+                "stored secret exposed: {text}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_edit_resend_in_an_assistant_conversation_is_masked() {
+        let state = assistant_state();
+        let id = create_assistant(&state).await;
+        let (message_id, revision): (String, String) = state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    Ok(conn.query_row(
+                        "SELECT id, timestamp FROM messages WHERE discussion_id = ?1 AND role = 'User'",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?)
+                }
+            })
+            .await
+            .unwrap();
+        let (_, body) = send(
+            state.clone(),
+            false,
+            json_post(
+                &format!("/api/discussions/{id}/messages/revise"),
+                serde_json::json!({
+                    "message_id": message_id,
+                    "content": format!("retry with {ASSISTANT_STORED}"),
+                    "expected_revision": revision,
+                    "idempotency_key": uuid::Uuid::new_v4().to_string(),
+                }),
+            ),
+        )
+        .await;
+        let stored = stored_text(&state).await;
+        assert!(
+            stored.contains("retry with ***"),
+            "revision not applied: {body} / {stored}"
+        );
+        assert!(!stored.contains(ASSISTANT_STORED));
+        let events: String = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COALESCE(group_concat(content, '\n'), '') FROM message_revision_events",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert!(!events.contains(ASSISTANT_STORED));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_of_the_same_turn_is_masked_with_the_values_sent_with_it() {
+        let state = assistant_state();
+        let id = create_assistant(&state).await;
+        state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    crate::db::discussions::set_disc_no_agent(conn, &id, false)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let message = serde_json::json!({
+            "content": "check this",
+            "assistant_secrets": [ASSISTANT_TYPED],
+            "defer_dispatch": true,
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            send_raw(
+                state.clone(),
+                json_post(&format!("/api/discussions/{id}/messages"), message),
+            ),
+        )
+        .await
+        .expect("message request finished");
+        let job_ids: Vec<String> = state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    let mut stmt = conn
+                        .prepare("SELECT id FROM agent_dispatch_jobs WHERE discussion_id = ?1")?;
+                    let rows = stmt
+                        .query_map([id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()?;
+                    Ok(rows)
+                }
+            })
+            .await
+            .unwrap();
+        assert!(!job_ids.is_empty(), "the message started a dispatch");
+        assert_eq!(state.db.assistant_guard().live_turns(), job_ids.len());
+
+        write_agent_reply(&state, &id, format!("you typed {ASSISTANT_TYPED}")).await;
+        assert!(!stored_text(&state).await.contains(ASSISTANT_TYPED));
+
+        // The turn ends with its dispatch: nothing of it stays in memory.
+        for job in &job_ids {
+            state.db.assistant_guard().end_turn(job);
+        }
+        assert_eq!(state.db.assistant_guard().live_turns(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dispatch_still_queued_after_two_hours_keeps_its_values_masked() {
+        let state = assistant_state();
+        let id = create_assistant(&state).await;
+        state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    crate::db::discussions::set_disc_no_agent(conn, &id, false)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let message = serde_json::json!({
+            "content": "check this",
+            "assistant_secrets": [ASSISTANT_TYPED],
+            "defer_dispatch": true,
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            send_raw(
+                state.clone(),
+                json_post(&format!("/api/discussions/{id}/messages"), message),
+            ),
+        )
+        .await
+        .expect("message request finished");
+        let jobs: Vec<String> = state
+            .db
+            .with_conn({
+                let id = id.clone();
+                move |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT id FROM agent_dispatch_jobs
+                          WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')",
+                    )?;
+                    let rows = stmt
+                        .query_map([id], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<String>>>()?;
+                    Ok(rows)
+                }
+            })
+            .await
+            .unwrap();
+        assert!(!jobs.is_empty(), "the dispatch is still queued");
+        for job in &jobs {
+            state
+                .db
+                .assistant_guard()
+                .age_turn(job, std::time::Duration::from_secs(3 * 60 * 60));
+        }
+        write_agent_reply(&state, &id, format!("late reply with {ASSISTANT_TYPED}")).await;
+
+        let (_, detail) = send_raw(
+            state.clone(),
+            Request::builder()
+                .uri(format!("/api/discussions/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(detail.contains("late reply with ***"), "{detail}");
+        let export = crate::api::setup::build_export(&state).await.unwrap();
+        for text in [
+            detail,
+            serde_json::to_string(&export).unwrap(),
+            stored_text(&state).await,
+        ] {
+            assert!(
+                !text.contains(ASSISTANT_TYPED),
+                "an active dispatch lost its values: {text}"
+            );
         }
     }
 }

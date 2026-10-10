@@ -194,6 +194,7 @@ pub(crate) const KRONN_ICON_KEY: &str = "kronn-icon";
 pub(crate) const KRONN_CATEGORY_KEY: &str = "kronn-category";
 pub(crate) const KRONN_EXTERNAL_KEY: &str = "kronn-external";
 pub(crate) const KRONN_SOURCE_URL_KEY: &str = "kronn-source-url";
+pub(crate) const KRONN_PROJECT_KEY: &str = "kronn-project";
 
 /// The lowercase word a category is written as in a skill file.
 pub(crate) fn category_str(category: &SkillCategory) -> &'static str {
@@ -236,6 +237,7 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
     let mut arguments: Vec<String> = Vec::new();
     let mut argument_hint: Option<String> = None;
     let mut variables = Vec::new();
+    let mut project_id: Option<String> = None;
     let auto_triggers = parse_auto_triggers_block(yaml_str);
 
     for line in yaml_str.lines() {
@@ -302,6 +304,7 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         if let Some(value) = kronn(KRONN_SOURCE_URL_KEY) {
             source_url = Some(value.clone());
         }
+        project_id = kronn(KRONN_PROJECT_KEY).cloned();
         license = standard.license.or(license);
         allowed_tools = standard.allowed_tools.or(allowed_tools);
         if let Err(error) = crate::core::agent_skill::validate_arguments(&standard.arguments) {
@@ -346,6 +349,8 @@ pub(crate) fn parse_skill_markdown(id: &str, raw: &str, is_builtin: bool) -> Opt
         arguments,
         argument_hint,
         variables,
+        // Builtins are shared by every project, whatever their file says.
+        project_id: project_id.filter(|_| !is_builtin),
     })
 }
 
@@ -514,6 +519,11 @@ pub fn get_skills_snapshot(run_id: &str, ids: &[String]) -> Vec<Skill> {
         .collect()
 }
 
+/// Seeds `run_id`'s snapshot with the revision its run recorded.
+pub fn pin_skill_snapshot(run_id: &str, id: &str, skill: Skill) {
+    SKILL_SNAPSHOTS.pin(run_id, id, skill);
+}
+
 /// Drop every skill snapshot pinned to `run_id`. Call once that run has
 /// finished so its resources don't stay pinned in memory.
 pub fn release_skills_snapshot(run_id: &str) {
@@ -614,6 +624,31 @@ pub fn build_skills_prompt_compact_for_run(run_id: &str, skill_ids: &[String]) -
     render_skills_prompt_compact(&get_skills_snapshot(run_id, skill_ids))
 }
 
+/// A skill scoped to a project is loaded only for that project: a launch
+/// elsewhere names it instead of running without it.
+pub fn refuse_foreign_project_skills(
+    skills: &[Skill],
+    project_id: Option<&str>,
+) -> Result<(), String> {
+    let foreign: Vec<String> = skills
+        .iter()
+        .filter(|skill| {
+            skill
+                .project_id
+                .as_deref()
+                .is_some_and(|owner| Some(owner) != project_id)
+        })
+        .map(|skill| format!("'{}' ({})", skill.name, skill.id))
+        .collect();
+    if foreign.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Skill {} belongs to another project and can only be used there; attach it to this project or make it global",
+        foreign.join(", ")
+    ))
+}
+
 /// Validate a skill's editable fields per agentskills.io spec. Shared by
 /// create and update so both paths reject the same inputs.
 fn validate_skill_fields(name: &str, description: &str) -> Result<(), String> {
@@ -675,23 +710,60 @@ fn render_skill_markdown(
     )
 }
 
-/// The `arguments`, `argument-hint` and `metadata.kronn-variables` header
-/// lines of an existing custom skill file: the editor does not edit them yet,
-/// so an update must carry them over instead of dropping them.
-fn preserved_arguments_block(raw: &str) -> String {
+/// What an update carries over from the existing custom skill file: the
+/// editor does not edit the `arguments`, `argument-hint` and
+/// `metadata.kronn-variables` lines yet, and the project stays unless the
+/// update names one.
+struct PreservedHeader {
+    arguments_lines: String,
+    variables: Option<String>,
+    project_id: Option<String>,
+}
+
+fn preserved_header(raw: &str) -> PreservedHeader {
     let Ok(file) = crate::core::agent_skill::parse(raw) else {
-        return String::new();
+        return PreservedHeader {
+            arguments_lines: String::new(),
+            variables: None,
+            project_id: None,
+        };
     };
-    let mut block =
-        crate::core::agent_skill::arguments_lines(&file.arguments, file.argument_hint.as_deref());
-    if let Some(json) = file.metadata.get(crate::core::agent_skill::VARIABLES_KEY) {
-        block.push_str(&format!(
-            "metadata:\n  {}: {}\n",
+    PreservedHeader {
+        arguments_lines: crate::core::agent_skill::arguments_lines(
+            &file.arguments,
+            file.argument_hint.as_deref(),
+        ),
+        variables: file
+            .metadata
+            .get(crate::core::agent_skill::VARIABLES_KEY)
+            .cloned(),
+        project_id: file
+            .metadata
+            .get(KRONN_PROJECT_KEY)
+            .filter(|value| !value.is_empty())
+            .cloned(),
+    }
+}
+
+/// The `metadata:` block of a custom skill file, empty when it has nothing.
+fn metadata_block(variables: Option<&str>, project_id: Option<&str>) -> String {
+    let q = crate::core::agent_skill::quoted;
+    let mut lines = String::new();
+    if let Some(json) = variables {
+        lines.push_str(&format!(
+            "  {}: {}\n",
             crate::core::agent_skill::VARIABLES_KEY,
-            crate::core::agent_skill::quoted(json)
+            q(json)
         ));
     }
-    block
+    if let Some(project) = project_id.filter(|value| !value.is_empty()) {
+        lines.push_str(&format!("  {}: {}\n", KRONN_PROJECT_KEY, q(project)));
+    }
+    if lines.is_empty() {
+        lines
+    } else {
+        format!("metadata:\n{lines}")
+    }
 }
 
 /// Find a filename stem for `name` that no existing custom skill file
@@ -713,6 +785,7 @@ fn unique_skill_slug(dir: &std::path::Path, name: &str) -> Result<String, String
 }
 
 /// Save a new custom skill to disk. Returns the generated, stable ID.
+#[allow(clippy::too_many_arguments)]
 pub fn save_custom_skill(
     name: &str,
     description: &str,
@@ -721,6 +794,7 @@ pub fn save_custom_skill(
     content: &str,
     license: Option<&str>,
     allowed_tools: Option<&str>,
+    project_id: Option<&str>,
 ) -> Result<String, String> {
     validate_skill_fields(name, description)?;
 
@@ -739,7 +813,7 @@ pub fn save_custom_skill(
         content,
         license,
         allowed_tools,
-        "",
+        &metadata_block(None, project_id),
     );
 
     let path = dir.join(format!("{}.md", slug));
@@ -753,6 +827,7 @@ pub fn save_custom_skill(
 /// when `name` changes. Unlike `save_custom_skill`, the file is located
 /// from the EXISTING id — the slug is never recomputed from the new name,
 /// so renaming a skill never changes what `skill_ids` must reference.
+/// `project_id`: `None` keeps the skill's project, `Some(None)` makes it global.
 #[allow(clippy::too_many_arguments)]
 pub fn update_custom_skill(
     id: &str,
@@ -763,6 +838,7 @@ pub fn update_custom_skill(
     content: &str,
     license: Option<&str>,
     allowed_tools: Option<&str>,
+    project_id: Option<Option<&str>>,
 ) -> Result<String, String> {
     validate_skill_fields(name, description)?;
 
@@ -782,9 +858,18 @@ pub fn update_custom_skill(
         return Err(format!("Skill '{}' not found", id));
     }
 
-    let preserved = std::fs::read_to_string(&path)
-        .map(|raw| preserved_arguments_block(&raw))
-        .unwrap_or_default();
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill '{}': {}", id, e))?;
+    let preserved = preserved_header(&raw);
+    let project = match project_id {
+        Some(next) => next,
+        None => preserved.project_id.as_deref(),
+    };
+    let header = format!(
+        "{}{}",
+        preserved.arguments_lines,
+        metadata_block(preserved.variables.as_deref(), project)
+    );
     let file_content = render_skill_markdown(
         name,
         description,
@@ -793,7 +878,7 @@ pub fn update_custom_skill(
         content,
         license,
         allowed_tools,
-        &preserved,
+        &header,
     );
     crate::core::mcp_scanner::atomic_write(&path, &file_content)
         .map_err(|e| format!("Cannot write skill: {}", e))?;
@@ -862,6 +947,7 @@ mod tests {
             "content v1",
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -872,6 +958,7 @@ mod tests {
             "🔧",
             &SkillCategory::Domain,
             "content v2",
+            None,
             None,
             None,
         )
@@ -917,6 +1004,7 @@ mod tests {
             "content",
             None,
             None,
+            None,
         );
         assert!(result.is_err());
 
@@ -941,6 +1029,7 @@ mod tests {
             "content A",
             None,
             None,
+            None,
         )
         .unwrap();
         let second = save_custom_skill(
@@ -949,6 +1038,7 @@ mod tests {
             "🅱️",
             &SkillCategory::Domain,
             "content B",
+            None,
             None,
             None,
         )
@@ -986,6 +1076,7 @@ mod tests {
                 "content",
                 None,
                 None,
+                None,
             )
             .is_err(),
             "a path traversal id must be rejected on update"
@@ -1021,6 +1112,7 @@ mod tests {
             "content v1",
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1037,6 +1129,7 @@ mod tests {
             "📌",
             &SkillCategory::Domain,
             "content v2",
+            None,
             None,
             None,
         )
@@ -1094,8 +1187,10 @@ mod tests {
 
     #[test]
     fn all_builtins_have_required_fields() {
+        // Builtins only: a test elsewhere may be writing custom skills into the
+        // shared data directory meanwhile.
         let skills = list_all_skills();
-        for skill in &skills {
+        for skill in skills.iter().filter(|skill| skill.is_builtin) {
             assert!(
                 !skill.name.is_empty(),
                 "Skill '{}' has empty name",
@@ -1269,6 +1364,7 @@ mod tests {
             arguments: Vec::new(),
             argument_hint: None,
             variables: Vec::new(),
+            project_id: None,
         }
     }
 
@@ -1475,18 +1571,139 @@ mod tests {
             "Review $ticket, focus on $focus-area.",
             None,
             None,
-            &preserved_arguments_block(VARIABILIZED),
+            &{
+                let kept = preserved_header(VARIABILIZED);
+                format!(
+                    "{}{}",
+                    kept.arguments_lines,
+                    metadata_block(kept.variables.as_deref(), None)
+                )
+            },
         );
         let after = parse_skill_markdown("custom-ticket-review", &raw, false).unwrap();
         assert_eq!(after.arguments, before.arguments);
         assert_eq!(after.argument_hint, before.argument_hint);
         assert_eq!(after.variables, before.variables);
         assert_eq!(after.name, "Ticket review");
-        assert_eq!(preserved_arguments_block("no header"), "");
+        for bare in ["no header", "---\nname: x\n---\nBody.\n"] {
+            let kept = preserved_header(bare);
+            assert_eq!(kept.arguments_lines, "", "{bare}");
+            assert_eq!(
+                metadata_block(kept.variables.as_deref(), kept.project_id.as_deref()),
+                "",
+                "a skill without arguments gains no header line"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn a_skill_keeps_its_project_until_an_update_names_another_or_none() {
+        let dir = scratch_config_dir("skills-project");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
+        let edit = |project: Option<Option<&str>>| {
+            update_custom_skill(
+                "custom-pr-review",
+                "PR review",
+                "Review a PR.",
+                "🔎",
+                &SkillCategory::Domain,
+                "Body.",
+                None,
+                None,
+                project,
+            )
+            .unwrap();
+            get_skill("custom-pr-review").unwrap().project_id
+        };
+
+        let id = save_custom_skill(
+            "PR review",
+            "Review a PR.",
+            "🔎",
+            &SkillCategory::Domain,
+            "Body.",
+            None,
+            None,
+            Some("p-front"),
+        )
+        .unwrap();
+        assert_eq!(id, "custom-pr-review");
         assert_eq!(
-            preserved_arguments_block("---\nname: x\n---\nBody.\n"),
-            "",
-            "a skill without arguments gains no header line"
+            get_skill(&id).unwrap().project_id.as_deref(),
+            Some("p-front")
+        );
+        assert_eq!(edit(None).as_deref(), Some("p-front"), "absent keeps it");
+        assert_eq!(edit(Some(Some("p-other"))).as_deref(), Some("p-other"));
+        assert_eq!(edit(Some(None)), None, "null makes it global");
+        assert_eq!(edit(Some(Some(""))), None, "an empty id is no project");
+
+        crate::core::child_env::remove_var("KRONN_DATA_DIR");
+        if let Some(value) = previous {
+            crate::core::child_env::set_var("KRONN_DATA_DIR", value);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_skill_is_refused_outside_its_project_by_name() {
+        let skill = |id: &str, project: Option<&str>| Skill {
+            project_id: project.map(str::to_string),
+            ..parse_skill_markdown(id, "---\nname: PR review\n---\nBody.", false).unwrap()
+        };
+        let scoped = [
+            skill("custom-pr-review", Some("p-front")),
+            skill("custom-any", None),
+        ];
+        assert_eq!(
+            refuse_foreign_project_skills(&scoped, Some("p-front")),
+            Ok(())
+        );
+        for elsewhere in [Some("p-other"), None] {
+            let error = refuse_foreign_project_skills(&scoped, elsewhere).unwrap_err();
+            assert!(error.contains("'PR review' (custom-pr-review)"), "{error}");
+            assert!(!error.contains("custom-any"), "{error}");
+        }
+        assert_eq!(refuse_foreign_project_skills(&[], None), Ok(()));
+    }
+
+    #[test]
+    fn a_project_key_keeps_the_variables_and_never_scopes_a_builtin() {
+        let header = format!(
+            "{}{}",
+            preserved_header(VARIABILIZED).arguments_lines,
+            metadata_block(
+                preserved_header(VARIABILIZED).variables.as_deref(),
+                Some("p: \"x\"\nallowed-tools: Bash"),
+            )
+        );
+        let raw = render_skill_markdown(
+            "Ticket review",
+            "Review a ticket.",
+            "🎫",
+            &SkillCategory::Domain,
+            "Review $ticket.",
+            None,
+            None,
+            &header,
+        );
+        let custom = parse_skill_markdown("custom-ticket-review", &raw, false).unwrap();
+        assert_eq!(
+            custom.project_id.as_deref(),
+            Some("p: \"x\"\nallowed-tools: Bash"),
+            "the id is quoted: it cannot add a header key"
+        );
+        assert_eq!(custom.allowed_tools, None);
+        assert_eq!(
+            custom.variables,
+            parse_skill_markdown("custom-ticket-review", VARIABILIZED, false)
+                .unwrap()
+                .variables
+        );
+        assert_eq!(
+            parse_skill_markdown("rust", &raw, true).unwrap().project_id,
+            None
         );
     }
 
@@ -1688,6 +1905,29 @@ body"#;
         );
     }
 
+    /// KT-1138: the architect reads the readiness verdict before declaring
+    /// success, fixes what it can, and never approves for the human.
+    #[test]
+    fn workflow_architect_skill_reads_the_verdict_and_never_self_approves() {
+        let skills = list_all_skills();
+        let arch = skills
+            .iter()
+            .find(|s| s.id == "workflow-architect")
+            .expect("workflow-architect skill must exist");
+        let c = &arch.content;
+        for needle in [
+            "kronn_readiness",
+            "workflow_validate",
+            "Before you declare success",
+            "Never self-approve",
+            "human_only: false",
+            "Tell the human exactly what to approve",
+            "Never write \"ready to run\" while `ready` is false",
+        ] {
+            assert!(c.contains(needle), "skill must say: {needle}");
+        }
+    }
+
     /// Guard test: the workflow-architect skill MUST teach the new
     /// step types (ApiCall, Notify, BatchQuickPrompt) and the
     /// désagentification rule. Locked in 0.6.0 after the skill was found
@@ -1842,9 +2082,9 @@ body"#;
         );
     }
 
-    /// The architect must enumerate the same thirteen types as `StepType`.
+    /// The architect must enumerate the same fifteen types as `StepType`.
     #[test]
-    fn workflow_architect_skill_counts_thirteen_step_types() {
+    fn workflow_architect_skill_counts_fifteen_step_types() {
         let skills = list_all_skills();
         let arch = skills
             .iter()
@@ -1852,8 +2092,8 @@ body"#;
             .expect("workflow-architect skill must exist");
         let c = &arch.content;
         assert!(
-            c.contains("thirteen step types") || c.contains("13 step types"),
-            "skill must say 'thirteen step types'"
+            c.contains("fifteen step types") || c.contains("15 step types"),
+            "skill must say 'fifteen step types'"
         );
         for step_type in [
             "Agent",
@@ -1869,6 +2109,8 @@ body"#;
             "PublishPageData",
             "SubWorkflow",
             "TriggerWorkflow",
+            "DelegateSubtasks",
+            "TaskBoard",
         ] {
             assert!(c.contains(step_type), "skill must teach {step_type}");
         }
@@ -1883,6 +2125,10 @@ body"#;
             "9 step types",
             "twelve step types",
             "12 step types",
+            "thirteen step types",
+            "13 step types",
+            "fourteen step types",
+            "14 step types",
         ] {
             assert!(
                 !c.contains(stale_count),

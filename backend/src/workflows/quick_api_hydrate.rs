@@ -31,9 +31,12 @@ fn step_kind_label(step: &WorkflowStep) -> &'static str {
 ///   - L'accès DB échoue
 ///
 /// No-op si `quick_api_id` est `None`.
+/// `run_id` is the workflow run executing the step: a pinned run gets its
+/// pinned revision (KT-1096).
 pub async fn hydrate_step_from_quick_api(
     step: &mut WorkflowStep,
     db: &Database,
+    run_id: Option<&str>,
 ) -> Result<(), String> {
     let qa_id = match step.quick_api_id.clone() {
         Some(id) => id,
@@ -42,19 +45,28 @@ pub async fn hydrate_step_from_quick_api(
     let kind = step_kind_label(step);
 
     let qa_lookup = qa_id.clone();
+    let pinned_run = run_id.map(str::to_string);
     let qa = match db
         .with_read_conn(move |conn| {
-            let api = crate::db::quick_apis::get_quick_api(conn, &qa_lookup)?;
+            let api = match crate::workflows::run_pins::quick_api_for(
+                conn,
+                pinned_run.as_deref(),
+                &qa_lookup,
+            )? {
+                Ok(api) => api,
+                Err(reason) => return Ok(Err(reason)),
+            };
             if let Some(api) = &api {
                 crate::core::repository_resources::ensure_quick_api_execution_approved(conn, api)
                     .map_err(anyhow::Error::msg)?;
             }
-            Ok(api)
+            Ok(Ok(api))
         })
         .await
     {
-        Ok(Some(q)) => q,
-        Ok(None) => {
+        Ok(Err(reason)) => return Err(reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => {
             return Err(format!(
                 "{} step references QuickApi `{}` which does not exist.",
                 kind, qa_id
@@ -175,11 +187,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -240,7 +254,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut step = empty_step(None);
         let before = step.clone();
-        hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_api(&mut step, &db, None)
+            .await
+            .unwrap();
         assert_eq!(step.api_plugin_slug, before.api_plugin_slug);
         assert_eq!(step.api_endpoint_path, before.api_endpoint_path);
     }
@@ -256,7 +272,9 @@ mod tests {
         let qa_id = seed_qa(&db, qa).await;
         let mut step = empty_step(Some(qa_id));
 
-        hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_api(&mut step, &db, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             step.api_body,
@@ -268,7 +286,7 @@ mod tests {
     async fn missing_quick_api_returns_clear_error() {
         let db = Database::open_in_memory().unwrap();
         let mut step = empty_step(Some("nonexistent-id".to_string()));
-        let err = hydrate_step_from_quick_api(&mut step, &db)
+        let err = hydrate_step_from_quick_api(&mut step, &db, None)
             .await
             .unwrap_err();
         assert!(err.contains("QuickApi"), "error mentions QuickApi: {}", err);
@@ -281,7 +299,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let qa_id = seed_qa(&db, make_qa("qa-hydrate-1")).await;
         let mut step = empty_step(Some(qa_id));
-        hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_api(&mut step, &db, None)
+            .await
+            .unwrap();
         assert_eq!(step.api_plugin_slug.as_deref(), Some("test-plugin"));
         assert_eq!(step.api_config_id.as_deref(), Some("cfg-1"));
         assert_eq!(step.api_endpoint_path.as_deref(), Some("/v1/items"));
@@ -301,7 +321,9 @@ mod tests {
         // plugin_slug / config_id viennent du QA (non-overridden).
         step.api_endpoint_path = Some("/step/override-path".to_string());
         step.api_timeout_ms = Some(9999);
-        hydrate_step_from_quick_api(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_api(&mut step, &db, None)
+            .await
+            .unwrap();
         assert_eq!(
             step.api_endpoint_path.as_deref(),
             Some("/step/override-path"),
@@ -325,7 +347,7 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut step = blank_step("batch_step", StepType::BatchApiCall);
         step.quick_api_id = Some("missing".to_string());
-        let err = hydrate_step_from_quick_api(&mut step, &db)
+        let err = hydrate_step_from_quick_api(&mut step, &db, None)
             .await
             .unwrap_err();
         assert!(

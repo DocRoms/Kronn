@@ -127,6 +127,9 @@ services:
       - KRONN_DATA_DIR=/data
       - KRONN_IN_DOCKER=1
       - KRONN_HOST_HOME=${HOME}
+      # Default zone of crons and date templates; a container reports UTC
+      # without it. Settings > timezone overrides it.
+      - TZ=${TZ:-}
       # Expose the security boundary to diagnostics. These values do not add
       # mounts; they mirror the primary + generated override mounts above.
       - KRONN_REPOS_DIR=${KRONN_REPOS_DIR:-${HOME}/Repositories}

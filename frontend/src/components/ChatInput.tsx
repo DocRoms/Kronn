@@ -15,6 +15,7 @@ import type {
   QuickPrompt,
   ModelTier,
   ModelTiersConfig,
+  DiscussionAgentHandoffMode,
 } from '../types/generated';
 import {
   AGENT_MENTIONS as ALL_AGENT_MENTIONS,
@@ -65,8 +66,11 @@ import { useIsMobile } from '../hooks/useMediaQuery';
 import { MarkdownEditor } from './MarkdownComposerTools';
 import {
   composerMentions,
+  positionedTargetsFromComposerText,
   targetsFromComposerText,
 } from '../lib/messageTargets';
+import { detectDelegation, type DelegationProposal } from '../lib/agentDelegation';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { findAgentMentionQuery, mentionMatchRank, type AgentMentionQuery } from '../lib/mention-autocomplete';
 import { externalAgentTargets } from '../lib/externalAgentIdentity';
 import { SkillVariablesBadge } from './SkillVariablesBadge';
@@ -205,6 +209,26 @@ export function ChatInput({
   const [sendAsNote, setSendAsNote] = useState(false);
   const [cliParticipants, setCliParticipants] = useState<ParticipantView[]>([]);
   const [nativeAgentDisabled, setNativeAgentDisabled] = useState<boolean | null>(null);
+  // Live routing of the draft; the textarea is uncontrolled, so this only
+  // changes when the parsed target list does.
+  const [draftTargets, setDraftTargets] = useState<MessageTarget[]>([]);
+  // One routing question at a time, bound to its discussion and draft; any
+  // edit, switch or cancel bumps the id so a pending continuation cannot send.
+  const [delegationPrompt, setDelegationPrompt] = useState<{
+    id: number;
+    discussionId: string;
+    text: string;
+    proposal: DelegationProposal;
+  } | null>(null);
+  const [delegationPending, setDelegationPending] = useState(false);
+  const delegationOpRef = useRef(0);
+  const discussionIdRef = useRef(discussion?.id);
+  const closeDelegation = useCallback(() => {
+    delegationOpRef.current += 1;
+    setDelegationPrompt(null);
+    setDelegationPending(false);
+  }, []);
+  const [handoffMode, setHandoffMode] = useState<DiscussionAgentHandoffMode | null>(null);
   const chatInputValueRef = useRef('');
   const chatInputHasText = chatInput.trim().length > 0;
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
@@ -216,9 +240,13 @@ export function ChatInput({
       .catch(error => console.warn('fetch discussion note setting failed:', error));
   }, []);
 
+  useLayoutEffect(() => {
+    discussionIdRef.current = discussion?.id;
+  }, [discussion?.id]);
   useEffect(() => {
     setSendAsNote(false);
-  }, [discussion?.id]);
+    closeDelegation();
+  }, [discussion?.id, closeDelegation]);
   const replyAuthor = useMemo(() => {
     if (!replyTarget) return '';
     if (replyTarget.agent_type) {
@@ -630,7 +658,9 @@ export function ChatInput({
     return () => window.removeEventListener('keydown', onKey);
   }, [showDebatePopover]);
 
-  const handleSendMessageRef = useRef<(() => void) | null>(null);
+  const handleSendMessageRef = useRef<((routing?: 'orchestrate' | 'parallel', snapshot?: string) => Promise<void>) | null>(null);
+  const mentionTrigger = (agent: AgentType) =>
+    ALL_AGENT_MENTIONS.find(mention => mention.type === agent)?.trigger ?? `@${agent}`;
 
   // ─── Derived data ────────────────────────────────────────────────────────
   const installedAgentsList = useMemo(() => agents.filter(isUsable), [agents]);
@@ -842,23 +872,42 @@ export function ChatInput({
   // enough by itself, and double-POST on send is the highest-blast bug
   // in the chat path.
   const sendInFlightRef = useRef(false);
-  const handleSendMessage = useCallback(async () => {
+  const handleSendMessage = useCallback(async (routing?: 'orchestrate' | 'parallel', snapshot?: string) => {
     const inputVal = chatInputValueRef.current;
     // NOTE: `sending` is intentionally NOT a guard here. Submitting mid-stream
     // is allowed — the parent (handleSendMessage) routes it to the message
     // QUEUE instead of dropping it (CLI-style). `sendInFlightRef` still blocks
     // a same-tick double-fire of the SAME keystroke.
     if (!discussion || !inputVal.trim() || sendInFlightRef.current) return;
-    sendInFlightRef.current = true;
-    const msg = inputVal.trim();
+    // A routed send carries the text the human answered for; a changed draft is not it.
+    if (snapshot !== undefined && inputVal.trim() !== snapshot) return;
+    const msg = snapshot ?? inputVal.trim();
     const channel: MessageChannel = sendAsNote ? 'note' : 'main';
+    if (channel === 'main' && !routing) {
+      // A delegation instruction asks the human how to route before anything
+      // is sent; the parallel choice keeps the historical behaviour.
+      const proposal = detectDelegation(msg, positionedTargetsFromComposerText(msg, AGENT_MENTIONS));
+      if (proposal) {
+        setHandoffMode(null);
+        delegationOpRef.current += 1;
+        setDelegationPending(false);
+        setDelegationPrompt({ id: delegationOpRef.current, discussionId: discussion.id, text: msg, proposal });
+        return;
+      }
+    }
+    sendInFlightRef.current = true;
+    closeDelegation();
     const parsedTargets = channel === 'main'
       ? targetsFromComposerText(msg, AGENT_MENTIONS)
       : { targets: [], targetAll: false };
+    // Orchestration addresses the first agent alone; it hands off to the others.
+    const routedTargets: MessageTarget[] = routing === 'orchestrate'
+      ? parsedTargets.targets.slice(0, 1)
+      : parsedTargets.targets;
     // Empty targets intentionally let the backend route to the configured
     // discussion agent. Historical punctual participants must never become an
     // implicit fan-out: only an explicit mention or @all can address them.
-    const targets = parsedTargets.targets.map(target => {
+    const targets = routedTargets.map(target => {
       if (target.kind === 'cli') return target;
       const tier = mentionTierOverridesRef.current[target.agent_type]
         ?? preferredTiersRef.current[target.agent_type];
@@ -939,11 +988,59 @@ export function ChatInput({
       queueMicrotask(() => { sendInFlightRef.current = false; });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget, sendAsNote]);
+  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget, sendAsNote, closeDelegation]);
 
   useLayoutEffect(() => {
     handleSendMessageRef.current = handleSendMessage;
   }, [handleSendMessage]);
+
+  const refreshDraftTargets = useCallback((text: string) => {
+    const next = sendAsNote ? [] : targetsFromComposerText(text, AGENT_MENTIONS).targets;
+    const key = (list: MessageTarget[]) => list
+      .map(target => `${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}`)
+      .join('|');
+    setDraftTargets(current => (key(current) === key(next) ? current : next));
+  }, [AGENT_MENTIONS, sendAsNote]);
+  useEffect(() => {
+    refreshDraftTargets(chatInputValueRef.current);
+  }, [chatInput, refreshDraftTargets]);
+
+  useEffect(() => {
+    if (!delegationPrompt || !discussion?.id) return;
+    let current = true;
+    discussionsApi.agentHandoffMode(discussion.id)
+      .then(mode => { if (current) setHandoffMode(mode); })
+      .catch(error => console.warn('[ChatInput] agent handoff mode fetch failed:', error));
+    return () => { current = false; };
+  }, [delegationPrompt, discussion?.id]);
+
+  // A single guard for both choices: the first one taken is the only one that runs.
+  const chooseDelegation = useAsyncGuard(async (routing: 'orchestrate' | 'parallel') => {
+    const prompt = delegationPrompt;
+    if (!prompt || delegationOpRef.current !== prompt.id) return;
+    const stillValid = () => delegationOpRef.current === prompt.id
+      && discussionIdRef.current === prompt.discussionId
+      && chatInputValueRef.current.trim() === prompt.text;
+    setDelegationPending(true);
+    if (routing === 'orchestrate') {
+      try {
+        // The orchestrator may only hand off to agents attached to the discussion.
+        await discussionsApi.update(prompt.discussionId, {
+          attach_agents: prompt.proposal.delegated.map(target => target.agent_type),
+        });
+        window.dispatchEvent(new CustomEvent('kronn:discussion-updated'));
+      } catch (error) {
+        console.warn('attach delegated agents failed:', error);
+        if (stillValid()) {
+          toast(t('disc.delegationAttachFailed'), 'error');
+          setDelegationPending(false);
+        }
+        return;
+      }
+    }
+    if (!stillValid()) return;
+    await handleSendMessageRef.current?.(routing, prompt.text);
+  });
 
   // ─── Keyboard shortcuts during recording ─────────────────────────────────
   useEffect(() => {
@@ -1613,6 +1710,101 @@ export function ChatInput({
           </div>
         )}
 
+        {delegationPrompt && (() => {
+          const { proposal } = delegationPrompt;
+          const orchestrator = mentionTrigger(proposal.orchestrator.agent_type);
+          const delegated = proposal.delegated.map(target => mentionTrigger(target.agent_type)).join(', ');
+          const handoffOff = handoffMode !== null && !handoffMode.effective_enabled;
+          const paidDelegations = proposal.delegated.filter(target => target.agent_type !== 'Ollama').length;
+          const paidLimit = handoffMode?.effective_enabled ? handoffMode.paid_limit ?? null : null;
+          return (
+            <div
+              className="disc-delegation-prompt"
+              role="group"
+              aria-labelledby="disc-delegation-question"
+              data-testid="delegation-prompt"
+              onKeyDown={e => {
+                if (e.key === 'Escape') {
+                  e.stopPropagation();
+                  closeDelegation();
+                  chatInputRef.current?.focus();
+                }
+              }}
+            >
+              <p id="disc-delegation-question" className="disc-delegation-question">
+                <Users size={12} aria-hidden="true" /> {t('disc.delegationQuestion', orchestrator, delegated)}
+              </p>
+              <p className="disc-delegation-hint">{t('disc.delegationExplain', orchestrator)}</p>
+              {handoffOff && (
+                <p className="disc-delegation-hint" data-testid="delegation-handoff-off">
+                  {t('disc.delegationHandoffOff')}
+                </p>
+              )}
+              {paidLimit !== null && paidDelegations > paidLimit && (
+                <p className="disc-delegation-hint" data-testid="delegation-paid-limit">
+                  {t('disc.delegationPaidLimit', paidLimit)}
+                </p>
+              )}
+              <div className="disc-delegation-actions">
+                <button
+                  type="button"
+                  className="disc-delegation-btn disc-delegation-btn-primary"
+                  autoFocus
+                  disabled={delegationPending || handoffMode === null || handoffOff}
+                  onClick={() => { void chooseDelegation('orchestrate'); }}
+                  data-testid="delegation-orchestrate"
+                >
+                  {t('disc.delegationOrchestrate', orchestrator)}
+                </button>
+                <button
+                  type="button"
+                  className="disc-delegation-btn"
+                  disabled={delegationPending}
+                  onClick={() => { void chooseDelegation('parallel'); }}
+                  data-testid="delegation-parallel"
+                >
+                  {t('disc.delegationParallel', proposal.delegated.length + 1)}
+                </button>
+                <button
+                  type="button"
+                  className="disc-delegation-btn disc-delegation-dismiss"
+                  aria-label={t('disc.delegationCancel')}
+                  title={t('disc.delegationCancel')}
+                  onClick={() => { closeDelegation(); chatInputRef.current?.focus(); }}
+                >
+                  <X size={11} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+
+        {!delegationPrompt && draftTargets.length > 1 && (
+          <div
+            className="disc-composer-parallel"
+            role="status"
+            aria-live="polite"
+            data-testid="composer-parallel-notice"
+          >
+            <Users size={11} aria-hidden="true" />
+            <span>{t('disc.parallelLaunchCount', draftTargets.length)}</span>
+            {draftTargets.map(target => (
+              <span
+                key={`${target.kind}:${target.agent_type}:${target.cli_session_id ?? ''}:${target.connection_id ?? ''}`}
+                className="disc-composer-parallel-chip"
+                style={{ color: agentTextColor(target.agent_type) }}
+              >
+                {AGENT_MENTIONS.find(mention => mention.target
+                  && mention.target.kind === target.kind
+                  && mention.target.agent_type === target.agent_type
+                  && (mention.target.cli_session_id ?? null) === (target.cli_session_id ?? null)
+                  && (mention.target.connection_id ?? null) === (target.connection_id ?? null))?.trigger
+                  ?? mentionTrigger(target.agent_type)}
+              </span>
+            ))}
+          </div>
+        )}
+
         {Object.entries(mentionTierOverrides).length > 0 && (
           <div
             className="disc-composer-routing-chips"
@@ -1683,6 +1875,8 @@ export function ChatInput({
             // Persist draft so tab/page navigation doesn't wipe the in-flight
             // textarea content. Debounced inside scheduleDraftSave.
             pruneMentionTierOverrides(val);
+            refreshDraftTargets(val);
+            if (delegationPrompt) closeDelegation();
             scheduleDraftSave(val);
             // Hide the "restored draft" hint as soon as the user edits.
             if (restoredDraftAt) setRestoredDraftAt(null);
@@ -2091,7 +2285,7 @@ export function ChatInput({
                   className="disc-send-btn"
                   data-active={true}
                   data-variant="queue"
-                  onClick={handleSendMessage}
+                  onClick={() => { void handleSendMessage(); }}
                   title={t('disc.queueSend')}
                   aria-label={t('disc.queueSend')}
                 >
@@ -2140,7 +2334,7 @@ export function ChatInput({
               <button
                 className="disc-send-btn"
                 data-active={chatInputHasText}
-                onClick={handleSendMessage}
+                onClick={() => { void handleSendMessage(); }}
                 disabled={!chatInputHasText}
                 aria-label="Send message"
               >

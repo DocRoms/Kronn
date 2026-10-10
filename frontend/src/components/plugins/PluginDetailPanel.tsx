@@ -8,6 +8,7 @@ import { linkify } from '../../lib/linkify';
 import { pluginCredentialKeys } from '../../lib/pluginCredentials';
 import { CustomApiForm } from './CustomApiForm';
 import { PluginScopeEditor } from './PluginScopeEditor';
+import { PluginAccessPolicyEditor } from './PluginAccessPolicyEditor';
 import { slugify } from './mcpPageHelpers';
 import { accessHealth, diagnosticLabel } from './pluginHealth';
 import { PluginHealthBadge } from './PluginHealthBadge';
@@ -36,6 +37,7 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
     editingEnvId, setEditingEnvId, editingEnv, setEditingEnv, editingEnvLoading, editingEnvError, visibleFields, setVisibleFields,
     handleStartEditSecrets, handleSaveSecrets, toggleFieldVisibility,
     handleToggleConfigGlobal, handleToggleConfigGeneral, handleToggleConfigProject, handleSetHostSync,
+    handleSaveAccessPolicy,
     handleOpenContext,
   } = state;
   const [activeTab, setActiveTab] = useState<'status' | 'access' | 'credentials' | 'advanced'>('status');
@@ -538,6 +540,18 @@ export function PluginDetailPanel({ cfg, state }: { cfg: McpConfigDisplay; state
             );
           }}
         />
+        {cfgServer?.api_spec && (() => {
+          const policy = mcpOverview.access_policies?.find(entry => entry.server_id === cfg.server_id)?.policy ?? null;
+          return <PluginAccessPolicyEditor
+            key={`${cfg.server_id}:${JSON.stringify(policy)}`}
+            t={t}
+            serverId={cfg.server_id}
+            endpoints={cfgServer.api_spec.endpoints}
+            policy={policy}
+            isHybrid={cfgKind === 'hybrid'}
+            onSave={handleSaveAccessPolicy}
+          />;
+        })()}
         </div>
         <section className="mcp-detail-section mcp-advanced-section" data-detail-tab="advanced">
           <div className="mcp-advanced-block">

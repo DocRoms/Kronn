@@ -336,13 +336,17 @@ async fn execute_batch_quick_prompt_step_with_budget(
 
     // ── Load the Quick Prompt ───────────────────────────────────────────
     let qp_lookup = qp_id.clone();
+    let pinned_run = parent_run_id.to_string();
     let qp = match state
         .db
-        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .with_conn(move |conn| {
+            crate::workflows::run_pins::quick_prompt_for(conn, Some(&pinned_run), &qp_lookup)
+        })
         .await
     {
-        Ok(Some(q)) => q,
-        Ok(None) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(q))) => q,
+        Ok(Ok(None)) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
         Err(e) => return fail(step, start, format!("DB error loading QP: {}", e)),
     };
     let approval_prompt = qp.clone();
@@ -505,6 +509,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
         )
     };
     let parent_snapshot_id = parent_run_id.to_string();
+    let pin_parent = parent_run_id.to_string();
     let item_variables_for_tx = item_variables;
     let outcome = match state
         .db
@@ -555,7 +560,7 @@ async fn execute_batch_quick_prompt_step_with_budget(
                     &key,
                 )?;
             }
-            crate::db::workflows::create_batch_run_with_identities(
+            let outcome = crate::db::workflows::create_batch_run_with_identities(
                 conn,
                 crate::db::workflows::CreateBatchRunInput {
                     quick_prompt: &qp_for_tx,
@@ -573,7 +578,10 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 },
                 None,
                 &assigned_ids_for_tx,
-            )
+            )?;
+            // Chain prompts load later, from the batch run's own pin.
+            crate::workflows::run_pins::inherit_for_batch(conn, &pin_parent, &outcome.run_id)?;
+            Ok(outcome)
         })
         .await
     {
@@ -659,6 +667,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             },
             condition_action: None,
         };
@@ -850,6 +860,8 @@ async fn execute_batch_quick_prompt_step_with_budget(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -893,6 +905,8 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -1861,6 +1875,7 @@ mod tests {
         use chrono::Utc;
         let wf_id = "wf-e2e".to_string();
         let workflow = Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: wf_id.clone(),
@@ -1889,6 +1904,7 @@ mod tests {
         };
         let run_id = "run-parent-e2e".to_string();
         let parent_run = WorkflowRun {
+            outcome: None,
             id: run_id.clone(),
             workflow_id: wf_id.clone(),
             status: RunStatus::Running,
@@ -2030,11 +2046,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

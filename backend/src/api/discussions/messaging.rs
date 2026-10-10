@@ -366,8 +366,23 @@ pub async fn running_discussions(State(state): State<AppState>) -> Json<ApiRespo
 pub async fn send_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<SendMessageRequest>,
+    Json(mut req): Json<SendMessageRequest>,
 ) -> Sse<SseStream> {
+    // KT-1111 — before the content is stored, dispatched or even measured.
+    let transient = std::mem::take(&mut req.assistant_secrets);
+    if let Err(error) = crate::api::assistant_conversations::protect_message(
+        &state,
+        &id,
+        &mut req.content,
+        &transient,
+    )
+    .await
+    {
+        tracing::warn!(target: "kronn::assistant", discussion_id = %id, "secret masking failed: {error}");
+        return sse_events(vec![Event::default().event("error").data(
+            serde_json::json!({ "error": "Secret masking failed" }).to_string(),
+        )]);
+    }
     // Input validation
     if req.content.len() > MAX_CONTENT_LEN {
         let stream: SseStream = Box::pin(futures::stream::once(async {
@@ -617,6 +632,18 @@ pub async fn send_message(
         .into_iter()
         .map(|agent| (Uuid::new_v4().to_string(), agent))
         .collect::<Vec<_>>();
+    // KT-1111 — the values named with this message also mask the replies of
+    // the dispatches it starts, in memory, until each dispatch ends.
+    let turns = crate::api::assistant_conversations::TurnRegistration::begin(
+        &state,
+        &id,
+        local_dispatches
+            .iter()
+            .map(|(job_id, _)| job_id.clone())
+            .collect(),
+        &transient,
+    );
+    drop(transient);
     let defer_dispatch = req.defer_dispatch;
     // KT-619 — cloned before the `move` closure, like `defer_dispatch` above.
     let publication_grant = req.publication_grant.clone();
@@ -756,7 +783,10 @@ pub async fn send_message(
             message,
             sort_order,
             dispatch_job,
-        } => (*message, sort_order, dispatch_job.map(|job| *job)),
+        } => {
+            turns.keep();
+            (*message, sort_order, dispatch_job.map(|job| *job))
+        }
         crate::db::discussions::InsertUserMessageOutcome::Duplicate { sort_order } => {
             return sse_events(vec![accepted_event(&message_id, sort_order, true)]);
         }
@@ -2028,6 +2058,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2101,6 +2132,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2123,6 +2155,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2164,6 +2197,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2201,6 +2235,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2366,6 +2401,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2480,6 +2516,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2540,6 +2577,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2597,6 +2635,7 @@ mod tests {
                 reply_to_message_id: Some(source_id.into()),
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2632,6 +2671,7 @@ mod tests {
                 reply_to_message_id: Some("44444444-4444-4444-8444-444444444444".into()),
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -2705,6 +2745,7 @@ mod tests {
                 crate::db::workflows::insert_run(
                     conn,
                     &crate::models::WorkflowRun {
+                        outcome: None,
                         id: "batch-stop".into(),
                         workflow_id: "qp:qp-stop".into(),
                         status: crate::models::RunStatus::Running,
@@ -3377,6 +3418,7 @@ mod tests {
                 reply_to_message_id: None,
                 publication_grant: None,
                 publication_proof: None,
+                assistant_secrets: Default::default(),
             }),
         )
         .await;
@@ -3512,6 +3554,7 @@ mod tests {
             reply_to_message_id: None,
             publication_grant: grant,
             publication_proof: proof,
+            assistant_secrets: Default::default(),
         };
         let response = send_message(
             State(state.clone()),

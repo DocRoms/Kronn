@@ -11,6 +11,10 @@ use crate::models::{
     LivePagesCapability, PublishLivePageRequest, PublishLivePageResult, UpdateLivePageRequest,
 };
 
+#[path = "live_page_datasets.rs"]
+pub(crate) mod datasets;
+pub use datasets::*;
+
 pub fn list_live_page_workflows(
     conn: &Connection,
     page_id_or_slug: &str,
@@ -18,6 +22,9 @@ pub fn list_live_page_workflows(
     let Some(detail) = get_live_page(conn, page_id_or_slug)? else {
         return Ok(None);
     };
+    let aliases: HashSet<String> = list_live_page_slug_aliases(conn, &detail.page.id)?
+        .into_iter()
+        .collect();
     let mut links = crate::db::workflows::list_workflows(conn)?
         .into_iter()
         .filter_map(|workflow| {
@@ -26,8 +33,10 @@ pub fn list_live_page_workflows(
                 .iter()
                 .filter_map(|step| {
                     let publish = step.page_publish.as_ref()?;
-                    (publish.page_id == detail.page.id || publish.page_id == detail.page.slug)
-                        .then(|| step.name.clone())
+                    (publish.page_id == detail.page.id
+                        || publish.page_id == detail.page.slug
+                        || aliases.contains(&publish.page_id))
+                    .then(|| step.name.clone())
                 })
                 .collect::<Vec<_>>();
             (!step_names.is_empty()).then_some(LivePageWorkflowLink {
@@ -50,14 +59,7 @@ pub fn list_live_page_publications(
     page_id_or_slug: &str,
     limit: usize,
 ) -> Result<Option<Vec<LivePagePublication>>> {
-    let canonical_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id_or_slug],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let canonical_id = resolve_live_page_id(conn, page_id_or_slug)?;
     let Some(canonical_id) = canonical_id else {
         return Ok(None);
     };
@@ -131,6 +133,15 @@ pub(crate) fn create_live_page_in_transaction(
     datasets: &[CreateLivePageDataset],
     discussion_id: Option<&str>,
 ) -> Result<()> {
+    // A renamed page's old slug is not free: taking it would capture its links.
+    let retired: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_page_slug_aliases WHERE slug = ?1)",
+        [&page.slug],
+        |row| row.get(0),
+    )?;
+    if retired {
+        return Err(SlugUnavailable.into());
+    }
     tx.execute(
         "INSERT INTO live_pages (
              id, project_id, title, slug, current_revision_id, data_revision,
@@ -279,18 +290,14 @@ pub fn update_live_page(
     page_id: &str,
     request: &UpdateLivePageRequest,
 ) -> Result<Option<LivePageDetail>> {
-    let canonical_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(canonical_id) = canonical_id else {
+    let tx = conn.unchecked_transaction()?;
+    let Some(canonical_id) = resolve_live_page_id(&tx, page_id)? else {
         return Ok(None);
     };
-    conn.execute(
+    if let Some(slug) = request.slug.as_deref() {
+        rename_live_page_slug(&tx, &canonical_id, slug)?;
+    }
+    tx.execute(
         "UPDATE live_pages
             SET title = COALESCE(?2, title),
                 pinned = COALESCE(?3, pinned),
@@ -305,28 +312,112 @@ pub fn update_live_page(
             Utc::now().to_rfc3339(),
         ],
     )?;
+    tx.commit()?;
     get_live_page(conn, &canonical_id)
 }
 
-pub fn delete_live_page(conn: &Connection, page_id: &str) -> Result<bool> {
-    Ok(conn.execute(
-        "DELETE FROM live_pages WHERE id = (SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1 ORDER BY (id = ?1) DESC LIMIT 1)",
+/// Refusal for a slug another page holds, live or retired. It never says
+/// which page, since that page may sit in a project the caller cannot see.
+#[derive(Debug)]
+pub struct SlugUnavailable;
+
+impl std::fmt::Display for SlugUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("This Page slug is not available; choose another")
+    }
+}
+
+impl std::error::Error for SlugUnavailable {}
+
+/// The page an id, slug or retired slug names. An id wins over a slug and a
+/// live slug over a retired one, so an alias can never shadow a page.
+pub fn resolve_live_page_id(conn: &Connection, page_ref: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM (
+                 SELECT id, 0 AS rank FROM live_pages WHERE id = ?1
+                 UNION ALL SELECT id, 1 FROM live_pages WHERE slug = ?1
+                 UNION ALL SELECT page_id, 2 FROM live_page_slug_aliases WHERE slug = ?1
+             ) ORDER BY rank LIMIT 1",
+            [page_ref],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Whether a new page may not take `slug`: a live slug, or one a renamed page
+/// keeps for its old links.
+pub fn slug_is_taken(conn: &Connection, slug: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)
+             OR EXISTS(SELECT 1 FROM live_page_slug_aliases WHERE slug = ?1)",
+        [slug],
+        |row| row.get(0),
+    )?)
+}
+
+/// The slugs a page answered to before it was renamed.
+pub fn list_live_page_slug_aliases(conn: &Connection, page_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT slug FROM live_page_slug_aliases WHERE page_id = ?1 ORDER BY created_at, slug",
+    )?;
+    let slugs = stmt
+        .query_map([page_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(slugs)
+}
+
+/// Give a page a new, already validated slug. The old one becomes an alias, and
+/// the page may take back one of its own aliases but never another page's.
+fn rename_live_page_slug(conn: &Connection, page_id: &str, slug: &str) -> Result<()> {
+    let current: String = conn.query_row(
+        "SELECT slug FROM live_pages WHERE id = ?1",
         [page_id],
-    )? > 0)
+        |row| row.get(0),
+    )?;
+    if current == slug {
+        return Ok(());
+    }
+    let alias_owner: Option<String> = conn
+        .query_row(
+            "SELECT page_id FROM live_page_slug_aliases WHERE slug = ?1",
+            [slug],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let live_elsewhere: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1 AND id != ?2)",
+        params![slug, page_id],
+        |row| row.get(0),
+    )?;
+    if live_elsewhere || alias_owner.as_deref().is_some_and(|owner| owner != page_id) {
+        return Err(SlugUnavailable.into());
+    }
+    let now = Utc::now().to_rfc3339();
+    conn.execute("DELETE FROM live_page_slug_aliases WHERE slug = ?1", [slug])?;
+    conn.execute(
+        "UPDATE live_pages SET slug = ?2 WHERE id = ?1",
+        params![page_id, slug],
+    )?;
+    conn.execute(
+        "INSERT INTO live_page_slug_aliases (slug, page_id, created_at) VALUES (?1, ?2, ?3)",
+        params![current, page_id, now],
+    )?;
+    Ok(())
+}
+
+pub fn delete_live_page(conn: &Connection, page_id: &str) -> Result<bool> {
+    let Some(canonical_id) = resolve_live_page_id(conn, page_id)? else {
+        return Ok(false);
+    };
+    Ok(conn.execute("DELETE FROM live_pages WHERE id = ?1", [canonical_id])? > 0)
 }
 
 pub fn list_live_page_discussions(
     conn: &Connection,
     page_id_or_slug: &str,
 ) -> Result<Option<Vec<LivePageDiscussionLink>>> {
-    let canonical_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id_or_slug],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let canonical_id = resolve_live_page_id(conn, page_id_or_slug)?;
     let Some(canonical_id) = canonical_id else {
         return Ok(None);
     };
@@ -362,14 +453,7 @@ pub fn link_live_page_discussion(
     discussion_id: &str,
     relation: LivePageDiscussionRelation,
 ) -> Result<bool> {
-    let canonical_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id_or_slug],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let canonical_id = resolve_live_page_id(conn, page_id_or_slug)?;
     let Some(canonical_id) = canonical_id else {
         return Ok(false);
     };
@@ -392,23 +476,17 @@ pub fn unlink_live_page_discussion(
     page_id_or_slug: &str,
     discussion_id: &str,
 ) -> Result<bool> {
+    let Some(canonical_id) = resolve_live_page_id(conn, page_id_or_slug)? else {
+        return Ok(false);
+    };
     Ok(conn.execute(
-        "DELETE FROM live_page_discussion_links
-          WHERE page_id = (SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1 ORDER BY (id = ?1) DESC LIMIT 1)
-            AND discussion_id = ?2",
-        params![page_id_or_slug, discussion_id],
+        "DELETE FROM live_page_discussion_links WHERE page_id = ?1 AND discussion_id = ?2",
+        params![canonical_id, discussion_id],
     )? > 0)
 }
 
 pub fn list_live_page_revisions(conn: &Connection, page_id: &str) -> Result<Vec<LivePageRevision>> {
-    let canonical_page_id: Option<String> = conn
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let canonical_page_id = resolve_live_page_id(conn, page_id)?;
     let Some(canonical_page_id) = canonical_page_id else {
         return Ok(Vec::new());
     };
@@ -429,15 +507,8 @@ pub fn update_live_page_html(
     created_by_agent: Option<&str>,
 ) -> Result<LivePageRevision> {
     let tx = conn.unchecked_transaction()?;
-    let canonical_page_id: String = tx
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("Page not found"))?;
+    let canonical_page_id =
+        resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
     let next_revision: i64 = tx.query_row(
         "SELECT COALESCE(MAX(revision), 0) + 1 FROM live_page_revisions WHERE page_id = ?1",
         [&canonical_page_id],
@@ -481,13 +552,15 @@ pub fn update_live_page_html(
 /// The page row alone, by id or slug: `get_live_page` without the revision,
 /// the datasets and their points, for a caller that needs the page's own facts.
 pub fn get_live_page_summary(conn: &Connection, page_id: &str) -> Result<Option<LivePage>> {
+    let Some(canonical_id) = resolve_live_page_id(conn, page_id)? else {
+        return Ok(None);
+    };
     Ok(conn
         .query_row(
             "SELECT id, project_id, title, slug, current_revision_id, data_revision,
                     created_at, updated_at, last_published_at, pinned, archived
-               FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
+               FROM live_pages WHERE id = ?1",
+            [canonical_id],
             map_page,
         )
         .optional()?)
@@ -537,10 +610,12 @@ pub fn get_live_page(conn: &Connection, page_id: &str) -> Result<Option<LivePage
             data_size_bytes,
         });
     }
+    let slug_aliases = list_live_page_slug_aliases(conn, &page.id)?;
     Ok(Some(LivePageDetail {
         page,
         revision,
         datasets: views,
+        slug_aliases,
     }))
 }
 
@@ -575,15 +650,8 @@ pub fn add_live_page_dataset(
     }
 
     let tx = conn.unchecked_transaction()?;
-    let canonical_page_id: String = tx
-        .query_row(
-            "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("Page not found"))?;
+    let canonical_page_id =
+        resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
 
     let existing = tx
         .query_row(
@@ -699,19 +767,11 @@ pub fn publish_live_page(
         bail!("A Page publication requires at least one dataset write");
     }
     let tx = conn.unchecked_transaction()?;
-    let current_revision: i64 = tx
-        .query_row(
-            "SELECT data_revision FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-            [page_id],
-            |row| row.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("Page not found"))?;
-    let canonical_page_id: String = tx.query_row(
-        "SELECT id FROM live_pages WHERE id = ?1 OR slug = ?1
-             ORDER BY (id = ?1) DESC LIMIT 1",
-        [page_id],
+    let canonical_page_id =
+        resolve_live_page_id(&tx, page_id)?.ok_or_else(|| anyhow!("Page not found"))?;
+    let current_revision: i64 = tx.query_row(
+        "SELECT data_revision FROM live_pages WHERE id = ?1",
+        [&canonical_page_id],
         |row| row.get(0),
     )?;
 
@@ -790,6 +850,28 @@ pub fn publish_live_page(
                     params![dataset.id, published_at.to_rfc3339()],
                 )?;
                 points_added > added_before || points_removed > removed_before
+            }
+            LivePageWriteOperation::Clear => {
+                let removed = tx.execute(
+                    "DELETE FROM live_page_dataset_points WHERE dataset_id = ?1",
+                    [&dataset.id],
+                )?;
+                points_removed += removed as u32;
+                // A collection stays an array, so a Page iterating it keeps working.
+                let emptied = match dataset.kind {
+                    LivePageDatasetKind::Collection => Some(serde_json::json!([])),
+                    _ => None,
+                };
+                let changed = removed > 0 || dataset.current != emptied;
+                tx.execute(
+                    "UPDATE live_page_datasets SET current_json = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![
+                        dataset.id,
+                        emptied.as_ref().map(serde_json::to_string).transpose()?,
+                        published_at.to_rfc3339()
+                    ],
+                )?;
+                changed
             }
             LivePageWriteOperation::Upsert => {
                 if dataset.kind != LivePageDatasetKind::Collection {
@@ -1245,6 +1327,7 @@ mod tests {
             &page.id,
             &UpdateLivePageRequest {
                 title: Some("Production health".into()),
+                slug: None,
                 pinned: None,
                 archived: None,
             },
@@ -1755,5 +1838,168 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("Page not found"));
+    }
+
+    fn rename(conn: &Connection, page: &str, slug: &str) -> Result<Option<LivePageDetail>> {
+        update_live_page(
+            conn,
+            page,
+            &UpdateLivePageRequest {
+                title: None,
+                slug: Some(slug.into()),
+                pinned: None,
+                archived: None,
+            },
+        )
+    }
+
+    /// KT-1098 — every id-or-slug entry point follows a renamed page's old slug.
+    #[test]
+    fn an_old_slug_reaches_the_page_through_every_lookup() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+        let renamed = rename(&conn, "adobe-indicators", "adobe-kpis")
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.page.slug, "adobe-kpis");
+        assert_eq!(renamed.slug_aliases, vec!["adobe-indicators".to_string()]);
+        assert_eq!(
+            rename(&conn, "adobe-kpis", "adobe-kpis")
+                .unwrap()
+                .unwrap()
+                .slug_aliases
+                .len(),
+            1
+        );
+
+        let old = "adobe-indicators";
+        assert_eq!(
+            resolve_live_page_id(&conn, old).unwrap().as_deref(),
+            Some("page-1")
+        );
+        assert_eq!(list_live_page_revisions(&conn, old).unwrap().len(), 1);
+        assert!(list_live_page_publications(&conn, old, 3)
+            .unwrap()
+            .is_some());
+        assert!(list_live_page_discussions(&conn, old).unwrap().is_some());
+        update_live_page_html(&conn, old, "<p>v2</p>", None).unwrap();
+        let published = publish_live_page(
+            &conn,
+            old,
+            &PublishLivePageRequest {
+                workflow_id: None,
+                workflow_run_id: None,
+                writes: vec![LivePageWrite {
+                    dataset: "summary".into(),
+                    operation: LivePageWriteOperation::Replace,
+                    value: serde_json::json!({"count": 1}),
+                    observed_at: None,
+                    dedupe_key: None,
+                    key_field: None,
+                }],
+            },
+        )
+        .unwrap();
+        assert_eq!(published.data_revision, 1);
+        assert_eq!(
+            crate::workflows::run_scope::page_projects(&conn, old).unwrap(),
+            vec![None]
+        );
+        assert!(!unlink_live_page_discussion(&conn, old, "none").unwrap());
+        assert!(delete_live_page(&conn, old).unwrap());
+        assert!(get_live_page(&conn, &page.id).unwrap().is_none());
+        assert!(resolve_live_page_id(&conn, old).unwrap().is_none());
+        assert!(!slug_is_taken(&conn, old).unwrap());
+    }
+
+    /// KT-1098 — a live slug wins over a retired one, and no create path, the
+    /// import included, can take a retired slug.
+    #[test]
+    fn a_retired_slug_never_shadows_or_yields_to_another_page() {
+        let conn = test_connection();
+        let page = fixture(&conn);
+        rename(&conn, &page.id, "adobe-kpis").unwrap();
+        let other = fixture_without_datasets(&conn);
+        assert!(rename(&conn, &other.id, "adobe-indicators")
+            .unwrap_err()
+            .is::<SlugUnavailable>());
+        assert!(rename(&conn, &other.id, "adobe-kpis")
+            .unwrap_err()
+            .is::<SlugUnavailable>());
+
+        let revision = get_live_page(&conn, &other.id).unwrap().unwrap().revision;
+        let squatter = LivePage {
+            id: "page-squat".into(),
+            slug: "adobe-indicators".into(),
+            ..other.clone()
+        };
+        let tx = conn.unchecked_transaction().unwrap();
+        let refused = create_live_page_in_transaction(&tx, &squatter, &revision, &[], None);
+        assert!(refused.unwrap_err().is::<SlugUnavailable>());
+        drop(tx);
+        assert!(slug_is_taken(&conn, "adobe-indicators").unwrap());
+
+        // Even a stray alias row naming another page's live slug loses to it.
+        conn.execute(
+            "INSERT INTO live_page_slug_aliases (slug, page_id, created_at) VALUES ('bare-page', 'page-1', 'x')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_live_page_id(&conn, "bare-page").unwrap().as_deref(),
+            Some(other.id.as_str())
+        );
+    }
+
+    /// KT-1098 — a workflow that publishes into the old slug still counts as
+    /// one of the page's publishers.
+    #[test]
+    fn a_workflow_naming_the_old_slug_still_lists_as_a_publisher() {
+        let conn = test_connection();
+        fixture(&conn);
+        let now = Utc::now();
+        let workflow = crate::models::Workflow {
+            retention: None,
+            project_scope: None,
+            id: "wf-old-slug".into(),
+            name: "Feeder".into(),
+            project_id: None,
+            trigger: crate::models::WorkflowTrigger::Manual,
+            steps: vec![crate::models::WorkflowStep {
+                name: "publish".into(),
+                step_type: crate::models::StepType::PublishPageData,
+                page_publish: Some(crate::models::PublishPageDataConfig {
+                    page_id: "adobe-indicators".into(),
+                    writes: vec![],
+                }),
+                ..Default::default()
+            }],
+            actions: vec![],
+            safety: crate::models::WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            concurrency_key: None,
+            guards: None,
+            artifacts: HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        };
+        crate::db::workflows::insert_workflow(&conn, &workflow).unwrap();
+        rename(&conn, "page-1", "adobe-kpis").unwrap();
+        let links = list_live_page_workflows(&conn, "adobe-kpis")
+            .unwrap()
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, "wf-old-slug");
     }
 }

@@ -46,6 +46,9 @@ pub struct ApiCallLogContext {
     pub run_id: Option<String>,
     pub disc_id: Option<String>,
     pub agent: Option<String>,
+    /// The run whose pinned Quick API revision a workflow step loads
+    /// (KT-1096). An agent's own call attributed to a run is not pinned.
+    pub pinned_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,6 +67,16 @@ impl ApiCallLogContext {
         Self {
             source: ApiCallLogSource::Workflow,
             run_id: Some(run_id.into()),
+            ..Self::default()
+        }
+    }
+    /// A step of `run_id` itself: logged for the run, and pinned to it.
+    pub fn workflow_step(run_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
+        Self {
+            source: ApiCallLogSource::Workflow,
+            run_id: Some(run_id.clone()),
+            pinned_run_id: Some(run_id),
             ..Self::default()
         }
     }
@@ -152,10 +165,24 @@ pub async fn execute_api_call_step_core(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
 ) -> StepOutcome {
+    execute_core_gated(step, plugin, env, ctx, policy, None).await
+}
+
+/// [`execute_api_call_step_core`] with an access-policy gate checked on
+/// every request the call sends.
+async fn execute_core_gated(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+    gate: Option<crate::core::api_access::EndpointGate>,
+) -> StepOutcome {
     let mut secrets = call_secrets(plugin, env);
     // The inner call adds what it resolves (default headers) to the same set,
     // so errors, the summary and the success output share one complete set.
-    let mut outcome = execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets).await;
+    let mut outcome =
+        execute_core_unscrubbed(step, plugin, env, ctx, policy, &mut secrets, gate).await;
     // Every byte the step hands on (success JSON, summary, error) loses the
     // credentials this call resolved, in every wire form.
     outcome.result.output = secrets.scrub(&outcome.result.output);
@@ -228,6 +255,7 @@ async fn execute_core_unscrubbed(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
     secrets: &mut crate::core::secret_scrub::SecretSet,
+    gate: Option<crate::core::api_access::EndpointGate>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -300,33 +328,9 @@ async fn execute_core_unscrubbed(
     // unescaped — workflow-step values are typically URL-safe (issue
     // keys, project slugs, etc.); if you need percent-encoding, use the
     // explicit `{key}` + `path_params` form which encodes per RFC 3986.
-    let templated_endpoint = match ctx.render_strict(endpoint_path) {
-        Ok(s) => s,
-        Err(e) => return fail(step, start, format!("Endpoint template render error: {e}")),
-    };
-    // 0.8.6 — also substitute `${ENV.X}` placeholders so plugin specs
-    // can reference encrypted config values directly in the endpoint
-    // path (e.g. Didomi's `/consents/users/${ENV.ORGANIZATION_ID}`)
-    // without forcing the agent to know the value. The agent calls
-    // the path as-declared, Kronn injects. Same pattern in query +
-    // headers + body below. Missing env var surfaces a clean error
-    // naming the missing key (no silent `undefined` strings hitting
-    // the vendor API — caught 2026-05-20 on Didomi 403 "organization
-    // undefined").
-    let templated_endpoint =
-        match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
-            Ok(s) => s,
-            Err(e) => return fail(step, start, format!("Endpoint env-substitution error: {e}")),
-        };
-    // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
-    // Values are rendered through TemplateContext FIRST so a previous
-    // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
-    // The resolver validates the declared and supplied keys in both
-    // directions before any HTTP request, so a typo or missing segment
-    // produces an actionable local error instead of an opaque vendor 404.
-    let resolved_path = match resolve_path_params(&templated_endpoint, &step.api_path_params, ctx) {
+    let resolved_path = match render_endpoint(endpoint_path, step, env, ctx) {
         Ok(p) => p,
-        Err(e) => return fail(step, start, format!("Path param render error: {e}")),
+        Err(e) => return fail(step, start, e),
     };
 
     // Resolve `{ENV_KEY}` placeholders in `base_url` against the
@@ -405,6 +409,7 @@ async fn execute_core_unscrubbed(
     add_resolved_auth(secrets, &auth);
     let transport = ApiTransport {
         client,
+        gate,
         secrets: secrets.clone(),
         pinned_base: if policy.enforce_host_match {
             Url::parse(&resolved_base_url).ok()
@@ -533,9 +538,87 @@ async fn execute_core_unscrubbed(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
+}
+
+/// The endpoint path as the request sends it: `{{var}}` rendered, `${ENV.X}`
+/// substituted, `{key}` path params encoded. The access gate decides on this
+/// same path, so the two can never disagree.
+fn render_endpoint(
+    endpoint_path: &str,
+    step: &WorkflowStep,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+) -> Result<String, String> {
+    let templated_endpoint = match ctx.render_strict(endpoint_path) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Endpoint template render error: {e}")),
+    };
+    // 0.8.6 — also substitute `${ENV.X}` placeholders so plugin specs
+    // can reference encrypted config values directly in the endpoint
+    // path (e.g. Didomi's `/consents/users/${ENV.ORGANIZATION_ID}`)
+    // without forcing the agent to know the value. The agent calls
+    // the path as-declared, Kronn injects. Same pattern in query +
+    // headers + body below. Missing env var surfaces a clean error
+    // naming the missing key (no silent `undefined` strings hitting
+    // the vendor API — caught 2026-05-20 on Didomi 403 "organization
+    // undefined").
+    let templated_endpoint =
+        match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
+            Ok(s) => s,
+            Err(e) => return Err(format!("Endpoint env-substitution error: {e}")),
+        };
+    // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
+    // Values are rendered through TemplateContext FIRST so a previous
+    // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
+    // The resolver validates the declared and supplied keys in both
+    // directions before any HTTP request, so a typo or missing segment
+    // produces an actionable local error instead of an opaque vendor 404.
+    resolve_path_params(&templated_endpoint, &step.api_path_params, ctx)
+        .map_err(|e| format!("Path param render error: {e}"))
+}
+
+/// The path of the plugin's base URL, without its trailing slash.
+pub(crate) fn base_path(spec: &ApiSpec, env: &HashMap<String, String>) -> Result<String, String> {
+    let base = interpolate_env(&spec.base_url, env);
+    Url::parse(base.trim_end_matches('/'))
+        .map(|u| u.path().trim_end_matches('/').to_string())
+        .map_err(|e| format!("URL parse error: {e}"))
+}
+
+/// The method and the path relative to the plugin's base URL that this step
+/// would send, computed without any network access (KT-1026 access gate).
+pub(crate) fn request_target(
+    step: &WorkflowStep,
+    spec: &ApiSpec,
+    env: &HashMap<String, String>,
+    ctx: &TemplateContext,
+) -> Result<crate::core::api_access::Target, String> {
+    let Some(endpoint_path) = step.api_endpoint_path.as_ref() else {
+        return Err("ApiCall step missing `api_endpoint_path`".into());
+    };
+    let resolved_path = render_endpoint(endpoint_path, step, env, ctx)?;
+    let base = interpolate_env(&spec.base_url, env);
+    let url = build_url(&base, &resolved_path, &HashMap::new(), &HashMap::new())?;
+    let base_path = base_path(spec, env)?;
+    // A path that climbs out of the base URL's path is no endpoint of it.
+    let path = match url.path().strip_prefix(base_path.as_str()) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.to_string(),
+        _ => {
+            return Err(format!(
+                "Access policy: `{endpoint_path}` leaves the plugin's base URL, call refused."
+            ))
+        }
+    };
+    let method = resolve_method(&step.api_method, endpoint_path, spec)?;
+    Ok(crate::core::api_access::Target {
+        method: method.as_str().to_string(),
+        path,
+    })
 }
 
 /// Runner dispatch helper — loads the plugin + decrypted env from the
@@ -554,6 +637,7 @@ pub async fn execute_api_call_step_with_db(
     state: &crate::AppState,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     // 0.8.6 (#59) — default entry point logs as a workflow call. For
     // wizard "Test the call" + standalone Quick API runs, callers use
@@ -565,6 +649,7 @@ pub async fn execute_api_call_step_with_db(
         ctx,
         policy,
         ApiCallLogContext::workflow(),
+        caller,
     )
     .await
 }
@@ -605,8 +690,18 @@ pub async fn execute_api_call_step_with_db_as(
     ctx: &TemplateContext,
     policy: SecurityPolicy,
     log_ctx: ApiCallLogContext,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
-    let outcome = execute_api_call_step_with_db_inner(step, project_id, state, ctx, policy).await;
+    let outcome = execute_api_call_step_with_db_inner(
+        step,
+        project_id,
+        state,
+        ctx,
+        policy,
+        log_ctx.pinned_run_id.as_deref(),
+        caller,
+    )
+    .await;
     record_api_call_log(state, step, project_id, &outcome, &log_ctx).await;
     outcome
 }
@@ -617,28 +712,57 @@ async fn execute_api_call_step_with_db_inner(
     state: &crate::AppState,
     ctx: &TemplateContext,
     policy: SecurityPolicy,
+    pinned_run_id: Option<&str>,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let start = Instant::now();
+    let (step_owned, plugin, mut env) =
+        match load_broker_target(step, project_id, state, pinned_run_id).await {
+            Ok(target) => target,
+            Err(msg) => return fail(step, start, msg),
+        };
+    let step = &step_owned;
 
+    // Before token minting: a refused call sends nothing anywhere.
+    let gate = match crate::core::api_access::enforce(state, &plugin, step, &env, ctx, caller).await
+    {
+        Ok(gate) => gate,
+        Err(refusal) => return fail(step, start, call_secrets(&plugin, &env).scrub(&refusal)),
+    };
+
+    let config_id = step.api_config_id.clone().unwrap_or_default();
+    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
+    execute_core_gated(step, &plugin, &env, ctx, policy, gate).await
+}
+
+/// The step hydrated from its Quick API, its plugin and its decrypted env:
+/// what every broker call sends from. Dynamic credentials are not minted yet,
+/// so an access decision can run before any token exists.
+async fn load_broker_target(
+    step: &WorkflowStep,
+    project_id: Option<&str>,
+    state: &crate::AppState,
+    pinned_run_id: Option<&str>,
+) -> Result<(WorkflowStep, McpServer, HashMap<String, String>), String> {
     // 0.7+ — référence optionnelle vers un QuickApi. Hydrate les champs
     // `api_*` manquants depuis le QA (per-field override, le step gagne).
     // Même règle que pour `BatchApiCall`. Permet à l'utilisateur de définir
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    if let Err(e) =
-        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step_owned, &state.db)
-            .await
-    {
-        return fail(step, start, e);
-    }
+    crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+        &mut step_owned,
+        &state.db,
+        pinned_run_id,
+    )
+    .await?;
     let step = &step_owned;
 
     let Some(slug) = step.api_plugin_slug.as_ref() else {
-        return fail(step, start, "ApiCall step missing `api_plugin_slug`".into());
+        return Err("ApiCall step missing `api_plugin_slug`".into());
     };
     let Some(config_id) = step.api_config_id.as_ref() else {
-        return fail(step, start, "ApiCall step missing `api_config_id`".into());
+        return Err("ApiCall step missing `api_config_id`".into());
     };
 
     // Read the encryption secret under the short-lived config read lock,
@@ -646,11 +770,7 @@ async fn execute_api_call_step_with_db_inner(
     // every other config reader for no reason.
     let secret_opt = { state.config.read().await.encryption_secret.clone() };
     let Some(secret) = secret_opt else {
-        return fail(
-            step,
-            start,
-            "Encryption secret not configured — cannot decrypt plugin env".into(),
-        );
+        return Err("Encryption secret not configured — cannot decrypt plugin env".into());
     };
 
     // Scope resolution. A projectless call really is a General-discussion
@@ -671,15 +791,11 @@ async fn execute_api_call_step_with_db_inner(
                 Some(c) if c.is_global || c.include_general => None,
                 Some(c) if !c.project_ids.is_empty() => Some(c.project_ids[0].clone()),
                 _ => {
-                    return fail(
-                        step,
-                        start,
-                        format!(
-                            "API plugin config `{config_id}` is not linked to any project. \
+                    return Err(format!(
+                        "API plugin config `{config_id}` is not linked to any project. \
                              Open Settings → APIs and tick at least one project on this config, \
                              or attach the workflow to a project."
-                        ),
-                    );
+                    ));
                 }
             }
         }
@@ -708,7 +824,7 @@ async fn execute_api_call_step_with_db_inner(
     let found = plugins
         .into_iter()
         .find(|(server, cid, _env)| server.id == *slug && cid == config_id);
-    let Some((plugin, _cid, mut env)) = found else {
+    let Some((plugin, _cid, env)) = found else {
         let pid_label = resolved_scope
             .clone()
             .unwrap_or_else(|| "(general)".to_string());
@@ -769,18 +885,13 @@ async fn execute_api_call_step_with_db_inner(
             })
             .await
             .unwrap_or_else(|error| format!("diagnostic lookup failed: {error}"));
-        return fail(
-            step,
-            start,
-            format!(
+        return Err(format!(
                 "API plugin `{slug}` / config `{config_id}` unavailable in scope `{pid_label}`: {diagnostic}"
             ),
         );
     };
 
-    resolve_dynamic_auth(&plugin, config_id, state, &mut env, policy).await;
-
-    execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
+    Ok((step_owned, plugin, env))
 }
 
 /// Resolve OAuth2/token-exchange/CLI credentials only at request time.
@@ -1463,6 +1574,246 @@ fn resolve_method(
     Ok(Method::GET)
 }
 
+// ─── Watch trigger poll ─────────────────────────────────────────────────
+
+/// One conditional GET a `Watch` trigger sends from the scheduler (KT-1099).
+pub(crate) struct WatchPollRequest<'a> {
+    /// A synthetic ApiCall step naming the source (API + endpoint, or a Quick API).
+    pub source: &'a WorkflowStep,
+    /// The workflow whose runs receive the response: the audience an API
+    /// access policy decides for.
+    pub workflow: &'a Workflow,
+    /// Scope the source's config is resolved in.
+    pub project_id: Option<&'a str>,
+    pub if_none_match: Option<&'a str>,
+    pub if_modified_since: Option<&'a str>,
+    pub max_body_bytes: u64,
+    pub timeout: Duration,
+}
+
+/// What a poll returned; every text field has had the call's credentials removed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WatchPollResponse {
+    pub status: u16,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    /// `None` on a 304.
+    pub body: Option<String>,
+}
+
+/// Sends a Watch poll through the broker: the source's stored credentials,
+/// the API's default headers and the guarded transport, a GET only, no
+/// retry (the next poll is the retry) and no `api_call_logs` row.
+pub(crate) async fn execute_watch_poll(
+    state: &crate::AppState,
+    policy: SecurityPolicy,
+    request: WatchPollRequest<'_>,
+) -> Result<WatchPollResponse, String> {
+    let (step, plugin, mut env) =
+        load_broker_target(request.source, request.project_id, state, None).await?;
+    // Before token minting: a poll the workflow's audience may not make
+    // sends nothing; the gate then re-decides the request and every hop.
+    let caller = crate::core::api_access::workflow_caller(state, request.workflow).await;
+    let gate = crate::core::api_access::enforce(
+        state,
+        &plugin,
+        &step,
+        &env,
+        &TemplateContext::new(),
+        &caller,
+    )
+    .await
+    .map_err(|refusal| call_secrets(&plugin, &env).scrub(&refusal))?;
+    let config_id = step.api_config_id.clone().unwrap_or_default();
+    resolve_dynamic_auth(&plugin, &config_id, state, &mut env, policy).await;
+    tracing::debug!(
+        workflow_id = %request.workflow.id,
+        plugin = %plugin.id,
+        "Watch poll"
+    );
+    let mut secrets = call_secrets(&plugin, &env);
+    let outcome = watch_poll_unscrubbed(
+        &step,
+        &plugin,
+        &env,
+        policy,
+        &request,
+        gate.as_ref(),
+        &mut secrets,
+    )
+    .await;
+    match outcome {
+        Ok(response) => Ok(WatchPollResponse {
+            status: response.status,
+            etag: response.etag.map(|v| secrets.scrub(&v)),
+            last_modified: response.last_modified.map(|v| secrets.scrub(&v)),
+            body: response.body.map(|v| secrets.scrub(&v)),
+        }),
+        Err(error) => Err(secrets.scrub(&error)),
+    }
+}
+
+async fn watch_poll_unscrubbed(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    env: &HashMap<String, String>,
+    policy: SecurityPolicy,
+    request: &WatchPollRequest<'_>,
+    gate: Option<&crate::core::api_access::EndpointGate>,
+    secrets: &mut crate::core::secret_scrub::SecretSet,
+) -> Result<WatchPollResponse, String> {
+    let spec = plugin
+        .api_spec
+        .as_ref()
+        .ok_or("Plugin has no `api_spec` — not an API plugin")?;
+    let endpoint_path = step
+        .api_endpoint_path
+        .as_ref()
+        .ok_or("Watch source missing `api_endpoint_path`")?;
+    let method = resolve_method(&step.api_method, endpoint_path, spec)?;
+    if method != Method::GET {
+        return Err(format!(
+            "A Watch trigger only sends GET requests; this source uses {method}."
+        ));
+    }
+    let ctx = TemplateContext::new();
+    let mut auth = resolve_auth(&spec.auth, env)?;
+    let query = render_map(&step.api_query, &ctx)
+        .and_then(|m| substitute_env_in_map(m, env))
+        .map_err(|e| format!("Template render error (query): {e}"))?;
+    let mut extra_headers = render_map(&step.api_headers, &ctx)
+        .and_then(|m| substitute_env_in_map(m, env))
+        .map_err(|e| format!("Template render error (headers): {e}"))?;
+    apply_default_headers(&mut auth, &spec.default_headers, &extra_headers, env)?;
+    if let Some(etag) = request.if_none_match {
+        extra_headers.insert("If-None-Match".into(), etag.to_string());
+    }
+    if let Some(date) = request.if_modified_since {
+        extra_headers.insert("If-Modified-Since".into(), date.to_string());
+    }
+    let templated = ctx
+        .render_strict(endpoint_path)
+        .map_err(|e| format!("Endpoint template render error: {e}"))?;
+    let templated = crate::core::oauth2_cache::substitute_env_in_string(&templated, env)
+        .map_err(|e| format!("Endpoint env-substitution error: {e}"))?;
+    let path = resolve_path_params(&templated, &step.api_path_params, &ctx)
+        .map_err(|e| format!("Path param render error: {e}"))?;
+    let base_url = interpolate_env(&spec.base_url, env);
+    if base_url.contains("<NOT_CONFIGURED:") {
+        return Err(format!(
+            "Plugin base URL has unresolved env placeholder(s): `{base_url}`. \
+             Open Settings → APIs and fill in every required config key for this plugin."
+        ));
+    }
+    let url = build_url(&base_url, &path, &auth.query, &query)?;
+    if policy.enforce_host_match {
+        assert_host_matches_base(&url, &base_url).map_err(|e| format!("Security: {e}"))?;
+    }
+    if policy.enforce_public_ip {
+        assert_public_ip(&url)
+            .await
+            .map_err(|e| format!("Security: {e}"))?;
+    }
+    let client = safe_http::client(
+        policy.destinations(),
+        ClientOptions::new(Redirects::Manual)
+            .timeout(request.timeout)
+            .user_agent(concat!("Kronn/", env!("CARGO_PKG_VERSION"))),
+    )?;
+    add_resolved_auth(secrets, &auth);
+    let headers = build_request_headers(&auth, &extra_headers)?;
+    let (secret_headers, secret_query_keys) = secret_slots(&auth, &extra_headers, &url);
+    let pinned_base = if policy.enforce_host_match {
+        Url::parse(&base_url).ok()
+    } else {
+        None
+    };
+    if let Some(gate) = gate {
+        gate.check(Method::GET.as_str(), url.path())?;
+    }
+    let hop_guard = |hop_method: &Method, hop_url: &Url| match gate {
+        Some(gate) => gate.check(hop_method.as_str(), hop_url.path()),
+        None => Ok(()),
+    };
+    let no_body = |req: safe_http::SafeRequest| req;
+    let response = match safe_http::send_following(
+        &client,
+        Outbound {
+            method: Method::GET,
+            url: url.clone(),
+            headers,
+            secret_headers: &secret_headers,
+            secret_query_keys: &secret_query_keys,
+            attach_body: &no_body,
+            has_body: false,
+            pinned_base: pinned_base.as_ref(),
+            hop_guard: Some(&hop_guard),
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(SendError::Blocked(reason)) => return Err(format!("Security: {reason}")),
+        Err(error @ SendError::Transport(_)) => {
+            return Err(format!("HTTP request failed: {error}"))
+        }
+    };
+    let status = response.status();
+    let header = |name: reqwest::header::HeaderName| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    };
+    let etag = header(reqwest::header::ETAG);
+    let last_modified = header(reqwest::header::LAST_MODIFIED);
+    if status == StatusCode::NOT_MODIFIED {
+        return Ok(WatchPollResponse {
+            status: status.as_u16(),
+            etag,
+            last_modified,
+            body: None,
+        });
+    }
+    if !status.is_success() {
+        let head = match read_body_capped(response, ERROR_BODY_READ_BYTES).await {
+            Ok(CappedBody::Whole(bytes)) => bytes,
+            _ => Vec::new(),
+        };
+        let excerpt = secrets.scrub(&String::from_utf8_lossy(&head));
+        return Err(format!(
+            "HTTP {} on GET {} — {}",
+            status.as_u16(),
+            redact_url_query(&url),
+            truncate(&excerpt, 512),
+        ));
+    }
+    let bytes = match read_body_capped(response, request.max_body_bytes).await {
+        Ok(CappedBody::Whole(bytes)) => bytes,
+        Ok(CappedBody::TooLarge(seen)) => {
+            return Err(format!(
+                "Response refused ({}): the body exceeds {} bytes ({seen} read); \
+                 watch a narrower endpoint",
+                status.as_u16(),
+                request.max_body_bytes
+            ))
+        }
+        Err(e) => {
+            return Err(format!(
+                "Response body read failed ({}): {e}",
+                status.as_u16()
+            ))
+        }
+    };
+    Ok(WatchPollResponse {
+        status: status.as_u16(),
+        etag,
+        last_modified,
+        body: Some(String::from_utf8_lossy(&bytes).into_owned()),
+    })
+}
+
 // ─── Pagination walk ────────────────────────────────────────────────────
 
 /// Walks paginated responses according to `PaginationSpec` and returns a
@@ -1872,6 +2223,14 @@ async fn send_with_retry(
     } else {
         0
     };
+    // Every page is re-decided under a policy; every redirect hop too.
+    if let Some(gate) = &transport.gate {
+        gate.check(method.as_str(), url.path())?;
+    }
+    let hop_guard = |hop_method: &Method, hop_url: &Url| match &transport.gate {
+        Some(gate) => gate.check(hop_method.as_str(), hop_url.path()),
+        None => Ok(()),
+    };
     let mut attempt: u8 = 0;
     loop {
         let attach_body = |req: safe_http::SafeRequest| match body {
@@ -1889,6 +2248,7 @@ async fn send_with_retry(
                 attach_body: &attach_body,
                 has_body: body.is_some(),
                 pinned_base: transport.pinned_base.as_ref(),
+                hop_guard: Some(&hop_guard),
             },
         )
         .await
@@ -1923,10 +2283,23 @@ async fn send_with_retry(
                     None => (Value::Null, link, Some(status.as_u16())),
                 });
             }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|e| format!("Response body read failed ({}): {e}", status.as_u16()))?;
+            let bytes = match read_body_capped(response, MAX_JSON_RESPONSE_BYTES).await {
+                Ok(CappedBody::Whole(bytes)) => bytes,
+                Ok(CappedBody::TooLarge(seen)) => {
+                    return Err(format!(
+                        "Response refused ({}): the JSON body exceeds {} MiB ({seen} bytes \
+                         read before stopping); narrow the request or paginate",
+                        status.as_u16(),
+                        MAX_JSON_RESPONSE_BYTES / (1024 * 1024)
+                    ))
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Response body read failed ({}): {e}",
+                        status.as_u16()
+                    ))
+                }
+            };
             if bytes.is_empty() {
                 return Ok((Value::Null, link, Some(status.as_u16())));
             }
@@ -1939,9 +2312,11 @@ async fn send_with_retry(
         let retryable = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
         if !retryable || attempt >= max_retries {
             // An upstream error body may echo the credential it rejected.
-            let excerpt = transport
-                .secrets
-                .scrub(&response.text().await.unwrap_or_default());
+            let head = match read_body_capped(response, ERROR_BODY_READ_BYTES).await {
+                Ok(CappedBody::Whole(bytes)) => bytes,
+                _ => Vec::new(),
+            };
+            let excerpt = transport.secrets.scrub(&String::from_utf8_lossy(&head));
             let redacted_url = redact_url_query(url);
             return Err(format!(
                 "HTTP {} on {} {} — {}",
@@ -1956,10 +2331,42 @@ async fn send_with_retry(
     }
 }
 
+/// A JSON response past this size fails the step before it is held whole.
+pub(crate) const MAX_JSON_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+/// An error body only feeds a 512-character excerpt.
+const ERROR_BODY_READ_BYTES: u64 = 64 * 1024;
+
+pub(crate) enum CappedBody {
+    Whole(Vec<u8>),
+    /// Bytes read when the cap was crossed (or the declared length).
+    TooLarge(u64),
+}
+
+/// Reads a body chunk by chunk and stops as soon as it crosses `max`.
+pub(crate) async fn read_body_capped(
+    mut response: reqwest::Response,
+    max: u64,
+) -> Result<CappedBody, reqwest::Error> {
+    if let Some(length) = response.content_length().filter(|length| *length > max) {
+        return Ok(CappedBody::TooLarge(length));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let total = (body.len() + chunk.len()) as u64;
+        if total > max {
+            return Ok(CappedBody::TooLarge(total));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(CappedBody::Whole(body))
+}
+
 /// Every request a step makes (each page, retry and hop) goes through one
 /// guarded client and, when the host is enforced, the plugin's base.
 struct ApiTransport {
     client: SafeClient,
+    /// Under an access policy, every page and redirect hop is re-decided.
+    gate: Option<crate::core::api_access::EndpointGate>,
     /// Applied to error text before it is truncated.
     secrets: crate::core::secret_scrub::SecretSet,
     pinned_base: Option<Url>,
@@ -2189,6 +2596,8 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -2312,11 +2721,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -5092,6 +5503,67 @@ mod tests {
         );
     }
 
+    /// KT-1047 — a JSON body past the cap fails the step explicitly.
+    #[tokio::test]
+    async fn a_json_response_past_the_cap_fails_the_step() {
+        let server = MockServer::start().await;
+        let body = format!("[\"{}\"]", "x".repeat(MAX_JSON_RESPONSE_BYTES as usize));
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
+        let out = execute_api_call_step_core(
+            &mk_step("/items"),
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(
+            out.result.output.contains("exceeds 16 MiB"),
+            "{}",
+            &out.result.output[..out.result.output.len().min(300)]
+        );
+    }
+
+    /// A chunked body with no declared length stops at the cap, not at its end.
+    #[tokio::test]
+    async fn a_chunked_body_stops_reading_at_the_cap() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await;
+            let chunk = format!("{:x}\r\n{}\r\n", 4096, "y".repeat(4096));
+            // Far more than the cap; the reader must stop long before the end.
+            for _ in 0..1024 {
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        assert_eq!(response.content_length(), None);
+        match read_body_capped(response, 64 * 1024).await.unwrap() {
+            CappedBody::TooLarge(seen) => assert!(seen <= 64 * 1024 + 8 * 4096, "{seen}"),
+            CappedBody::Whole(body) => panic!("read {} bytes past the cap", body.len()),
+        }
+    }
+
     #[tokio::test]
     async fn a_successful_json_echoing_the_key_is_scrubbed() {
         let server = MockServer::start().await;
@@ -5277,6 +5749,7 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::workflow_for_run("run-001"),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
@@ -5306,6 +5779,7 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::manual_test(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         let rows = state
@@ -5334,6 +5808,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::production(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
         let rows = state
@@ -5369,6 +5844,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::production(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
 
@@ -5431,6 +5907,7 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await;
 

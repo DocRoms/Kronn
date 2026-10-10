@@ -4,7 +4,7 @@
 // ticked next, and the rest of the catalog waits by category, folded away.
 // Pure, so both pickers and the tests read one definition.
 import type { Project, ProjectUsedSkill, Skill, SkillCategory } from '../types/generated';
-import { automationSkillEntries, isRepositorySkillId } from './automationSkills';
+import { automationSkillEntries, isRepositorySkillId, offeredToProject } from './automationSkills';
 import type { AutomationSkillEntry } from './automationSkills';
 
 type PickerProject = Pick<Project, 'id' | 'name' | 'default_skill_ids'>;
@@ -68,7 +68,7 @@ export function skillPickerModel(input: SkillPickerInput): SkillPickerModel {
   // Only what this project uses: another project's repository skills have no
   // business in its discussion.
   const entries = automationSkillEntries(
-    catalog,
+    catalog.filter(skill => offeredToProject(skill, project?.id)),
     project ? [project] : [],
     project ? usedSkills.filter(used => used.project_id === project.id) : [],
   );

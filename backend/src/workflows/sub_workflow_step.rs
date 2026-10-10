@@ -329,15 +329,19 @@ pub async fn execute_sub_workflow_step(
     }
 
     // Load the child workflow definition.
-    let target_for_db = target.clone();
+    let target_for_db = target.to_string();
+    let pinned_parent = parent_run_id.to_string();
+    // The parent's pinned revision of the child (KT-1096).
     let child_wf = match state
         .db
-        .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
+        .with_conn(move |c| {
+            crate::workflows::run_pins::sub_workflow_for(c, &pinned_parent, &target_for_db)
+        })
         .await
     {
-        // A disabled child (an agent changed it, or it was never enabled) is
-        // not run under the parent's activation (KT-1037).
-        Ok(Some(w)) if !w.enabled => {
+        // A child disabled when its parent pinned it, or switched off by a
+        // human since, is not run under the parent's activation (KT-1037).
+        Ok(Ok(Some(w))) if !w.enabled => {
             return fail(
                 step,
                 start,
@@ -348,8 +352,9 @@ pub async fn execute_sub_workflow_step(
                 ),
             )
         }
-        Ok(Some(w)) => w,
-        Ok(None) => {
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => {
             return fail(
                 step,
                 start,
@@ -394,6 +399,7 @@ pub async fn execute_sub_workflow_step(
     };
     insert_snapshot_marker(&mut trigger, prepared.snapshot);
     let mut child_run = WorkflowRun {
+        outcome: None,
         id: child_run_id.clone(),
         workflow_id: child_wf.id.clone(),
         status: RunStatus::Pending,
@@ -554,6 +560,8 @@ pub async fn execute_sub_workflow_step(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: crate::workflows::safety::run_terminal_stop(&child_run),
         },
         condition_action,
     }
@@ -852,14 +860,18 @@ async fn execute_foreach(
 
     // Load the child workflow once (same definition for every item).
     let target_for_db = target.to_string();
+    let pinned_parent = parent_run_id.to_string();
+    // The parent's pinned revision of the child (KT-1096).
     let child_wf = match state
         .db
-        .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
+        .with_conn(move |c| {
+            crate::workflows::run_pins::sub_workflow_for(c, &pinned_parent, &target_for_db)
+        })
         .await
     {
-        // A disabled child (an agent changed it, or it was never enabled) is
-        // not run under the parent's activation (KT-1037).
-        Ok(Some(w)) if !w.enabled => {
+        // A child disabled when its parent pinned it, or switched off by a
+        // human since, is not run under the parent's activation (KT-1037).
+        Ok(Ok(Some(w))) if !w.enabled => {
             return fail(
                 step,
                 start,
@@ -870,8 +882,9 @@ async fn execute_foreach(
                 ),
             )
         }
-        Ok(Some(w)) => w,
-        Ok(None) => {
+        Ok(Err(reason)) => return fail(step, start, reason),
+        Ok(Ok(Some(w))) => w,
+        Ok(Ok(None)) => {
             return fail(
                 step,
                 start,
@@ -996,6 +1009,7 @@ async fn execute_foreach(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
     let mut skipped_for_capacity = 0usize;
+    let mut foreach_terminal_stop: Option<String> = None;
     let mut total_tokens = Some(0u64);
     let mut last_child_id: Option<String> = None;
     let mut last_output: Option<String> = None;
@@ -1238,6 +1252,7 @@ async fn execute_foreach(
         } else {
             let now = Utc::now();
             let child = WorkflowRun {
+                outcome: None,
                 id: child_id.clone(),
                 workflow_id: child_wf.id.clone(),
                 status: RunStatus::Pending,
@@ -1384,6 +1399,11 @@ async fn execute_foreach(
             record_foreach_done(state, parent_run_id, &step.name,
                 json!({"idx": idx, "id": item_id, "status": "Success", "child_run_id": child_run.id})).await;
         }
+        // A terminal stop ends the whole tree: no further item is dispatched.
+        if let Some(reason) = crate::workflows::safety::run_terminal_stop(&child_run) {
+            foreach_terminal_stop = Some(reason);
+            break;
+        }
     }
     let _ = crate::core::rooted_io::remove(&ws_root, task_file); // best-effort cleanup
 
@@ -1460,6 +1480,8 @@ async fn execute_foreach(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: foreach_terminal_stop,
         },
         condition_action,
     }
@@ -1515,6 +1537,8 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }
@@ -1557,6 +1581,7 @@ mod tests {
 
         // Child workflow: deterministic JsonData steps — no LLM, no project.
         let child_wf = crate::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "child-wf".into(),
@@ -1593,6 +1618,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
         let parent_run = crate::models::WorkflowRun {
+            outcome: None,
             id: "parent-run".into(),
             workflow_id: "parent-wf".into(),
             status: crate::models::RunStatus::Running,
@@ -2330,6 +2356,14 @@ mod tests {
     // ─── KT-1045 — a child goes through its workflow's admission ───
     /// A budget bounded like a runner whose timeout guard of `seconds`
     /// started now: the foreach waits for capacity until just before it.
+    /// A run with `left` seconds of its `seconds` budget remaining.
+    fn budget_with_left(left: i64, seconds: u64) -> crate::workflows::runner::SharedBudget {
+        crate::workflows::runner::SharedBudget::root(50).within_deadline(
+            chrono::Utc::now() + chrono::Duration::seconds(left),
+            seconds,
+        )
+    }
+
     fn budget_with_timeout(seconds: u64) -> crate::workflows::runner::SharedBudget {
         crate::workflows::runner::SharedBudget::root(50).within_deadline(
             chrono::Utc::now() + chrono::Duration::seconds(seconds as i64),
@@ -2588,28 +2622,25 @@ mod tests {
     #[tokio::test]
     async fn the_runner_records_skipped_items_before_its_timeout() {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;
-        let (parent, mut outer) = outer_foreach_run(&state, &step, 2, &ws).await;
-        // A later edit of the saved guard must not move the running deadline.
-        {
-            let state = state.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                state
-                    .db
-                    .with_conn(|c| {
-                        let mut parent =
-                            crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
-                        parent.guards = Some(crate::models::WorkflowGuards {
-                            timeout_seconds: Some(3600),
-                            ..Default::default()
-                        });
-                        crate::db::workflows::update_workflow(c, &parent)?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap();
-            });
-        }
+        let (parent, mut outer) = outer_foreach_run(&state, &step, 100, &ws).await;
+        // 89 of 100 s spent: the capacity wait (10 s margin) ends in about 1 s, and
+        // the runner's deadline leaves 10 s to record the skipped items.
+        outer.started_at = chrono::Utc::now() - chrono::Duration::seconds(89);
+        // A stored edit of the guard must not move the running deadline: a run
+        // that read it would wait past its deadline instead of recording the skips.
+        state
+            .db
+            .with_conn(|c| {
+                let mut parent = crate::db::workflows::get_workflow(c, "parent-wf")?.unwrap();
+                parent.guards = Some(crate::models::WorkflowGuards {
+                    timeout_seconds: Some(3600),
+                    ..Default::default()
+                });
+                crate::db::workflows::update_workflow(c, &parent)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let _ = crate::workflows::runner::execute_run(
             state.clone(),
             &parent,
@@ -3092,7 +3123,7 @@ mod tests {
             "sub_workflow_foreach_file": "tasks.json",
             "sub_workflow_variables": {"ticketKey": "{{current_task.id}}"},
         }));
-        let run = |state: crate::AppState, timeout: u64| {
+        let run = |state: crate::AppState, budget: crate::workflows::runner::SharedBudget| {
             let (tokens, agents, ws, step) = (
                 tokens.clone(),
                 agents.clone(),
@@ -3108,7 +3139,7 @@ mod tests {
                     &step,
                     &tokens,
                     &agents,
-                    budget_with_timeout(timeout),
+                    budget,
                     Some(ws.to_string_lossy().to_string()),
                     super::ChildLaunch {
                         ctx: &ctx,
@@ -3130,7 +3161,9 @@ mod tests {
         };
 
         // The rendered key T1 is held: the old child does not slip through.
-        let refused = run(state.clone(), 1).await;
+        // Capacity wait already over (60 s margin of a 600 s budget, 30 s left), yet
+        // the deadline itself is 30 s away: setup under load cannot expire it.
+        let refused = run(state.clone(), budget_with_left(30, 600)).await;
         assert!(
             refused.result.output.contains("SkippedConcurrencyLimit"),
             "{}",
@@ -3143,7 +3176,7 @@ mod tests {
 
         // Once T1 is free, it resumes and keeps the rendered key.
         finish_run_later(&state, "t1-holder", 0).await;
-        let resumed = run(state.clone(), 3600).await;
+        let resumed = run(state.clone(), budget_with_timeout(3600)).await;
         assert!(
             resumed.result.output.contains("\"old-child\""),
             "{}",

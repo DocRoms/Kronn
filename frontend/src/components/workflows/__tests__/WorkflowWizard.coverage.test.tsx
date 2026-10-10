@@ -435,7 +435,7 @@ describe('WorkflowWizard — full summary recap', () => {
     expect(screen.getByText(/timeout 120s/)).toBeInTheDocument();
     expect(screen.getByText(/delai 5s/)).toBeInTheDocument();
     // Safety + hooks summary rows.
-    expect(screen.getByText('Securite')).toBeInTheDocument();
+    expect(screen.getByText('wiz.security')).toBeInTheDocument();
     expect(screen.getByText('Hooks')).toBeInTheDocument();
     expect(screen.getByText('Concurrence')).toBeInTheDocument();
   });

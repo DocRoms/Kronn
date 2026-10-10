@@ -4440,6 +4440,116 @@ button.disc-contact-open {
   background: var(--kr-bg-hover-strong);
 }
 
+.disc-composer-parallel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: 8px 10px 0;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-composer-parallel-chip {
+  padding: 1px 7px;
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-pill);
+  font-weight: 600;
+}
+
+.disc-delegation-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-4);
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  background: var(--kr-accent-bg);
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-md);
+}
+
+.disc-delegation-question {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  margin: 0;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.disc-delegation-hint {
+  margin: 0;
+  color: var(--kr-text-tertiary);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-delegation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-4);
+}
+
+.disc-delegation-btn {
+  min-height: 26px;
+  padding: 2px 10px;
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border-subtle);
+  border-radius: var(--kr-r-pill);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.disc-delegation-btn:hover:not(:disabled),
+.disc-delegation-btn:focus-visible {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover-strong);
+}
+
+.disc-delegation-btn-primary {
+  color: var(--kr-accent-ink);
+  background: var(--kr-accent);
+  border-color: var(--kr-accent);
+}
+
+.disc-delegation-btn-primary:hover:not(:disabled),
+.disc-delegation-btn-primary:focus-visible {
+  color: var(--kr-accent-ink);
+  background: var(--kr-accent);
+  filter: brightness(1.08);
+}
+
+.disc-delegation-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.disc-delegation-dismiss {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  padding: 0;
+  margin-left: auto;
+}
+
+.disc-msg-routing-mode {
+  color: var(--kr-text-tertiary);
+  font-style: italic;
+}
+
+.disc-msg-inert-mentions {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-4);
+  margin: 4px 0 0;
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+}
+
 .disc-composer-textarea {
   width: 100%;
   padding: 12px 14px 4px;
@@ -5424,6 +5534,10 @@ button.disc-contact-open {
   line-height: 1.2;
   max-width: 72px;
   overflow-wrap: anywhere;
+}
+
+.disc-mention-catalog-meta[data-catalog-warning='true'] {
+  color: var(--kr-warning);
 }
 
 .disc-mention-tier-choice:disabled,
@@ -8488,3 +8602,170 @@ button.disc-contact-open {
   background: #000;
 }
 .disc-sequence-screen .disc-sequence-error { display: grid; gap: 8px; justify-items: center; color: #fff; }
+
+/* KT-1107 — pre-launch agent check (form) and its compact room notice. */
+.agent-readiness {
+  margin: 0 var(--kr-sp-4) var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-subtle);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.agent-readiness[data-state="blocked"],
+.agent-readiness[data-state="error"] {
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border-color: rgba(var(--kr-error-rgb), 0.28);
+}
+
+.agent-readiness-title {
+  font-weight: 600;
+  color: var(--kr-text-primary);
+  margin-bottom: var(--kr-sp-2);
+}
+
+.agent-readiness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.agent-readiness-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  line-height: 1.4;
+}
+
+.agent-readiness-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-readiness-row-actions,
+.agent-readiness-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+}
+
+.agent-readiness-actions {
+  justify-content: flex-end;
+  margin-top: var(--kr-sp-3);
+}
+
+.agent-readiness-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin: var(--kr-sp-2) var(--kr-sp-4);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+  border: 1px solid var(--kr-border-subtle);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.agent-readiness-notice[data-state="blocked"] {
+  border-color: rgba(var(--kr-warning-rgb), 0.28);
+}
+
+.agent-readiness-chip {
+  padding: 0 var(--kr-sp-2);
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+}
+
+/* KT-1108 — a reply's live progress: phase, startup steps, idle countdown, activity. */
+.disc-run-progress {
+  margin-top: var(--kr-sp-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+}
+
+.disc-run-progress-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--kr-sp-3);
+}
+
+.disc-run-progress-phase {
+  color: var(--kr-text-primary);
+  font-style: italic;
+}
+
+.disc-run-progress-time,
+.disc-run-progress-total {
+  color: var(--kr-text-dim);
+  font-family: var(--kr-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.disc-run-progress-steps,
+.disc-run-progress-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.disc-run-progress-steps li,
+.disc-run-progress-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.disc-run-progress-steps li[data-current="false"] {
+  color: var(--kr-text-muted);
+}
+
+.disc-run-progress-steps li[data-current="true"] {
+  color: var(--kr-text-primary);
+}
+
+.disc-run-progress-idle {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  color: var(--kr-warning);
+}
+
+.disc-run-progress-stop {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-error);
+}
+
+.disc-run-progress-list {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.disc-run-progress-empty {
+  margin: 4px 0 0;
+  color: var(--kr-text-dim);
+}

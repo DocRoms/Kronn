@@ -36,11 +36,12 @@ import { CollectionSidebarRail } from '../components/CollectionShell';
 import { NewDiscussionForm } from '../components/NewDiscussionForm';
 import type { NewDiscConfig } from '../components/NewDiscussionForm';
 import { AgentQuestionForm } from '../components/AgentQuestionForm';
+import { AgentReadinessNotice } from '../components/AgentReadinessPanel';
 import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun, QuickPrompt } from '../types/generated';
+import type { Project, AgentDetection, AgentReadiness, Discussion, DiscussionDetail, DiscussionMessage, MessageChannel, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse, ExecutionDiscussionLink, MessageSearchHit, MessageTarget, ParticipantView, DiscussionAction, SharedRun, QuickPrompt } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStableCallback } from '../hooks/useStableCallback';
 import { useQpChain } from '../hooks/useQpChain';
@@ -79,8 +80,11 @@ import {
   messagesInConversationOrder,
   pendingAgentReplies,
   targetsFromComposerText, draftBelongsToTurn } from '../lib/messageTargets';
+import { inertAgentMentions, inertMentionsFor } from '../lib/agentDelegation';
 import { externalConnectionForDiscussion } from '../lib/externalAgentIdentity';
 import { safeGetItem, safeSetItem } from '../lib/safeStorage';
+import { receiveRunFrame, receiveRunSnapshot, useLiveRun, type AgentRunProgressFrame, type ReplyIds } from '../lib/agentRunProgress';
+import { AgentRunProgressPanel } from '../components/AgentRunProgressPanel';
 
 type LoadedDiscussion = Discussion
   & Partial<Pick<DiscussionDetail,
@@ -125,6 +129,9 @@ function newClientMessageId(): string {
 }
 
 function PendingAgentReplyBubble({
+  replyId,
+  discussionId,
+  replyIds,
   agent,
   triggerMessageId,
   status,
@@ -132,6 +139,9 @@ function PendingAgentReplyBubble({
   stopping,
   onStop,
 }: {
+  replyId: string;
+  discussionId: string;
+  replyIds: ReplyIds;
   agent: AgentType;
   triggerMessageId: string;
   status: string;
@@ -140,6 +150,7 @@ function PendingAgentReplyBubble({
   onStop: () => void;
 }) {
   const { t } = useT();
+  const run = useLiveRun(discussionId, { id: replyId, agent, triggerMessageId }, replyIds);
   // A refused sibling used to vanish: the placeholder disappeared and the room
   // showed nothing, while Kronn had written down exactly why. Mention three
   // agents, watch two of them go, and the only way to learn the cause was to
@@ -174,7 +185,7 @@ function PendingAgentReplyBubble({
       data-role="agent"
       data-reply-trigger={triggerMessageId}
       data-testid={`pending-agent-${agent}`}
-      aria-live="polite"
+      aria-live={run ? undefined : 'polite'}
     >
       <div className="disc-msg-bubble" data-role="agent">
         <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent) }}>
@@ -200,12 +211,16 @@ function PendingAgentReplyBubble({
             {stopping ? t('disc.stoppingReply') : t('disc.stopReply')}
           </button>
         </div>
+        {run && <AgentRunProgressPanel run={run} agentLabel={AGENT_LABELS[agent] ?? agent} />}
       </div>
     </div>
   );
 }
 
 function StreamingAgentReplyBubble({
+  replyId,
+  discussionId,
+  replyIds,
   agent,
   triggerMessageId,
   elapsed,
@@ -220,6 +235,9 @@ function StreamingAgentReplyBubble({
   agentLabel,
   waitingUpstream,
 }: {
+  replyId: string;
+  discussionId: string;
+  replyIds: ReplyIds;
   agent: AgentType;
   triggerMessageId: string;
   elapsed: number;
@@ -237,13 +255,14 @@ function StreamingAgentReplyBubble({
 }) {
   const { t } = useT();
   const displayAgent = agentLabel ?? AGENT_LABELS[agent] ?? agent;
+  const run = useLiveRun(discussionId, { id: replyId, agent, triggerMessageId }, replyIds);
   return (
     <div
       className="disc-msg-row"
       data-role="agent"
       data-reply-trigger={triggerMessageId}
       data-testid={`streaming-agent-${agent}`}
-      aria-live="polite"
+      aria-live={run ? undefined : 'polite'}
     >
       <div className="disc-msg-bubble" data-role="agent">
         <div className="disc-msg-agent-label" style={{ color: agentTextColor(agent), justifyContent: 'space-between' }}>
@@ -284,7 +303,7 @@ function StreamingAgentReplyBubble({
           <div className="disc-streaming-md">
             <MarkdownContent content={text} />
           </div>
-        ) : (
+        ) : run ? null : (
           <div className="disc-streaming-waiting" aria-live="assertive">
             <span className="disc-pulse-dot" />
             {waitingUpstream ? t('disc.waitingForSlot') : t('disc.running')}
@@ -293,6 +312,7 @@ function StreamingAgentReplyBubble({
             )}
           </div>
         )}
+        {run && <AgentRunProgressPanel run={run} agentLabel={displayAgent} />}
         {logs.length > 0 && (
           <div style={{ marginTop: 6 }}>
             <button className="disc-logs-toggle" onClick={onToggleLogs}>
@@ -806,6 +826,8 @@ export function DiscussionsPage({
   const [externalConnections, setExternalConnections] = useState<ExternalApiConnectionView[]>([]);
   const [expandedSummaryMsgId, setExpandedSummaryMsgId] = useState<string | null>(null);
   const [worktreeError, setWorktreeError] = useState<string | null>(null);
+  // KT-1107 — the agent check of each room started from this page, until dismissed.
+  const [readinessByDisc, setReadinessByDisc] = useState<Record<string, AgentReadiness[]>>({});
   // A send refused because the previous run is still being recovered. Held as
   // state (not a blocking `confirm`) because recovery can take minutes: the tab
   // must stay usable. The submitted text is already back in the composer via
@@ -1544,6 +1566,14 @@ export function DiscussionsPage({
       status: sending ? 'Running' : 'Pending',
     }];
   }, [activeDiscussion, interruptedStream, sending, streamingTargetMap, streamingTurnMap]);
+  // The replies on screen: a run shown by one of them is never shown by another.
+  const activeDispatches = activeDiscussion && 'active_agent_dispatches' in activeDiscussion
+    ? activeDiscussion.active_agent_dispatches
+    : undefined;
+  const replyIds = useMemo<ReplyIds>(() => ({
+    claimed: new Set(pendingReplySlots.map(reply => reply.id)),
+    durable: new Set((activeDispatches ?? []).map(dispatch => dispatch.id)),
+  }), [activeDispatches, pendingReplySlots]);
   const streamingText = activeDiscussionId ? (streamingMap[activeDiscussionId] ?? '') : '';
   // The turn that is streaming right now, when one is.
   const liveTurnId = activeDiscussionId ? streamingTurnMap[activeDiscussionId] : undefined;
@@ -1668,7 +1698,28 @@ export function DiscussionsPage({
   // AbortController is not render data, and storing it there re-renders the
   // page for every request in flight. Declared here rather than worked around.
   // eslint-disable-next-line react-hooks/immutability
+  // KT-1108 — frames missed while the page was closed or the socket down.
+  const loadRunProgress = useCallback((discId: string) => {
+    if (typeof discussionsApi.runProgress !== 'function') return;
+    const requestedAt = Date.now();
+    discussionsApi.runProgress(discId)
+      .then(frames => receiveRunSnapshot(
+        discId,
+        (frames ?? []).filter((frame): frame is AgentRunProgressFrame => frame.type === 'agent_run_progress'),
+        requestedAt,
+      ))
+      .catch(() => { /* the next live frame brings the same */ });
+  }, []);
+  useEffect(() => {
+    if (activeDiscussionId) loadRunProgress(activeDiscussionId);
+  }, [activeDiscussionId, loadRunProgress]);
+
   const handleWsMessage = useCallback((msg: WsMessage) => {
+    // KT-1108 — lands in its own store: only the bubble showing the run re-renders.
+    if (msg.type === 'agent_run_progress') {
+      receiveRunFrame(msg);
+      return;
+    }
     if (msg.type === 'shared_run_updated') {
       // A brand-new media job (not yet in the by-message map) needs a relist
       // so its placeholder appears; a known one's own RunStatusCard
@@ -1885,6 +1936,7 @@ export function DiscussionsPage({
     if (activeDiscussionId) {
       reloadDiscussion(activeDiscussionId);
       loadContextFiles(activeDiscussionId);
+      loadRunProgress(activeDiscussionId);
     }
     refreshContactsPresence();
   });
@@ -2442,6 +2494,10 @@ export function DiscussionsPage({
     setShowNewDiscussion(false);
     setActiveDiscussionId(disc.id);
     refetchDiscussions();
+    if (config.readiness?.length) {
+      const readiness = config.readiness;
+      setReadinessByDisc(prev => ({ ...prev, [disc.id]: readiness }));
+    }
 
     // Upload pending context files (from NewDiscussionForm) before running agent
     if (config.pendingFiles?.length) {
@@ -3210,6 +3266,12 @@ export function DiscussionsPage({
     return map;
   }, [activeDiscussionId, contextFilesMap]);
 
+  const inertMentionsByMessage = useMemo(() => inertAgentMentions(
+    activeDiscussion?.messages ?? EMPTY_MESSAGES,
+    activeDiscussion?.message_targets ?? {},
+    activeDiscussion?.agent ?? 'ClaudeCode',
+  ), [activeDiscussion?.messages, activeDiscussion?.message_targets, activeDiscussion?.agent]);
+
   // Built once per transcript change: rebuilding these per render handed every
   // memoized bubble a new `replies` array and re-rendered the whole thread.
   const transcriptIndex = useMemo(() => {
@@ -3848,6 +3910,9 @@ export function DiscussionsPage({
               ? (
                   <StreamingAgentReplyBubble
                     key={reply.id}
+                    replyId={reply.id}
+                    discussionId={activeDiscussion.id}
+                    replyIds={replyIds}
                     agent={reply.agent}
                     triggerMessageId={reply.triggerMessageId}
                     elapsed={sendingElapsed}
@@ -3872,6 +3937,9 @@ export function DiscussionsPage({
               : (
                   <PendingAgentReplyBubble
                     key={reply.id}
+                    replyId={reply.id}
+                    discussionId={activeDiscussion.id}
+                    replyIds={replyIds}
                     agent={reply.agent}
                     triggerMessageId={reply.triggerMessageId}
                     status={reply.status}
@@ -3957,6 +4025,7 @@ export function DiscussionsPage({
                 msg={msg}
                 workflowStep={activeDiscussion.workflow_step_authors?.[msg.id]}
                 targets={activeDiscussion.message_targets?.[msg.id] ?? EMPTY_TARGETS}
+                inertMentions={inertMentionsFor(inertMentionsByMessage, msg.id)}
                 defaultTargets={activeDiscussion.default_targets ?? EMPTY_TARGETS}
                 idx={idx}
                 attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
@@ -4016,14 +4085,14 @@ export function DiscussionsPage({
             </Fragment>
           );
         });
-  }, [activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId,
+  }, [activeContextFiles, activeDiscussion, activeExternalConnection, agentLogs, attachmentsByMessageId, inertMentionsByMessage,
     chainableQPs, copiedMsgId, deferredStreamingText, deletingMessageIds, discussionActionsByMessageId,
     durablePartial, editingMsgId, editingText, expandedSummaryMsgId, externalConnectionAliases,
     globalSearchTarget, handleDiscussionActionChanged, handleMsgCopy, handleMsgDelete, handleMsgEditCancel,
     handleMsgEditStart, handleMsgExpandSummary, handleMsgReply, handleMsgTts, handleReplyNavigate,
     handleRetryAgentDispatch, handleStopDispatch, hasFullAccess, locale, mediaJobsByMessage,
     messageSearchIndex, messageSearchMatches, stableNavigate, openMediaAsset, orchState, pendingFileMsgIds,
-    pendingReplySlots, recoveryAgentLabel, resilientStreamingText, sending, sendingElapsed, streamLost,
+    pendingReplySlots, recoveryAgentLabel, replyIds, resilientStreamingText, sending, sendingElapsed, streamLost,
     showLogs, stableEditMessage, stableLaunchQp, stableOpenActionDiscussion, stableRetry,
     stoppingDispatchIds, t, transcriptIndex, ttsPlayingMsgId, ttsState, visibleStreamingReply]);
 
@@ -5338,6 +5407,18 @@ export function DiscussionsPage({
                   >{t('disc.agentDisabledLink')}</span>
                 </span>
               </div>
+            )}
+
+            {readinessByDisc[activeDiscussion.id] && (
+              <AgentReadinessNotice
+                results={readinessByDisc[activeDiscussion.id]}
+                onDismiss={() => setReadinessByDisc(prev => {
+                  const next = { ...prev };
+                  delete next[activeDiscussion.id];
+                  return next;
+                })}
+                t={t}
+              />
             )}
 
             {/* Structured agent questions form (0.3.5) — surfaced when the

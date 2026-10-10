@@ -797,11 +797,7 @@ fn create_imported_page(
         serde_json::from_value(remap_value(&item.source, map, project_id)?)?;
     let now = Utc::now();
     let mut slug = exported.slug;
-    while tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)",
-        [&slug],
-        |row| row.get::<_, bool>(0),
-    )? {
+    while crate::db::live_pages::slug_is_taken(tx, &slug)? {
         let stem = item.source.value["slug"].as_str().unwrap();
         let stem = &stem[..stem.len().min(87)]; // validated ASCII slug
         slug = format!("{}-{}", stem.trim_end_matches('-'), Uuid::new_v4().simple());
@@ -981,6 +977,41 @@ fn commit_plan(
     })
 }
 
+/// Import a bundle Kronn ships itself, inside the caller's transaction: every
+/// dependency is a fresh copy, so nothing the user already has is reused or
+/// changed. Workflows land disabled, as for any import.
+pub(crate) fn import_shipped_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    content: String,
+) -> Result<ArtifactImportResult> {
+    let mut request = ArtifactImportRequest {
+        content,
+        project_id: None,
+        choices: Vec::new(),
+        approved_quick_exec_ids: Vec::new(),
+        preview_digest: None,
+        allow_embed_origins: Vec::new(),
+    };
+    request.choices = parse_resources(&request)?
+        .into_iter()
+        .skip(1)
+        .map(|resource| ArtifactImportChoice {
+            kind: resource.kind,
+            source_id: resource.id,
+            action: ArtifactImportAction::Create,
+            target_id: None,
+        })
+        .collect();
+    let plan = prepare_plan(tx, &request)?;
+    if !plan.preview.can_import {
+        bail!(
+            "Shipped Artifact cannot be imported: {}",
+            plan.preview.issues.join("; ")
+        );
+    }
+    commit_plan(tx, plan, &request)
+}
+
 pub async fn import(
     State(state): State<AppState>,
     Json(request): Json<ArtifactImportRequest>,
@@ -1038,6 +1069,10 @@ pub async fn import(
                     }
                     Err(error) => Err(error),
                 };
+                drop(config);
+                if outcome.is_ok() {
+                    crate::api::live_pages::announce_embed_origins_changed(&state);
+                }
                 if let Err(error) = outcome {
                     tracing::warn!("Imported Artifact, but could not allow its sites: {error}");
                     imported.not_allowed_embed_origins =

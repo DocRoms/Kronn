@@ -28,6 +28,10 @@ class MockUtterance {
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
+  // KT-1111 — the sidebar files assistant conversations apart.
+  assistantConversations: { list: vi.fn().mockResolvedValue([]) },
+  // KT-1107 — a multi-agent start checks its agents first.
+  agents: { readiness: vi.fn().mockResolvedValue([]) },
   // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
   learnings: {
     pending: vi.fn().mockResolvedValue({ count: 0 }),
@@ -52,6 +56,7 @@ vi.mock('../../lib/api', () => ({
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
     poll: vi.fn(),
+    runProgress: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     delete: vi.fn(),
     deleteMessage: vi.fn().mockResolvedValue(undefined),
@@ -202,6 +207,7 @@ vi.mock('../../hooks/useWebSocket', () => ({
 }));
 
 import {
+  agents as agentsApi,
   discussions as discussionsApi,
   externalApi as externalApiConnections,
   media,
@@ -214,7 +220,7 @@ import { DiscussionsPage } from '../DiscussionsPage';
 import { clearImportantMessages } from '../../lib/importantMessages';
 import { discardImportantDraft } from '../../lib/importantMessageDraft';
 import { findRenderedTextRanges } from '../../lib/discussionMessageSearch';
-import type { AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun } from '../../types/generated';
+import type { ActiveAgentDispatch, AgentDetection, AgentType, AgentsConfig, AiAuditStatus, ContextFile, Discussion, Project, SharedRun, WsMessage } from '../../types/generated';
 import type { ExternalApiConnectionView } from '../../lib/api';
 import type { ToastFn } from '../../hooks/useToast';
 
@@ -3597,6 +3603,57 @@ describe('DiscussionsPage', () => {
     }, { timeout: 1000 });
   });
 
+  it('KT-1107 — a multi-agent room shows the agent check it was started with', async () => {
+    const createdDisc: Discussion = { ...makeListDiscussion('disc-checked', 1), messages: [] };
+    vi.mocked(discussionsApi.create).mockReset();
+    vi.mocked(discussionsApi.create).mockResolvedValue(createdDisc);
+    vi.mocked(discussionsApi.get).mockResolvedValue(createdDisc);
+    vi.mocked(agentsApi.readiness).mockResolvedValueOnce([
+      {
+        agent_type: 'Codex', status: 'ready', reason: 'ready', message_key: 'readiness.reason.ready',
+        servers: [], secs: null, detail: null, cached: false, checked_at: '2026-10-09T10:00:00Z',
+      },
+      {
+        agent_type: 'ClaudeCode', status: 'unknown', reason: 'login_unverified',
+        message_key: 'readiness.reason.login_unverified',
+        servers: [], secs: null, detail: null, cached: true, checked_at: '2026-10-09T10:00:00Z',
+      },
+    ]);
+    const agent = (agent_type: AgentType, name: string): AgentDetection => ({
+      name, agent_type, installed: true, enabled: true, path: `/usr/bin/${name}`, version: '1.0.0',
+      latest_version: null, origin: 'host', install_command: null, host_managed: false, host_label: null,
+      runtime_available: false, rtk_available: false, rtk_hook_configured: false,
+    });
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[agent('ClaudeCode', 'claude'), agent('Codex', 'codex')]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={vi.fn()}
+        {...liftedProps()}
+      />
+    );
+    await act(async () => { fireEvent.click(screen.getAllByText(/Nouvelle/)[0]); });
+    const prompt = document.querySelector('.disc-new-prompt-wrap textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(prompt, { target: { value: '@codex @claude vérifiez ceci.' } });
+    });
+    await act(async () => {
+      fireEvent.click(document.querySelector('.disc-create-btn') as HTMLButtonElement);
+    });
+    const notice = await screen.findByTestId('agent-readiness-notice');
+    expect(notice).toHaveTextContent('Agents vérifiés avant le démarrage');
+    expect(notice).toHaveTextContent('✅ Codex');
+    expect(notice).toHaveTextContent('❔ Claude Code');
+    await act(async () => { fireEvent.click(notice.querySelector('button') as HTMLButtonElement); });
+    expect(screen.queryByTestId('agent-readiness-notice')).toBeNull();
+  });
+
   it('creates one no-agent room for a media-only connection before launching media', async () => {
     const connection: ExternalApiConnectionView = {
       id: 'media-only',
@@ -4790,5 +4847,167 @@ describe('DiscussionsPage', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 50)); });
     const body = document.body.textContent ?? '';
     expect(body).not.toMatch(/Audit IA en cours sur ce projet/i);
+  });
+});
+
+describe('KT-1108 — live progress in the reply bubble', () => {
+  type ProgressFrame = Extract<WsMessage, { type: 'agent_run_progress' }>;
+  type FrameOverrides = Partial<Omit<ProgressFrame, 'progress'>> & { progress?: Partial<ProgressFrame['progress']> };
+  const frame = (overrides: FrameOverrides): ProgressFrame => ({
+    type: 'agent_run_progress',
+    discussion_id: 'd-live',
+    dispatch_id: null,
+    trigger_message_id: 'u-live',
+    agent_type: 'ClaudeCode',
+    run_id: 'run-1',
+    started_at: '2026-10-09T09:00:00Z',
+    seq: 1,
+    ...overrides,
+    progress: {
+      phase: 'waiting_model',
+      phase_ms: 4_000,
+      elapsed_ms: 9_000,
+      timeline: [
+        { phase: 'preparing', at_ms: 0 },
+        { phase: 'starting_cli', at_ms: 300 },
+        { phase: 'waiting_model', at_ms: 5_000 },
+      ],
+      mcp_servers: null,
+      activity: [],
+      tool_calls: 0,
+      silent_ms: 0,
+      idle_limit_ms: 300_000,
+      stopped: null,
+      ...overrides.progress,
+    },
+  });
+
+  type Dispatches = ActiveAgentDispatch[];
+  const liveDiscussion = (dispatches: Dispatches = []): Discussion => ({
+    ...makeListDiscussion('d-live', 1),
+    awaiting_agent: true,
+    messages: [{
+      id: 'u-live', role: 'User', channel: 'main', content: 'Premier message',
+      agent_type: null, timestamp: '2026-10-09T09:00:00Z', tokens_used: 0, auth_mode: null,
+    }],
+    active_agent_dispatches: dispatches,
+  } as Discussion);
+
+  let send: ((msg: ProgressFrame) => void) | undefined;
+  beforeEach(async () => {
+    const { resetLiveRuns } = await import('../../lib/agentRunProgress');
+    resetLiveRuns();
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(onMessage => {
+      send = msg => onMessage(msg);
+      return { connected: true, connectionState: 'connected' };
+    });
+  });
+  afterEach(async () => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false, connectionState: 'connecting' }));
+  });
+
+  const renderLive = async (disc: Discussion, sending: boolean) => {
+    vi.mocked(discussionsApi.get).mockResolvedValue(disc);
+    const lifted = liftedProps();
+    if (sending) {
+      lifted.sendingMap = { 'd-live': true } as never;
+      lifted.streamingMap = { 'd-live': '' } as never;
+    }
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[disc]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d-live"
+        {...lifted}
+      />,
+    );
+  };
+
+  it('shows the phase, its time and the activity on the very first message', async () => {
+    await renderLive(liveDiscussion(), true);
+    const bubble = await screen.findByTestId('streaming-agent-ClaudeCode');
+    await act(async () => { send?.(frame({})); });
+
+    expect(bubble).toHaveTextContent('Prompt envoyé, en attente du modèle');
+    expect(bubble.querySelector('[data-testid="run-phase-elapsed"]')).toHaveTextContent('4 s');
+    expect(bubble).toHaveTextContent('Démarrage du CLI Claude Code et de ses serveurs MCP');
+    expect(bubble).not.toHaveTextContent("Agent en cours d'exécution...");
+
+    await act(async () => {
+      send?.(frame({
+        seq: 2,
+        progress: {
+          phase: 'tool',
+          tool_calls: 1,
+          activity: [{ category: 'Read', at: new Date().toISOString() }],
+        },
+      }));
+    });
+    fireEvent.click(screen.getByTestId('run-activity-toggle'));
+    expect(screen.getByTestId('run-activity-toggle')).toHaveTextContent('Activité (1)');
+    expect(screen.getByTestId('run-activity-entry')).toHaveTextContent('Lecture');
+  });
+
+  it('reads the run in progress when the page opens mid-silence, and again on reconnect', async () => {
+    let connect: (() => void) | undefined;
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation((onMessage, onConnect) => {
+      send = msg => onMessage(msg);
+      connect = onConnect;
+      return { connected: true, connectionState: 'connected' };
+    });
+    const silent = frame({
+      dispatch_id: 'job-open', seq: 7,
+      progress: { phase: 'waiting_model', silent_ms: 120_000, idle_limit_ms: 300_000 },
+    });
+    vi.mocked(discussionsApi.runProgress).mockReset();
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([silent]);
+    await renderLive(liveDiscussion([{
+      id: 'job-open', trigger_message_id: 'u-live', agent_type: 'ClaudeCode', status: 'Running',
+    }]), false);
+
+    const bubble = await screen.findByTestId('pending-agent-ClaudeCode');
+    await waitFor(() => expect(bubble).toHaveTextContent('Prompt envoyé, en attente du modèle'));
+    expect(screen.getByTestId('run-idle-countdown')).toHaveTextContent('arrêt pour inactivité dans 3 min 00 s');
+    expect(discussionsApi.runProgress).toHaveBeenCalledWith('d-live');
+
+    // The socket drops; on reconnect the snapshot is read again, and its
+    // newer state is taken.
+    vi.mocked(discussionsApi.runProgress).mockResolvedValue([frame({
+      dispatch_id: 'job-open', seq: 9,
+      progress: { phase: 'tool', tool_calls: 1, silent_ms: 0 },
+    })]);
+    await act(async () => { connect?.(); });
+    await waitFor(() => expect(screen.getByTestId('run-phase')).toHaveTextContent('Utilise un outil'));
+  });
+
+  it('never shows another run of the discussion in a dispatch bubble, and ignores late frames', async () => {
+    await renderLive(liveDiscussion([{
+      id: 'job-codex', trigger_message_id: 'u-live', agent_type: 'Codex', status: 'Running',
+    }]), false);
+    const bubble = await screen.findByTestId('pending-agent-Codex');
+    await act(async () => {
+      send?.(frame({ dispatch_id: 'job-other', agent_type: 'Codex', run_id: 'other' }));
+    });
+    expect(bubble.querySelector('[data-testid="agent-run-progress"]')).toBeNull();
+
+    await act(async () => {
+      send?.(frame({ dispatch_id: 'job-codex', agent_type: 'Codex', run_id: 'mine', seq: 3 }));
+      // Older, then after the stop: neither changes the bubble.
+      send?.(frame({ dispatch_id: 'job-codex', agent_type: 'Codex', run_id: 'mine', seq: 2, progress: { phase: 'initializing' } }));
+      send?.(frame({ dispatch_id: 'job-codex', agent_type: 'Codex', run_id: 'mine', seq: 4, progress: { stopped: 'idle', silent_ms: 300_000, idle_limit_ms: null } }));
+      send?.(frame({ dispatch_id: 'job-codex', agent_type: 'Codex', run_id: 'mine', seq: 5, progress: { phase: 'responding' } }));
+    });
+    expect(screen.getByTestId('run-phase')).toHaveTextContent('Prompt envoyé, en attente du modèle');
+    expect(screen.getByTestId('run-stopped')).toHaveTextContent('Kronn a arrêté Codex après 5 min 00 s sans activité.');
   });
 });

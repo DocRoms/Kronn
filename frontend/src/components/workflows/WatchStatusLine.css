@@ -1,0 +1,25 @@
+.wf-watch-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.wf-watch-status-counters {
+  font-variant-numeric: tabular-nums;
+}
+
+.wf-watch-status[data-failing='true'] .wf-watch-status-result {
+  color: var(--kr-danger);
+}
+
+.wf-watch-failing-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--kr-danger);
+  font-weight: 600;
+}

@@ -198,7 +198,7 @@ describe('WorkflowDetail — header actions', () => {
     renderDetail({
       workflow: mkWorkflow({ trigger: { type: 'Cron', schedule: '0 9 * * *' } as unknown as WorkflowTrigger }),
     });
-    expect(screen.getByText('Cron: 0 9 * * *')).toBeInTheDocument();
+    expect(screen.getByText('Cron: 0 9 * * * (wiz.timezoneKronn)')).toBeInTheDocument();
   });
 
   it('shows a Tracker trigger label with owner/repo', () => {

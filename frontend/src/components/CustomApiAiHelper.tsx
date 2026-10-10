@@ -7,7 +7,7 @@
 //
 // TD-helpers-unify: ApiCallAiHelper and CustomApiAiHelper share ~60% of
 // their lifecycle code (phases, streaming, agent dropdown, welcome
-// state, KRONN:APPLY parsing). A future refactor should extract a
+// state). The KRONN:APPLY parser is already shared. A future refactor should extract a
 // shared `<AiChatHelperShell>` that both consume via injected
 // buildSystemPrompt / buildContext / onApply slots.
 
@@ -16,15 +16,27 @@ import {
   Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown,
   ClipboardPaste, Link2, MessageSquareText,
 } from 'lucide-react';
-import { discussions as discussionsApi } from '../lib/api';
+import { assistantConversations, discussions as discussionsApi } from '../lib/api';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../lib/i18n';
-import type { AgentType, CustomApiPayload } from '../types/generated';
-import { parseApplyBlocks } from './workflows/apiCallAiHelperUtils';
+import type { AgentType, AssistantConversation, CustomApiPayload } from '../types/generated';
+import { sanitizeForAssistant, scrubSecrets } from '../lib/assistantSecrets';
+import { AssistantConversationList } from './AssistantConversationList';
+import {
+  notifyAssistantConversationsChanged,
+  pendingFor,
+  recordApplied,
+  settlePending,
+  recordProposal,
+  transcriptToChat,
+} from './assistantConversation';
+import { parseKronnApply } from '../lib/kronnApply';
+import { KronnApplyNotice } from './KronnApplyNotice';
 import {
   applyToCustomForm,
   buildContextBlock,
   buildSystemPrompt,
+  customApiSecrets,
   type CustomApiFormSnapshot,
   type Translator,
 } from './customApiAiHelperUtils';
@@ -49,6 +61,11 @@ export interface CustomApiAiHelperProps {
   /** Backend output-language (Settings → Output language) drives the
    *  agent's reply language. UI labels stay UI-locale. */
   configLanguage?: string;
+  /** Server id of the plugin being edited; null while it is being created. */
+  targetId?: string | null;
+  /** Called with each conversation started, so the form can attach it to the
+   *  plugin once created. */
+  onConversationStarted?: (discussionId: string) => void;
   t: Translator;
 }
 
@@ -64,6 +81,8 @@ export function CustomApiAiHelper({
   onApply,
   installedAgents,
   configLanguage,
+  targetId = null,
+  onConversationStarted,
   t,
 }: CustomApiAiHelperProps) {
   const agentLocale = toUILocale(configLanguage);
@@ -84,6 +103,12 @@ export function CustomApiAiHelper({
   const [minimized, setMinimized] = useState(false);
   const [appliedSignatures, setAppliedSignatures] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
+  // Each open/resume/switch/close starts a new session: a late response of an
+  // older one (a slow GET, a create, a stream chunk) is dropped.
+  const sessionRef = useRef(0);
+  const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
+  const formSecrets = customApiSecrets(formSnapshot);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -98,14 +123,8 @@ export function CustomApiAiHelper({
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, [messages]);
 
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-      if (discussionId) {
-        discussionsApi.delete(discussionId).catch(() => {});
-      }
-    };
-  }, [discussionId]);
+  // The conversation is kept (KT-1111): unmounting only stops the stream.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   useEffect(() => {
     if (!agentMenuOpen) return;
@@ -119,11 +138,18 @@ export function CustomApiAiHelper({
     return () => window.removeEventListener('mousedown', handler);
   }, [agentMenuOpen]);
 
-  const close = useCallback(() => {
+  const beginSession = useCallback(() => {
     abortRef.current?.abort();
-    if (discussionId) {
-      discussionsApi.delete(discussionId).catch(() => {});
-    }
+    streamingRef.current = false;
+    loadingRef.current = false;
+    setLoading(false);
+    sessionRef.current += 1;
+    return sessionRef.current;
+  }, []);
+
+  const close = useCallback(() => {
+    beginSession();
+    if (discussionId) notifyAssistantConversationsChanged();
     setDiscussionId(null);
     setMessages([]);
     setInput('');
@@ -134,53 +160,115 @@ export function CustomApiAiHelper({
     setAgentMenuOpen(false);
     setActiveAgent(null);
     setPhase('closed');
-  }, [discussionId]);
+  }, [discussionId, beginSession]);
+
+  const resume = useCallback(async (conversation: AssistantConversation) => {
+    const session = beginSession();
+    // Nothing can be sent until the history is loaded, so it cannot be lost.
+    loadingRef.current = true;
+    setLoading(true);
+    setStreaming(false);
+    setPhase('chatting');
+    setMinimized(false);
+    setActiveAgent(conversation.agent);
+    setDiscussionId(conversation.discussion_id);
+    setMessages([]);
+    setInput('');
+    setError(null);
+    setAppliedSignatures(new Set(conversation.last_applied_signature ? [conversation.last_applied_signature] : []));
+    try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
+      const disc = await discussionsApi.get(conversation.discussion_id);
+      if (session !== sessionRef.current) return;
+      setMessages(transcriptToChat(disc.messages, [
+        agentT('mcp.custom.helper.sys.userQuestion'),
+        t('mcp.custom.helper.sys.userQuestion'),
+      ]));
+      // An unattached conversation joins this plugin, or the draft being created.
+      if (!conversation.target_id) {
+        if (targetId) {
+          assistantConversations.update(conversation.discussion_id, { target_id: targetId })
+            .then(() => {
+              settlePending(targetId, conversation.discussion_id);
+              notifyAssistantConversationsChanged();
+            })
+            .catch(e => console.warn('[CustomApiAiHelper] attach on resume failed:', e));
+        } else {
+          onConversationStarted?.(conversation.discussion_id);
+        }
+      }
+    } catch (e) {
+      if (session !== sessionRef.current) return;
+      console.error('[CustomApiAiHelper] resume failed:', e);
+      setError(String(e));
+    } finally {
+      if (session === sessionRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
+  }, [agentLocale, agentT, t, beginSession, targetId, onConversationStarted]);
 
   const startWithAgentRef = useRef<((agent: AgentType) => Promise<void>) | null>(null);
 
   const switchAgent = useCallback((agent: AgentType) => {
     setAgentMenuOpen(false);
     if (agent === activeAgent || streaming) return;
-    abortRef.current?.abort();
-    if (discussionId) {
-      discussionsApi.delete(discussionId).catch(() => {});
-    }
+    // The previous conversation stays kept; the new agent starts a fresh one.
     setDiscussionId(null);
     setMessages([]);
     setInput('');
     setError(null);
     setAppliedSignatures(new Set());
     void startWithAgentRef.current?.(agent);
-  }, [activeAgent, streaming, discussionId]);
+  }, [activeAgent, streaming]);
 
   const startWithAgent = useCallback(async (agent: AgentType) => {
+    const session = beginSession();
     setPhase('chatting');
     setActiveAgent(agent);
     setMessages([]);
     setError(null);
     try {
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
+      const label = formSnapshot.name.trim();
+      // One server call creates and files the conversation; the server masks
+      // the form's secrets before the first insert.
       const disc = await discussionsApi.create({
         project_id: null,
-        title: `🤖 ${t('mcp.custom.helper.discTitle')}`,
+        title: `🤖 ${t('mcp.custom.helper.discTitle')}${label ? ` · ${label}` : ''}`,
         agent,
         language: configLanguage ?? 'fr',
         initial_prompt: buildSystemPrompt(agentT),
+        assistant: {
+          kind: 'custom_api',
+          target_id: targetId,
+          target_label: label,
+          secrets: formSecrets,
+        },
       });
+      notifyAssistantConversationsChanged();
+      onConversationStarted?.(disc.id);
+      if (session !== sessionRef.current) return;
       setDiscussionId(disc.id);
     } catch (e) {
+      if (session !== sessionRef.current) return;
       console.error('[CustomApiAiHelper] startWithAgent failed:', e);
       setError(String(e));
     }
-  }, [t, configLanguage, agentLocale, agentT]);
+  }, [t, configLanguage, agentLocale, agentT, formSnapshot.name, targetId, onConversationStarted, beginSession, formSecrets]);
 
   useEffect(() => {
     startWithAgentRef.current = startWithAgent;
   }, [startWithAgent]);
 
   const sendMessage = useCallback(async (overrideText?: string) => {
-    const userText = (overrideText ?? input).trim();
-    if (!userText || !discussionId || streamingRef.current) return;
+    const typed = (overrideText ?? input).trim();
+    if (!typed || !discussionId || streamingRef.current || loadingRef.current) return;
+    const session = sessionRef.current;
+    // The conversation is kept: no secret typed in the form may enter it.
+    const secrets = formSecrets;
+    const userText = sanitizeForAssistant(typed, secrets);
     streamingRef.current = true;
     setInput('');
     setError(null);
@@ -190,6 +278,7 @@ export function CustomApiAiHelper({
     try {
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
     } catch (e) {
+      if (session !== sessionRef.current) return;
       setMessages(prev => prev.slice(0, -2));
       setInput(userText);
       setError(String(e));
@@ -198,15 +287,21 @@ export function CustomApiAiHelper({
       return;
     }
     const contextBlock = buildContextBlock(formSnapshot, agentT);
-    const enriched = `${contextBlock}\n\n${agentT('mcp.custom.helper.sys.userQuestion')}\n${userText}`;
+    const enriched = sanitizeForAssistant(
+      `${contextBlock}\n\n${agentT('mcp.custom.helper.sys.userQuestion')}\n${userText}`,
+      secrets,
+    );
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let reply = '';
 
     await discussionsApi.sendMessageStream(
       discussionId,
-      { content: enriched },
+      { content: enriched, assistant_secrets: secrets },
       chunk => {
+        if (session !== sessionRef.current) return;
+        reply += chunk;
         setMessages(prev => {
           const last = prev[prev.length - 1];
           if (last?.role !== 'assistant') {
@@ -215,8 +310,14 @@ export function CustomApiAiHelper({
           return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
         });
       },
-      () => { streamingRef.current = false; setStreaming(false); },
+      () => {
+        recordProposal(discussionId, reply);
+        if (session !== sessionRef.current) return;
+        streamingRef.current = false;
+        setStreaming(false);
+      },
       err => {
+        if (session !== sessionRef.current) return;
         console.error('[CustomApiAiHelper] sendMessageStream error:', err);
         setError(err);
         streamingRef.current = false;
@@ -224,7 +325,7 @@ export function CustomApiAiHelper({
       },
       controller.signal,
     );
-  }, [input, discussionId, formSnapshot, agentLocale, agentT]);
+  }, [input, discussionId, formSnapshot, formSecrets, agentLocale, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();
@@ -237,12 +338,25 @@ export function CustomApiAiHelper({
 
   const handleApply = useCallback((sig: string, parsed: Record<string, unknown>) => {
     onApply(applyToCustomForm(parsed));
+    if (discussionId) recordApplied(discussionId, sig);
     setAppliedSignatures(prev => {
       const next = new Set(prev);
       next.add(sig);
       return next;
     });
-  }, [onApply]);
+  }, [onApply, discussionId]);
+
+  const conversationList = (
+    <AssistantConversationList
+      filter={targetId
+        // Also the conversations this browser still owes it (failed attach).
+        ? { kind: 'custom_api', target_id: targetId, include_unattached: true, pending_ids: pendingFor(targetId) }
+        : { kind: 'custom_api', unattached: true }}
+      activeDiscussionId={discussionId}
+      onResume={resume}
+      t={t}
+    />
+  );
 
   // ─── Phase: closed ────────────────────────────────────────────────────
   if (phase === 'closed') {
@@ -262,6 +376,7 @@ export function CustomApiAiHelper({
         >
           <Sparkles size={11} /> {t('mcp.custom.helper.trigger')}
         </button>
+        {conversationList}
         {error && (
           <span className="wf-apicall-ai-inline-error" role="alert">
             {error}
@@ -281,6 +396,7 @@ export function CustomApiAiHelper({
       >
         <Sparkles size={11} /> {t('mcp.custom.helper.trigger')}
       </button>
+      {conversationList}
       {!minimized && (
         <div className="wf-apicall-ai-bubble" role="dialog" aria-label={t('mcp.custom.helper.bubbleTitle')}>
           <div className="wf-apicall-ai-bubble-header">
@@ -320,7 +436,7 @@ export function CustomApiAiHelper({
                 </div>
               )}
             </div>
-            <span className="wf-apicall-ai-bubble-eph">{t('mcp.custom.helper.ephemeral')}</span>
+            <span className="wf-apicall-ai-bubble-eph" title={t('aiHelper.keptHint')}>{t('aiHelper.kept')}</span>
             <button
               type="button"
               className="wf-apicall-ai-icon-btn"
@@ -396,8 +512,12 @@ export function CustomApiAiHelper({
               <ChatMessageView
                 key={idx}
                 msg={msg}
+                streaming={streaming && idx === messages.length - 1}
                 appliedSignatures={appliedSignatures}
                 onApply={handleApply}
+                onRetry={() => void sendMessage(t('aiHelper.apply.retryPrompt'))}
+                retryDisabled={streaming || loading || !discussionId}
+                secrets={formSecrets}
                 t={t}
               />
             ))}
@@ -428,7 +548,8 @@ export function CustomApiAiHelper({
               }}
               placeholder={t('mcp.custom.helper.inputPlaceholder')}
               rows={2}
-              disabled={streaming}
+              disabled={streaming || loading}
+              aria-busy={loading}
               autoFocus
             />
             {streaming ? (
@@ -446,7 +567,7 @@ export function CustomApiAiHelper({
                 type="button"
                 className="wf-apicall-ai-send-btn"
                 onClick={() => void sendMessage()}
-                disabled={!input.trim() || !discussionId}
+                disabled={!input.trim() || !discussionId || loading}
                 title={t('mcp.custom.helper.send')}
                 aria-label={t('mcp.custom.helper.send')}
               >
@@ -472,35 +593,43 @@ export function CustomApiAiHelper({
 }
 
 // ─── Sub-components (mirrored from ApiCallAiHelper, kept local to avoid
-// a fragile cross-component dependency). The shared parser primitive
-// `parseApplyBlocks` IS imported from ApiCallAiHelper since it's already
-// exported and represents the KRONN:APPLY wire contract. ────────────────
+// a fragile cross-component dependency). The KRONN:APPLY parser is shared
+// through lib/kronnApply. ────────────────────────────────────────────────
 
 interface ChatMessageViewProps {
   msg: ChatMessage;
+  /** True while this message is still being streamed: a partial block is not yet an error. */
+  streaming: boolean;
   appliedSignatures: Set<string>;
   onApply: (sig: string, parsed: Record<string, unknown>) => void;
+  onRetry: () => void;
+  retryDisabled: boolean;
+  /** Form values masked from what is displayed, replies and resumed history included. */
+  secrets: string[];
   t: Translator;
 }
 
-const KRONN_APPLY_RX = /KRONN:APPLY\s*```json\s*([\s\S]*?)```/g;
-
-function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageViewProps) {
-  const blocks = msg.role === 'assistant' ? parseApplyBlocks(msg.text) : [];
-  const prose = msg.role === 'assistant' ? msg.text.replace(KRONN_APPLY_RX, '').trim() : msg.text;
+function ChatMessageView({ msg, streaming, appliedSignatures, onApply, onRetry, retryDisabled, secrets, t }: ChatMessageViewProps) {
+  const { blocks, prose, unreadable } = msg.role === 'assistant'
+    ? parseKronnApply(msg.text)
+    : { blocks: [], prose: msg.text, unreadable: null };
 
   return (
     <div className={`wf-apicall-ai-msg wf-apicall-ai-msg-${msg.role}`}>
-      {prose && <div className="wf-apicall-ai-msg-text">{prose}</div>}
+      {prose && <div className="wf-apicall-ai-msg-text">{scrubSecrets(prose, secrets)}</div>}
       {blocks.map(block => (
         <SuggestionCard
           key={block.signature}
           parsed={block.parsed}
           applied={appliedSignatures.has(block.signature)}
           onApply={() => onApply(block.signature, block.parsed)}
+          secrets={secrets}
           t={t}
         />
       ))}
+      {unreadable !== null && !streaming && (
+        <KronnApplyNotice raw={unreadable} onRetry={onRetry} retryDisabled={retryDisabled} t={t} />
+      )}
     </div>
   );
 }
@@ -509,10 +638,11 @@ interface SuggestionCardProps {
   parsed: Record<string, unknown>;
   applied: boolean;
   onApply: () => void;
+  secrets: string[];
   t: Translator;
 }
 
-function SuggestionCard({ parsed, applied, onApply, t }: SuggestionCardProps) {
+function SuggestionCard({ parsed, applied, onApply, secrets, t }: SuggestionCardProps) {
   const fields = Object.entries(parsed).filter(([, v]) => v !== undefined && v !== null);
   return (
     <div className={`wf-apicall-ai-suggestion${applied ? ' wf-apicall-ai-suggestion-applied' : ''}`}>
@@ -523,7 +653,7 @@ function SuggestionCard({ parsed, applied, onApply, t }: SuggestionCardProps) {
       <ul className="wf-apicall-ai-suggestion-list">
         {fields.map(([k, v]) => (
           <li key={k}>
-            <strong>{k}</strong>: <code>{typeof v === 'string' ? v : JSON.stringify(v)}</code>
+            <strong>{k}</strong>: <code>{scrubSecrets(typeof v === 'string' ? v : JSON.stringify(v), secrets)}</code>
           </li>
         ))}
       </ul>

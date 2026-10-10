@@ -17,7 +17,7 @@ vi.mock('../../../lib/api', () => buildApiMock());
 
 import { workflows as workflowsApi } from '../../../lib/api';
 import { WorkflowDetail } from '../WorkflowDetail';
-import type { Workflow, WorkflowStep } from '../../../types/generated';
+import type { AgentType, AgentsConfig, Workflow, WorkflowStep } from '../../../types/generated';
 
 // Minimal step factory — spreads the defaults the renderer dereferences so
 // each test only states the discriminating fields (name + step_type).
@@ -502,5 +502,47 @@ describe('WorkflowDetail — focused steps pipeline', () => {
     fireEvent.click(trigger!);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Team Two · disc.tier.default' }));
     await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledExactlyOnceWith(0, 'Custom', 'default', 'two'));
+  });
+
+  it('badges a native agent in the step picker while its full access is off', () => {
+    const agent = (full_access: boolean) => ({ path: null, installed: true, version: null, full_access });
+    const tiers = () => ({ economy: null, default: null, reasoning: null });
+    const access = (copilotFullAccess: boolean): AgentsConfig => ({
+      claude_code: agent(false), codex: agent(false), open_code: agent(false), gemini_cli: agent(false),
+      kiro: agent(false), vibe: agent(false), copilot_cli: agent(copilotFullAccess), ollama: agent(false),
+      lite_llm: agent(false), nvidia: agent(false),
+      model_tiers: { claude_code: tiers(), codex: tiers(), open_code: tiers(), gemini_cli: tiers(), kiro: tiers(),
+        vibe: tiers(), copilot_cli: tiers(), ollama: tiers(), lite_llm: tiers(), nvidia: tiers() },
+    });
+    const props = {
+      availableAgentTypes: ['ClaudeCode', 'CopilotCli'] as AgentType[],
+      onChangeStepAgent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { container, rerender } = renderDetail(mixedSteps, { ...props, agentAccess: access(false) });
+    fireEvent.click(container.querySelector<HTMLButtonElement>(
+      '.wf-steps-pipeline [aria-label="wf.stepAgentSwitchLabel"]',
+    )!);
+    const copilotRow = () => screen.getByRole('group', { name: 'GitHub Copilot' });
+    expect(copilotRow()).toContainElement(screen.getByTestId('agent-needs-full-access'));
+    expect(screen.getByTestId('agent-needs-full-access')).toHaveTextContent('agentPicker.needsFullAccess');
+    expect(screen.getAllByTestId('agent-needs-full-access')).toHaveLength(1);
+
+    rerender(
+      <WorkflowDetail
+        workflow={mkWorkflow(mixedSteps)}
+        runs={[]}
+        liveRun={null}
+        onTrigger={() => {}}
+        onRefresh={() => {}}
+        onEdit={() => {}}
+        onDeleteRun={() => {}}
+        onDeleteAllRuns={() => {}}
+        triggering={false}
+        {...props}
+        agentAccess={access(true)}
+      />,
+    );
+    expect(copilotRow()).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-needs-full-access')).not.toBeInTheDocument();
   });
 });

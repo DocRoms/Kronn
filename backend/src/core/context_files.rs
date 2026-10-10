@@ -1172,9 +1172,9 @@ mod tests {
     #[test]
     fn delete_image_from_disk_is_silent_on_missing() {
         // delete_image_from_disk is fire-and-forget — must NOT panic if the path is bogus.
-        delete_image_from_disk("/tmp/does-not-exist-kronn-test.png");
-        // Sanity: it does actually remove a real file too.
         let tmp = tempfile::tempdir().unwrap();
+        delete_image_from_disk(&tmp.path().join("does-not-exist.png").to_string_lossy());
+        // Sanity: it does actually remove a real file too.
         let p = tmp.path().join("tobe-deleted.png");
         std::fs::write(&p, b"x").unwrap();
         delete_image_from_disk(&p.to_string_lossy());

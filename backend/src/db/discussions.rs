@@ -42,6 +42,9 @@ pub fn set_partial_response(
 ) -> Result<()> {
     match partial {
         Some(text) => {
+            let masked =
+                crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, text)?;
+            let text = masked.as_str();
             let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
             let model = provenance.and_then(|(_, model)| model);
             conn.execute(
@@ -101,6 +104,8 @@ pub fn set_partial_response_for_dispatch(
     trigger_message_id: &str,
     connection_id: Option<&str>,
 ) -> Result<bool> {
+    let masked = crate::db::assistant_conversations::mask_for_discussion(conn, disc_id, partial)?;
+    let partial = masked.as_str();
     let agent_type = format_agent_type(provenance.0);
     let changed = conn.execute(
         "UPDATE discussions
@@ -1347,6 +1352,9 @@ pub fn revise_note_message(
     message_id: &str,
     content: &str,
 ) -> Result<String> {
+    let masked =
+        crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, content)?;
+    let content = masked.as_str();
     // The note and its audit trail are one write. A failed audit must not
     // leave changed content behind, nor consume the discussion sequence.
     let transaction = conn.unchecked_transaction()?;
@@ -2313,6 +2321,38 @@ pub fn update_discussion_timestamp(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Append missing agents to the participants; the principal is already
+/// attached. Returns false when the discussion does not exist.
+pub fn attach_discussion_participants(
+    conn: &Connection,
+    id: &str,
+    agents: &[AgentType],
+) -> Result<bool> {
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT agent, participants_json FROM discussions WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((principal, participants_json)) = row else {
+        return Ok(false);
+    };
+    let principal = parse_agent_type(&principal)?;
+    let mut participants =
+        serde_json::from_str::<Vec<AgentType>>(&participants_json).unwrap_or_default();
+    let before = participants.len();
+    for agent in agents {
+        if *agent != principal && !participants.contains(agent) {
+            participants.push(agent.clone());
+        }
+    }
+    if participants.len() != before {
+        update_discussion_participants(conn, id, &participants)?;
+    }
+    Ok(true)
+}
+
 pub fn update_discussion_participants(
     conn: &Connection,
     id: &str,
@@ -2700,6 +2740,9 @@ fn insert_message_inner(
         .lint_report
         .as_ref()
         .and_then(|r| serde_json::to_string(r).ok());
+    // KT-1111 — every message of an assistant conversation, any author.
+    let content =
+        crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, &msg.content)?;
 
     conn.execute(
         "INSERT INTO messages (id, discussion_id, role, channel, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
@@ -2709,7 +2752,7 @@ fn insert_message_inner(
             discussion_id,
             format_role(&msg.role),
             format_message_channel(msg.channel),
-            msg.content,
+            content,
             msg.agent_type.as_ref().map(format_agent_type),
             msg.timestamp.to_rfc3339(),
             next_order,
@@ -3202,6 +3245,9 @@ pub fn edit_last_user_message(
     discussion_id: &str,
     content: &str,
 ) -> Result<bool> {
+    let masked =
+        crate::db::assistant_conversations::mask_for_discussion(conn, discussion_id, content)?;
+    let content = masked.as_str();
     let affected = conn.execute(
         "UPDATE messages SET content = ?1, timestamp = ?2
          WHERE discussion_id = ?3 AND role = 'User'
@@ -3340,6 +3386,16 @@ pub fn revise_message_with_dispatch(
     conn: &Connection,
     request: ReviseMessageParams<'_>,
 ) -> std::result::Result<ReviseMessageOutcome, ReviseMessageError> {
+    let masked = crate::db::assistant_conversations::mask_for_discussion(
+        conn,
+        request.discussion_id,
+        request.content,
+    )
+    .map_err(ReviseMessageError::Other)?;
+    let request = ReviseMessageParams {
+        content: &masked,
+        ..request
+    };
     let transaction = conn.unchecked_transaction()?;
 
     if let Some(existing) =
@@ -3608,6 +3664,13 @@ pub fn apply_remote_message_revision_with_targets(
     event: &MessageRevisionEvent,
     targets: &[MessageTarget],
 ) -> Result<bool> {
+    let mut masked = event.clone();
+    masked.content = crate::db::assistant_conversations::mask_for_discussion(
+        conn,
+        &event.discussion_id,
+        &event.content,
+    )?;
+    let event = &masked;
     let transaction = conn.unchecked_transaction()?;
     if get_revision_event_by_idempotency_key(&transaction, &event.idempotency_key)?.is_some() {
         return Ok(false);

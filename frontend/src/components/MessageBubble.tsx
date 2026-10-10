@@ -42,6 +42,7 @@ import {
   isDeletedMessage,
 } from '../lib/messageContent';
 import { parseModelErrorEvent } from '../lib/modelErrorEvent';
+import { orchestratedAgents, type InertMention } from '../lib/agentDelegation';
 import { discussions as discussionsApi, executionVariables, projects as projectsApi } from '../lib/api';
 import { isPreviewableAttachment } from '../lib/mediaKind';
 import { attachmentForLink, fileLinkUrlTransform, linkKind, projectFileTarget, unavailableFileReason } from '../lib/localFileLinks';
@@ -50,7 +51,7 @@ import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
   ChevronRight, ListTodo, User, Users, Trash2, Workflow,
-  Reply, Eye, EyeOff, Wrench, Paperclip, FileText, ArrowUpRight,
+  Reply, Eye, EyeOff, Wrench, Paperclip, FileText, ArrowUpRight, Info,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -315,6 +316,8 @@ export interface MessageBubbleProps {
   onReplyNavigate?: (messageId: string) => void;
   onDelete?: (message: DiscussionMessage) => void;
   isDeleting?: boolean;
+  /** Agents this reply names in prose without launching them, with why. */
+  inertMentions?: InertMention[];
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -322,7 +325,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   const { msg, workflowStep, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, defaultAgentAlias, targetConnectionAliases = {}, summaryCache, language, sending, editingText, hasFullAccess,
     defaultTargets = [],
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onRetryAgentDispatch, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, actions = [], onActionChanged, onOpenActionDiscussion, attachments, discussionMedia, pendingAttachment, isSearchMatch, isSearchCurrent, replyTarget, replies = [], onReply, onReplyNavigate, onDelete, isDeleting = false, targets = [], inertMentions = [], t } = props;
   const [fileOpenRequest, setFileOpenRequest] = useState<{ assetId: string; nonce: number } | null>(null);
   const fileLinkContext = useMemo<MessageFileLinkContextValue>(() => ({
     attachments: discussionMedia ?? attachments,
@@ -352,6 +355,9 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   // ordinary turn. Both are MessageTarget, so one renderer covers the two and
   // a CLI session reads as a CLI session in either case.
   const effectiveTargets = targets.length > 0 ? targets : defaultTargets;
+  const orchestrated = useMemo(() => orchestratedAgents(msg, targets), [msg, targets]);
+  const triggerOf = (agent: AgentType) =>
+    AGENT_MENTIONS.find(mention => mention.type === agent)?.trigger ?? `@${AGENT_LABELS[agent] ?? agent}`;
   const isDeleted = isDeletedMessage(msg.content);
   const modelError = useMemo(() => {
     if (msg.role !== 'System') return null;
@@ -776,6 +782,16 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                         );
                       })}
                   </span>
+                  {targets.length > 1 && (
+                    <span className="disc-msg-routing-mode" data-testid="message-routing-parallel">
+                      · {t('disc.routingParallel', targets.length)}
+                    </span>
+                  )}
+                  {orchestrated.length > 0 && (
+                    <span className="disc-msg-routing-mode" data-testid="message-routing-orchestrated">
+                      · {t('disc.routingOrchestrates', orchestrated.map(triggerOf).join(', '))}
+                    </span>
+                  )}
                 </span>
               </div>
             )}
@@ -1293,6 +1309,17 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               <Zap size={11} /> {t('disc.launchProposedQp', `${chainQp.icon ?? '⚡'} ${chainQp.name}`)}
             </button>
           </div>
+        )}
+        {inertMentions.length > 0 && (
+          <p className="disc-msg-inert-mentions" role="note" data-testid="message-inert-mentions">
+            <Info size={10} aria-hidden="true" />
+            <span>
+              {inertMentions.map(mention => t(
+                mention.reason === 'scheduled' ? 'disc.inertMentionScheduled' : 'disc.inertMentionProse',
+                triggerOf(mention.agent),
+              )).join(' · ')}
+            </span>
+          </p>
         )}
         <div className="disc-msg-footer">
           <div className="disc-msg-time-row">

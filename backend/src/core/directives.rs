@@ -197,6 +197,11 @@ pub fn get_directives_snapshot(run_id: &str, ids: &[String]) -> Vec<Directive> {
         .collect()
 }
 
+/// Seeds `run_id`'s snapshot with the revision its run recorded.
+pub fn pin_directive_snapshot(run_id: &str, id: &str, directive: Directive) {
+    DIRECTIVE_SNAPSHOTS.pin(run_id, id, directive);
+}
+
 /// Drop every directive snapshot pinned to `run_id`. Call once that run
 /// has finished so its resources don't stay pinned in memory.
 pub fn release_directives_snapshot(run_id: &str) {

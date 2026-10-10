@@ -912,7 +912,9 @@ async fn quick_exec_failed_stdout_remains_in_the_saved_diagnostic() {
 }
 
 async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    // The launch is fire-and-forget: its persisted terminal state is the event.
+    // The ceiling only bounds a hang; the paced poll leaves the DB to the launch.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let (_, action) =
                 get_json(app.clone(), &format!("/api/discussion-actions/{action_id}")).await;
@@ -923,7 +925,7 @@ async fn wait_for_terminal_action(app: Router, action_id: &str) -> Value {
             ) {
                 break action;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
     .await
@@ -1162,7 +1164,8 @@ async fn discussion_action_launch_context_resolves_project_env_for_a_global_targ
     // A real, existing directory — the exec step validates `work_dir` exists
     // on disk before spawning, and a global target now resolves the
     // discussion's project as its worktree (KT-476 LaunchContext).
-    let project_path = std::env::temp_dir().to_string_lossy().into_owned();
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().to_string_lossy().into_owned();
     state
         .db
         .with_conn({
@@ -1633,6 +1636,7 @@ async fn live_page_workflows_returns_configured_publishers() {
                 [&now],
             )?;
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "wf-linked".into(),
                 name: "Page producer".into(),
@@ -1675,6 +1679,104 @@ async fn live_page_workflows_returns_configured_publishers() {
     assert_eq!(missing_status, StatusCode::OK);
     assert_eq!(missing["success"], false);
     assert_eq!(missing["error_code"], "not_found");
+}
+
+/// KT-1098 — a slug is renamed under the creation rules, and the old one keeps
+/// opening the page without ever being claimable by another page.
+#[tokio::test]
+async fn a_renamed_page_slug_keeps_its_old_links_and_cannot_be_hijacked() {
+    let app = build_router_with_auth(test_state(), false);
+    let create = |slug: &str| serde_json::json!({"title": slug, "slug": slug, "html": "<p>x</p>", "datasets": []});
+    let (_, team) = post_json(app.clone(), "/api/pages", create("team-v2")).await;
+    let team_id = team["data"]["id"]
+        .as_str()
+        .expect("page created")
+        .to_string();
+    let (_, other) = post_json(app.clone(), "/api/pages", create("other-page")).await;
+    let other_id = other["data"]["id"]
+        .as_str()
+        .expect("page created")
+        .to_string();
+    let page_url = |id: &str| format!("/api/pages/{id}");
+
+    for bad in [
+        "Team V2",
+        "team--v2",
+        "-team",
+        "",
+        "0b8f5c2e-3a7d-4f1e-9c6b-2d4e8a1f7c3b",
+    ] {
+        let (_, refused) = patch_json(
+            app.clone(),
+            &page_url(&team_id),
+            serde_json::json!({"slug": bad}),
+        )
+        .await;
+        assert_eq!(refused["error_code"], "validation", "{bad}: {refused}");
+    }
+    let (_, clash) = patch_json(
+        app.clone(),
+        &page_url(&team_id),
+        serde_json::json!({"slug": "other-page"}),
+    )
+    .await;
+    assert_eq!(clash["error_code"], "conflict", "{clash}");
+    let (_, unknown) = patch_json(
+        app.clone(),
+        "/api/pages/no-such-page",
+        serde_json::json!({"slug": "anything"}),
+    )
+    .await;
+    assert_eq!(unknown["error_code"], "not_found", "{unknown}");
+
+    let (_, renamed) = patch_json(
+        app.clone(),
+        &page_url(&team_id),
+        serde_json::json!({"slug": " suivi-team-front "}),
+    )
+    .await;
+    assert_eq!(renamed["data"]["slug"], "suivi-team-front", "{renamed}");
+    assert_eq!(
+        renamed["data"]["slug_aliases"],
+        serde_json::json!(["team-v2"])
+    );
+    for link in ["team-v2", "suivi-team-front"] {
+        let (_, opened) = get_json(app.clone(), &page_url(link)).await;
+        assert_eq!(opened["data"]["id"], team_id.as_str(), "{link}: {opened}");
+    }
+
+    // Neither a new page nor a rename may take the retired slug.
+    let (_, squat) = post_json(app.clone(), "/api/pages", create("team-v2")).await;
+    assert_eq!(squat["error_code"], "conflict", "{squat}");
+    let (_, steal) = patch_json(
+        app.clone(),
+        &page_url(&other_id),
+        serde_json::json!({"slug": "team-v2"}),
+    )
+    .await;
+    assert_eq!(steal["error_code"], "conflict", "{steal}");
+    let (_, still) = get_json(app.clone(), &page_url("team-v2")).await;
+    assert_eq!(still["data"]["id"], team_id.as_str());
+
+    // The page itself may take its old slug back.
+    let (_, back) = patch_json(
+        app.clone(),
+        &page_url("suivi-team-front"),
+        serde_json::json!({"slug": "team-v2", "title": "Team"}),
+    )
+    .await;
+    assert_eq!(back["data"]["slug"], "team-v2", "{back}");
+    assert_eq!(back["data"]["title"], "Team");
+    assert_eq!(
+        back["data"]["slug_aliases"],
+        serde_json::json!(["suivi-team-front"])
+    );
+
+    // Deleting the page frees every slug it held.
+    let (_, deleted) = delete_json(app.clone(), &page_url("suivi-team-front")).await;
+    assert_eq!(deleted["success"], true, "{deleted}");
+    let (_, reused) = post_json(app.clone(), "/api/pages", create("suivi-team-front")).await;
+    assert_eq!(reused["success"], true, "{reused}");
 }
 
 async fn workflow_portability_fixture() -> (AppState, Value) {
@@ -1785,6 +1887,7 @@ async fn workflow_portability_fixture() -> (AppState, Value) {
             )?;
 
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-portable".into(),
                 name: "Portable workflow".into(),
@@ -5439,6 +5542,7 @@ async fn optional_variable_http_run(
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "optional-input-workflow".into(),
         name: "Optional input".into(),
@@ -5628,6 +5732,7 @@ async fn workflow_goto_path_renders_fallback_exec_markers_and_run_id() {
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "goto-fallback-workflow".into(),
         name: "Goto fallback".into(),
@@ -5763,6 +5868,7 @@ async fn a_run_seeded_with_a_ticket_is_found_by_it_in_one_call() {
     state.config.write().await.encryption_secret = Some(kronn::core::crypto::generate_secret());
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "labelled-workflow".into(),
         name: "Labelled".into(),
@@ -5906,6 +6012,7 @@ async fn a_keyed_limit_runs_other_tickets_and_refuses_the_same_one() {
     // An in-flight run of EW-1, as a still-running launch would leave it.
     let now = chrono::Utc::now();
     let active = kronn::models::WorkflowRun {
+        outcome: None,
         id: "active-ew-1".into(),
         workflow_id: workflow_id.clone(),
         status: kronn::models::RunStatus::Running,
@@ -6377,6 +6484,7 @@ async fn mcp_workflow_trigger_runs_a_workflow_with_required_variables_like_the_u
     let project_path = directory.path().to_string_lossy().into_owned();
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: "required-input-workflow".into(),
         name: "Required input".into(),
@@ -6537,6 +6645,7 @@ async fn launch_agent_choice_state(workflow_id: &str) -> AppState {
     }
     let now = chrono::Utc::now();
     let workflow = kronn::models::Workflow {
+        retention: None,
         project_scope: None,
         id: workflow_id.into(),
         name: "Launch agent choice".into(),
@@ -10671,8 +10780,8 @@ async fn projects_list_empty() {
 async fn projects_add_folder_creates_project_with_no_repo_url() {
     let state = test_state();
     // Use the actual temp directory (always exists).
-    let tmp = std::env::temp_dir();
-    let path = tmp.to_str().unwrap().to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
 
     let (status, json) = post_json(
         build_router_with_auth(state.clone(), false),
@@ -10719,8 +10828,8 @@ async fn projects_add_folder_rejects_path_traversal() {
 #[tokio::test]
 async fn projects_add_folder_rejects_duplicate_path() {
     let state = test_state();
-    let tmp = std::env::temp_dir();
-    let path = tmp.to_str().unwrap().to_string();
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().to_str().unwrap().to_string();
 
     // First add succeeds.
     let (_, json1) = post_json(
@@ -11794,13 +11903,16 @@ async fn bootstrap_find_common_parent_logic() {
     // then verifying bootstrap doesn't complain about missing scan paths.
     let state = test_state();
 
-    // Insert two projects at known paths under /tmp/kronn-test-parent
+    // Insert two projects under one parent that does not exist, inside a private
+    // directory so parallel test processes never share it.
+    let scratch = tempfile::tempdir().unwrap();
+    let parent = scratch.path().join("bootstrap-parent");
     let now = chrono::Utc::now();
     for (name, subdir) in &[("Project A", "project-a"), ("Project B", "project-b")] {
         let project = kronn::models::Project {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
-            path: format!("/tmp/kronn-test-bootstrap-parent/{}", subdir),
+            path: parent.join(subdir).to_string_lossy().into_owned(),
             repo_url: None,
             token_override: None,
             ai_config: kronn::models::AiConfigStatus {
@@ -11830,7 +11942,7 @@ async fn bootstrap_find_common_parent_logic() {
             .unwrap();
     }
 
-    // Now bootstrap should use common parent /tmp/kronn-test-bootstrap-parent
+    // Now bootstrap should use that common parent.
     // It will fail on filesystem ops (dir doesn't exist), but the error should
     // mention "Parent directory not found" or "Directory already exists" — NOT "No scan path".
     let body = serde_json::json!({
@@ -15029,6 +15141,39 @@ async fn agents_detect_returns_list() {
         "Expected at least 6 agents, got {}",
         agents.len()
     );
+}
+
+/// KT-1107 — the readiness endpoint answers per agent, in request order and
+/// deduplicated; an HTTP provider is reported unknown, never ready.
+#[tokio::test]
+async fn agent_readiness_reports_each_selected_agent() {
+    let (status, json) = post_json(
+        test_app(),
+        "/api/agents/readiness",
+        serde_json::json!({ "project_id": null, "agents": ["Ollama", "Ollama", "LiteLlm"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true, "{json}");
+    let results = json["data"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["agent_type"], "Ollama");
+    assert_eq!(results[1]["agent_type"], "LiteLlm");
+    for result in results {
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(result["reason"], "not_probed");
+        assert_eq!(result["message_key"], "readiness.reason.not_probed");
+    }
+
+    let (status, json) = post_json(
+        test_app(),
+        "/api/agents/readiness",
+        serde_json::json!({ "project_id": "no-such-project", "agents": ["OpenCode"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], false);
+    assert_eq!(json["error"], "Project not found");
 }
 
 // ─── Compare-agents mode (POST /api/quick-prompts/:id/compare-agents) ───
@@ -23262,6 +23407,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23322,6 +23468,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23784,6 +23931,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: workflow_id.clone(),
@@ -23819,6 +23967,7 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
 
         let run_id = format!("run-{}", uuid::Uuid::new_v4());
         let run = kronn::models::WorkflowRun {
+            outcome: None,
             id: run_id.clone(),
             workflow_id: workflow_id.clone(),
             status,
@@ -23956,6 +24105,8 @@ Read [docs/AGENTS.md](docs/AGENTS.md) — tiered context loader (load only what 
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         };
         let run_for_update = run_id.clone();
         state
@@ -26586,6 +26737,7 @@ async fn unsafe_inline_interpolation_is_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-unsafe".into(),
                 name: "Unsafe".into(),
@@ -26806,6 +26958,7 @@ async fn inline_quick_exec_sources_are_flagged_and_fixable() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-collect-unsafe".into(),
                 name: "Collect".into(),
@@ -27223,6 +27376,74 @@ fn workflow_request(steps: Value) -> Value {
     })
 }
 
+/// KT-1138 — an agent's bundle is saved but not ready: the bundle response,
+/// the readiness route, the workflow read and the list all say so, children
+/// and rollback chains included.
+#[tokio::test]
+async fn readiness_reports_the_pending_approvals_of_a_saved_chain() {
+    let app = test_app();
+    let mut child = workflow_request(serde_json::json!([safe_exec_step("inner")]));
+    child["bundle_id"] = serde_json::json!("child");
+    child["on_failure"] = serde_json::json!([safe_exec_step("undo")]);
+    let (_, bundle) = post_json(
+        app.clone(),
+        "/api/workflows/bundle",
+        serde_json::json!({
+            "child_workflows": [child],
+            "workflow": workflow_request(serde_json::json!([
+                safe_exec_step("outer"),
+                {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "@bundle:child"}
+            ]))
+        }),
+    )
+    .await;
+    assert_eq!(bundle["success"], true, "{bundle}");
+    let verdict = &bundle["data"]["readiness"];
+    assert_eq!(verdict["ready"], false, "{verdict}");
+    assert_eq!(bundle["readiness"], *verdict);
+    let steps: Vec<(String, bool, bool)> = verdict["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["step"].as_str().unwrap().to_string(),
+                b["on_failure"].as_bool().unwrap(),
+                b["human_only"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("outer".to_string(), false, true),
+            ("inner".to_string(), false, true),
+            ("undo".to_string(), true, true),
+        ]
+    );
+    let id = bundle["data"]["workflow"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, on_demand) = get_json(app.clone(), &format!("/api/workflows/{id}/readiness")).await;
+    assert_eq!(on_demand["data"], *verdict);
+    let (_, read) = get_json(app.clone(), &format!("/api/workflows/{id}")).await;
+    assert_eq!(read["readiness"], *verdict);
+    let (_, list) = get_json(app.clone(), "/api/workflows").await;
+    let card = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(card["blocker_count"], 3);
+    assert_eq!(card["human_approval_count"], 3);
+    let (_, missing) = get_json(app, "/api/workflows/nope/readiness").await;
+    assert_eq!(missing["success"], false);
+    assert_eq!(missing["error_code"], "not_found");
+}
+
 /// KT-1017 — every write path that creates an Exec line, a Quick Exec or an
 /// inline CollectApiData source refuses an unsafe inline interpolation:
 /// create, bundle (parent and child), workflow import (step and bundled
@@ -27367,6 +27588,7 @@ async fn the_unchanged_line_exception_keys_on_the_exact_stored_line() {
         .db
         .with_conn(move |connection| {
             let workflow = kronn::models::Workflow {
+                retention: None,
                 project_scope: None,
                 id: "workflow-identity".into(),
                 name: "Identity".into(),
@@ -27523,4 +27745,56 @@ async fn bundle_refuses_a_foreach_file_leaving_the_worktree() {
             "{file}: {body}"
         );
     }
+}
+
+/// KT-1030 — Kronn's todo board: its status, an explicit (re)install that is
+/// never duplicated, and a publish that reaches open Pages at once.
+#[tokio::test]
+async fn the_default_todo_board_installs_on_request_once_and_pushes_its_publishes() {
+    let state = test_state();
+    let app = build_router_with_auth(state.clone(), false);
+    let (_, fresh) = get_json(app.clone(), "/api/defaults/todo").await;
+    assert_eq!(fresh["data"]["state"], "not_installed", "{fresh}");
+
+    let (_, installed) = post_json(
+        app.clone(),
+        "/api/defaults/todo/install",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(installed["data"]["state"], "installed", "{installed}");
+    assert_eq!(
+        installed["data"]["workflow_ids"].as_array().unwrap().len(),
+        6
+    );
+    let page_id = installed["data"]["page_id"].as_str().unwrap().to_string();
+
+    let (_, again) = post_json(
+        app.clone(),
+        "/api/defaults/todo/install",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(again["error_code"], "conflict", "{again}");
+
+    let (_, trusts) = get_json(app.clone(), &format!("/api/pages/{page_id}/action-trusts")).await;
+    assert!(trusts["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|state| state["active"] == false && state["trust"].is_null()));
+
+    let mut events = state.ws_broadcast.subscribe();
+    let (_, published) = post_json(
+        app.clone(),
+        &format!("/api/pages/{page_id}/publish"),
+        serde_json::json!({"writes": [{"dataset": "todo", "operation": "replace", "value": [{"id": "x", "title": "x", "column": "todo"}]}]}),
+    )
+    .await;
+    assert_eq!(published["success"], true, "{published}");
+    let mut pushed = false;
+    while let Ok(event) = events.try_recv() {
+        pushed |= matches!(event, WsMessage::LivePageDataChanged { ref page_id, .. } if *page_id == published["data"]["page_id"]);
+    }
+    assert!(pushed, "an open page hears about the publish at once");
 }

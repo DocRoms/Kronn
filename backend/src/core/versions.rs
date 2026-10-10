@@ -535,30 +535,29 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let program = temp.path().join("fake-cli");
-        // Give non-timeout cases enough time to spawn on loaded hosts. The output bound
-        // is MAX_OUTPUT_BYTES; only the timeout case needs a short deadline.
+        // Cases that must end on their own bound get an hour, so a None within
+        // the 60 s hang bound cannot come from the probe timeout. The timeout case
+        // runs a child that would outlive that bound, so only the timeout ends it.
+        const NEVER: Duration = Duration::from_secs(3600);
         for (body, timeout, expected) in [
             (
                 "[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 91\nprintf 'ccusage v20.1.2\\n'",
-                Duration::from_secs(10),
+                NEVER,
                 Some("20.1.2"),
             ),
-            ("printf '20.1.2\\n'; exit 1", Duration::from_secs(10), None),
-            ("exec /usr/bin/yes x", Duration::from_secs(10), None),
-            ("exec /bin/sleep 30", Duration::from_millis(250), None),
+            ("printf '20.1.2\\n'; exit 1", NEVER, None),
+            ("exec /usr/bin/yes x", NEVER, None),
+            ("exec /bin/sleep 600", Duration::from_millis(250), None),
         ] {
             std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let started = std::time::Instant::now();
-            let result = probe_installed_version(&program, timeout).await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(60),
+                probe_installed_version(&program, timeout),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{body}: the probe did not bound the process"));
             assert_eq!(result.as_deref(), expected, "{body}");
-            // A generous budget must not become a slow test: anything that
-            // actually waited for it would mean the bound under test is the
-            // clock rather than the one we meant to exercise.
-            assert!(
-                started.elapsed() < Duration::from_secs(9),
-                "{body} leaned on the timeout instead of its own bound"
-            );
         }
         assert!(installed_version(&temp.path().join("missing"))
             .await

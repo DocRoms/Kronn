@@ -188,7 +188,12 @@ the optional Claude/Codex ACP adapters carry the same resolved value; other
 ACP and HTTP routes receive no guessed parameter.
 Free-text API/workflow overrides are trimmed, then must match an advertised
 mode exactly, including case (`high` is not `High`). Use the catalog value;
-Kronn does not guess a spelling or substitute another effort level.
+Kronn does not guess a spelling or substitute another effort level. When a
+candidate differs from an advertised mode only by case or whitespace, the
+refusal names that mode instead of the generic "catalogue does not list
+that combination" message, which otherwise reads as if the mode is entirely
+absent (KT-656).
+[src: file: backend/src/agents/runner.rs]
 The direct Codex runner still starts a fresh execution on each turn; its ACP
 adapter supports thread resume. Claude supports resume on both routes. Effort
 is transmitted on every supported fresh/resumed invocation; this feature does

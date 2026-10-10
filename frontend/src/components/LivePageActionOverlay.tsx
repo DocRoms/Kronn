@@ -97,6 +97,11 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
           {t('pages.action.previousLaunch', t(`disc.action.state.${previous.state}`))}
         </button>
       )}
+      {active.trustNotice && (
+        <p className="live-page-action-overlay__trust-notice" role="status" data-testid="page-action-trust-notice">
+          {t('pages.trust.cardNotice', t(`pages.trust.reason.${active.trustNotice}`))}
+        </p>
+      )}
       {/* One card per click. Keyed on the activation alone, so the card
           survives its own id changing from the offer to its launch. */}
       <LivePageActionCard
@@ -104,6 +109,7 @@ export function LivePageActionOverlay({ active, action, offer, onChanged, onClos
         action={action}
         offer={offer}
         bindings={active.bindings}
+        bindingLabels={active.bindingLabels}
         prefill={active.prefill}
         onChanged={handleChanged}
         onOpenDiscussion={onOpenDiscussion}

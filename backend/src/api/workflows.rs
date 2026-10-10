@@ -156,6 +156,28 @@ fn validate_guards(g: &WorkflowGuards) -> Result<(), String> {
     Ok(())
 }
 
+/// KT-1100 — bounded windows; `0` (keep forever) is valid for every class.
+fn validate_retention(retention: &WorkflowRetention) -> Result<(), String> {
+    const MAX_HOURS: u32 = 24 * 366;
+    const MAX_DAYS: u32 = 3660;
+    if retention.no_op_hours.is_some_and(|hours| hours > MAX_HOURS) {
+        return Err(format!(
+            "Retention: no-op runs are kept at most {MAX_HOURS} hours (0 keeps them forever)."
+        ));
+    }
+    for days in [retention.success_days, retention.failure_days]
+        .into_iter()
+        .flatten()
+    {
+        if days > MAX_DAYS {
+            return Err(format!(
+                "Retention: runs are kept at most {MAX_DAYS} days (0 keeps them forever)."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// 0.7.0 Phase 7 — reject rollback chains that mix in a `Gate` step.
 /// A Gate inside `on_failure` would deadlock the run on a `Failed`
 /// status that no resume path serves: `decide_run` only accepts runs
@@ -170,8 +192,73 @@ fn validate_on_failure_steps(steps: &[WorkflowStep]) -> Result<(), String> {
                 s.name
             ));
         }
+        if matches!(s.step_type, StepType::DelegateSubtasks) {
+            return Err(format!(
+                "Rollback step « {} » : type DelegateSubtasks interdit dans la chaîne on_failure (une compensation ne lance pas de nouveau travail).",
+                s.name
+            ));
+        }
     }
     Ok(())
+}
+
+/// KT-909 — what a `DelegateSubtasks` step must declare before it can run.
+fn validate_delegate_subtasks(s: &WorkflowStep) -> Result<(), String> {
+    use crate::workflows::delegate_subtasks_step::{MAX_CONCURRENCY, MAX_REVIEW_ROUNDS};
+    let Some(config) = s.delegate_subtasks.as_ref() else {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `delegate_subtasks` est obligatoire.",
+            s.name
+        ));
+    };
+    if config.parent_task.trim().is_empty() {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `delegate_subtasks.parent_task` est obligatoire (référence ou gabarit, ex. `{{{{steps.garde.data.tacheId}}}}`).",
+            s.name
+        ));
+    }
+    if config.worker_map.is_empty() && config.default_worker.is_none() {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : déclare `worker_map` ou `default_worker`.",
+            s.name
+        ));
+    }
+    if config.worker_map.keys().any(|key| key.trim().is_empty()) {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : une clé de `worker_map` est vide.",
+            s.name
+        ));
+    }
+    if config
+        .concurrency
+        .is_some_and(|value| value == 0 || value > MAX_CONCURRENCY)
+    {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `concurrency` doit être entre 1 et {MAX_CONCURRENCY}.",
+            s.name
+        ));
+    }
+    if config
+        .max_review_rounds
+        .is_some_and(|value| value == 0 || value > MAX_REVIEW_ROUNDS)
+    {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `max_review_rounds` doit être entre 1 et {MAX_REVIEW_ROUNDS}.",
+            s.name
+        ));
+    }
+    if config.timeout_secs == Some(0) {
+        return Err(format!(
+            "Step DelegateSubtasks « {} » : `timeout_secs` doit être > 0.",
+            s.name
+        ));
+    }
+    crate::api::orchestration::validate_new_validation_specs(&config.validations).map_err(|error| {
+        format!(
+            "Step DelegateSubtasks « {} » : validations : {error}",
+            s.name
+        )
+    })
 }
 
 /// 0.7.0 Phase 5 — validate the per-workflow Exec allowlist.
@@ -623,7 +710,7 @@ pub(crate) fn validate_imported_sub_workflow_graph(
 /// between what blocks a save and what the card flags). Exec/JsonData are
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
-fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
+pub(crate) fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
     if let Some(tools) = s.agent_settings.as_ref().and_then(|a| a.tools.as_ref()) {
         if !matches!(s.step_type, StepType::Agent) {
             return Err(format!(
@@ -774,6 +861,7 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                     .map_err(|e| format!("Step SubWorkflow « {} » : {e}", s.name))?;
             }
         }
+        StepType::DelegateSubtasks => validate_delegate_subtasks(s)?,
         StepType::TriggerWorkflow => {
             if s.sub_workflow_id
                 .as_deref()
@@ -807,7 +895,10 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                 ));
             }
             for write in &config.writes {
-                if write.dataset.trim().is_empty() || write.value_from.trim().is_empty() {
+                let needs_value = write.operation != crate::models::LivePageWriteOperation::Clear;
+                if write.dataset.trim().is_empty()
+                    || (needs_value && write.value_from.trim().is_empty())
+                {
                     return Err(format!(
                         "Step PublishPageData « {} » : chaque écriture requiert `dataset` et `value_from`.",
                         s.name
@@ -899,6 +990,41 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                         ));
                     }
                 }
+            }
+        }
+        StepType::TaskBoard => {
+            use crate::models::TaskBoardOperation as Op;
+            let Some(config) = s.task_board.as_ref() else {
+                return Err(format!(
+                    "Step TaskBoard « {} » : `task_board` est obligatoire.",
+                    s.name
+                ));
+            };
+            let tag = config.tag.trim();
+            if tag.is_empty()
+                || (!tag.contains("{{")
+                    && crate::workflows::task_board_step::validate_tag(tag).is_err())
+            {
+                return Err(format!(
+                    "Step TaskBoard « {} » : `task_board.tag` doit être un tag de 1 à 80 caractères, sans virgule.",
+                    s.name
+                ));
+            }
+            let missing = match config.operation {
+                Op::Read => None,
+                Op::Add => config.title.trim().is_empty().then_some("title"),
+                Op::Toggle | Op::Edit | Op::Discuss => {
+                    config.task.trim().is_empty().then_some("task")
+                }
+                Op::Move => (config.task.trim().is_empty()
+                    || (config.before.trim().is_empty() && config.column.trim().is_empty()))
+                .then_some("task, et before ou column"),
+            };
+            if let Some(field) = missing {
+                return Err(format!(
+                    "Step TaskBoard « {} » : cette opération requiert `{field}`.",
+                    s.name
+                ));
             }
         }
         StepType::TransformData => {
@@ -1725,10 +1851,18 @@ pub(crate) async fn list_with_visibility(
             let mut last_runs =
                 crate::db::workflows::get_last_run_summaries_visible(conn, visibility.as_ref())?;
             let project_names = crate::db::projects::get_project_names(conn)?;
+            let mut watch_statuses = crate::db::workflow_watch_state::list_statuses(conn)?;
 
+            let by_id: std::collections::HashMap<String, Workflow> = workflows
+                .iter()
+                .map(|wf| (wf.id.clone(), wf.clone()))
+                .collect();
             let summaries = workflows
                 .into_iter()
                 .map(|wf| {
+                    let (blocker_count, human_approval_count) = crate::workflows::readiness::counts(
+                        &crate::workflows::readiness::assess(&wf, &by_id),
+                    );
                     let last_run = last_runs.remove(&wf.id);
 
                     let project_name = wf
@@ -1740,8 +1874,11 @@ pub(crate) async fn list_with_visibility(
                         WorkflowTrigger::Cron { .. } => "cron",
                         WorkflowTrigger::Tracker { .. } => "tracker",
                         WorkflowTrigger::Manual => "manual",
+                        WorkflowTrigger::Watch(_) => "watch",
                     }
                     .to_string();
+                    let watch = matches!(wf.trigger, WorkflowTrigger::Watch(_))
+                        .then(|| watch_statuses.remove(&wf.id).unwrap_or_default());
 
                     WorkflowSummary {
                         id: wf.id,
@@ -1750,15 +1887,19 @@ pub(crate) async fn list_with_visibility(
                         project_name,
                         trigger_type,
                         step_count: wf.steps.len() as u32,
-                        misconfigured_step_count: count_misconfigured_steps(&wf.steps),
+                        misconfigured_step_count: count_misconfigured_steps(&wf.steps)
+                            + count_misconfigured_steps(&wf.on_failure),
                         unsafe_step_count: crate::core::inline_code::classify_workflow(
                             &wf.steps,
                             &wf.on_failure,
                         )
                         .len() as u32,
+                        blocker_count: Some(blocker_count),
+                        human_approval_count: Some(human_approval_count),
                         enabled: wf.enabled,
                         pinned: wf.pinned,
                         last_run,
+                        watch,
                         created_at: wf.created_at,
                     }
                 })
@@ -1783,12 +1924,51 @@ pub async fn get(
         .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
         .await
     {
-        Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
+        Ok(Some(wf)) => {
+            let readiness = workflow_readiness(&state, &wf).await;
+            Json(ApiResponse::ok(wf).with_readiness(Some(readiness)))
+        }
         Ok(None) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
         )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// GET /api/workflows/{id}/readiness — whether the saved workflow can start:
+/// every known refusal of it, its sub-workflows and rollback chains (KT-1138).
+pub async fn readiness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<WorkflowReadiness>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+        .await
+    {
+        Ok(Some(wf)) => Json(ApiResponse::ok(workflow_readiness(&state, &wf).await)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+/// The readiness of a saved workflow against every workflow it may call; a
+/// failed load is reported as such, never as ready.
+pub(crate) async fn workflow_readiness(state: &AppState, wf: &Workflow) -> WorkflowReadiness {
+    match state
+        .db
+        .with_read_conn(crate::db::workflows::list_workflows)
+        .await
+    {
+        Ok(all) => crate::workflows::readiness::assess(
+            wf,
+            &all.into_iter().map(|w| (w.id.clone(), w)).collect(),
+        ),
+        Err(e) => crate::workflows::readiness::collection_failure(wf, &format!("DB error: {e}")),
     }
 }
 
@@ -2061,9 +2241,18 @@ pub(crate) fn awaiting_approval_notice(wf: &Workflow) -> Option<String> {
     })
 }
 
-fn with_awaiting_notice(response: ApiResponse<Workflow>) -> ApiResponse<Workflow> {
+/// A write's response with what it leaves to a human and whether the saved
+/// workflow can start: a successful save is not readiness (KT-1138).
+async fn with_awaiting_notice(
+    state: &AppState,
+    response: ApiResponse<Workflow>,
+) -> ApiResponse<Workflow> {
     let notice = response.data.as_ref().and_then(awaiting_approval_notice);
-    response.with_notice(notice)
+    let readiness = match response.data.as_ref() {
+        Some(wf) => Some(workflow_readiness(state, wf).await),
+        None => None,
+    };
+    response.with_notice(notice).with_readiness(readiness)
 }
 
 /// An approval no line of its step needs any more is dropped, so it never
@@ -2239,6 +2428,38 @@ pub(crate) async fn reenable_as_human(
 pub(crate) const AGENT_RESUME_REFUSAL: &str = "This workflow is disabled, so its run can only \
      be resumed by a human: ask the user to review the workflow and resume it from Kronn.";
 
+/// Lets a test run another write between an update's read and its write.
+#[cfg(test)]
+pub(crate) mod before_write_hook {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    type Pause = (String, Arc<Notify>, Arc<Notify>);
+    static PAUSES: Mutex<Vec<Pause>> = Mutex::new(Vec::new());
+
+    /// The next update of `workflow_id` signals `reached`, then waits for `resume`.
+    pub(crate) fn arm(workflow_id: &str) -> (Arc<Notify>, Arc<Notify>) {
+        let (reached, resume) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        PAUSES
+            .lock()
+            .unwrap()
+            .push((workflow_id.to_string(), reached.clone(), resume.clone()));
+        (reached, resume)
+    }
+
+    pub(super) async fn pause(workflow_id: &str) {
+        let armed = {
+            let mut pauses = PAUSES.lock().unwrap();
+            let at = pauses.iter().position(|(id, _, _)| id == workflow_id);
+            at.map(|at| pauses.remove(at))
+        };
+        if let Some((_, reached, resume)) = armed {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+}
+
 /// Everything that decides what a workflow runs, where and when.
 fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
     serde_json::json!({
@@ -2258,6 +2479,12 @@ fn execution_fingerprint(wf: &Workflow) -> serde_json::Value {
         "project_scope": wf.project_scope,
     })
 }
+
+/// Why an agent cannot change a workflow's retention (KT-1100): the purge
+/// applies it at once, enabled or not, so only a human may set what it deletes.
+pub(crate) const AGENT_RETENTION_REFUSAL: &str = "Run retention is a human decision: an \
+     agent cannot change it on an existing workflow. Ask the user to set it in Kronn \
+     (workflow editor, \"Run retention\").";
 
 /// Why an agent cannot turn a workflow on (KT-1037, KT-1017): a Cron or
 /// Tracker trigger would then run its content with no human in the loop.
@@ -2295,7 +2522,7 @@ pub(crate) async fn create_as_labeled(
             .await;
         }
     }
-    Json(with_awaiting_notice(response))
+    Json(with_awaiting_notice(&state, response).await)
 }
 
 async fn create_written(
@@ -2347,6 +2574,9 @@ async fn create_written(
     if let Err(e) = crate::models::validate_prompt_variables(&req.variables) {
         return Json(ApiResponse::err(e));
     }
+    if let Err(e) = crate::workflows::trigger::validate_trigger(&req.trigger) {
+        return Json(ApiResponse::err(e));
+    }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
         return Json(ApiResponse::err(format!(
             "Références d'étapes invalides :\n- {}",
@@ -2356,6 +2586,11 @@ async fn create_written(
 
     if let Some(ref guards) = req.guards {
         if let Err(e) = validate_guards(guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(ref retention) = req.retention {
+        if let Err(e) = validate_retention(retention) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -2461,6 +2696,7 @@ async fn create_written(
         return Json(ApiResponse::err(e));
     }
     let wf = Workflow {
+        retention: req.retention,
         pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -2636,9 +2872,155 @@ pub(crate) async fn update_as_labeled(
     writer: WorkflowWriter,
     label: Option<String>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = update_written(state, id, req, writer, label).await;
-    Json(with_awaiting_notice(response))
+    let Json(response) = update_written(state.clone(), id, req, writer, label, None).await;
+    Json(with_awaiting_notice(&state, response).await)
 }
+
+/// Body of `PATCH /api/workflows/:id/step` (KT-1139): one step, named or by
+/// 1-based position, and the fields to set on it (`null` clears one).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateWorkflowStepRequest {
+    #[serde(default)]
+    pub step_name: Option<String>,
+    #[serde(default)]
+    pub step_index: Option<usize>,
+    /// Target the rollback chain instead of the main steps.
+    #[serde(default)]
+    pub on_failure: bool,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The step list with one step's fields replaced, or why it cannot be.
+pub(crate) fn patch_step(
+    mut steps: Vec<WorkflowStep>,
+    req: &UpdateWorkflowStepRequest,
+) -> Result<Vec<WorkflowStep>, String> {
+    let at = match (&req.step_name, req.step_index) {
+        (Some(name), None) => steps.iter().position(|s| &s.name == name).ok_or_else(|| {
+            let names: Vec<&str> = steps.iter().map(|s| s.name.as_str()).collect();
+            format!("No step named `{name}`. Steps: {}", names.join(", "))
+        })?,
+        (None, Some(index)) if (1..=steps.len()).contains(&index) => index - 1,
+        (None, Some(index)) => {
+            return Err(format!(
+                "step_index {index} is out of range: 1 to {}",
+                steps.len()
+            ))
+        }
+        _ => return Err("Name the step with exactly one of step_name or step_index.".into()),
+    };
+    if req.fields.is_empty() {
+        return Err("No step field to change.".into());
+    }
+    let known = step_field_names();
+    if let Some(key) = req.fields.keys().find(|key| !known.contains(&key.as_str())) {
+        return Err(format!("Unknown step field `{key}`."));
+    }
+    let mut merged = match serde_json::to_value(&steps[at]) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return Err("The stored step could not be read.".into()),
+    };
+    for (key, value) in &req.fields {
+        if value.is_null() {
+            merged.remove(key);
+        } else {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    let step: WorkflowStep = serde_json::from_value(serde_json::Value::Object(merged))
+        .map_err(|e| format!("Invalid step field: {e}"))?;
+    steps[at] = step;
+    Ok(steps)
+}
+
+/// Every field name `WorkflowStep` deserializes, read from serde's own list so
+/// it can never drift from the struct.
+pub(crate) fn step_field_names() -> &'static [&'static str] {
+    use serde::de::{Error, Visitor};
+    struct Probe<'a>(&'a mut &'static [&'static str]);
+    impl<'de> serde::Deserializer<'de> for Probe<'_> {
+        type Error = serde::de::value::Error;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(Error::custom("not a struct"))
+        }
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(Error::custom("probed"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+    static NAMES: std::sync::OnceLock<&'static [&'static str]> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut fields: &'static [&'static str] = &[];
+        let _ = <WorkflowStep as serde::Deserialize>::deserialize(Probe(&mut fields));
+        fields
+    })
+}
+
+/// PATCH /api/workflows/:id/step — saves the whole list through the same
+/// path as `PUT`, so authorship, enablement and approval rules all apply.
+pub async fn update_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Json(req): Json<UpdateWorkflowStepRequest>,
+) -> Json<ApiResponse<Workflow>> {
+    let wf_id = id.clone();
+    // The definition and the raw revision of every written column, read
+    // together: the write is refused if any of those columns changed since.
+    let (existing, base) = match state
+        .db
+        .with_conn(move |conn| {
+            let wf = crate::db::workflows::get_workflow(conn, &wf_id)?;
+            let revision = crate::db::workflows::written_revision(conn, &wf_id)?;
+            Ok(wf.zip(revision))
+        })
+        .await
+    {
+        Ok(Some(read)) => read,
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+    #[cfg(test)]
+    before_write_hook::pause(&format!("{id}#step-read")).await;
+    let (list, key) = if req.on_failure {
+        (existing.on_failure, "on_failure")
+    } else {
+        (existing.steps, "steps")
+    };
+    let steps = match patch_step(list, &req) {
+        Ok(steps) => steps,
+        Err(e) => return Json(ApiResponse::err(e)),
+    };
+    let update: UpdateWorkflowRequest =
+        match serde_json::from_value(serde_json::json!({ key: steps })) {
+            Ok(update) => update,
+            Err(e) => return Json(ApiResponse::err(format!("Invalid step: {e}"))),
+        };
+    let label = agent_label(&state, &bridge).await;
+    let writer = WorkflowWriter::from_bridge(&bridge);
+    let Json(response) = update_written(state.clone(), id, update, writer, label, Some(base)).await;
+    Json(with_awaiting_notice(&state, response).await)
+}
+
+#[cfg(test)]
+#[path = "workflow_step_patch_tests.rs"]
+mod step_patch_tests;
 
 async fn update_written(
     state: AppState,
@@ -2646,6 +3028,8 @@ async fn update_written(
     mut req: UpdateWorkflowRequest,
     writer: WorkflowWriter,
     label: Option<String>,
+    // A step PATCH's base: the save is refused if any written column changed.
+    expected_revision: Option<Vec<rusqlite::types::Value>>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
     let existing = match state
@@ -2664,6 +3048,13 @@ async fn update_written(
     };
     if writer == WorkflowWriter::Agent && req.enabled == Some(true) && !existing.enabled {
         return Json(ApiResponse::err(AGENT_ENABLE_REFUSAL));
+    }
+    if writer == WorkflowWriter::Agent
+        && req
+            .retention
+            .is_some_and(|retention| retention != existing.retention)
+    {
+        return Json(ApiResponse::err(AGENT_RETENTION_REFUSAL));
     }
     // An agent's change to what an enabled workflow executes would run under
     // the human's earlier activation: compared below, it disables the workflow.
@@ -2755,6 +3146,11 @@ async fn update_written(
             return Json(ApiResponse::err(e));
         }
     }
+    if let Some(ref trigger) = req.trigger {
+        if let Err(e) = crate::workflows::trigger::validate_trigger(trigger) {
+            return Json(ApiResponse::err(e));
+        }
+    }
 
     // `guards` follows the same opt-in semantics as `safety`: if the
     // caller doesn't include it in the patch, the existing value is
@@ -2762,6 +3158,11 @@ async fn update_written(
     // overrides and fall back to backend defaults.
     if let Some(ref new_guards) = req.guards {
         if let Err(e) = validate_guards(new_guards) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+    if let Some(Some(ref retention)) = req.retention {
+        if let Err(e) = validate_retention(retention) {
             return Json(ApiResponse::err(e));
         }
     }
@@ -2854,6 +3255,7 @@ async fn update_written(
     }
 
     let mut updated = Workflow {
+        retention: req.retention.unwrap_or(existing.retention),
         id: existing.id,
         name: req.name.unwrap_or(existing.name),
         project_id: req.project_id.unwrap_or(existing.project_id),
@@ -2948,6 +3350,8 @@ async fn update_written(
         return Json(ApiResponse::err(e));
     }
 
+    #[cfg(test)]
+    before_write_hook::pause(&updated.id).await;
     let w = updated.clone();
     // A human turning it on has reviewed it: the record of why Kronn turned
     // it off goes.
@@ -2956,6 +3360,15 @@ async fn update_written(
     match state
         .db
         .with_conn(move |conn| {
+            // Checked on the write connection right before the UPDATE, so no
+            // other save can land between the comparison and the write.
+            if let Some(expected) = expected_revision {
+                match crate::db::workflows::written_revision(conn, &w.id)? {
+                    None => return Ok(Some(false)),
+                    Some(current) if current != expected => return Ok(None),
+                    Some(_) => {}
+                }
+            }
             let saved = if by_agent {
                 crate::db::workflows::update_workflow_as_agent(conn, &w)?
             } else {
@@ -2964,12 +3377,18 @@ async fn update_written(
             if saved && clear_record {
                 crate::db::workflows::clear_auto_disabled(conn, &w.id)?;
             }
-            Ok(saved)
+            Ok(Some(saved))
         })
         .await
     {
-        Ok(true) => {
-            // The stored flag may have stayed off (see `update_workflow_as_agent`).
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Conflict,
+            "The workflow changed since this edit read it; nothing was saved. \
+             Read the step again and retry.",
+        )),
+        Ok(Some(true)) => {
+            // The stored flag and retention may differ from this read (see
+            // `update_workflow_as_agent`).
             let mut updated = updated;
             if by_agent {
                 let id = updated.id.clone();
@@ -2979,6 +3398,7 @@ async fn update_written(
                     .await
                 {
                     updated.enabled = stored.enabled;
+                    updated.retention = stored.retention;
                 }
             }
             if let (true, Some((by, summary))) = (was_enabled, auto_disable_summary) {
@@ -2995,7 +3415,7 @@ async fn update_written(
         }
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
-        Ok(false) => Json(ApiResponse::err_coded(
+        Ok(Some(false)) => Json(ApiResponse::err_coded(
             ApiErrorCode::NotFound,
             "Workflow not found",
         )),
@@ -3112,6 +3532,15 @@ pub(crate) fn workflow_dependency_ids<'a>(
 ) -> WorkflowDependencyIds {
     let mut dependencies = WorkflowDependencyIds::default();
     for workflow in workflows {
+        if let WorkflowTrigger::Watch(watch) = &workflow.trigger {
+            if let Some(id) = watch
+                .quick_api_id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+            {
+                dependencies.quick_apis.insert(id.to_string());
+            }
+        }
         for step in workflow.steps.iter().chain(workflow.on_failure.iter()) {
             if let Some(id) = step
                 .quick_prompt_id
@@ -3183,7 +3612,13 @@ pub async fn export_workflow(
     let wf_id = id.clone();
     let wf = match state
         .db
-        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .with_conn(move |conn| {
+            let mut wf = crate::db::workflows::get_workflow(conn, &wf_id)?;
+            if let Some(wf) = wf.as_mut() {
+                canonicalize_exported_page_refs(conn, std::slice::from_mut(wf))?;
+            }
+            Ok(wf)
+        })
         .await
     {
         Ok(Some(wf)) => wf,
@@ -3233,6 +3668,7 @@ pub async fn export_workflow(
                     bundled.push(child.clone());
                 }
             }
+            canonicalize_exported_page_refs(conn, &mut bundled)?;
 
             let dependencies =
                 workflow_dependency_ids(std::iter::once(&root).chain(bundled.iter()));
@@ -3254,9 +3690,12 @@ pub async fn export_workflow(
                     qes.push(qe);
                 }
             }
-            let mut pages = Vec::with_capacity(dependencies.pages.len());
+            let mut pages: Vec<WorkflowExportPage> = Vec::with_capacity(dependencies.pages.len());
             for id in &dependencies.pages {
                 if let Some(page) = crate::db::live_pages::get_live_page(conn, id)? {
+                    if pages.iter().any(|known| known.id == page.page.id) {
+                        continue;
+                    }
                     pages.push(WorkflowExportPage {
                         id: page.page.id,
                         slug: page.page.slug,
@@ -3408,6 +3847,9 @@ pub(crate) fn validate_workflow_for_import_keeping(
     if let Some(ref guards) = wf.guards {
         validate_guards(guards)?;
     }
+    if let Some(ref retention) = wf.retention {
+        validate_retention(retention)?;
+    }
     validate_artifact_specs(&wf.artifacts)?;
     validate_on_failure_steps(&wf.on_failure)?;
     validate_exec_allowlist(&wf.exec_allowlist)?;
@@ -3485,6 +3927,32 @@ pub(crate) fn rebind_quick_api_config(
     {
         quick_api.api_config_id = new_id;
     }
+}
+
+/// Point the literal Page targets of exported workflow copies at the page id,
+/// so a step naming a renamed page's former slug still matches the bundle.
+pub(crate) fn canonicalize_exported_page_refs(
+    conn: &rusqlite::Connection,
+    workflows: &mut [Workflow],
+) -> anyhow::Result<()> {
+    for workflow in workflows {
+        for step in workflow
+            .steps
+            .iter_mut()
+            .chain(workflow.on_failure.iter_mut())
+        {
+            let Some(config) = step.page_publish.as_mut() else {
+                continue;
+            };
+            if config.page_id.contains("{{") {
+                continue;
+            }
+            if let Some(id) = crate::db::live_pages::resolve_live_page_id(conn, &config.page_id)? {
+                config.page_id = id;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn remap_workflow_step_dependencies(
@@ -3569,8 +4037,8 @@ pub async fn import_workflow(
     bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
     Json(req): Json<ImportWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
-    let Json(response) = import_workflow_written(state, bridge, req).await;
-    Json(with_awaiting_notice(response))
+    let Json(response) = import_workflow_written(state.clone(), bridge, req).await;
+    Json(with_awaiting_notice(&state, response).await)
 }
 
 async fn import_workflow_written(
@@ -3768,6 +4236,15 @@ async fn import_workflow_written(
                     return Json(ApiResponse::err(error));
                 }
                 s.gate_notify_url = None;
+            }
+        }
+        if let WorkflowTrigger::Watch(watch) = &mut w.trigger {
+            if let Some(nid) = watch
+                .quick_api_id
+                .as_ref()
+                .and_then(|id| qa_id_remap.get(id))
+            {
+                watch.quick_api_id = Some(nid.clone());
             }
         }
         w.id = new_id;
@@ -3978,6 +4455,42 @@ pub(crate) async fn create_manual_run_with_id(
     launch: crate::core::launch_context::LaunchContext,
     run_id: String,
 ) -> Result<(Workflow, WorkflowRun), String> {
+    create_manual_run_admitted(
+        state,
+        workflow_id,
+        provided_vars,
+        initial_state,
+        launch,
+        run_id,
+        None,
+    )
+    .await
+}
+
+/// A last check run in the transaction that inserts and pins the run, against
+/// the workflow as read for it (before project resolution): what will execute.
+/// The third argument is the repository profiles the run will pin (KT-920),
+/// read before the transaction: the admission compares those very snapshots.
+pub(crate) type RunAdmission = Box<
+    dyn FnOnce(
+            &rusqlite::Connection,
+            &Workflow,
+            &crate::core::project_profile::ProfileSnapshots,
+        ) -> anyhow::Result<Result<(), String>>
+        + Send,
+>;
+
+/// [`create_manual_run_with_id`] with an admission: when given, the check, the
+/// insert and the KT-1096 pin of that exact definition commit together (KT-1029).
+pub(crate) async fn create_manual_run_admitted(
+    state: &AppState,
+    workflow_id: &str,
+    provided_vars: std::collections::HashMap<String, String>,
+    initial_state: std::collections::HashMap<String, String>,
+    launch: crate::core::launch_context::LaunchContext,
+    run_id: String,
+    admission: Option<RunAdmission>,
+) -> Result<(Workflow, WorkflowRun), String> {
     validate_initial_run_state(&initial_state)?;
     let lookup_id = workflow_id.to_string();
     let mut wf = state
@@ -3989,6 +4502,7 @@ pub(crate) async fn create_manual_run_with_id(
     if !wf.enabled {
         return Err("Workflow is disabled — enable it before triggering".into());
     }
+    let as_read = wf.clone();
     crate::workflows::template::refuse_reserved_names(
         wf.variables
             .iter()
@@ -4077,6 +4591,7 @@ pub(crate) async fn create_manual_run_with_id(
     }
     let now = Utc::now();
     let run = WorkflowRun {
+        outcome: None,
         id: run_id,
         workflow_id: wf.id.clone(),
         status: RunStatus::Pending,
@@ -4103,11 +4618,56 @@ pub(crate) async fn create_manual_run_with_id(
         parent_run_started_at: None,
     };
     let persisted = run.clone();
-    let admission = wf.clone();
+    let admitted_workflow = wf.clone();
+    // KT-920 — an admitted run's profiles are read once, before the
+    // transaction: the admission compares them and the pin stores them.
+    let profiles = if admission.is_some() {
+        let mut targets = vec![(wf.clone(), run.project_id.clone())];
+        for project in [
+            launch.requested_project_id.clone(),
+            as_read.project_id.clone(),
+        ] {
+            targets.push((as_read.clone(), project));
+        }
+        crate::core::project_profile::resolve_for(&state.db, targets)
+            .await
+            .map_err(|error| format!("Repository profile unavailable: {error}"))?
+    } else {
+        Default::default()
+    };
     state
         .db
         .with_conn(move |conn| {
-            crate::workflows::concurrency::insert_run_within_limit(conn, &admission, &persisted)
+            let Some(admission) = admission else {
+                return crate::workflows::concurrency::insert_run_within_limit(
+                    conn,
+                    &admitted_workflow,
+                    &persisted,
+                );
+            };
+            let tx = conn.unchecked_transaction()?;
+            if let Err(reason) = admission(&tx, &as_read, &profiles)? {
+                // Keep what the check recorded (an invalidation); no run exists.
+                tx.commit()?;
+                return Ok(Err(reason));
+            }
+            if let Err(reason) = crate::workflows::concurrency::insert_run_within_limit(
+                &tx,
+                &admitted_workflow,
+                &persisted,
+            )? {
+                return Ok(Err(reason));
+            }
+            if let Err(reason) = crate::workflows::run_pins::pin_within_with_profiles(
+                &tx,
+                &admitted_workflow,
+                &persisted,
+                &profiles,
+            )? {
+                return Ok(Err(reason));
+            }
+            tx.commit()?;
+            Ok(Ok(()))
         })
         .await
         .map_err(|error| format!("DB error: {error}"))??;
@@ -4827,6 +5387,9 @@ pub struct ListRunsQuery {
     state_key: Option<String>,
     /// …with exactly this value, when given.
     state_value: Option<String>,
+    /// KT-1100 — leave out the runs that changed nothing.
+    #[serde(default)]
+    hide_no_op: bool,
 }
 
 /// The runs a bridge caller may see (its project's, or its own run); `None`
@@ -4881,6 +5444,7 @@ pub async fn list_runs(
                         limit,
                         params.offset.unwrap_or(0),
                         visibility.as_ref(),
+                        params.hide_no_op,
                     )
                 } else {
                     crate::db::workflows::list_runs_paginated_visible(
@@ -4889,6 +5453,7 @@ pub async fn list_runs(
                         Some(limit),
                         params.offset,
                         visibility.as_ref(),
+                        params.hide_no_op,
                     )
                 }
             } else {
@@ -4898,6 +5463,7 @@ pub async fn list_runs(
                     Some(crate::db::workflows::MAX_RUNS_UNPAGINATED),
                     None,
                     visibility.as_ref(),
+                    params.hide_no_op,
                 )
             }
         })
@@ -4908,14 +5474,24 @@ pub async fn list_runs(
     }
 }
 
+/// `GET /api/workflows/:id/runs/count[?hide_no_op=true]`.
+#[derive(Debug, Default, Deserialize)]
+pub struct CountRunsQuery {
+    #[serde(default)]
+    hide_no_op: bool,
+}
+
 /// GET /api/workflows/:id/runs/count
 pub async fn count_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<CountRunsQuery>,
 ) -> Json<ApiResponse<u32>> {
     match state
         .db
-        .with_read_conn(move |conn| crate::db::workflows::count_runs(conn, &id))
+        .with_read_conn(move |conn| {
+            crate::db::workflows::count_runs_filtered(conn, &id, params.hide_no_op)
+        })
         .await
     {
         Ok(count) => Json(ApiResponse::ok(count)),
@@ -5006,6 +5582,160 @@ pub struct DecideRunRequest {
 pub struct DecideRunResponse {
     pub run_id: String,
     pub new_status: RunStatus,
+}
+
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CronPreviewRequest {
+    pub schedule: String,
+    /// The trigger's own zone; absent means Kronn's global zone.
+    #[serde(default)]
+    #[ts(optional)]
+    pub timezone: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct CronPreview {
+    /// The zone the schedule is read in.
+    pub timezone: String,
+    /// True when that zone is Kronn's global one (no trigger override).
+    pub inherited: bool,
+    /// The next firings, RFC 3339 with the zone's offset.
+    pub next: Vec<String>,
+}
+
+/// POST /api/workflows/cron-preview — the next 3 firings of a schedule, with
+/// the scheduler's own zone and DST rules (KT-1103).
+pub async fn cron_preview(Json(req): Json<CronPreviewRequest>) -> Json<ApiResponse<CronPreview>> {
+    Json(
+        cron_preview_at(&req, crate::core::timezone::current(), Utc::now())
+            .map_or_else(ApiResponse::err, ApiResponse::ok),
+    )
+}
+
+pub(crate) fn cron_preview_at(
+    req: &CronPreviewRequest,
+    default_tz: chrono_tz::Tz,
+    now: chrono::DateTime<Utc>,
+) -> Result<CronPreview, String> {
+    use crate::workflows::trigger;
+    let own = req
+        .timezone
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let tz = trigger::trigger_timezone(own, default_tz)?;
+    let next = trigger::next_fires(req.schedule.trim(), tz, now, 3)?;
+    Ok(CronPreview {
+        timezone: tz.name().to_string(),
+        inherited: own.is_none(),
+        next: next.iter().map(|at| at.to_rfc3339()).collect(),
+    })
+}
+
+#[cfg(test)]
+mod cron_preview_tests {
+    use super::*;
+
+    #[test]
+    fn the_preview_follows_the_global_zone_unless_the_trigger_has_one() {
+        let req = |tz: Option<&str>| CronPreviewRequest {
+            schedule: "0 7-21 * * 1-5".into(),
+            timezone: tz.map(String::from),
+        };
+        // Friday 2026-10-23 21:30 Paris; Monday is after the DST change.
+        let now = "2026-10-23T19:30:00Z".parse().unwrap();
+        let paris = cron_preview_at(&req(None), chrono_tz::Europe::Paris, now).unwrap();
+        assert_eq!(paris.timezone, "Europe/Paris");
+        assert!(paris.inherited);
+        assert_eq!(
+            paris.next,
+            [
+                "2026-10-26T07:00:00+01:00",
+                "2026-10-26T08:00:00+01:00",
+                "2026-10-26T09:00:00+01:00"
+            ]
+        );
+        let utc = cron_preview_at(&req(Some("UTC")), chrono_tz::Europe::Paris, now).unwrap();
+        assert_eq!((utc.timezone.as_str(), utc.inherited), ("UTC", false));
+        assert_eq!(utc.next[0], "2026-10-23T20:00:00+00:00");
+        // A blank override is no override.
+        assert!(
+            cron_preview_at(&req(Some(" ")), chrono_tz::UTC, now)
+                .unwrap()
+                .inherited
+        );
+        assert!(cron_preview_at(&req(Some("Mars/Olympus")), chrono_tz::UTC, now).is_err());
+    }
+}
+
+#[derive(Debug, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SafetyCheckRequest {
+    /// The saved workflow, to know whether another one runs it as a sub-workflow.
+    #[serde(default)]
+    #[ts(optional)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub project_id: Option<String>,
+    /// The project is chosen at launch (multi-project workflow).
+    #[serde(default)]
+    #[ts(optional)]
+    pub per_run_project: Option<bool>,
+    pub safety: WorkflowSafety,
+}
+
+/// POST /api/workflows/safety-check — the Security settings this host would
+/// refuse at run time, so the editor and the workflow page can say so first.
+pub async fn safety_check(
+    State(state): State<AppState>,
+    Json(req): Json<SafetyCheckRequest>,
+) -> Json<ApiResponse<Vec<crate::workflows::safety::SafetyWarning>>> {
+    use crate::workflows::safety::{self, DirectoryState};
+    let project_id = req.project_id.clone();
+    let workflow_id = req.workflow_id.clone();
+    let loaded = state
+        .db
+        .with_read_conn(move |conn| {
+            let path = match project_id {
+                Some(id) => crate::db::projects::get_project(conn, &id)?.map(|p| p.path),
+                None => None,
+            };
+            let used_as_sub_workflow = match workflow_id {
+                Some(id) => crate::db::workflows::list_workflows(conn)?
+                    .iter()
+                    .any(|wf| {
+                        wf.steps.iter().chain(wf.on_failure.iter()).any(|step| {
+                            matches!(step.step_type, StepType::SubWorkflow)
+                                && step.sub_workflow_id.as_deref().map(str::trim)
+                                    == Some(id.as_str())
+                        })
+                    }),
+                None => false,
+            };
+            Ok((path, used_as_sub_workflow))
+        })
+        .await;
+    let (path, used_as_sub_workflow) = match loaded {
+        Ok(found) => found,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {e}"))),
+    };
+    let directory = if req.per_run_project == Some(true) {
+        DirectoryState::PerRun
+    } else {
+        let path = path.map(|path| crate::core::scanner::resolve_host_path(&path));
+        tokio::task::spawn_blocking(move || safety::directory_state(path.as_deref()))
+            .await
+            .unwrap_or(DirectoryState::Missing)
+    };
+    Json(ApiResponse::ok(safety::warnings(
+        &req.safety,
+        safety::in_container(),
+        directory,
+        used_as_sub_workflow,
+    )))
 }
 
 /// POST /api/workflows/:id/runs/:run_id/decide
@@ -5107,6 +5837,17 @@ pub async fn decide_run(
             )))
         }
     };
+
+    // Nothing has run before the pre-start approval, so there is nothing to change.
+    let awaits_safety_approval = run
+        .step_results
+        .last()
+        .is_some_and(|last| last.step_name == crate::workflows::safety::APPROVAL_STEP);
+    if awaits_safety_approval && matches!(decision, GateDecision::RequestChanges { .. }) {
+        return Json(ApiResponse::err(
+            "This run waits for its pre-start approval: approve or reject it.",
+        ));
+    }
 
     let new_status = match &decision {
         GateDecision::Reject { .. } => RunStatus::Failed,
@@ -5216,7 +5957,8 @@ fn parse_resume_interrupted_request(
 
 /// POST /api/workflow-runs/:run_id/resume
 ///
-/// A2 — manually resume an `Interrupted` run (backend restart, crash). The
+/// A2 — manually resume an `Interrupted` run (backend restart, crash), or a
+/// `WaitingQuota` run before its wake-up or once parked (KT-811). The
 /// atomic `Interrupted → Running` claim happens BEFORE this responds, so a
 /// double-click gets exactly one resume + one clear error. Execution then
 /// continues in the background from the step after the last completed result,
@@ -5291,29 +6033,8 @@ pub(crate) async fn resume_interrupted_as(
         return Json(ApiResponse::err(e.to_string()));
     }
 
-    let state_clone = state.clone();
     let response_run_id = run.id.clone();
-    tokio::spawn(async move {
-        let cfg = state_clone.config.read().await;
-        let tokens = cfg.tokens.clone();
-        let agents = cfg.agents.clone();
-        drop(cfg);
-        if let Err(e) = crate::workflows::runner::resume_interrupted_run(
-            state_clone.clone(),
-            &workflow,
-            &mut run,
-            &tokens,
-            &agents,
-            None,
-        )
-        .await
-        {
-            crate::workflows::runner::settle_errored_run(&state_clone, &workflow, &mut run, &e)
-                .await;
-        }
-        // Same unattended-failure contract as the gate resume path.
-        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run).await;
-    });
+    crate::workflows::runner::spawn_claimed_resume(state.clone(), workflow, run);
 
     Json(ApiResponse::ok(ResumeRunResponse {
         run_id: response_run_id,
@@ -5827,7 +6548,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "jira"],
         audience: "dev",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 9 * * 1-5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 9 * * 1-5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-prs", "List all open pull requests on the repository. For each PR, return: title, author, url, branch_name, description (first 200 chars). data must be a JSON array of objects with these fields.", true),
             ("check-tickets", "For each PR in {{previous_step.data}}, check if the title, description, or branch_name contains a Jira ticket reference (pattern: uppercase letters followed by a dash and digits, e.g. PROJ-123). Return only the PRs that have NO ticket reference. data must be an array of {title, author, url}.", true),
@@ -5842,7 +6563,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "slack"],
         audience: "pm",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 17 * * 5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 17 * * 5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-tickets", "Query Jira for all tickets resolved or closed in the last 7 days. For each: key, summary, type (Bug/Feature/Task), assignee. data must be a JSON array of these objects.", true),
             ("format-digest", "From the tickets in {{previous_step.data}}, generate a concise sprint digest grouped by type (Bug fixes, Features, Tasks). Include counts per category and the top 3 highlights.", false),
@@ -5872,7 +6593,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "slack"],
         audience: "dev",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1-5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1-5".to_string(), timezone: None },
         step_prompts: &[
             ("find-stale", "List all open pull requests with zero reviews AND created more than 48 hours ago. For each: title, author, created_at, url. data must be a JSON array. If none found, use status NO_RESULTS with data as empty array [].", true),
             ("notify", "From the stale PRs in {{previous_step.data}}: format a notification listing each one with title, author, and days waiting. If {{previous_step.status}} is NO_RESULTS, just output 'No stale PRs found.'", false),
@@ -5887,7 +6608,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "confluence"],
         audience: "pm",
         complexity: "simple",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 9 1 * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 9 1 * *".to_string(), timezone: None },
         step_prompts: &[
             ("query-bugs", "Query Jira for all open issues of type Bug. For each: key, summary, priority (Critical/High/Medium/Low), created_date, assignee. data must be a JSON array.", true),
             ("generate-report", "From the bugs in {{previous_step.data}}: count by priority, list the top 5 oldest, note trends if visible. Generate a Markdown report.", false),
@@ -5923,7 +6644,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["cloudwatch", "github"],
         audience: "ops",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "*/15 * * * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "*/15 * * * *".to_string(), timezone: None },
         step_prompts: &[
             ("check-errors", "Query CloudWatch for HTTP 5xx error count in the last 15 minutes. data must be {count: number, endpoints: [{path, count}]}. If count is 0: status NO_RESULTS, data {count: 0, endpoints: []}.", true),
             ("find-deploys", "List the last 3 merged PRs on main (recent deployments). For each: title, author, merged_at, changed_files. data must be a JSON array.", true),
@@ -5939,7 +6660,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["jira", "github", "confluence"],
         audience: "pm",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 16 * * 5".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 16 * * 5".to_string(), timezone: None },
         step_prompts: &[
             ("collect-sprint", "Get the current active sprint from Jira. List all tickets: key, summary, status, assignee, story_points. data must be a JSON array.", true),
             ("check-prs", "For each ticket in {{previous_step.data}}, check if there is a linked GitHub PR. data must be an array of {ticket_key, pr_status: 'merged'|'open'|'none', pr_url}.", true),
@@ -5956,7 +6677,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["cloudwatch", "slack"],
         audience: "ops",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "*/30 * * * *".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "*/30 * * * *".to_string(), timezone: None },
         step_prompts: &[
             ("collect-metrics", "Query CloudWatch for: latency_p99_ms, error_rate_percent, cpu_percent — last 30 min. data must be {latency_p99_ms: number, error_rate_percent: number, cpu_percent: number}.", true),
             ("detect-anomalies", "Current metrics: {{previous_step.data}}. Compare against 7-day average for same time window. data must be an array of {metric, current, baseline, factor}. If all normal: status NO_RESULTS, data [].", true),
@@ -5972,7 +6693,7 @@ const CATALOGUE: &[CatalogueEntry] = &[
         required_mcps: &["github", "confluence"],
         audience: "dev",
         complexity: "advanced",
-        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1".to_string() },
+        trigger: || WorkflowTrigger::Cron { schedule: "0 10 * * 1".to_string(), timezone: None },
         step_prompts: &[
             ("find-api-changes", "List PRs merged in the last 7 days that modified **/routes/**, **/api/**, **/models/**, **/schema/**. For each: pr_title, changed_files. data must be a JSON array.", true),
             ("check-docs", "For each PR in {{previous_step.data}}, search Confluence for related pages. Check if updated in last 7 days. data must be [{pr_title, page_title, page_url, last_updated, is_stale: bool}].", true),
@@ -6146,11 +6867,13 @@ pub async fn suggestions(
                     collect_api_data: None,
                     transform_data: None,
                     page_publish: None,
+                    task_board: None,
                     sub_workflow_id: None,
                     sub_workflow_foreach_file: None,
                     multi_agent_review: None,
                     room_id: None,
                     read_only_repos: vec![],
+                    delegate_subtasks: None,
                     exec_script_files: vec![],
                     exec_unmodelled_args_approved: None,
                     exec_agent_written: None,
@@ -6386,6 +7109,7 @@ pub async fn test_collect_api_data(
         ApiCallLogContext::manual_test(),
         &req.exec_allowlist,
         &work_dir,
+        &crate::core::api_access::ApiCaller::Human,
     )
     .await;
     let success = outcome.result.status == RunStatus::Success;
@@ -6450,6 +7174,7 @@ pub async fn test_api_call(
         &ctx,
         SecurityPolicy::production(),
         ApiCallLogContext::manual_test(),
+        &crate::core::api_access::ApiCaller::Human,
     )
     .await;
 
@@ -6478,6 +7203,10 @@ pub async fn test_api_call(
         error,
     }))
 }
+
+#[cfg(test)]
+#[path = "workflow_readiness_tests.rs"]
+mod readiness_tests;
 
 #[cfg(test)]
 mod tests {
@@ -7090,11 +7819,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -7659,6 +8390,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(by_bridge) = create(State(state.clone()), bridge, Json(request())).await;
         let Json(by_tools) = create_as(state.clone(), request(), WorkflowWriter::Agent).await;
@@ -7738,6 +8470,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(by_bridge) = create(
             State(state.clone()),
@@ -8359,6 +9092,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "src-id-original".into(),
@@ -8546,6 +9280,40 @@ mod tests {
         assert_eq!(step.page_publish.unwrap().page_id, "page-new");
     }
 
+    /// KT-1098 — exported copies name the page id, not a former slug; templated
+    /// and unknown targets are left as written.
+    #[test]
+    fn exported_page_targets_are_canonical_ids() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO live_pages (id, title, slug, created_at, updated_at)
+             VALUES ('page-1', 'Board', 'board-new', 'now', 'now');
+             INSERT INTO live_page_slug_aliases (slug, page_id, created_at)
+             VALUES ('board-old', 'page-1', 'now');",
+        )
+        .unwrap();
+        let mut workflow = mk_workflow_for_export("w");
+        let publish = |page: &str| {
+            let mut step = mk_step("p", StepType::PublishPageData);
+            step.page_publish = Some(PublishPageDataConfig {
+                page_id: page.into(),
+                writes: vec![],
+            });
+            step
+        };
+        workflow.steps = vec![publish("board-old"), publish("{{target}}"), publish("gone")];
+        workflow.on_failure = vec![publish("board-new")];
+        canonicalize_exported_page_refs(&conn, std::slice::from_mut(&mut workflow)).unwrap();
+        let targets: Vec<_> = workflow
+            .steps
+            .iter()
+            .chain(&workflow.on_failure)
+            .map(|step| step.page_publish.as_ref().unwrap().page_id.as_str())
+            .collect();
+        assert_eq!(targets, ["page-1", "{{target}}", "gone", "page-1"]);
+    }
+
     #[test]
     fn export_envelope_roundtrips_referenced_workflows() {
         let mut child = mk_workflow_for_export("child");
@@ -8689,6 +9457,385 @@ mod tests {
             .unwrap()
     }
 
+    /// KT-1099: an agent turning an enabled workflow's trigger into a Watch
+    /// (or editing its watched source) disables it; an invalid Watch is refused.
+    #[tokio::test]
+    async fn an_agent_edit_of_the_trigger_disables_the_workflow() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "watched", "project_id": null, "enabled": true,
+            "trigger": {"type": "Cron", "schedule": "0 7 * * *", "timezone": "Europe/Paris"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created
+            .data
+            .expect("a human may create an enabled workflow");
+        assert!(created.enabled);
+
+        let invalid: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Watch", "interval": "*/5 * * * *"}
+        }))
+        .unwrap();
+        let Json(refused) = update_as(
+            state.clone(),
+            created.id.clone(),
+            invalid,
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(!refused.success, "a Watch without a source is refused");
+
+        let watch: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "trigger": {"type": "Watch", "api_plugin_slug": "github", "api_config_id": "cfg",
+                        "api_endpoint_path": "/repos/o/r/commits", "interval": "*/5 * * * *",
+                        "detection": {"type": "JsonPath", "path": "$[0].sha"}}
+        }))
+        .unwrap();
+        let Json(edited) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            watch,
+            WorkflowWriter::Agent,
+            Some("Claude".into()),
+        )
+        .await;
+        let edited = edited.data.expect("a valid Watch is saved");
+        assert!(
+            !edited.enabled,
+            "the agent's trigger edit disables the workflow"
+        );
+        assert!(matches!(edited.trigger, WorkflowTrigger::Watch(_)));
+        let listed = auto_disabled(&state).await;
+        assert_eq!(listed[0].reason, AutoDisableReason::AgentEdit);
+        assert_eq!(listed[0].summary, "trigger changed by Claude");
+
+        let Json(enable) = update_as(
+            state.clone(),
+            created.id.clone(),
+            serde_json::from_value(serde_json::json!({"enabled": true})).unwrap(),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        assert!(!enable.success, "only a human turns it back on");
+    }
+
+    /// KT-1100: a human sets and clears a workflow's retention; an agent
+    /// cannot change it, but may send it back unchanged.
+    #[tokio::test]
+    async fn retention_is_editable_by_a_human_only() {
+        let state = agent_state();
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "polling", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}],
+            "retention": {"no_op_hours": 2}
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.unwrap();
+        assert!(created.enabled);
+        assert_eq!(
+            created.retention,
+            Some(WorkflowRetention {
+                no_op_hours: Some(2),
+                ..Default::default()
+            })
+        );
+
+        let update = |body: serde_json::Value| -> UpdateWorkflowRequest {
+            serde_json::from_value(body).unwrap()
+        };
+        let Json(too_long) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": {"failure_days": 100_000}})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert!(!too_long.success, "an unbounded window is refused");
+
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": {"success_days": 7, "failure_days": 0}})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        let human = human.data.unwrap();
+        assert!(human.enabled, "a human edit keeps the workflow on");
+        assert_eq!(human.retention.unwrap().failure_days, Some(0));
+
+        let Json(untouched) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"name": "polling (renamed)"})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let untouched = untouched.data.unwrap();
+        assert!(
+            untouched.enabled,
+            "an omitted retention is kept and changes nothing"
+        );
+        assert_eq!(untouched.retention, human.retention);
+
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": null})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+        let Json(echoed) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": human.retention})),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        let echoed = echoed.data.unwrap();
+        assert!(echoed.enabled, "an unchanged retention is no change");
+        assert_eq!(echoed.retention, human.retention);
+
+        let Json(cleared) = update_as_labeled(
+            state.clone(),
+            created.id.clone(),
+            update(serde_json::json!({"retention": null})),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        let cleared = cleared.data.unwrap();
+        assert_eq!(
+            cleared.retention, None,
+            "null returns to the global retention"
+        );
+        assert!(cleared.enabled);
+        assert!(auto_disabled(&state).await.is_empty());
+    }
+
+    // KT-1100 — what the real purge deletes after each kind of retention write.
+
+    /// The KT-984 global windows of these tests: shorter than a human's keep-all.
+    const SHORT_GLOBAL: crate::core::run_retention::RetentionDays =
+        crate::core::run_retention::RetentionDays {
+            payload: 0,
+            delete: 30,
+            no_op_hours: 24,
+        };
+    const NO_GLOBAL: crate::core::run_retention::RetentionDays =
+        crate::core::run_retention::RetentionDays {
+            payload: 0,
+            delete: 0,
+            no_op_hours: 0,
+        };
+    const ONE_DAY: WorkflowRetention = WorkflowRetention {
+        no_op_hours: Some(1),
+        success_days: Some(1),
+        failure_days: Some(1),
+    };
+
+    /// A human-saved Cron workflow with `retention` and four runs finished 40
+    /// days ago: one per class, plus a witness that still owns a worktree.
+    async fn retained_workflow(state: &AppState, retention: WorkflowRetention) -> Workflow {
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "polling", "project_id": null, "trigger": {"type": "Cron", "schedule": "* * * * *"},
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}],
+            "retention": retention
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.unwrap();
+        let workflow_id = created.id.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                let finished = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+                for (id, status, outcome, workspace) in [
+                    ("noop", "Success", Some("no_op"), None),
+                    ("success", "Success", Some("changed"), None),
+                    ("failed", "Failed", None, None),
+                    (
+                        "witness",
+                        "Success",
+                        Some("changed"),
+                        Some("/repo/.kronn/worktrees/w"),
+                    ),
+                ] {
+                    conn.execute(
+                        "INSERT INTO workflow_runs (id, workflow_id, status, step_results_json,
+                             started_at, finished_at, run_type, outcome, workspace_path)
+                         VALUES (?1, ?2, ?3, '[]', ?4, ?4, 'linear', ?5, ?6)",
+                        rusqlite::params![id, workflow_id, status, finished, outcome, workspace],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        created
+    }
+
+    async fn purge_then_list(
+        state: &AppState,
+        global: crate::core::run_retention::RetentionDays,
+    ) -> Vec<String> {
+        crate::core::run_retention::run_pass(&state.db, global, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                Ok(conn
+                    .prepare("SELECT id FROM workflow_runs ORDER BY id")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    fn retention_patch(retention: serde_json::Value) -> UpdateWorkflowRequest {
+        serde_json::from_value(serde_json::json!({ "retention": retention })).unwrap()
+    }
+
+    /// An agent shortening the retention deletes nothing more; the same
+    /// windows saved by a human apply at the next pass.
+    #[tokio::test]
+    async fn an_agent_retention_never_reaches_the_purge_until_a_human_saves_it() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(
+            purge_then_list(&state, SHORT_GLOBAL).await,
+            ["failed", "noop", "success", "witness"],
+            "the human's keep-all still holds"
+        );
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert_eq!(human.data.unwrap().retention, Some(ONE_DAY));
+        assert_eq!(purge_then_list(&state, NO_GLOBAL).await, ["witness"]);
+    }
+
+    /// An agent's `null` would fall back to a shorter global window: refused,
+    /// the human's keep-all still holds.
+    #[tokio::test]
+    async fn an_agent_null_retention_never_falls_back_to_a_shorter_global_window() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(agent) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::Value::Null),
+            WorkflowWriter::Agent,
+            Some("Codex".into()),
+        )
+        .await;
+        assert_eq!(
+            purge_then_list(&state, SHORT_GLOBAL).await,
+            ["failed", "noop", "success", "witness"]
+        );
+        assert_eq!(agent.error.as_deref(), Some(AGENT_RETENTION_REFUSAL));
+    }
+
+    /// A human's retention saved between an agent's read and its write
+    /// survives, whether the agent omitted it or sent back what it read.
+    #[tokio::test]
+    async fn a_human_retention_saved_during_an_agent_write_survives_it() {
+        for agent_patch in [
+            serde_json::json!({"name": "renamed by the agent"}),
+            serde_json::json!({"name": "renamed by the agent", "retention": ONE_DAY}),
+        ] {
+            let state = agent_state();
+            let wf = retained_workflow(&state, ONE_DAY).await;
+            let (reached, resume) = before_write_hook::arm(&wf.id);
+            let agent = tokio::spawn(update_as_labeled(
+                state.clone(),
+                wf.id.clone(),
+                serde_json::from_value(agent_patch.clone()).unwrap(),
+                WorkflowWriter::Agent,
+                Some("Codex".into()),
+            ));
+            reached.notified().await;
+            let Json(human) = update_as_labeled(
+                state.clone(),
+                wf.id.clone(),
+                retention_patch(serde_json::to_value(WorkflowRetention::KEEP_ALL).unwrap()),
+                WorkflowWriter::Human,
+                None,
+            )
+            .await;
+            assert!(human.success, "{agent_patch}");
+            resume.notify_one();
+            let Json(agent) = agent.await.unwrap();
+            assert_eq!(
+                purge_then_list(&state, SHORT_GLOBAL).await,
+                ["failed", "noop", "success", "witness"],
+                "{agent_patch}"
+            );
+            let agent = agent.data.unwrap();
+            assert_eq!(agent.name, "renamed by the agent");
+            assert_eq!(
+                agent.retention,
+                Some(WorkflowRetention::KEEP_ALL),
+                "the response carries the stored retention"
+            );
+        }
+
+        // Control: a human edit still applies.
+        let state = agent_state();
+        let wf = retained_workflow(&state, WorkflowRetention::KEEP_ALL).await;
+        let Json(human) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            retention_patch(serde_json::to_value(ONE_DAY).unwrap()),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert_eq!(human.data.unwrap().retention, Some(ONE_DAY));
+        assert_eq!(purge_then_list(&state, SHORT_GLOBAL).await, ["witness"]);
+    }
+
+    /// A workflow its user turned off keeps being cleaned by its own retention.
+    #[tokio::test]
+    async fn a_user_disabled_workflow_is_still_cleaned_by_its_human_retention() {
+        let state = agent_state();
+        let wf = retained_workflow(&state, ONE_DAY).await;
+        let Json(disabled) = update_as_labeled(
+            state.clone(),
+            wf.id.clone(),
+            serde_json::from_value(serde_json::json!({"enabled": false})).unwrap(),
+            WorkflowWriter::Human,
+            None,
+        )
+        .await;
+        assert!(!disabled.data.unwrap().enabled);
+        assert_eq!(purge_then_list(&state, NO_GLOBAL).await, ["witness"]);
+    }
+
     /// KT-1037: every automatic disable records why; a human re-enable
     /// clears it; the re-enable route refuses a bridge token.
     #[tokio::test]
@@ -8719,6 +9866,7 @@ mod tests {
             project: None,
             own_discussions: vec![],
             own_run: None,
+            agent: None,
         }));
         let Json(refused) = reenable(
             State(state.clone()),
@@ -8980,6 +10128,166 @@ mod tests {
         }
     }
 
+    /// KT-1044: a Security setting cleared by a human is stored cleared, and an
+    /// agent loosening one on an enabled workflow disables it.
+    #[tokio::test]
+    async fn cleared_security_settings_persist_and_an_agent_cannot_loosen_them_silently() {
+        let state = agent_state();
+        let all_on = serde_json::json!({
+            "sandbox": true, "require_approval": true, "max_files": 3, "max_lines": 40
+        });
+        let request: CreateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "name": "guarded", "project_id": null,
+            "trigger": {"type": "Manual"},
+            "safety": all_on,
+            "steps": [{"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}]
+        }))
+        .unwrap();
+        let Json(created) = create_as(state.clone(), request, WorkflowWriter::Human).await;
+        let created = created.data.expect("created");
+        assert!(created.enabled);
+
+        let loosen = |safety: serde_json::Value| -> UpdateWorkflowRequest {
+            serde_json::from_value(serde_json::json!({ "safety": safety })).unwrap()
+        };
+        let all_off = serde_json::json!({
+            "sandbox": false, "require_approval": false, "max_files": null, "max_lines": null
+        });
+        let Json(by_agent) = update_as(
+            state.clone(),
+            created.id.clone(),
+            loosen(all_off.clone()),
+            WorkflowWriter::Agent,
+        )
+        .await;
+        let by_agent = by_agent.data.expect("agent update");
+        assert!(
+            !by_agent.enabled,
+            "an agent's weaker Security settings need a human again"
+        );
+
+        let restore: UpdateWorkflowRequest = serde_json::from_value(serde_json::json!({
+            "safety": all_on, "enabled": true
+        }))
+        .unwrap();
+        let Json(_) = update_as(
+            state.clone(),
+            created.id.clone(),
+            restore,
+            WorkflowWriter::Human,
+        )
+        .await;
+        let Json(cleared) = update_as(
+            state.clone(),
+            created.id.clone(),
+            loosen(all_off),
+            WorkflowWriter::Human,
+        )
+        .await;
+        assert!(cleared.success, "{:?}", cleared.error);
+        let id = created.id.clone();
+        let stored = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.enabled, "a human's own change keeps the activation");
+        assert!(!stored.safety.sandbox);
+        assert!(!stored.safety.require_approval);
+        assert_eq!(stored.safety.max_files, None);
+        assert_eq!(stored.safety.max_lines, None);
+    }
+
+    /// KT-1043: the editor and the workflow page learn which stored settings
+    /// this host would refuse before any run.
+    #[tokio::test]
+    async fn the_safety_check_reports_what_a_run_here_would_refuse() {
+        use crate::workflows::safety::SafetyWarning;
+        let state = agent_state();
+        let mut child = mk_workflow_for_export("child");
+        child.id = "wf-child".into();
+        child.project_id = None;
+        let mut parent = mk_workflow_for_export("parent");
+        parent.id = "wf-parent".into();
+        parent.project_id = None;
+        parent.steps = serde_json::from_value(serde_json::json!([
+            {"name": "call", "step_type": {"type": "SubWorkflow"}, "sub_workflow_id": "wf-child"}
+        ]))
+        .unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &child)?;
+                crate::db::workflows::insert_workflow(conn, &parent)
+            })
+            .await
+            .unwrap();
+        let check = |body: serde_json::Value| {
+            let state = state.clone();
+            async move {
+                let Json(response) =
+                    safety_check(State(state), Json(serde_json::from_value(body).unwrap())).await;
+                response.data.expect("warnings")
+            }
+        };
+        let all = serde_json::json!({
+            "sandbox": false, "require_approval": true, "max_files": 2, "max_lines": null
+        });
+        assert_eq!(
+            check(serde_json::json!({"workflow_id": "wf-child", "safety": all})).await,
+            vec![
+                SafetyWarning::LimitsWithoutDirectory,
+                SafetyWarning::ApprovalOnSubWorkflow
+            ]
+        );
+        assert!(check(serde_json::json!({
+            "workflow_id": "wf-parent", "per_run_project": true, "safety": all
+        }))
+        .await
+        .is_empty());
+    }
+
+    /// KT-1043: the pre-start approval has no earlier step to send changes to.
+    #[tokio::test]
+    async fn the_pre_start_approval_accepts_only_approve_or_reject() {
+        let state = agent_state();
+        let mut wf = mk_workflow_for_export("approval");
+        wf.project_id = None;
+        let insert = wf.clone();
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &insert))
+            .await
+            .unwrap();
+        let mut run: WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-approval", "workflow_id": wf.id, "status": "WaitingApproval",
+            "step_results": [], "tokens_used": 0, "started_at": "2026-01-01T00:00:00Z",
+            "run_type": "linear", "batch_total": 0, "batch_completed": 0,
+            "batch_failed": 0, "batch_no_response": 0, "state": {}
+        }))
+        .unwrap();
+        run.step_results
+            .push(crate::workflows::safety::approval_result());
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_run(conn, &run))
+            .await
+            .unwrap();
+        let payload: DecideRunRequest = serde_json::from_value(serde_json::json!({
+            "decision": "request_changes", "comment": "do it differently"
+        }))
+        .unwrap();
+        let Json(refused) = decide_run(
+            State(state.clone()),
+            Path((wf.id.clone(), "run-approval".to_string())),
+            Json(payload),
+        )
+        .await;
+        assert!(!refused.success);
+        assert!(refused.error.unwrap().contains("approve or reject"));
+    }
+
     /// KT-1037: an agent cannot resume a run of a disabled workflow; a human
     /// can try (the resume then goes through its own checks).
     #[tokio::test]
@@ -9035,6 +10343,7 @@ mod tests {
         wf.project_id = None;
         wf.trigger = WorkflowTrigger::Cron {
             schedule: "* * * * *".into(),
+            timezone: None,
         };
         let mut emit = mk_step("emit", StepType::JsonData);
         emit.json_data_payload = Some(serde_json::json!({"a": 1}));
@@ -9128,6 +10437,7 @@ mod tests {
                         project: None,
                         own_discussions: vec![],
                         own_run: None,
+                        agent: None,
                     })
                 });
                 import_workflow(

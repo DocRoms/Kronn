@@ -183,6 +183,13 @@ pub struct ProjectRepositorySkill {
     /// `kronn_only`, one found only in a repository folder is `repository_only`
     /// (`native_skill` when Kronn has no counterpart at all).
     pub status: ProjectRepositoryResourceStatus,
+    /// In the project's default skills: what a `default-skills` update resends.
+    #[serde(default)]
+    pub attached: bool,
+    /// A custom skill scoped to this project: listed here without being a
+    /// default of its discussions, and offered to no other project.
+    #[serde(default)]
+    pub project_owned: bool,
     /// Proposed for this repository from its detected stack, not attached to
     /// it: never an item to process, only a suggestion to attach.
     #[serde(default)]
@@ -452,7 +459,8 @@ pub struct RepositoryNativeSkillRequest {
 /// A skill a project uses that its `default_skill_ids` do not tell: a native
 /// `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
 /// because Kronn published it into the repository. The Automation page reads
-/// these for every project at once, so nothing here renders or compares.
+/// these for every project at once; the route also lists an attached skill the
+/// repository holds a file for, so each Kronn skill carries its sync state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ProjectUsedSkill {
@@ -472,6 +480,11 @@ pub struct ProjectUsedSkill {
     pub referenced: bool,
     /// `kronn.lock` lists it: Kronn wrote it into the repository.
     pub published: bool,
+    /// A Kronn skill's sync state with this repository, as the project card
+    /// shows it. `None` for a skill only the repository holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sync_status: Option<ProjectRepositoryResourceStatus>,
 }
 
 /// The `SKILL.md` of a used skill, as the repository holds it now: masked the
@@ -1085,6 +1098,10 @@ pub struct AuditRun {
     /// The model the run's agent used, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Starter `kronn/project.toml` drafted for a repository without one
+    /// (KT-920); never written into the checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_profile_draft: Option<String>,
 }
 
 /// 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.

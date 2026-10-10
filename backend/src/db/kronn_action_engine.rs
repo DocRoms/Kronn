@@ -302,6 +302,22 @@ pub(crate) fn cancel(conn: &Connection, table: ActionTable, id: &str) -> Result<
     Ok(())
 }
 
+/// Drop the values a launch only hands over in memory, as a claimed row stores them.
+pub(crate) fn scrub_runtime_values(values: &mut [DiscussionActionValue]) {
+    for value in values {
+        if value.allow_manual_override
+            || matches!(
+                value.provenance,
+                DiscussionActionValueProvenance::UserInput
+                    | DiscussionActionValueProvenance::AgentSuggestion
+                    | DiscussionActionValueProvenance::DynamicBinding
+            )
+        {
+            value.value = None;
+        }
+    }
+}
+
 /// Claim a row for launch. Precondition: caller has already verified
 /// `core.state == Proposed` in the same transaction (a non-proposed row must
 /// never reach this function — the caller returns `Existing` itself, exactly
@@ -406,18 +422,7 @@ pub(crate) fn claim_launch(
                 .map(|v| (value.name.clone(), v.clone()))
         })
         .collect();
-    for value in &mut core.values {
-        if value.allow_manual_override
-            || matches!(
-                value.provenance,
-                DiscussionActionValueProvenance::UserInput
-                    | DiscussionActionValueProvenance::AgentSuggestion
-                    | DiscussionActionValueProvenance::DynamicBinding
-            )
-        {
-            value.value = None;
-        }
-    }
+    scrub_runtime_values(&mut core.values);
 
     let now = Utc::now().to_rfc3339();
     let changed = transaction.execute(

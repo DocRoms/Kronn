@@ -622,11 +622,8 @@ async fn start_backend(
         format!("http://127.0.0.1:{port}"),
     );
 
-    // Load or create config
-    let mut app_config = match config::load().await? {
-        Some(cfg) => cfg,
-        None => config::default_config_without_key(),
-    };
+    // Load or create config; also arms the process timezone (KT-1103).
+    let mut app_config = kronn::load_startup_config().await?;
 
     // Embedded mode: bind loopback by default, but HONOR the network-exposure
     // toggle (`config.server.host = 0.0.0.0`) so the desktop app can join the
@@ -696,6 +693,9 @@ async fn start_backend(
     {
         tracing::error!("Model catalog migration failed: {e}");
     }
+
+    // KT-1030: Kronn's default todo board, installed once.
+    kronn::core::default_todo::install_on_boot(&database, &app_config.language).await;
 
     // Build state via the shared factory — any new AppState field gets
     // picked up here automatically (see kronn::AppState::new_defaults).
@@ -855,25 +855,14 @@ async fn start_backend(
     // backend/src/main.rs (feature in the lib, spawn per-binary).
     let prewarm = kronn::api::projects::resource_prewarm::Prewarm::start(state.db.clone());
 
+    // Static files carry the host frame policy: with no Tauri CSP, this header
+    // is what makes the webview refuse a site that is not allowed.
+    let frontend_service = kronn::api::live_pages::serve_app_documents(&dist_dir, state.clone());
+
     // Build API router
     let api_router = build_router(state);
 
-    // Serve frontend static files + API
-    let frontend_service =
-        tower_http::services::ServeDir::new(&dist_dir).append_index_html_on_directories(true);
-
-    // Merge: /api/* → backend, /* → frontend static files
-    let app = axum::Router::new()
-        .merge(api_router)
-        .fallback_service(frontend_service)
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            axum::http::HeaderName::from_static("cross-origin-opener-policy"),
-            axum::http::HeaderValue::from_static("same-origin"),
-        ))
-        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-            axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
-            axum::http::HeaderValue::from_static("require-corp"),
-        ));
+    let app = desktop_app(api_router, frontend_service);
 
     let addr = format!("{}:{}", bind_host, port);
     let listener = if kronn::core::net_expose::is_exposed_host(&bind_host) {
@@ -896,6 +885,14 @@ async fn start_backend(
     prewarm.stop().await;
     served?;
     Ok(())
+}
+
+/// /api/* → backend, /* → frontend. No COEP/COOP: require-corp blocks every allowed
+/// third-party player; without isolation TTS/STT run single-threaded WASM, as on Docker.
+fn desktop_app(api_router: axum::Router, frontend_service: axum::Router) -> axum::Router {
+    axum::Router::new()
+        .merge(api_router)
+        .fallback_service(frontend_service)
 }
 
 struct BackendInfo {
@@ -1113,7 +1110,6 @@ fn main() {
     let dist_dir = extract_frontend_dist();
 
     // Launch Tauri app — webview loads from the backend HTTP server (not custom protocol)
-    // This ensures SharedArrayBuffer is available for WASM threading (TTS/STT)
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1437,6 +1433,55 @@ mod enrich_path_tests {
         );
 
         assert!(state.data_dir_lock.is_some());
+    }
+
+    /// Allowed third-party players must load: no response opts into cross-origin
+    /// isolation, and the frame policy reaches the webview untouched.
+    #[tokio::test]
+    async fn desktop_responses_carry_no_isolation_and_keep_the_frame_policy() {
+        use tower::ServiceExt;
+        let lock = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let state = desktop_app_state(
+            Arc::new(RwLock::new(config::default_config())),
+            Arc::new(Database::open_in_memory().unwrap()),
+            1,
+            lock,
+        );
+        state.config.write().await.embed_allowed_origins =
+            vec!["https://www.youtube.com".to_string()];
+        let dist = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../frontend/dist");
+        let app = desktop_app(
+            build_router(state.clone()),
+            kronn::api::live_pages::serve_app_documents(&dist, state),
+        );
+
+        for uri in ["/", "/api/health"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .header("accept", "text/html")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let headers = response.headers();
+            assert!(
+                headers.get("cross-origin-embedder-policy").is_none(),
+                "{uri}"
+            );
+            assert!(headers.get("cross-origin-opener-policy").is_none(), "{uri}");
+            if uri == "/" {
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                assert_eq!(
+                    headers["content-security-policy"],
+                    "frame-src 'self' https://www.youtube.com; \
+                     child-src 'self' https://www.youtube.com; worker-src 'self' blob:"
+                );
+            }
+        }
     }
 
     #[test]

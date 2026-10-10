@@ -865,6 +865,62 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "223_workflow_auto_disable_reason",
         include_str!("sql/223_workflow_auto_disable_reason.sql"),
     ),
+    (
+        "224_live_page_slug_aliases",
+        include_str!("sql/224_live_page_slug_aliases.sql"),
+    ),
+    (
+        "225_model_catalog_listing_evidence",
+        include_str!("sql/225_model_catalog_listing_evidence.sql"),
+    ),
+    (
+        "226_assistant_conversations",
+        include_str!("sql/226_assistant_conversations.sql"),
+    ),
+    (
+        "227_workflow_run_pins",
+        include_str!("sql/227_workflow_run_pins.sql"),
+    ),
+    (
+        "228_live_page_action_trusts",
+        include_str!("sql/228_live_page_action_trusts.sql"),
+    ),
+    (
+        "229_workflow_run_tree_llm_calls",
+        include_str!("sql/229_workflow_run_tree_llm_calls.sql"),
+    ),
+    (
+        "231_api_access_policies",
+        include_str!("sql/231_api_access_policies.sql"),
+    ),
+    (
+        "234_project_profile",
+        include_str!("sql/234_project_profile.sql"),
+    ),
+    (
+        "237_workflow_watch_state",
+        include_str!("sql/237_workflow_watch_state.sql"),
+    ),
+    (
+        "238_run_outcome_and_workflow_retention",
+        include_str!("sql/238_run_outcome_and_workflow_retention.sql"),
+    ),
+    (
+        "240_task_boards_and_default_contents",
+        include_str!("sql/240_task_boards_and_default_contents.sql"),
+    ),
+    (
+        "241_trust_trigger_workflow_retention",
+        include_str!("sql/241_trust_trigger_workflow_retention.sql"),
+    ),
+    (
+        "242_trigger_timezone_utc",
+        include_str!("sql/242_trigger_timezone_utc.sql"),
+    ),
+    (
+        "244_trust_trigger_without_retention",
+        include_str!("sql/244_trust_trigger_without_retention.sql"),
+    ),
 ];
 
 /// Copy `config.toml` to `config.toml.backup` (owner-only) without the auth
@@ -1461,6 +1517,86 @@ mod tests {
         assert_eq!(applied_0143, 0);
         run(&from_main).unwrap();
         assert_fully_migrated_once(&from_main);
+    }
+
+    #[test]
+    fn migration_242_pins_existing_cron_and_watch_triggers_to_utc() {
+        use crate::models::WorkflowTrigger;
+        use chrono::{DateTime, Duration, Utc};
+
+        let conn = Connection::open_in_memory().unwrap();
+        run_through(&conn, "240_task_boards_and_default_contents").unwrap();
+        let rows = [
+            ("cron", r#"{"type":"Cron","schedule":"0 5-19 * * 1-5"}"#),
+            (
+                "cron-null",
+                r#"{"type":"Cron","schedule":"0 7 * * *","timezone":null}"#,
+            ),
+            (
+                "cron-paris",
+                r#"{"type":"Cron","schedule":"0 7 * * *","timezone":"Europe/Paris"}"#,
+            ),
+            (
+                "watch",
+                r#"{"type":"Watch","quick_api_id":"qa","interval":"0 7 * * *"}"#,
+            ),
+            ("manual", r#"{"type":"Manual"}"#),
+            (
+                "tracker",
+                r#"{"type":"Tracker","source":{"type":"GitHub","owner":"o","repo":"r"},"query":"","labels":[],"interval":"0 7 * * *"}"#,
+            ),
+            ("broken", "not json"),
+        ];
+        for (id, trigger) in rows {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES (?1, ?1, ?2, '[]', '2026-10-01', '2026-10-01')",
+                [id, trigger],
+            )
+            .unwrap();
+        }
+        run(&conn).unwrap();
+        let stored = |id: &str| -> String {
+            conn.query_row(
+                "SELECT trigger_json FROM workflows WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let parsed = |id: &str| serde_json::from_str::<WorkflowTrigger>(&stored(id)).unwrap();
+        let zone = |id: &str| match parsed(id) {
+            WorkflowTrigger::Cron { timezone, .. } => timezone,
+            WorkflowTrigger::Watch(watch) => watch.timezone,
+            _ => None,
+        };
+        assert_eq!(zone("cron").as_deref(), Some("UTC"));
+        assert_eq!(zone("cron-null").as_deref(), Some("UTC"));
+        assert_eq!(
+            zone("cron-paris").as_deref(),
+            Some("Europe/Paris"),
+            "an explicit zone stays"
+        );
+        assert_eq!(zone("watch").as_deref(), Some("UTC"));
+        assert_eq!(stored("manual"), r#"{"type":"Manual"}"#);
+        assert!(!stored("tracker").contains("timezone"));
+        assert_eq!(stored("broken"), "not json");
+
+        // The pre-0.15 poller keeps its UTC hours even on a Paris machine.
+        let paris = chrono_tz::Europe::Paris;
+        let day = "2026-10-26T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let mut fired = vec![];
+        let mut since = day;
+        while since < day + Duration::days(1) {
+            let now = since + Duration::seconds(30);
+            if crate::workflows::trigger::should_fire(&parsed("cron"), paris, since, now) {
+                fired.push(now);
+            }
+            since = now;
+        }
+        assert_eq!(fired.len(), 15);
+        assert_eq!(fired.first(), Some(&(day + Duration::hours(5))));
+        assert_eq!(fired.last(), Some(&(day + Duration::hours(19))));
     }
 
     #[test]

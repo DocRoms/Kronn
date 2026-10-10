@@ -55,6 +55,7 @@ Three Docker services behind nginx gateway:
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro), `--allow-all-tools` (Copilot).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
 - **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex/Copilot, uv/pipx/pip3 for Vibe).
+- **Pre-launch readiness** (KT-1107): `POST /api/agents/readiness` checks the agents of a multi-agent start in parallel, model-free: detection, native full access, CLI sign-in status, and an ACP `initialize` + `session/new` without prompt for native agents (`agents::readiness`, `runner::probe_native_acp_session`). Unknown is never reported as ready; results are cached 3 min per agent+project, keyed by a fingerprint of the agent settings, key and project MCP servers. Not on the bridge-token route list. `[src: file: backend/src/agents/readiness.rs:1]`
 - **Cross-platform HOME resolution**: in Docker, `KRONN_HOST_HOME` overrides `HOME` for all spawned agents so they find their auth config (`~/.claude/`, `~/.codex/`, `~/.copilot/`, etc.). On native (Tauri desktop), HOME is already correct. `COPILOT_HOME` is also set explicitly for Copilot CLI.
 - **Windows binary detection**: `find_binary()` matches `.cmd`, `.exe`, `.ps1` extensions in addition to exact names (npm installs create `.cmd` wrappers on Windows).
 - **WSL detection**: uses `WSL_DISTRO_NAME` env var first (most reliable), then `/proc/version` fallback.
@@ -359,13 +360,48 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   scheduler crate's Sunday-first numbering at evaluation time.
 - **Tracker** — polls an issue tracker API (GitHub, Linear...) at a cron interval. Each new matching issue = 1 separate run with issue context injected via Kronn's `{{variable}}` templates. Pull-based (polling), not push (webhooks). Tracks processed issue IDs for reconciliation (no duplicate runs).
 - **Manual** — triggered from dashboard UI or CLI.
+- **Watch** (`workflows/watch_trigger.rs`) — on a cron interval, the scheduler
+  GETs a source through the API broker (`execute_watch_poll`: stored
+  credentials, the API's default headers, guarded transport, no retry, no
+  `api_call_logs` row) and creates a run only when the source changed. The
+  stored ETag / Last-Modified go out as `If-None-Match` / `If-Modified-Since`
+  (a 304 is "unchanged"); a 200 is compared by validators (`Validators`, body
+  fingerprint when the server sends none), body fingerprint (`Body`) or the
+  fingerprint of a JSONPath result (`JsonPath`). A poll writes
+  `workflow_watch_state` (validators, fingerprint, unchanged/changed/error
+  counters, consecutive failures; 3 in a row show the workflow as failing),
+  never `workflow_runs`. The first poll of a source records a baseline without
+  a run. A change is identified by the baseline it departs from and the state
+  it reaches; each served project's admission is recorded in
+  `workflow_watch_occurrences` in the transaction that inserts its run, and
+  the baseline advances only once every served project has its run. A change
+  detected again (restart before the acknowledgment, a project still refused)
+  therefore runs once per project, never twice. The source is identified
+  after its Quick API fills it, so a human edit of that Quick API starts a
+  new baseline, and an agent's edit disables the workflow (KT-1037) as for a
+  Quick API a step uses. The run receives `{{trigger.body}}` (credentials
+  removed, cut at 64 KiB), `{{trigger.status}}`, `{{trigger.fingerprint}}`
+  and, when present, `{{trigger.etag}}`, `{{trigger.last_modified}}`,
+  `{{trigger.extract}}`. Watch intervals have five fields (at most once a
+  minute).
+
+Cron and Watch intervals are read in UTC unless the trigger sets an IANA
+`timezone` (e.g. `Europe/Paris`), in which case the schedule follows local
+time across DST changes. Workflows saved without one keep UTC. On the DST change days, a local time the spring change skips does not fire
+that day, and a local time the autumn change repeats fires once, at its first
+pass (a frequent schedule adds no fire during the repeated hour).
 
 **Steps:**
 - Sequential execution, each step runs an agent with optional per-step MCPs (resolved and synced before execution).
 - LiteLLM and Ollama Agent steps also receive a bounded Kronn-native catalogue:
   configured API/Quick API discovery and execution, plus read-only Planning for
-  project workflows. Scope is enforced server-side and persisted receipts keep
+  project workflows and the five Page tools ([Native Page tools](../operations/native-page-tools.md)).
+  Scope is enforced server-side and persisted receipts keep
   only tool names and outcomes, never arguments or credentials.
+- A Claude Code or Codex Agent step can declare `read_only_repos`: absolute
+  paths of linked Git checkouts it may read but never write, enforced by the
+  CLI's own sandbox and permission rules
+  ([Workflow Agent read-only repositories](../operations/workflow-read-only-repos.md)).
 - Steps can use `mode: debate` for multi-agent discussion at any point.
 - Context flows between steps via Kronn's purpose-built `{{variable}}` syntax: `{{issue.title}}`, `{{issue.body}}`, `{{issue.number}}`, `{{issue.url}}`, `{{issue.labels}}`, `{{previous_step.output}}`, `{{steps.<name>.output}}`, `{{run.id}}`. It is not Liquid; its only filters are the run-anchored `time.now` grammar. Runtime rendering rejects unknown variables, filters and unclosed placeholders before executing the step, while preview rendering keeps them visible. `{{path ?? "text"}}` (or `'text'`) is the one explicit fallback: it renders the literal when the path is absent or JSON null, such as a step a `Goto` skipped. An `Exec` step's `---STATE:` and `---ARTIFACT:` markers are read from its raw stdout, where a `STATE` value may span lines. `[src: file: backend/src/workflows/template.rs:527]`
 - Deterministic Page pipelines can fan out over saved Quick APIs and
@@ -424,6 +460,45 @@ Unified automation system: `Trigger → Steps`. Kronn and OpenAI Symphony overla
   paused or interrupted more recently is kept, and a branch holding commits no
   known base has is kept and recorded in the run's `produced_branches` before
   the checkout goes. Git-ignored files (build output) go with the checkout.
+- **A stopped run never destroys uncommitted work (KT-1096).** At the end of
+  every run except a fully successful one (Partial, Failed, Cancelled,
+  StoppedByGuard, an engine error, a Gate rejection), and in the boot purge of
+  terminal runs, a worktree with uncommitted or untracked (non-ignored) files,
+  a detached HEAD or a state git cannot read, in itself or in a worktree
+  registered inside it (`<run>/.kronn/pr-N`), is kept with its branch and its
+  nested worktrees, without running `before_remove`
+  (`Workspace::cleanup_keeping_work`, `workspace::work_to_keep`, the same
+  check as the Interrupted reclaim). The run keeps its `workspace_path`; its
+  last step says where the work is (the log does, after an engine error, a
+  Gate rejection or at boot), and a later boot removes the checkout
+  once it is clean. A clean set is removed without `--force`, nested
+  worktrees first, and never forced: whenever git refuses (work written after
+  the inspection, a submodule, a lock) the set is kept and the run says why,
+  since no fresh look can exclude a write landing before a forced removal.
+  Kronn's own `.kronn/` files are not work: `.kronn/` is added to the
+  repository's local `info/exclude`. The one exception is a Success run: its
+  cleanup is unchanged and forced, because what it left uncommitted is its
+  own scratch once every step finished, and is discarded.
+- **A provider quota pauses the run, it does not fail it (KT-811).** When an
+  Agent step of a top-level run is refused for a quota or session limit
+  (`You've hit your session limit · resets 9:40pm (Europe/Paris)`, a 429 with
+  `Retry-After`, Codex's `try again in …`), the step and the run go to the
+  non-terminal `WaitingQuota` status with a `quota_wait` on the step: the
+  announced reset, the wake-up (reset + 2 min, at least 5, 10, 20, 40 min on
+  repeated refusals) or why it is parked for a human. The workflow engine tick
+  resumes due runs through the same claim and preconditions as a manual
+  resume (no child or batch run, worktree still there, no uncertain external
+  effect), at the refused step, without replaying earlier ones. The state is
+  on the run row, so a restart keeps it; a cancelled run is never woken. The
+  wait counts against the absolute timeout guard: a reset after the deadline,
+  no usable reset, a fifth refusal or a refused precondition parks the run
+  for the "Resume" button. A park or a claim names the wait it read (its
+  `id`), so a stale engine tick never undoes a resume or a newer wait.
+  Automatic resume covers linear root runs only: sub-workflow children,
+  batches and `on_failure` compensations are not resumed; a child ends
+  `Failed` with the quota classification on its step.
+  [src: file: backend/src/workflows/quota_wait.rs:27-264]
+  [src: file: backend/src/workflows/runner.rs:2618-2648]
 - **Worktrees nested in a run worktree (KT-985).** A step may add its own
   worktree inside the run's (`<run worktree>/.kronn/pr-N`). Deleting the run's
   directory alone leaves that entry `prunable` in `git worktree list`, so
@@ -746,7 +821,20 @@ WorkflowRunner (per run)
   → cleanup workspace (git worktree remove)
   → run workspace hooks: before_remove
   → emit SSE events throughout for real-time UI updates
+  → on Success (top-level linear run): classify the outcome (no_op | changed)
 ```
+
+**Runs without changes (KT-1100).** A successful top-level run whose steps
+all declared or proved that they changed nothing is stored with
+`outcome: no_op` (`workflows/run_effect.rs`, fail-closed: anything unknown is
+`changed`). An Exec step declares it with a `KRONN_NOOP` line, an Agent step
+with `"no_change": true` in its envelope; an identical Page publish, a GET
+call and the pure data steps are inferred. The run list hides these runs by
+default and folds a streak of them into one row; they are purged after 24 h,
+and `Workflow.retention` overrides each window per workflow (human-only on a
+stored workflow: an agent's update is refused, a `kronn/` re-import keeps it). Rules and purge:
+[`operations/db-backup.md`](../operations/db-backup.md#runs-without-changes-kt-1100).
+`[src: file: backend/src/workflows/run_effect.rs:1]`
 
 **Agents chosen at launch (KT-1025).** A manual launch (`POST
 /api/workflows/{id}/trigger`, a discussion or Live Page action launch, MCP

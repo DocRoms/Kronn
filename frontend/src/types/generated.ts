@@ -104,13 +104,8 @@ project_id?: string | null,
  */
 api_plugin_slug?: string | null, api_config_id?: string | null, quick_api_id?: string | null,
 /**
- * Endpoint path on the plugin's API. NOTE (2026-06-24): the declared
- * `ApiSpec.endpoints` are INDICATIVE, not an allow-list — the executor
- * does NOT reject undeclared paths; it forwards ANY path to the plugin's
- * base URL with auth injected (the declared list only drives method
- * resolution + display). So agents can call valid-but-undeclared
- * endpoints; the API itself is the real authority. The host-match +
- * public-IP `SecurityPolicy` is the actual guard, not the endpoint list.
+ * Endpoint path on the plugin's API. Without an access policy any path
+ * is forwarded; under one, only declared endpoints are (KT-1026).
  */
 endpoint_path: string,
 /**
@@ -239,7 +234,11 @@ gate_status: string, override_value?: string | null,
  */
 code_locations?: string | null, created_at: string, resolved_at?: string | null, };
 
-export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null, version: string | null, latest_version: string | null,
+export type AgentDetection = { name: string, agent_type: AgentType, installed: boolean, enabled: boolean, path: string | null,
+/**
+ * Resolved package-runner executable and argv when no installed CLI was found.
+ */
+fallback_command?: Array<string>, version: string | null, latest_version: string | null,
 /**
  * Time at which the official release source was last checked (RFC 3339).
  */
@@ -321,6 +320,37 @@ token_estimate: number, };
 
 export type AgentProjectUsage = { project_id: string, project_name: string, tokens_used: number, message_count: number, };
 
+export type AgentReadiness = { agent_type: AgentType, status: AgentReadinessStatus, reason: AgentReadinessReason,
+/**
+ * The UI's i18n key for `reason`.
+ */
+message_key: string,
+/**
+ * Project MCP servers the session was starting when it stalled.
+ */
+servers: Array<string>,
+/**
+ * The bound that elapsed, for a timeout.
+ */
+secs: number | null,
+/**
+ * The runtime's own error, redacted and bounded.
+ */
+detail: string | null, cached: boolean, checked_at: string, };
+
+export type AgentReadinessReason = "ready" | "not_installed" | "full_access_required" | "not_logged_in" | "login_unverified" | "session_timeout" | "session_failed" | "not_probed";
+
+export type AgentReadinessRequest = { project_id?: string | null, agents: Array<AgentType>,
+/**
+ * Ignore cached results.
+ */
+force?: boolean, };
+
+/**
+ * Readiness of one agent before a multi-agent launch (KT-1107).
+ */
+export type AgentReadinessStatus = "ready" | "not_ready" | "unknown";
+
 export type AgentResumeFailureKind = "command_failed" | "backend_restarted" | "dispatch_stalled" | "quota_exhausted" | "runtime_unavailable";
 
 export type AgentResumeJobKind = "command" | "wake";
@@ -332,6 +362,57 @@ export type AgentResumeJobStatus = "pending" | "running" | "completed" | "failed
  * snapshot and variable values intentionally remain backend-only.
  */
 export type AgentResumeJobView = { id: string, discussion_id: string, target_agent: AgentType, source_dispatch_job_id: string | null, task_execution_id: string | null, quick_exec_id: string | null, kind: AgentResumeJobKind, status: AgentResumeJobStatus, reason: string, scheduled_at: string, chain_depth: number, wake_budget: number, watchdog_redispatches: number, completion_dispatch_id: string | null, result: QuickExecResult | null, failure_kind: AgentResumeFailureKind | null, started_at: string | null, completed_at: string | null, last_error: string | null, created_at: string, updated_at: string, };
+
+/**
+ * What a running agent is doing, as its live reply bubble shows it
+ * (KT-1108). The startup phases come first, in launch order; the last three
+ * follow the agent's own output once the prompt is sent.
+ */
+export type AgentRunPhase = "preparing" | "launching" | "initializing" | "opening_session" | "selecting_model" | "starting_cli" | "waiting_model" | "thinking" | "tool" | "responding" | "waiting_next_answer";
+
+/**
+ * When a startup phase began, in milliseconds since the run started.
+ */
+export type AgentRunPhaseMark = { phase: AgentRunPhase, at_ms: number, };
+
+/**
+ * One run's live progress. Categories, counts and durations only: never a
+ * tool's name, argument or target, nor any text from the agent.
+ */
+export type AgentRunProgress = { phase: AgentRunPhase,
+/**
+ * Milliseconds spent in `phase` so far.
+ */
+phase_ms: number,
+/**
+ * Milliseconds since the run started, frozen once it stopped.
+ */
+elapsed_ms: number,
+/**
+ * The startup phases reached, in order.
+ */
+timeline: Array<AgentRunPhaseMark>,
+/**
+ * How many MCP servers the session declares, when it declares any.
+ */
+mcp_servers: number | null,
+/**
+ * The latest tool calls, newest first.
+ */
+activity: Array<AuditActivityEntry>, tool_calls: number,
+/**
+ * Milliseconds since the agent last showed any sign of life.
+ */
+silent_ms: number,
+/**
+ * The silence after which Kronn stops the agent, when one applies now.
+ */
+idle_limit_ms: number | null, stopped: AgentRunStop | null, };
+
+/**
+ * Why a run's live progress ended.
+ */
+export type AgentRunStop = "finished" | "failed" | "cancelled" | "idle" | "timed_out";
 
 export type AgentsConfig = { claude_code: AgentConfig, codex: AgentConfig, open_code: AgentConfig, gemini_cli: AgentConfig, kiro: AgentConfig, vibe: AgentConfig, copilot_cli: AgentConfig, ollama: AgentConfig, lite_llm: AgentConfig, nvidia: AgentConfig,
 /**
@@ -387,6 +468,27 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 export type AiSearchResult = { path: string, match_count: number, };
 
 export type AnswerDiscussionQuestionRequest = { selected_option_ids?: Array<string>, item_answers?: Array<DiscussionQuestionItemAnswer>, text?: string | null, idempotency_key: string, };
+
+/**
+ * A plugin's access policy. Its presence switches the broker to strict mode:
+ * only declared endpoints (the spec's and these) may be called.
+ */
+export type ApiAccessPolicy = { access: ApiAccessRule, endpoints: Array<ApiEndpointAccess>, };
+
+/**
+ * A stored policy, as the overview lists it.
+ */
+export type ApiAccessPolicyEntry = { server_id: string, policy: ApiAccessPolicy, };
+
+/**
+ * Who may reach a plugin, or one of its endpoints, through Kronn.
+ */
+export type ApiAccessRule = { "kind": "all" } | { "kind": "agents", agents: Array<ApiAccessSubject>, } | { "kind": "local_only" } | { "kind": "blocked" };
+
+/**
+ * One allowed agent; `model: None` admits every model of that agent.
+ */
+export type ApiAccessSubject = { agent: AgentType, model?: string, };
 
 export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection,
 /**
@@ -468,6 +570,11 @@ export type ApiEndpoint = { path: string,
  * that want to call a rare verb.
  */
 method: string, description: string, };
+
+/**
+ * A rule for one endpoint (method + path template), overriding the plugin's.
+ */
+export type ApiEndpointAccess = { method: string, path: string, access: ApiAccessRule, };
 
 export type ApiKey = { id: string, name: string, provider: string, active: boolean, };
 
@@ -666,6 +773,46 @@ path: string,
  * informational only, the engine doesn't enforce a format.
  */
 format?: string | null, };
+
+/**
+ * What a discussion is created for when it is an assistant conversation:
+ * the link is written in the discussion's own transaction, and `secrets`
+ * are masked out of its title and first message before anything is stored.
+ */
+export type AssistantContext = { kind: AssistantKind, target_id?: string | null, target_step?: string | null, plugin_id?: string | null, target_label?: string, secrets?: Array<string>, };
+
+/**
+ * One kept assistant conversation, with the discussion fields the lists show.
+ */
+export type AssistantConversation = { discussion_id: string, kind: AssistantKind,
+/**
+ * Custom API server id, or the workflow / Quick API owning the step.
+ * `None` while the configured object is not saved yet.
+ */
+target_id: string | null,
+/**
+ * ApiCall step name; `None` for a plugin.
+ */
+target_step: string | null,
+/**
+ * The API plugin the conversation is about, when known.
+ */
+plugin_id: string | null, target_label: string,
+/**
+ * Signature of the last proposal the assistant made, if any.
+ */
+last_proposal_signature: string | null,
+/**
+ * Signature of the last proposal the user applied, if any.
+ */
+last_applied_signature: string | null, last_applied_at: string | null, created_at: string, title: string, agent: AgentType, archived: boolean, message_count: number, updated_at: string, };
+
+/**
+ * A link as stored, for the logical export.
+ */
+export type AssistantConversationLink = { discussion_id: string, kind: AssistantKind, target_id: string | null, target_step: string | null, plugin_id: string | null, target_label: string, last_proposal_signature: string | null, last_applied_signature: string | null, last_applied_at: string | null, created_at: string, };
+
+export type AssistantKind = "custom_api" | "api_call_step";
 
 /**
  * One tool call: its category and when it started, nothing else.
@@ -899,7 +1046,12 @@ head_sha?: string | null, branch?: string | null, source_fingerprint?: string | 
 /**
  * The model the run's agent used, when known.
  */
-model?: string | null, };
+model?: string | null,
+/**
+ * Starter `kronn/project.toml` drafted for a repository without one
+ * (KT-920); never written into the checkout.
+ */
+project_profile_draft?: string | null, };
 
 /**
  * 0.8.4 (#298) — Per-step metrics for the post-audit recap panel.
@@ -1223,7 +1375,7 @@ export type BundleChildWorkflow = { bundle_id: string, name: string, project_id:
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
 
 /**
  * One artifact that was created by the bundle endpoint. The
@@ -1315,7 +1467,12 @@ child_workflows: Array<BundleCreated>,
  * The workflow doesn't have a `bundle_id` (only one per bundle);
  * the frontend uses `id` + `name` to navigate to it.
  */
-workflow: BundleWorkflowCreated, };
+workflow: BundleWorkflowCreated,
+/**
+ * Whether the created chain can start (KT-1138): every blocker of the
+ * workflow, its child workflows and rollback chains.
+ */
+readiness: WorkflowReadiness, };
 
 /**
  * One line about a task: enough to recognise it, not enough to re-read it.
@@ -1345,6 +1502,12 @@ export type CampaignTaskReason = { code: string, detail: string, };
 export type CampaignWorkerSelection = { target: MessageTarget, model?: string | null, profile_id?: string | null, };
 
 export type CancellationCleanupPolicy = "preserve" | "remove_if_clean";
+
+/**
+ * Evidence from a runtime listing, kept apart from availability: a listing
+ * is not proof of access, so `NotListed` is a warning, never a refusal.
+ */
+export type CatalogListing = "unknown" | "listed" | "not_listed";
 
 /**
  * One model as Kronn's shared contract sees it. `id` is an opaque encoding
@@ -1425,6 +1588,11 @@ last_seen_at?: string | null,
  */
 last_checked_at: string,
 /**
+ * What the runtime's own model listing says about this model. Evidence
+ * only: `not_listed` warns before launch, it never refuses.
+ */
+listing?: CatalogListing,
+/**
  * Last time a real call to this model answered. Being listed is not
  * being served: `None` means no call has proven it yet.
  */
@@ -1451,7 +1619,12 @@ recommended_action: string,
  */
 replacement?: string | null, };
 
-export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null, };
+export type CatalogPreflightResolution = { requested_model: string | null, effective_model: string | null, warning?: CatalogPreflightWarning | null,
+/**
+ * Shown before the run, which still goes ahead: the runtime's complete
+ * listing does not contain the model.
+ */
+notice?: string | null, };
 
 /**
  * Non-blocking catalogue decision made immediately before a launch. The
@@ -1461,6 +1634,20 @@ export type CatalogPreflightResolution = { requested_model: string | null, effec
 export type CatalogPreflightWarning = { requested_model: string, effective_model: string, reason: ModelUnavailableReason, detail: string, replacement_source: CatalogReplacementSource, equivalent_tier: ModelTier, };
 
 export type CatalogReplacementSource = "resolved_model" | "equivalent_tier";
+
+/**
+ * Whether a tier can launch, and on which model. `requested_model` is `None`
+ * when nothing is configured and the runtime's own default applies.
+ */
+export type CatalogTierVerdict = { tier: ModelTier, requested_model?: string | null, effective_model?: string | null, launchable: boolean, reason?: ModelUnavailableReason | null,
+/**
+ * Why the tier is refused, or why another model runs in its place.
+ */
+detail?: string | null,
+/**
+ * A launchable tier's pre-launch warning (model absent from the listing).
+ */
+notice?: string | null, };
 
 /**
  * What a CI check is known to be. `Unknown` is its own value: a check nobody
@@ -1767,7 +1954,12 @@ launch_variables?: { [key in string]: string },
  * F9 — create a "human-only" disc: the agent runner never spawns on
  * `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
  */
-no_agent?: boolean, };
+no_agent?: boolean,
+/**
+ * KT-1111 — a configuration assistant's conversation: linked in the
+ * creation transaction, its secrets masked before the first insert.
+ */
+assistant?: AssistantContext, };
 
 export type CreateLivePageDataset = { name: string, kind: LivePageDatasetKind,
 /**
@@ -1829,7 +2021,11 @@ unmodelled_args_approved?: boolean, };
 
 export type CreateQuickPromptRequest = { name: string, icon?: string | null, prompt_template: string, variables?: Array<PromptVariable>, agent?: AgentType | null, connection_id?: string | null, project_id?: string | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, tier?: ModelTier, agent_settings?: AgentSettings | null, description?: string, };
 
-export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null, };
+export type CreateSkillRequest = { name: string, description: string, icon: string, category: SkillCategory, content: string, license?: string | null, allowed_tools?: string | null,
+/**
+ * Absent keeps the skill's project on update, `null` makes it global.
+ */
+project_id?: string | null, };
 
 export type CreateWorkflowRequest = { name: string, project_id?: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions?: Array<WorkflowAction>, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, concurrency_key?: string | null, guards?: WorkflowGuards | null, artifacts?: Record<string, ArtifactSpec>, on_failure?: Array<WorkflowStep>, exec_allowlist?: Array<string>, variables?: Array<PromptVariable>,
 /**
@@ -1842,7 +2038,7 @@ export type CreateWorkflowRequest = { name: string, project_id?: string | null, 
  * failure mode while still letting agents accelerate the
  * adoption of Kronn by drafting common patterns autonomously.
  */
-enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
+enabled?: boolean | null, project_scope?: WorkflowProjectScope, retention?: WorkflowRetention, };
 
 /**
  * Where a plugin's outbound API credential actually comes from, computed
@@ -1854,6 +2050,26 @@ enabled?: boolean | null, project_scope?: WorkflowProjectScope, };
  * whenever the auth kind is actually `CliToken`, Fastly included.
  */
 export type CredentialSource = "stored" | "cli_token" | "none";
+
+export type CronPreview = {
+/**
+ * The zone the schedule is read in.
+ */
+timezone: string,
+/**
+ * True when that zone is Kronn's global one (no trigger override).
+ */
+inherited: boolean,
+/**
+ * The next firings, RFC 3339 with the zone's offset.
+ */
+next: Array<string>, };
+
+export type CronPreviewRequest = { schedule: string,
+/**
+ * The trigger's own zone; absent means Kronn's global zone.
+ */
+timezone?: string, };
 
 export type CustomApiField = { label: string, value: string, };
 
@@ -1950,6 +2166,16 @@ quick_prompt_versions: Array<QuickPromptVersion>,
  */
 learning_rejections: Array<LearningRejection>,
 /**
+ * v7 (KT-1111) — what makes a discussion an assistant conversation.
+ * Older archives have none: their discussions import as ordinary ones.
+ */
+assistant_conversations: Array<AssistantConversationLink>,
+/**
+ * v7 (KT-1026) — plugin access policies. `None` (an older export) keeps
+ * the local policies; `Some` replaces them, an empty list included.
+ */
+api_access_policies?: Array<ApiAccessPolicyEntry>,
+/**
  * KT-1017 — a MAC, under this instance's key, over the workflows and
  * Quick Execs: a restore keeps their approvals only when it verifies.
  */
@@ -2029,6 +2255,71 @@ export type DeclineDiscussionQuestionRequest = { idempotency_key: string,
  * agent reads it, so an empty refusal still has to be actionable.
  */
 reason?: string | null, };
+
+export type DefaultTodoState = "installed" | "removed" | "kept_existing" | "not_installed";
+
+export type DefaultTodoStatus = { state: DefaultTodoState,
+/**
+ * Kronn's board page, while it exists.
+ */
+page_id: string | null,
+/**
+ * Kronn's board workflows that still exist.
+ */
+workflow_ids: Array<string>,
+/**
+ * A todo page of the user's own, if one is recognised.
+ */
+own_page_id: string | null, };
+
+/**
+ * KT-909 — what a `DelegateSubtasks` step delegates and how.
+ */
+export type DelegateSubtasksConfig = {
+/**
+ * Parent task reference or id; templated (`{{steps.guard.data.taskId}}`).
+ */
+parent_task: string,
+/**
+ * `worker:<key>` subtask tag → worker. The first tag found here wins.
+ */
+worker_map?: { [key in string]: DelegateWorker },
+/**
+ * Worker for a subtask whose tags match no `worker_map` entry.
+ */
+default_worker?: DelegateWorker,
+/**
+ * Executions in flight at once. Default 1, maximum 8.
+ */
+concurrency?: number,
+/**
+ * Review rounds per subtask before it escalates. Default 3, maximum 10.
+ */
+max_review_rounds?: number,
+/**
+ * Commands run on each approved candidate before it is integrated.
+ */
+validations?: Array<ValidationSpec>,
+/**
+ * Integration branch; templated. Default: the branch checked out in the
+ * run's working directory.
+ */
+target_branch?: string,
+/**
+ * Bound on the whole step. Default 6 h. Executions survive it.
+ */
+timeout_secs?: number, };
+
+/**
+ * A native worker identity for delegated subtasks (CLI sessions excluded).
+ */
+export type DelegateWorker = { agent: AgentType, tier?: ModelTier, model?: string, };
+
+export type DeleteLivePageDatasetResult = { page_id: string, name: string, data_revision: number,
+/**
+ * The references a forced deletion went past; empty otherwise.
+ */
+overridden: LivePageDatasetUsage, };
 
 export type DeleteManualModelRequest = { runtime_target_id: string, model_id: string, };
 
@@ -3958,7 +4249,12 @@ bindings?: Record<string, string>,
 /**
  * A workflow action's agents for some Agent steps, this launch only (KT-1025).
  */
-step_agents?: { [key in string]: StepAgentOverride }, };
+step_agents?: { [key in string]: StepAgentOverride },
+/**
+ * Launch without a card, under the action's human approval (KT-1029).
+ * Refused unless that approval matches the action as it stands.
+ */
+trusted?: boolean, };
 
 /**
  * The versioned, backward-compatible wire response for a single-task launch —
@@ -4175,13 +4471,59 @@ stale_source: boolean,
  * U+001F, empty for an unbound CTA. `None` on a declaration, which belongs
  * to every row at once.
  */
-binding_key: string | null, };
+binding_key: string | null,
+/**
+ * `Some(true)` for a launch a human-approved trust started without its
+ * card (KT-1029); omitted otherwise.
+ */
+trusted?: boolean, };
+
+/**
+ * A stored approval.
+ */
+export type LivePageActionTrust = { action_id: string, live_page_id: string, action_ref: string, project_id: string | null, target_id: string, fingerprint: string,
+/**
+ * New on every approval: launches claimed under an older one never run.
+ */
+approval_id: string, approved_at: string, invalidated_at: string | null, invalidated_reason: LivePageActionTrustRefusal | null, };
+
+/**
+ * Why an action cannot be (or no longer is) trusted. Serialized as a stable
+ * code the UI translates.
+ */
+export type LivePageActionTrustRefusal = "not_workflow" | "not_launchable" | "stale_source" | "target_missing" | "workflow_disabled" | "agent_step" | "agent_context" | "unpinned_dependency" | "user_input" | "secret_value" | "cross_project" | "changed" | "not_trusted" | "rate_limited";
+
+/**
+ * One current offer of a Page, as the trust panel and the click path read it.
+ */
+export type LivePageActionTrustState = { action_id: string, action_ref: string, target_name: string,
+/**
+ * What a human approves now; `None` when the action is not eligible.
+ */
+fingerprint: string | null, refusal: LivePageActionTrustRefusal | null, trust: LivePageActionTrust | null,
+/**
+ * True only when a valid approval matches the current fingerprint.
+ */
+active: boolean, };
 
 export type LivePageDataset = { id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
 export type LivePageDatasetKind = "snapshot" | "time_series" | "collection";
 
 export type LivePageDatasetPoint = { id: string, dataset_id: string, observed_at: string, payload: any, workflow_run_id: string | null, };
+
+/**
+ * What reads or writes one dataset: the check made before deleting it.
+ */
+export type LivePageDatasetUsage = { name: string, writers: Array<LivePageDatasetWriter>,
+/**
+ * The dataset name appears as a whole word in the current HTML revision.
+ */
+html_referenced: boolean,
+/**
+ * Page buttons (`action_ref`) whose values bind to this dataset.
+ */
+action_refs: Array<string>, };
 
 export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
 /**
@@ -4191,7 +4533,16 @@ export type LivePageDatasetView = { points: Array<LivePageDatasetPoint>,
  */
 data_size_bytes: number, id: string, page_id: string, name: string, kind: LivePageDatasetKind, current: any, schema: any, max_points: number, max_age_days: number | null, updated_at: string, };
 
-export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>, id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
+/**
+ * A workflow whose `PublishPageData` step writes one dataset.
+ */
+export type LivePageDatasetWriter = { workflow_id: string, workflow_name: string, enabled: boolean, };
+
+export type LivePageDetail = { revision: LivePageRevision, datasets: Array<LivePageDatasetView>,
+/**
+ * Former slugs that still open this Page after a rename.
+ */
+slug_aliases: Array<string>, id: string, project_id: string | null, title: string, slug: string, current_revision_id: string, data_revision: number, created_at: string, updated_at: string, last_published_at: string | null,
 /**
  * User-pinned / favorite Page — favorites surface first in the library.
  */
@@ -4222,9 +4573,13 @@ export type LivePagesCapability = { activated: boolean, activated_at: string | n
  */
 export type LivePageWorkflowLink = { id: string, name: string, enabled: boolean, step_names: Array<string>, };
 
-export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation, value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
+export type LivePageWrite = { dataset: string, operation: LivePageWriteOperation,
+/**
+ * Required, `null` included; only `clear` may omit it.
+ */
+value: any, observed_at: string | null, dedupe_key: string | null, key_field: string | null, };
 
-export type LivePageWriteOperation = "replace" | "append" | "upsert";
+export type LivePageWriteOperation = "replace" | "append" | "upsert" | "clear";
 
 /**
  * A per-DoD coverage claim. `dod_id` references the task's DoD item; the schema
@@ -4436,7 +4791,11 @@ incompatibilities: Array<McpIncompatibility>,
  * UI surfaces them as warnings so the operator can complete the
  * config or remove the entry.
  */
-incomplete_configs: Array<McpIncompleteConfig>, };
+incomplete_configs: Array<McpIncompleteConfig>,
+/**
+ * Plugins under an agent access policy (KT-1026).
+ */
+access_policies: Array<ApiAccessPolicyEntry>, };
 
 export type McpProbeCheck = { id: string, label: string, ok: boolean,
 /**
@@ -4762,7 +5121,12 @@ stale: boolean, last_live_success_at?: string | null, last_attempt_at?: string |
  * contains. This is a warning only: changing a reference remains an
  * explicit operator action.
  */
-alerts?: Array<ModelCatalogAlert>, };
+alerts?: Array<ModelCatalogAlert>,
+/**
+ * The launch decision for each tier of an agent's own target, computed by
+ * the same function as the preflight. Empty for HTTP connection targets.
+ */
+tier_verdicts?: Array<CatalogTierVerdict>, };
 
 /**
  * Coarse, catalog-driven cost classification. Never inferred from a
@@ -5816,6 +6180,15 @@ export type ProjectRepositorySkill = { id: string, name: string, slug: string, d
  */
 status: ProjectRepositoryResourceStatus,
 /**
+ * In the project's default skills: what a `default-skills` update resends.
+ */
+attached: boolean,
+/**
+ * A custom skill scoped to this project: listed here without being a
+ * default of its discussions, and offered to no other project.
+ */
+project_owned: boolean,
+/**
  * Proposed for this repository from its detected stack, not attached to
  * it: never an item to process, only a suggestion to attach.
  */
@@ -5864,7 +6237,8 @@ export type ProjectUsage = { project_id: string, project_name: string, tokens_us
  * A skill a project uses that its `default_skill_ids` do not tell: a native
  * `SKILL.md` "Use in Kronn" pointed at (KT-897), or a skill `kronn.lock` lists
  * because Kronn published it into the repository. The Automation page reads
- * these for every project at once, so nothing here renders or compares.
+ * these for every project at once; the route also lists an attached skill the
+ * repository holds a file for, so each Kronn skill carries its sync state.
  */
 export type ProjectUsedSkill = { project_id: string,
 /**
@@ -5887,7 +6261,12 @@ referenced: boolean,
 /**
  * `kronn.lock` lists it: Kronn wrote it into the repository.
  */
-published: boolean, };
+published: boolean,
+/**
+ * A Kronn skill's sync state with this repository, as the project card
+ * shows it. `None` for a skill only the repository holds.
+ */
+sync_status?: ProjectRepositoryResourceStatus, };
 
 /**
  * Project defaults for worktree preparation hooks. Workflow hooks override them
@@ -6045,7 +6424,8 @@ page_id: string, writes: Array<PublishPageDataWrite>, };
 export type PublishPageDataWrite = { dataset: string, operation: LivePageWriteOperation,
 /**
  * Chemin typé du contexte, avec ou sans doubles accolades.
- * Exemple : `steps.fetch_metrics.data.series`.
+ * Exemple : `steps.fetch_metrics.data.series`. Absent pour `clear` ;
+ * la validation l'exige pour les autres opérations.
  */
 value_from: string,
 /**
@@ -6262,6 +6642,36 @@ avg_duration_ms: number | null,
  * has cost data (e.g. local Ollama runs).
  */
 avg_cost_usd: number | null, };
+
+/**
+ * KT-811 — why a quota-refused step waits for a human instead of a timer.
+ */
+export type QuotaParkReason = "no_reset_time" | "after_deadline" | "too_many_attempts" | "not_resumable";
+
+/**
+ * KT-811 — a step refused for a provider quota, not an agent failure.
+ */
+export type QuotaWait = {
+/**
+ * Identity of this wait: a park or a claim applies only to the wait it read.
+ */
+id?: string | null,
+/**
+ * The reset instant the provider announced, when it could be parsed.
+ */
+reset_at?: string | null,
+/**
+ * When the engine resumes the step; `None` while parked or not waiting.
+ */
+wake_at?: string | null,
+/**
+ * Consecutive quota refusals of this step, this one included.
+ */
+attempt: number, parked?: QuotaParkReason | null,
+/**
+ * Why an automatic resume was refused, when `parked` is `NotResumable`.
+ */
+detail?: string | null, };
 
 export type RecentMessagePreview = { sort_order: number, role: string, agent_type: string | null, timestamp: string,
 /**
@@ -6942,7 +7352,22 @@ export type RunQuickExecRequest = { variables?: Record<string, string>, };
 
 export type RunQuickExecResponse = { run_id: string, success: boolean, duration_ms: number, exit_code: number | null, data: any, stdout: string | null, stderr: string | null, error: string | null, };
 
-export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
+export type RunStatus = "Pending" | "Running" | "Success" | "Partial" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted" | "WaitingQuota";
+
+export type SafetyCheckRequest = {
+/**
+ * The saved workflow, to know whether another one runs it as a sub-workflow.
+ */
+workflow_id?: string, project_id?: string,
+/**
+ * The project is chosen at launch (multi-project workflow).
+ */
+per_run_project?: boolean, safety: WorkflowSafety, };
+
+/**
+ * A stored setting this host would refuse at run time, shown before any run.
+ */
+export type SafetyWarning = "sandbox_outside_container" | "limits_without_directory" | "limits_without_git" | "approval_on_sub_workflow";
 
 /**
  * The action the §4bis boot saga takes for an in-flight integration, decided by
@@ -7013,7 +7438,12 @@ publication_proof?: string | null,
  * runner for this HTTP/SSE request. Used by the durable composer outbox:
  * the scheduler starts it only after the discussion's current run ends.
  */
-defer_dispatch?: boolean, reply_to_message_id?: string | null, };
+defer_dispatch?: boolean, reply_to_message_id?: string | null,
+/**
+ * KT-1111 — values to mask out of `content` before it is stored or
+ * sent to a model. Used for this request only, never stored.
+ */
+assistant_secrets?: Array<string>, };
 
 export type ServerConfig = { host: string, port: number,
 /**
@@ -7227,7 +7657,12 @@ agent_handoff_blocked_agents: Array<AgentType>,
  * Sidebar storage-weight indicator. Validation and fallback live in
  * `models::discussion_weight`; this is only the persisted field.
  */
-discussion_weight: DiscussionWeightConfig, };
+discussion_weight: DiscussionWeightConfig,
+/**
+ * IANA zone crons, watches and `{{time.now}}` default to (KT-1103).
+ * `None` follows the machine's zone, detected at boot.
+ */
+timezone?: string | null, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, agent_global_timeout_min: number, local_agent_global_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -7261,7 +7696,19 @@ execution_variable_retention_days: number,
 /**
  * Days a finished workflow run keeps its step outputs. Zero keeps them.
  */
-run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>, };
+run_payload_retention_days: number, p2p_enabled: boolean, frontend_origins: Array<string>,
+/**
+ * The zone set in Settings; `None` follows the machine.
+ */
+timezone: string | null,
+/**
+ * The zone in effect: `timezone`, else `timezone_detected`.
+ */
+timezone_effective: string,
+/**
+ * The machine's zone (`TZ`, then the OS setting, then UTC).
+ */
+timezone_detected: string, };
 
 /**
  * Configurable ceilings for one CLI session.
@@ -7322,6 +7769,11 @@ export type SetAgentMentionColorRequest = { agent: AgentType,
  * `None` or an empty string restores the built-in color.
  */
 color?: string | null, };
+
+/**
+ * `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.
+ */
+export type SetApiAccessPolicyRequest = { policy?: ApiAccessPolicy | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
 
@@ -7437,7 +7889,12 @@ argument_hint?: string | null,
  * Kronn's own description of the arguments (label, default, control),
  * read from the `metadata.kronn-variables` JSON string.
  */
-variables?: Array<SkillVariable>, };
+variables?: Array<SkillVariable>,
+/**
+ * The one project a custom skill belongs to (`metadata.kronn-project`):
+ * offered and loaded only there. `None` = global.
+ */
+project_id?: string, };
 
 export type SkillCategory = "Language" | "Domain" | "Business";
 
@@ -7838,7 +8295,17 @@ cache_write_prompt_tokens?: number | null,
  * Latest tool call of an Agent step while it runs. The terminal result
  * replaces the in-flight row, so it survives only an interrupted step.
  */
-last_activity?: AgentActivity | null, };
+last_activity?: AgentActivity | null,
+/**
+ * KT-811 — set when the provider refused the step for a quota or session
+ * limit, so the run reads "quota" rather than "failed".
+ */
+quota_wait?: QuotaWait | null,
+/**
+ * Why the run ends at this step for good: no `on_failure`, no quota wait,
+ * no recovery rule (a Security limit, a counter failure).
+ */
+terminal_stop?: string | null, };
 
 /**
  * What a workflow Agent step may call (KT-908). Both lists empty = no tool.
@@ -7854,7 +8321,7 @@ cli: Array<string>,
  */
 kronn_internal: Array<string>, };
 
-export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" };
+export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "CollectApiData" } | { "type": "TransformData" } | { "type": "PublishPageData" } | { "type": "SubWorkflow" } | { "type": "TriggerWorkflow" } | { "type": "DelegateSubtasks" } | { "type": "TaskBoard" };
 
 /**
  * A stored run, as a later reader gets it back.
@@ -7903,6 +8370,30 @@ tokens_used: number, };
  * from the agent or from a human reopening a long room — writes into it.
  */
 export type SummaryStrategy = "OnDemand" | "Off";
+
+export type TaskBoardConfig = {
+/**
+ * The tag every task of the board carries. A step never touches a task
+ * without it.
+ */
+tag: string, operation: TaskBoardOperation,
+/**
+ * Runtime templates, each read only by the operations that name it.
+ */
+task: string, before: string, column: string, title: string, description: string,
+/**
+ * Extra tags for `add`, comma separated.
+ */
+tags: string,
+/**
+ * Recently done tasks the board shows (default 15, at most 100).
+ */
+done_limit?: number, };
+
+/**
+ * What a `TaskBoard` step does before returning the board's rows.
+ */
+export type TaskBoardOperation = "read" | "add" | "toggle" | "move" | "edit" | "discuss";
 
 /**
  * The durable unit of work (ADR §1, §3, §4bis).
@@ -8065,7 +8556,11 @@ export type TaskExecutionObservability = { lineage: TaskExecutionLineage, metric
  * Read-only launch preflight for agent surfaces. Every refusal is a stable
  * code + actionable detail; calling it never creates a run or worktree.
  */
-export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
+export type TaskExecutionPreparation = { task: PlanningTaskDetail, parent_discussion_id: string, worker: MessageTarget, project_id: string | null, launchable: boolean, reasons: Array<CampaignTaskReason>,
+/**
+ * Shown before launch without blocking it.
+ */
+warnings?: Array<CampaignTaskReason>, active_execution: TaskExecution | null, };
 
 export type TaskExecutionProgress = { phase: TaskExecutionProgressPhase, reason: string | null, queue_position: number | null, queued_since: string | null, process_alive: boolean | null, last_reliable_signal_at: string | null, telemetry_mode: TaskExecutionTelemetryMode, };
 
@@ -8166,7 +8661,13 @@ declared_model: string | null, configured: boolean, reachable: boolean, availabl
  * modality. Empty when none is configured — an agent must never be told
  * it can produce a video the request would then refuse.
  */
-media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>, };
+media: Array<TaskWorkerModality>, reasons: Array<CampaignTaskReason>, warnings: Array<CampaignTaskReason>,
+/**
+ * HTTP workers only: what the bounded network probe observed. `reachable`
+ * is true only when this says `verified`; absent for host CLIs and joined
+ * sessions, whose reachability is not a network fact.
+ */
+connectivity?: WorkerConnectivity, };
 
 /**
  * A media generation slot a worker can actually serve.
@@ -8202,7 +8703,19 @@ export type TaskWorkerScope = { "mode": "prelocalized_edit", path: string, start
  * default remains authoritative; HTTP providers need a concrete model before
  * the catalogue can call them available.
  */
-export type TaskWorkerTier = { tier: ModelTier, resolved_model: string | null, };
+export type TaskWorkerTier = { tier: ModelTier, resolved_model: string | null,
+/**
+ * Set when the launch preflight would refuse this tier, with its reason.
+ */
+refusal?: CampaignTaskReason,
+/**
+ * The configured model when the catalogue runs `resolved_model` instead.
+ */
+requested_model?: string,
+/**
+ * A launchable tier's warning, e.g. a model absent from the CLI's listing.
+ */
+warning?: CampaignTaskReason, };
 
 export type TechDebtItem = { id: string, problem: string, area: string, severity: string, };
 
@@ -8484,6 +8997,8 @@ reason: string, suggested_args: Array<string> | null, manual_fix: string | null,
  */
 agent_written: boolean, };
 
+export type UpdateAssistantConversationRequest = { target_id?: string | null, target_step?: string | null, target_label?: string | null, last_proposal_signature?: string | null, last_applied_signature?: string | null, };
+
 export type UpdateBatchCompareManualScoreRequest = {
 /**
  * `None` clears the human rating; otherwise the accepted range is 1..=5.
@@ -8572,14 +9087,32 @@ agent_handoffs_disabled?: boolean | null,
  */
 agent_handoffs_unlimited?: boolean | null,
 /**
+ * Add these native agents to the participants without dispatching them,
+ * so an orchestrating agent may hand off to them. Never removes one.
+ */
+attach_agents?: Array<AgentType> | null,
+/**
  * Per-discussion encrypted execution-variable retention override.
  * Zero keeps values only for the lifetime of the active run.
  */
 execution_variable_retention_days?: number | null | null, };
 
+/**
+ * `PATCH /api/pages/{id}/datasets/{name}`: new retention limits. Existing
+ * points beyond them are pruned at once. `max_age_days: null` lifts the age
+ * limit; an absent field keeps its value.
+ */
+export type UpdateLivePageDatasetRequest = { max_points?: number, max_age_days?: number | null, };
+
+export type UpdateLivePageDatasetResult = { dataset: LivePageDataset, points_removed: number, data_revision: number, };
+
 export type UpdateLivePageHtmlRequest = { html: string, created_by_agent?: string | null, };
 
-export type UpdateLivePageRequest = { title?: string | null, pinned?: boolean | null, archived?: boolean | null, };
+export type UpdateLivePageRequest = { title?: string | null,
+/**
+ * New slug; the previous one keeps resolving to this Page.
+ */
+slug?: string | null, pinned?: boolean | null, archived?: boolean | null, };
 
 export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, preferred_interface?: PluginInterface | null, };
 
@@ -8628,7 +9161,11 @@ pinned?: boolean | null,
 /**
  * `null` makes the workflow single-project again; omitted keeps it.
  */
-project_scope?: WorkflowProjectScope | null, };
+project_scope?: WorkflowProjectScope | null,
+/**
+ * `null` returns to the global retention; omitted keeps it.
+ */
+retention?: WorkflowRetention | null, };
 
 /**
  * Response after uploading a context file.
@@ -8873,9 +9410,61 @@ withheld_by_routing: number, };
  */
 export type WakeMode = "native_dispatch" | "external_poll";
 
+/**
+ * How a `Watch` poll decides the source changed. Every mode sends the
+ * stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
+ */
+export type WatchDetection = { "type": "Validators" } | { "type": "Body" } | { "type": "JsonPath", path: string, };
+
+/**
+ * Outcome of the latest `Watch` poll.
+ */
+export type WatchPollResult = "baseline" | "unchanged" | "changed" | "deferred" | "error";
+
+/**
+ * Poll history of a `Watch` workflow, shown on its card.
+ */
+export type WatchStatus = { last_poll_at: string | null, last_result: WatchPollResult | null, last_http_status: number | null, last_error: string | null, last_change_at: string | null, unchanged_count: number, changed_count: number, error_count: number, consecutive_failures: number,
+/**
+ * `consecutive_failures` reached the alert threshold.
+ */
+failing: boolean, };
+
+/**
+ * What a `Watch` trigger polls, how often, and how it detects a change.
+ * The source is an API configured in Kronn, or a saved Quick API whose
+ * fields fill the ones left empty here; the request is always a GET.
+ */
+export type WatchTrigger = { quick_api_id?: string, api_plugin_slug?: string, api_config_id?: string, api_endpoint_path?: string, api_query?: { [key in string]: string },
+/**
+ * Cron expression of the poll cadence.
+ */
+interval: string,
+/**
+ * IANA timezone `interval` is read in; absent means Kronn's global one.
+ */
+timezone?: string, detection: WatchDetection, };
+
 export type WeightLevel = "green" | "amber" | "red";
 
 export type WeightThresholds = { amber_bytes: number, red_bytes: number, };
+
+/**
+ * Observed network connectivity, kept apart from `configured` (an address is
+ * saved) and `available` (Kronn would attempt a launch).
+ */
+export type WorkerConnectivity = { state: WorkerConnectivityState,
+/**
+ * `dns` | `refused` | `timeout` | `tls` | `http_status` |
+ * `invalid_endpoint` | `connect`. Never an address or upstream text.
+ */
+unreachable_reason?: string, http_status?: number,
+/**
+ * RFC 3339 instant of the observation, when one is reported.
+ */
+checked_at?: string, };
+
+export type WorkerConnectivityState = "verified" | "unreachable" | "unverified";
 
 /**
  * Lifecycle of a CLI worker control offer (KT-328). `pending` is the published,
@@ -8957,7 +9546,12 @@ pinned: boolean,
  * (its home project, whose repository carries it). `None` keeps the
  * single-project behaviour; the project is then resolved at trigger time.
  */
-project_scope?: WorkflowProjectScope, created_at: string, updated_at: string, };
+project_scope?: WorkflowProjectScope,
+/**
+ * KT-1100 — how long this workflow's finished runs are kept, overriding
+ * the global retention. `None` inherits it.
+ */
+retention?: WorkflowRetention, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -8990,7 +9584,15 @@ model_applied: boolean | null,
  * Distinct model identifiers reported by structured runtime responses.
  * Empty means unreported; never inferred from generated prose or config.
  */
-observed_models: Array<string>, format_fallback: boolean, started_at: string, duration_ms: number, succeeded: boolean,
+observed_models: Array<string>, format_fallback: boolean,
+/**
+ * Resolved npx executable and package arguments when direct CLI launch failed.
+ */
+npx_fallback_command?: Array<string>,
+/**
+ * Last successful version probe for that command in the run's working directory.
+ */
+npx_fallback_version?: string, started_at: string, duration_ms: number, succeeded: boolean,
 /**
  * Prompt tokens read from the provider's prompt cache, on top of the
  * uncached input counted in `tokens_used`. `None` when not reported.
@@ -9027,6 +9629,36 @@ export type WorkflowAgentProvenance = { attempts: Array<WorkflowAgentAttempt>,
  * attempt produced a retained output, including preflight failures.
  */
 selected_attempt: number | null, };
+
+/**
+ * One known refusal, with where it is and what lifts it.
+ */
+export type WorkflowBlocker = { workflow_id: string, workflow_name: string,
+/**
+ * The step, or `None` for a workflow-level blocker.
+ */
+step: string | null,
+/**
+ * The step belongs to the `on_failure` (rollback) chain.
+ */
+on_failure: boolean, kind: WorkflowBlockerKind,
+/**
+ * `main`, `setup`, `stdin`, `source` or `script` for an Exec line.
+ */
+phase?: string,
+/**
+ * The runtime validator's own reason code, e.g. `unmodelled_program`.
+ */
+reason?: string, message: string, action: string,
+/**
+ * Only a human can lift it: an agent must report it, never work around it.
+ */
+human_only: boolean, };
+
+/**
+ * What keeps a run from starting (KT-1138).
+ */
+export type WorkflowBlockerKind = "validation_error" | "misconfigured_step" | "human_approval" | "unsafe_interpolation" | "missing_child" | "child_cycle" | "collection_error";
 
 /**
  * Self-contained envelope produced by `GET /api/workflows/:id/export`.
@@ -9122,6 +9754,43 @@ loop_detection_max_revisits?: number | null, };
  */
 export type WorkflowProjectScope = { "type": "All" } | { "type": "Projects", project_ids: Array<string>, };
 
+/**
+ * Whether a saved workflow can start, as far as Kronn can tell before a run
+ * (KT-1138). Saving and enabling are separate facts, not proof of readiness.
+ */
+export type WorkflowReadiness = { workflow_id: string, workflow_name: string, enabled: boolean,
+/**
+ * No known blocker in the workflow, its sub-workflows and rollback
+ * chains. The run can still fail on what only a run reveals.
+ */
+ready: boolean, blockers: Array<WorkflowBlocker>, human_approval_count: number,
+/**
+ * The workflows checked: this one, then its sub-workflows.
+ */
+checked_workflow_ids: Array<string>,
+/**
+ * One line for an agent or a human to read first.
+ */
+summary: string, };
+
+/**
+ * Per-workflow run retention (KT-1100). Each window overrides the global one
+ * for its class of run; `None` inherits it and `0` keeps those runs forever.
+ */
+export type WorkflowRetention = {
+/**
+ * Successful runs that changed nothing. Inherited default: 24 hours.
+ */
+no_op_hours?: number,
+/**
+ * Successful runs with an effect (or not classified).
+ */
+success_days?: number,
+/**
+ * Failed, partial, cancelled and guard-stopped runs.
+ */
+failure_days?: number, };
+
 export type WorkflowRun = { id: string, workflow_id: string, status: RunStatus, trigger_context: any, step_results: Array<StepResult>, tokens_used: number, workspace_path: string | null, started_at: string, finished_at: string | null,
 /**
  * Linear workflow run vs batch fan-out. Default "linear" for backward
@@ -9191,6 +9860,10 @@ triggered_by_run_id?: string | null,
  */
 project_id?: string | null,
 /**
+ * KT-1100 — set once a top-level run succeeds; `None` otherwise.
+ */
+outcome?: WorkflowRunOutcome,
+/**
  * Provenance enrichment (DERIVED, not persisted). When this run is a
  * sub-workflow child (`parent_run_id` set), these resolve the parent run's
  * workflow id + name + tick time so the UI can render
@@ -9199,6 +9872,12 @@ project_id?: string | null,
  * `None` on insert, on top-level runs, and when the parent was deleted.
  */
 parent_workflow_id?: string | null, parent_workflow_name?: string | null, parent_run_started_at?: string | null, };
+
+/**
+ * What a finished run did (KT-1100). Only top-level successful runs are
+ * classified; every other run has no outcome.
+ */
+export type WorkflowRunOutcome = "no_op" | "changed";
 
 export type WorkflowRunSummary = { id: string, status: RunStatus, started_at: string, finished_at: string | null, tokens_used: number, };
 
@@ -9418,16 +10097,14 @@ gate_request_changes_target?: string | null,
  */
 gate_notify_url?: string | null,
 /**
- * 0.8.6 (#25) — `true` means create a git commit checkpoint before
- * pausing the run on this Gate. The SHA is stored in
- * `WorkflowRun.state["checkpoint:<step.name>"]`. On Goto from this
- * gate's `gate_request_changes_target`, the runner `git reset
- * --hard` to that SHA before re-running the target — makes
- * Gate→implement loops idempotent (re-implement on a clean tree,
- * not on top of the previous cycle's noise). Defaults to `false`
- * (no behaviour change for existing workflows). Skipped silently
- * in `Isolated` worktree mode (the worktree already has its own
- * branch). Skipped + warned on non-git project_path.
+ * 0.8.6 (#25) — `true` means commit the run's own worktree as a
+ * checkpoint before pausing the run on this Gate. The SHA is stored in
+ * `WorkflowRun.state["checkpoint:<step.name>"]`. On "Request changes",
+ * the target re-runs on top of that post-implementation commit, once
+ * the runner has checked the worktree is still clean and at that SHA.
+ * Only a run with workspace isolation gets a checkpoint:
+ * in shared mode none is taken and the Gate message says so, since it
+ * would commit the operator's checkout (KT-1042). Defaults to `false`.
  */
 gate_checkpoint_before?: boolean | null,
 /**
@@ -9541,6 +10218,10 @@ transform_data?: TransformDataConfig | null,
  */
 page_publish?: PublishPageDataConfig | null,
 /**
+ * KT-1030 — for `StepType::TaskBoard`.
+ */
+task_board?: TaskBoardConfig,
+/**
  * 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
  * workflow to run as a nested child. Required for that step type
  * (enforced at save). `None` for every other step type. Mirrors the
@@ -9586,7 +10267,12 @@ room_id?: string | null,
  * Agent step. Supported by Claude Code and Codex only; empty preserves
  * the existing launch policy. Paths are validated again before launch.
  */
-read_only_repos?: Array<string>, };
+read_only_repos?: Array<string>,
+/**
+ * KT-909 — `DelegateSubtasks` steps only. The step's `agent` and
+ * `agent_settings` are the reviewer's.
+ */
+delegate_subtasks?: DelegateSubtasksConfig, };
 
 /**
  * Durable identity of an Agent step that joined a discussion room.
@@ -9610,13 +10296,31 @@ misconfigured_step_count: number,
  * Exec command lines (main or setup) that interpolate a value into
  * inline code: refused at run time until fixed (KT-1017).
  */
-unsafe_step_count: number, enabled: boolean,
+unsafe_step_count: number,
+/**
+ * Every known refusal of a run, its sub-workflows and rollback chain
+ * included (KT-1138). 0 is not a promise that a run succeeds.
+ */
+blocker_count?: number,
+/**
+ * The blockers only a human can lift (approvals of agent-written lines).
+ */
+human_approval_count?: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */
-pinned: boolean, last_run: WorkflowRunSummary | null, created_at: string, };
+pinned: boolean, last_run: WorkflowRunSummary | null,
+/**
+ * Poll history of a `Watch` trigger; absent for other triggers.
+ */
+watch?: WatchStatus, created_at: string, };
 
-export type WorkflowTrigger = { "type": "Cron", schedule: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" };
+export type WorkflowTrigger = { "type": "Cron", schedule: string,
+/**
+ * IANA timezone the schedule is read in; absent means Kronn's
+ * global timezone. Triggers saved before it were pinned to UTC.
+ */
+timezone?: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" } | { "type": "Watch" } & WatchTrigger;
 
 export type WorkspaceConfig = { hooks: WorkspaceHooks,
 /**
@@ -9722,4 +10426,20 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };
+current_step: string | null, } | { "type": "shared_run_updated", run_id: string, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, } | { "type": "agent_run_progress", discussion_id: string,
+/**
+ * The durable dispatch the run executes, when it has one.
+ */
+dispatch_id: string | null, trigger_message_id: string | null, agent_type: AgentType,
+/**
+ * One launch; a retry of the same dispatch gets another.
+ */
+run_id: string,
+/**
+ * When the launch started: the latest attempt of a dispatch is the one shown.
+ */
+started_at: string,
+/**
+ * Increases with every frame of one run.
+ */
+seq: number, progress: AgentRunProgress, } | { "type": "embed_origins_changed" } | { "type": "live_page_data_changed", page_id: string, data_revision: number, };

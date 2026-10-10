@@ -6,7 +6,8 @@
 // per design (see `models/mod.rs::QuickApi`). This means the AI helper
 // (`ApiCallAiHelper`) is automatically available when editing a QuickApi
 // — same UX as editing an ApiCall step in a workflow.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AssistantDraftStore } from '../assistantConversation';
 import { Save, X, Plus } from 'lucide-react';
 import { useT } from '../../lib/I18nContext';
 import { SearchableSelect } from '../SearchableSelect';
@@ -28,7 +29,9 @@ interface Props {
   availableApiPlugins: ApiPluginOption[];
   installedAgents: AgentType[];
   configLanguage?: string;
-  onSave: (req: CreateQuickApiRequest) => Promise<void>;
+  /** Resolves to the saved Quick API, so assistant conversations started
+   *  before it existed can be attached to it. */
+  onSave: (req: CreateQuickApiRequest) => Promise<QuickApi | undefined>;
   onCancel: () => void;
 }
 
@@ -115,6 +118,12 @@ export function QuickApiForm({
   // Synthesize a step-shaped object so ApiCallStepCard can render against
   // it. The card only reads the fields it knows about — extra fields are
   // ignored. Memoized to avoid re-creating on every render.
+  // KT-1111 — assistant conversations started before the Quick API exists.
+  const [assistantDrafts] = useState(() => new AssistantDraftStore());
+  const trackAssistantConversation = useCallback((discussionId: string, stepName: string) => {
+    assistantDrafts.track(discussionId, stepName);
+  }, [assistantDrafts]);
+
   const ephemeralStep: WorkflowStep = useMemo(() => ({
     name: '__qa__',
     step_type: { type: 'ApiCall' },
@@ -214,7 +223,7 @@ export function QuickApiForm({
     setSaving(true);
     setSaveError(null);
     try {
-      await onSave({
+      const saved = await onSave({
         name,
         icon: icon || null,
         description,
@@ -235,6 +244,11 @@ export function QuickApiForm({
         profile_ids: profileIds,
         directive_ids: directiveIds,
       });
+      // A failed attach leaves the conversation unattached; this step still
+      // lists it and resuming it there attaches it.
+      if (!editApi && saved?.id) {
+        await assistantDrafts.attach(saved.id).catch(e => console.warn('Assistant conversations not attached:', e));
+      }
     } catch (e) {
       // Backend validation errors (400 Bad Request, "name must be 1-200
       // chars", "api_plugin_slug missing"…) used to swallow silently —
@@ -313,6 +327,8 @@ export function QuickApiForm({
           projectId={projectId || null}
           installedAgents={installedAgents}
           configLanguage={configLanguage}
+          assistantOwnerId={editApi?.id ?? null}
+          onAssistantConversationStarted={editApi ? undefined : trackAssistantConversation}
           t={t}
         />
       </div>

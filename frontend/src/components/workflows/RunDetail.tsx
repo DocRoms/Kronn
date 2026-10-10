@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
-import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
-import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle } from 'lucide-react';
+import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch, QuotaWait } from '../../types/generated';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight, Database, Shuffle, Clock } from 'lucide-react';
 import { AGENT_LABELS, agentTextColor } from '../../lib/constants';
 import { AgentProvenanceDetails, StepModelBadge } from './AgentProvenance';
 import { StepTokensBadge } from './StepTokens';
@@ -31,7 +31,37 @@ const STATUS_COLORS: Record<string, string> = {
   // 0.8.11 — backend died mid-run (crash/restart). Neutral grey, not red:
   // the workflow didn't fail, the host went away.
   Interrupted: 'var(--kr-text-ghost)',
+  // KT-811 — waiting for a provider quota reset: amber, never red.
+  WaitingQuota: 'var(--kr-warning)',
 };
+
+/** KT-811 — the quota wait the run is parked on: its trailing step's. */
+function pendingQuotaWait(run: WorkflowRun): QuotaWait | null {
+  if (run.status !== 'WaitingQuota') return null;
+  const last = run.step_results[run.step_results.length - 1];
+  return last?.status === 'WaitingQuota' ? last.quota_wait ?? null : null;
+}
+
+/** Why the run waits, and until when or what a human must do. */
+export function QuotaWaitNotice({ wait }: { wait: QuotaWait }) {
+  const { t } = useT();
+  const at = (iso: string) => new Date(iso).toLocaleString();
+  let message: string;
+  if (wait.wake_at) message = t('wf.quota.waitingUntil', at(wait.wake_at));
+  else if (wait.parked === 'after_deadline') message = t('wf.quota.parked.afterDeadline');
+  else if (wait.parked === 'too_many_attempts') message = t('wf.quota.parked.tooManyAttempts', wait.attempt - 1);
+  else if (wait.parked === 'not_resumable') message = t('wf.quota.parked.notResumable', wait.detail ?? '');
+  else message = t('wf.quota.parked.noResetTime');
+  return (
+    <div className="wf-quota-notice" data-testid="wf-quota-notice" data-parked={wait.wake_at ? undefined : 'true'}>
+      <Clock size={12} aria-hidden />
+      <span>{message}</span>
+      {wait.reset_at && (
+        <span className="wf-quota-notice-reset">{t('wf.quota.reset', at(wait.reset_at))}</span>
+      )}
+    </div>
+  );
+}
 
 const UNCERTAIN_SIDE_EFFECT_STATE_KEY = '__kronn.uncertain_side_effect';
 
@@ -73,7 +103,9 @@ export function RunStatusTrail({
             data-status={status}
             data-current={index === timeline.length - 1}
           >
-            {status === 'StoppedByGuard' ? t('wf.guards.stoppedBy.title') : status}
+            {status === 'StoppedByGuard'
+              ? t('wf.guards.stoppedBy.title')
+              : status === 'WaitingQuota' ? t('run.status.quota') : status}
           </span>
         </span>
       ))}
@@ -420,14 +452,20 @@ function TriageManifestPanel({
  *  (detected via `tryParseTriageManifest`), the JSON dump is replaced
  *  with a structured visualization (`TriageManifestPanel`). Non-triage
  *  Gates render the raw message verbatim as before. */
+/** Result row of the approval a workflow's Security settings require before it starts. */
+const SAFETY_APPROVAL_STEP = '__safety_approval__';
+
 function GatePanel({
   message,
   onDecide,
   t,
+  allowRequestChanges = true,
 }: {
   message: string;
   onDecide: (payload: DecideRunRequest) => Promise<void> | void;
   t: (key: string, ...args: (string | number)[]) => string;
+  // Nothing has run before a pre-start approval, so there is nothing to change.
+  allowRequestChanges?: boolean;
 }) {
   const [comment, setComment] = useState('');
   const [submitting, setSubmitting] = useState<GateDecisionKind | null>(null);
@@ -480,16 +518,18 @@ function GatePanel({
             : <Check size={12} />}
           {t('wf.gate.approve')}
         </button>
-        <button
-          className="wf-gate-btn wf-gate-btn--changes"
-          onClick={() => handle('request_changes')}
-          disabled={submitting !== null}
-        >
-          {submitting === 'request_changes'
-            ? <Loader2 size={12} className="spin" />
-            : <RotateCcw size={12} />}
-          {t('wf.gate.requestChanges')}
-        </button>
+        {allowRequestChanges && (
+          <button
+            className="wf-gate-btn wf-gate-btn--changes"
+            onClick={() => handle('request_changes')}
+            disabled={submitting !== null}
+          >
+            {submitting === 'request_changes'
+              ? <Loader2 size={12} className="spin" />
+              : <RotateCcw size={12} />}
+            {t('wf.gate.requestChanges')}
+          </button>
+        )}
         <button
           className="wf-gate-btn wf-gate-btn--reject"
           onClick={() => handle('reject')}
@@ -651,6 +691,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const statusTimeline = runStatusTimeline(run);
   const uncertainEffect = uncertainSideEffectIntent(run);
+  const quotaWait = pendingQuotaWait(run);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
@@ -734,7 +775,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             {run.tokens_used} {t('wf.tokensTotal')}
           </span>
         )}
-        {run.status === 'Running' && onCancel && (
+        {(run.status === 'Running' || run.status === 'WaitingQuota') && onCancel && (
           <button
             className="wf-run-cancel-btn"
             onClick={(e) => {
@@ -747,7 +788,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             {t('wf.cancelRun')}
           </button>
         )}
-        {run.status === 'Interrupted' && run.run_type !== 'batch' && onResume && (
+        {(run.status === 'Interrupted' || run.status === 'WaitingQuota') && run.run_type !== 'batch' && onResume && (
           <button
             className="wf-run-cancel-btn"
             onClick={(e) => {
@@ -765,7 +806,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             }}
             title={uncertainEffect
               ? t('wf.resumeUncertainHint', uncertainEffect.step_name)
-              : t('wf.resumeRunHint')}
+              : quotaWait ? t('wf.quota.resumeHint') : t('wf.resumeRunHint')}
           >
             {uncertainEffect ? <AlertTriangle size={10} /> : <RotateCcw size={10} />}
             {uncertainEffect ? t('wf.resumeUncertain') : t('wf.resumeRun')}
@@ -779,6 +820,8 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
           <Trash2 size={10} />
         </button>
       </div>
+
+      {quotaWait && <QuotaWaitNotice wait={quotaWait} />}
 
       {/* Worktree path — surfaces the actual filesystem location of the run's
           isolated git worktree. The wizard chips promise isolation; this row
@@ -857,6 +900,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'CollectApiData' ? 'data'
                       : ws_step.step_type.type === 'TransformData' ? 'data'
                       : ws_step.step_type.type === 'PublishPageData' ? 'page'
+                      : ws_step.step_type.type === 'TaskBoard' ? 'data'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'subwf'
                       : 'agent'
@@ -871,6 +915,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                       : ws_step.step_type.type === 'CollectApiData' ? 'COLLECT'
                       : ws_step.step_type.type === 'TransformData' ? 'TRANSFORM'
                       : ws_step.step_type.type === 'PublishPageData' ? 'PAGE'
+                      : ws_step.step_type.type === 'TaskBoard' ? 'BOARD'
                       : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
                       : ws_step.step_type.type === 'TriggerWorkflow' ? 'TRIGGER'
                       : 'AGENT'}
@@ -910,11 +955,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
       {run.status === 'WaitingApproval' && onDecide && (() => {
         const last = run.step_results[run.step_results.length - 1];
         if (!last || last.step_kind !== 'Gate') return null;
+        const safetyApproval = last.step_name === SAFETY_APPROVAL_STEP;
         return (
           <GatePanel
-            message={last.output}
+            message={safetyApproval ? t('wf.gate.safetyApproval') : last.output}
             onDecide={onDecide}
             t={t}
+            allowRequestChanges={!safetyApproval}
           />
         );
       })()}
@@ -964,6 +1011,11 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                     style={{ background: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}
                   />
                   <span className="font-semibold">{sr.step_name}</span>
+                  {sr.quota_wait && (
+                    <span className="wf-step-kind-badge" data-kind="quota" title={t('wf.quota.stepHint')}>
+                      <Clock size={9} /> {t('run.status.quota')}
+                    </span>
+                  )}
                   {sr.is_rollback && (
                     <span className="wf-step-kind-badge" data-kind="rollback" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.4)' }}>
                       ↩ ROLLBACK

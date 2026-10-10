@@ -26,6 +26,28 @@ fn fail_document_audit(outcome: &mut StepOutcome, reason: &str) {
     tracing::warn!(target: "kronn::docs_write_filter", "Document audit failed; files preserved: {reason}");
 }
 
+/// The single place a `terminal_stop` takes effect: Failed, no quota wait, no
+/// recovery rule. The rollback chain is skipped where it starts.
+fn apply_terminal_stop(outcome: &mut StepOutcome) {
+    let Some(reason) = outcome.result.terminal_stop.as_deref() else {
+        return;
+    };
+    if !outcome.result.output.contains(reason) {
+        outcome.result.output = format!("{reason}\n\n{}", outcome.result.output);
+    }
+    outcome.result.status = RunStatus::Failed;
+    outcome.result.quota_wait = None;
+    outcome.result.condition_result = None;
+    outcome.condition_action = None;
+}
+
+/// A Security limit ends the run at this step, whatever the step's verdict.
+fn fail_safety_limit(outcome: &mut StepOutcome, reason: &str) {
+    outcome.result.output = format!("{reason}\n\nStep result:\n{}", outcome.result.output);
+    outcome.result.terminal_stop = Some(reason.to_string());
+    tracing::warn!(target: "kronn::workflow_safety", "{reason}");
+}
+
 /// Events emitted during a workflow run for real-time SSE streaming.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
@@ -218,12 +240,16 @@ fn uncertain_side_effect_type(step_type: &StepType) -> Option<&'static str> {
         StepType::PublishPageData => Some("PublishPageData"),
         StepType::CollectApiData => Some("CollectApiData"),
         StepType::TriggerWorkflow => Some("TriggerWorkflow"),
+        // Replaying an add would create the task twice.
+        StepType::TaskBoard => Some("TaskBoard"),
         StepType::Agent
         | StepType::BatchQuickPrompt
         | StepType::Gate
         | StepType::JsonData
         | StepType::TransformData
-        | StepType::SubWorkflow => None,
+        | StepType::SubWorkflow
+        // Re-entry reads the campaign back; nothing launches twice.
+        | StepType::DelegateSubtasks => None,
     }
 }
 
@@ -269,6 +295,10 @@ pub struct SharedBudget {
     /// branch, with that runner's timeout: guards captured when each run
     /// started, never re-read from saved config.
     deadline: Option<(chrono::DateTime<Utc>, u64)>,
+    /// The run whose row durably records the tree's count (KT-1046).
+    root_run_id: Option<std::sync::Arc<str>>,
+    /// The highest total that row is known to hold.
+    recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl SharedBudget {
@@ -278,7 +308,23 @@ impl SharedBudget {
             llm_calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             max_llm_calls,
             deadline: None,
+            root_run_id: None,
+            recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
+    }
+    /// The same budget, recorded durably on `root_run_id`'s row.
+    pub fn recorded_on(mut self, root_run_id: &str) -> Self {
+        self.root_run_id = Some(root_run_id.into());
+        self
+    }
+    pub fn root_run_id(&self) -> Option<&str> {
+        self.root_run_id.as_deref()
+    }
+    /// Calls spent that the root's row does not hold yet: none may be
+    /// dispatched on top of them.
+    pub fn has_unrecorded_calls(&self) -> bool {
+        self.root_run_id.is_some()
+            && self.recorded.load(std::sync::atomic::Ordering::SeqCst) < self.llm_calls()
     }
     /// The same budget, bounded also by a runner whose timeout guard of
     /// `timeout_seconds` ends at `deadline`; the earlier deadline wins.
@@ -353,11 +399,16 @@ pub(crate) fn next_step_index_for_resume(
 ) -> usize {
     match step_results.last() {
         None => 0,
+        // The pre-start approval names no step: the run begins at the first one.
+        Some(last) if last.step_name == super::safety::APPROVAL_STEP => 0,
         Some(last) => steps
             .iter()
             .position(|s| s.name == last.step_name)
             .map(|i| {
-                if matches!(last.status, RunStatus::Running | RunStatus::Pending) {
+                if matches!(
+                    last.status,
+                    RunStatus::Running | RunStatus::Pending | RunStatus::WaitingQuota
+                ) {
                     // A durable StepStart placeholder means the process died
                     // before the step produced a terminal result. Resume must
                     // re-run that step, not skip it as if it had completed.
@@ -454,6 +505,8 @@ pub async fn settle_errored_run(
         cached_prompt_tokens: None,
         cache_write_prompt_tokens: None,
         last_activity: None,
+        quota_wait: None,
+        terminal_stop: None,
     });
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let run_id = run.id.clone();
@@ -586,7 +639,68 @@ fn workspace_failure_result(msg: &str) -> StepResult {
         cached_prompt_tokens: None,
         cache_write_prompt_tokens: None,
         last_activity: None,
+        quota_wait: None,
+        terminal_stop: None,
     }
+}
+
+/// The Security limit the run's changes exceed; a failed measurement counts as one.
+async fn safety_breach(
+    workflow: &Workflow,
+    work_dir: &str,
+    baseline: &super::safety::ChangeBaseline,
+) -> Option<String> {
+    let dir = std::path::PathBuf::from(work_dir);
+    let baseline = baseline.clone();
+    let measured = tokio::task::spawn_blocking(move || super::safety::measure(&dir, &baseline))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|measured| measured);
+    match measured {
+        Ok(stats) => super::safety::limit_breach(&workflow.safety, stats),
+        Err(error) => Some(format!(
+            "Could not measure the run's changes against the Security limits: {error}"
+        )),
+    }
+}
+
+/// Keeps the tree's starting state on the run, so a resumed run measures from it.
+async fn record_safety_baseline(
+    run: &mut WorkflowRun,
+    dir: &std::path::Path,
+) -> std::result::Result<(), String> {
+    let dir = dir.to_path_buf();
+    let baseline = tokio::task::spawn_blocking(move || super::safety::capture_baseline(&dir))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let raw = serde_json::to_string(&baseline).map_err(|error| error.to_string())?;
+    run.state
+        .insert(super::safety::BASELINE_STATE_KEY.to_string(), raw);
+    Ok(())
+}
+
+/// Ends a run the Security settings refuse, before any step executes.
+async fn refuse_run_for_safety(
+    state: &AppState,
+    run: &mut WorkflowRun,
+    msg: &str,
+    emit: &impl Fn(RunEvent),
+) -> Result<()> {
+    run.status = RunStatus::Failed;
+    run.finished_at = Some(Utc::now());
+    let mut refusal = super::safety::refusal_result(msg);
+    refusal.terminal_stop = Some(msg.to_string());
+    run.step_results.push(refusal);
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+        .await?;
+    emit(RunEvent::RunError {
+        error: msg.to_string(),
+    });
+    Ok(())
 }
 
 /// The definition a run executes against: the run's launch project wins over
@@ -696,8 +810,38 @@ async fn execute_run_with_notify_policy(
     inherited_workspace: Option<String>,
     notify_security_policy: NotifySecurityPolicy,
 ) -> Result<()> {
+    // KT-1096 — every execution of a run, resumes included, runs the
+    // revision pinned at its first one.
+    // KT-920 — the repository profiles the tree reads are resolved first,
+    // outside any connection; the pin stores and hashes those snapshots.
+    let profiles = resolve_pin_profiles(&state, workflow, run).await?;
+    let pinned = {
+        let (definition, snapshot) = (workflow.clone(), run.clone());
+        state
+            .db
+            .with_conn(move |conn| {
+                super::run_pins::pin_or_load_with_profiles(conn, &definition, &snapshot, &profiles)
+            })
+            .await?
+    };
+    let pinned = match pinned {
+        Ok(pinned) => pinned,
+        Err(reason) => {
+            if inherited_workspace.is_none() {
+                // The refused definition's own hooks never run.
+                let mut unhooked = workflow_in_run_project(workflow, run).into_owned();
+                unhooked.workspace_config = None;
+                if let Err(error) = reclaim_run_worktree(&state, &unhooked, run).await {
+                    tracing::warn!(run_id = %run.id, "worktree not removed: {error}");
+                }
+            }
+            anyhow::bail!(reason);
+        }
+    };
+    let workflow = &pinned;
     let is_inherited_workspace = inherited_workspace.is_some();
-    let result = execute_run_body(
+    // Boxed: the run body's state machine is too large for a caller's stack.
+    let result = Box::pin(execute_run_body(
         state.clone(),
         workflow,
         run,
@@ -707,7 +851,7 @@ async fn execute_run_with_notify_policy(
         shared_budget,
         inherited_workspace,
         notify_security_policy,
-    )
+    ))
     .await;
     // KT-910 — the artifacts directory goes with the run once it can no
     // longer execute; a paused or interrupted run keeps it.
@@ -716,14 +860,25 @@ async fn execute_run_with_notify_policy(
         RunStatus::Pending
             | RunStatus::Running
             | RunStatus::WaitingApproval
+            | RunStatus::WaitingQuota
             | RunStatus::Interrupted
-    ) || (result.is_err() && run.status != RunStatus::WaitingApproval)
+    ) || (result.is_err()
+        && !matches!(
+            run.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        ))
     {
         super::run_artifacts::remove(&run.id);
     }
     // An error settles the run as failed: its worktree goes now, not at the
     // next boot. An inherited worktree belongs to the parent run.
-    if result.is_err() && !is_inherited_workspace && run.status != RunStatus::WaitingApproval {
+    if result.is_err()
+        && !is_inherited_workspace
+        && !matches!(
+            run.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        )
+    {
         let workflow = workflow_in_run_project(workflow, run);
         if let Err(error) = reclaim_run_worktree(&state, &workflow, run).await {
             tracing::warn!(
@@ -733,7 +888,19 @@ async fn execute_run_with_notify_policy(
             );
         }
     }
+    if result.is_ok() {
+        super::run_effect::record(&state, run).await;
+    }
     result
+}
+
+/// What a run tells its reader when its end kept a checkout holding work.
+pub(crate) fn kept_checkout_note(kept: &super::workspace::KeptCheckout) -> String {
+    format!(
+        "Worktree `{}` kept with its branch: it holds {}. Commit or discard that work; Kronn removes the worktree at a later start once it is clean.",
+        kept.path.display(),
+        kept.reason
+    )
 }
 
 /// Finished runs whose checkout is gone no longer own a worktree. Clearing
@@ -757,6 +924,23 @@ pub(crate) async fn forget_removed_workspace(state: &AppState, run: &WorkflowRun
 
 /// Removes the worktree a run owns once it will not execute again, keeping its
 /// branch when it holds commits no known base has (recorded on the run).
+/// The repository profile of every project the run tree will read and has
+/// not pinned yet, read from git now.
+async fn resolve_pin_profiles(
+    state: &AppState,
+    workflow: &Workflow,
+    run: &WorkflowRun,
+) -> Result<crate::core::project_profile::ProfileSnapshots> {
+    let (definition, snapshot) = (workflow.clone(), run.clone());
+    let keys = state
+        .db
+        .with_read_conn(move |conn| {
+            super::run_pins::profile_projects_to_resolve(conn, &definition, &snapshot)
+        })
+        .await?;
+    crate::core::project_profile::snapshots_for_keys(&state.db, keys).await
+}
+
 async fn reclaim_run_worktree(
     state: &AppState,
     workflow: &Workflow,
@@ -799,7 +983,11 @@ async fn reclaim_run_worktree(
         &run.id,
         resolved_workspace_hooks(project_hooks.as_ref(), workflow.workspace_config.as_ref()),
     );
-    let outcome = ws.cleanup().await?;
+    // KT-1096 — this run did not succeed: a checkout holding work stays.
+    let outcome = ws.cleanup_keeping_work().await?;
+    if let Some(kept) = &outcome.kept {
+        tracing::warn!(run_id = %run.id, "{}", kept_checkout_note(kept));
+    }
     if let Some(preserved) = outcome.preserved {
         run.produced_branches.push(crate::models::ProducedBranch {
             branch_name: preserved.branch_name,
@@ -859,14 +1047,18 @@ async fn execute_run_body(
     if crate::core::resource_refs::has_structured_references(&workflow_in_project) {
         let mut resolved = workflow_in_project.into_owned();
         let project_id = resolved.project_id.clone();
+        let pinned_run = run.id.clone();
         let resolved_steps = state
             .db
             .with_read_conn(move |conn| {
-                crate::core::resource_refs::resolve_run_structured_references(
-                    conn,
-                    &mut resolved,
-                    project_id.as_deref(),
-                )?;
+                // KT-1096 — a pinned run keeps the resolutions it recorded.
+                if !super::run_pins::apply_pinned_structured(conn, &pinned_run, &mut resolved)? {
+                    crate::core::resource_refs::resolve_run_structured_references(
+                        conn,
+                        &mut resolved,
+                        project_id.as_deref(),
+                    )?;
+                }
                 Ok(resolved)
             })
             .await?;
@@ -931,6 +1123,9 @@ async fn execute_run_body(
     // Released when this call returns (completion, Gate pause, error or cancel).
     let _resource_snapshot_guard =
         crate::core::resource_snapshot::RunSnapshotGuard::new(run.id.clone());
+    let seeded_run_id = run.id.clone();
+    db.with_read_conn(move |conn| super::run_pins::seed_resource_snapshots(conn, &seeded_run_id))
+        .await?;
 
     // Update run status to Running. `false` = the Cancelled-stickiness guard
     // blocked the write: the user cancelled in the window between our caller
@@ -949,6 +1144,30 @@ async fn execute_run_body(
             run.id
         );
         run.status = RunStatus::Cancelled;
+        return Ok(());
+    }
+
+    let safety_refusal =
+        super::safety::sandbox_refusal(&workflow.safety, super::safety::in_container())
+            .or_else(|| super::safety::child_approval_refusal(&workflow.safety, run));
+    if let Some(msg) = safety_refusal {
+        return refuse_run_for_safety(&state, run, &msg, &emit).await;
+    }
+    // Before any worktree or hook: a refused run must have run nothing.
+    if super::safety::approval_pending(&workflow.safety, run) {
+        let approval = super::safety::approval_result();
+        emit(RunEvent::StepDone {
+            step_result: Box::new(approval.clone()),
+        });
+        run.step_results.push(approval);
+        run.status = RunStatus::WaitingApproval;
+        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+        db.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+            .await?;
+        emit(RunEvent::RunDone {
+            status: run.status.clone(),
+        });
+        broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
         return Ok(());
     }
 
@@ -1035,7 +1254,11 @@ async fn execute_run_body(
     // interrupted during its FIRST step (no result persisted yet) and a gate
     // RequestChanges that truncates back to step 0: both must re-attach the
     // preserved worktree, not create a second one.
-    let is_resume = !run.step_results.is_empty() || run.workspace_path.is_some();
+    let is_resume = run
+        .step_results
+        .iter()
+        .any(|result| result.step_name != super::safety::APPROVAL_STEP)
+        || run.workspace_path.is_some();
 
     // Isolation is opt-in. Before KT-343 every project-linked workflow tried
     // to create a worktree even when `require_isolation` was false, which made
@@ -1044,6 +1267,7 @@ async fn execute_run_body(
     // still request a worktree because silently dropping after_create / etc.
     // would be a different behavioral regression.
     let workspace_requested = workflow_requests_workspace(workflow.workspace_config.as_ref());
+    let mut safety_baseline_error: Option<String> = None;
 
     // Create or attach workspace (if we have a project path). An inherited or
     // resumed workspace remains authoritative even if the workflow definition
@@ -1112,8 +1336,26 @@ async fn execute_run_body(
                 None
             } else {
                 let base_ref = workflow_base_ref(workflow.workspace_config.as_ref());
-                match Workspace::create(&repo_path, &workflow.name, &run.id, hooks, base_ref).await
+                let created = match Workspace::create_before_hooks(
+                    &repo_path,
+                    &workflow.name,
+                    &run.id,
+                    hooks,
+                    base_ref,
+                )
+                .await
                 {
+                    Ok(ws) => {
+                        // Recorded before the project's hooks: their changes count.
+                        if super::safety::limits_set(&workflow.safety) {
+                            safety_baseline_error =
+                                record_safety_baseline(run, &ws.path).await.err();
+                        }
+                        ws.after_create().await.map(|()| ws)
+                    }
+                    Err(error) => Err(error),
+                };
+                match created {
                     Ok(ws) => {
                         run.workspace_path = Some(ws.path.to_string_lossy().to_string());
                         Some(ws)
@@ -1167,6 +1409,8 @@ async fn execute_run_body(
                                 cached_prompt_tokens: None,
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
+                                quota_wait: None,
+                                terminal_stop: None,
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
@@ -1178,6 +1422,8 @@ async fn execute_run_body(
                             return Ok(());
                         }
                         tracing::warn!("Failed to create worktree, running in main tree: {}", e);
+                        run.state.remove(super::safety::BASELINE_STATE_KEY);
+                        safety_baseline_error = None;
                         None
                     }
                 }
@@ -1239,6 +1485,8 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1275,6 +1523,8 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 });
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
@@ -1303,6 +1553,34 @@ async fn execute_run_body(
             }
         });
 
+    if super::safety::limits_set(&workflow.safety) {
+        let refusal = if let Some(error) = safety_baseline_error.take() {
+            Some(error)
+        } else if work_dir.is_empty() {
+            Some("this run has no project directory".to_string())
+        } else {
+            match run.state.get(super::safety::BASELINE_STATE_KEY) {
+                // Absent: this run never had one (fresh, or limits set since).
+                None => record_safety_baseline(run, std::path::Path::new(&work_dir))
+                    .await
+                    .err(),
+                // Never recaptured: a new baseline would forgive what the run already changed.
+                Some(raw)
+                    if serde_json::from_str::<super::safety::ChangeBaseline>(raw).is_err() =>
+                {
+                    Some("the run's recorded starting state is unreadable".to_string())
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some(error) = refusal {
+            let msg = format!(
+                "The max files / max lines limits (Security settings) need the project to be a git working tree: {error}"
+            );
+            return refuse_run_for_safety(&state, run, &msg, &emit).await;
+        }
+    }
+
     // Run before_run hook — but not on resume, the hook already fired
     // before the pause and re-firing it would re-run setup actions
     // (npm install, env preparation, etc.) the operator didn't ask for.
@@ -1329,8 +1607,17 @@ async fn execute_run_body(
         crate::core::docs_write_filter::scan_sensitive_files(std::path::Path::new(&work_dir))
     });
 
+    // The zone pinned with the run (KT-1103): a resume after a Settings
+    // change renders the same dates. Unpinned runs read the live zone.
+    let zone_run = run.id.clone();
+    let run_timezone = state
+        .db
+        .with_read_conn(move |conn| super::run_pins::pinned_timezone(conn, &zone_run))
+        .await?
+        .unwrap_or_else(crate::core::timezone::current);
     // Build template context from trigger context
-    let mut ctx = TemplateContext::with_time_anchor(run.started_at);
+    let mut ctx =
+        TemplateContext::with_time_anchor(run.started_at).with_default_timezone(run_timezone);
     if let Some(ref trigger_ctx) = run.trigger_context {
         inject_trigger_context(&mut ctx, trigger_ctx);
     }
@@ -1380,8 +1667,15 @@ async fn execute_run_body(
     // unresolved one stays unknown so strict rendering fails its step.
     let refs_workflow = workflow.clone();
     let refs_project = workflow.project_id.clone();
+    let refs_run = run.id.clone();
     let references = db
         .with_conn(move |conn| {
+            // KT-1096 — values recorded at pin time, from the pinned objects.
+            if let Some(pinned) =
+                super::run_pins::pinned_template_references(conn, &refs_run, &refs_workflow.id)?
+            {
+                return Ok(pinned);
+            }
             crate::core::resource_refs::resolve_template_references(
                 conn,
                 &refs_workflow,
@@ -1391,6 +1685,59 @@ async fn execute_run_body(
         .await?;
     for (reference, id) in references {
         ctx.set(reference, id);
+    }
+    // KT-920 — `{{project.<path>}}` comes from the main checkout's default
+    // branch, read once and pinned: no worktree, PR or pause changes it.
+    let profile_repo = (!project_path.is_empty())
+        .then(|| crate::core::scanner::resolve_host_path(&project_path))
+        .filter(|path| path.exists());
+    let profile_reads = crate::core::project_profile::workflow_placeholders(workflow);
+    let (profile_run, profile_project) = (run.id.clone(), workflow.project_id.clone());
+    let pinned_profile = {
+        let (run_id, project) = (profile_run.clone(), profile_project.clone());
+        db.with_read_conn(move |conn| {
+            super::run_pins::pinned_project_profile(conn, &run_id, project.as_deref())
+        })
+        .await?
+    };
+    let pinned_profile = match pinned_profile {
+        Some(pinned) => pinned,
+        None => {
+            let read = tokio::task::spawn_blocking(move || {
+                crate::core::project_profile::snapshot(profile_repo.as_deref())
+            })
+            .await?;
+            db.with_conn(move |conn| {
+                super::run_pins::record_project_profile(
+                    conn,
+                    &profile_run,
+                    profile_project.as_deref(),
+                    read,
+                )
+            })
+            .await?
+        }
+    };
+    let profile = crate::core::project_profile::values_for(&pinned_profile, &profile_reads);
+    match profile {
+        Ok(values) => {
+            for (key, value) in values {
+                ctx.set_builtin(key, value);
+            }
+        }
+        Err(msg) => {
+            run.status = RunStatus::Failed;
+            run.finished_at = Some(Utc::now());
+            let mut result = workspace_failure_result(&msg);
+            result.step_name = "__project_profile__".to_string();
+            run.step_results.push(result);
+            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+            db.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                .await?;
+            emit(RunEvent::RunError { error: msg });
+            broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
+            return Ok(());
+        }
     }
     // 0.7.0 Phase 3 — pre-seed every declared artifact to "" so a step
     // referencing `{{artifacts.review}}` on round 1 (before any step
@@ -1404,16 +1751,7 @@ async fn execute_run_body(
     // the template context so downstream steps see `{{steps.X.summary}}`
     // and `{{artifacts.Y}}` exactly as if the run had never paused.
     // Fresh runs have no prior step_results, so this is a no-op for them.
-    for prior in &run.step_results {
-        ctx.set_step_output(&prior.step_name, &prior.output);
-        let prior_agent = prior.step_agent.as_ref().map(|a| format!("{a:?}"));
-        ctx.set_step_meta(
-            &prior.step_name,
-            prior_agent.as_deref(),
-            prior.step_model.as_deref(),
-        );
-        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
-    }
+    replay_prior_results(&mut ctx, &run.step_results);
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
     // counters and verdicts the agent wrote in prior iterations so the
@@ -1488,6 +1826,8 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1499,13 +1839,13 @@ async fn execute_run_body(
 
             // Resolve every statically reachable Agent step before the first
             // one starts. Dynamic branches are checked again immediately
-            // before dispatch by `execute_step`.
+            // before dispatch by `execute_step`. A native agent without full
+            // access has no catalogue to read: its step fails on that reason.
             let mut catalog_failures = Vec::new();
-            for step in workflow
-                .steps
-                .iter()
-                .filter(|step| matches!(step.step_type, StepType::Agent))
-            {
+            for step in workflow.steps.iter().filter(|step| {
+                matches!(step.step_type, StepType::Agent)
+                    && super::steps::native_full_access_refusal_for(&step.agent).is_none()
+            }) {
                 let tier = step
                     .agent_settings
                     .as_ref()
@@ -1573,6 +1913,8 @@ async fn execute_run_body(
                     cached_prompt_tokens: None,
                     cache_write_prompt_tokens: None,
                     last_activity: None,
+                    quota_wait: None,
+                    terminal_stop: None,
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
@@ -1584,25 +1926,33 @@ async fn execute_run_body(
         }
     }
 
+    let safety_baseline = run
+        .state
+        .get(super::safety::BASELINE_STATE_KEY)
+        .and_then(|raw| serde_json::from_str::<super::safety::ChangeBaseline>(raw).ok());
+
     // Execute steps sequentially
     let mut all_success = true;
     let mut cancelled_by_user = false;
     let mut stopped_by_guard = false;
     let mut paused_for_approval = false;
+    let mut paused_for_quota = false;
     let mut step_idx = next_step_index_for_resume(&workflow.steps, &run.step_results);
-    if run
-        .step_results
-        .last()
-        .is_some_and(|result| matches!(result.status, RunStatus::Running | RunStatus::Pending))
-    {
+    let mut retried_step = None;
+    if run.step_results.last().is_some_and(|result| {
+        matches!(
+            result.status,
+            RunStatus::Running | RunStatus::Pending | RunStatus::WaitingQuota
+        )
+    }) {
         // StepStart is persisted for live observability. After a daemon crash
         // that trailing row is evidence of an incomplete step, not history to
-        // keep alongside the retry. Replace it with the new attempt.
-        run.step_results.pop();
+        // keep alongside the retry. Replace it with the new attempt. A step
+        // refused for quota (KT-811) is replaced the same way.
+        retried_step = run.step_results.pop().map(|result| result.step_name);
     }
     let total_steps = workflow.steps.len();
     let max_total_iterations = max_iterations_for(total_steps); // safeguard against infinite Goto loops
-    let mut iteration_count = 0;
 
     // 0.7.0 — execution guards. Resolved once at run start so subsequent
     // edits to the workflow (loosen the timeout, raise max calls) don't
@@ -1612,8 +1962,9 @@ async fn execute_run_body(
     // Phase 1b-ii — shared LLM-calls budget. A child inherits the parent
     // tree's (same counter + cap); a top-level run gets a fresh one capped at
     // its own resolved limit. The whole tree is then governed by ONE quota.
+    let is_root_budget = shared_budget.is_none();
     let budget = shared_budget
-        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls))
+        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls).recorded_on(&run.id))
         .within_deadline(
             run.started_at
                 + chrono::Duration::seconds(
@@ -1621,14 +1972,19 @@ async fn execute_run_body(
                 ),
             resolved_guards.timeout_seconds,
         );
-    let mut step_revisits: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    // 0.7.0 Phase 6 — per-Goto-edge counter. Keyed by `(source, target)`
-    // so two different loops in the same workflow have independent
-    // limits. Falls through (continues past the loop) when the cap is
-    // reached on a given edge.
-    let mut goto_fires: std::collections::HashMap<(String, String), u32> =
-        std::collections::HashMap::new();
+    // Visits, Goto-edge fires, iterations and LLM calls continue across resumes
+    // (KT-1046): a loop through a pause must trip where it would without one.
+    let mut guard_counters = super::guard_counters::GuardCounters::resume(
+        &run.state,
+        &workflow.steps,
+        &run.step_results,
+        retried_step.as_deref(),
+    );
+    if is_root_budget {
+        // A stale total would let the tree overspend: no count, no run.
+        budget.add_llm_calls(root_llm_calls_spent(&state, run, &guard_counters).await?);
+        record_tree_llm_calls(&state, &budget).await?;
+    }
 
     while step_idx < workflow.steps.len() {
         // Cancellation check — fires when the user clicked "⏹ Arrêter" and
@@ -1664,12 +2020,14 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             });
             all_success = false;
             break;
         }
-        iteration_count += 1;
-        if iteration_count > max_total_iterations {
+        guard_counters.iterations += 1;
+        if guard_counters.iterations > max_total_iterations {
             tracing::error!(
                 "Workflow run exceeded {} iterations — aborting to prevent infinite loop",
                 max_total_iterations
@@ -1696,6 +2054,8 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             });
             break;
         }
@@ -1742,6 +2102,8 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1752,6 +2114,17 @@ async fn execute_run_body(
         // the actual child count); this check uses the cumulative count
         // accumulated from previous iterations. ApiCall and Notify count
         // as 0 because they don't spend tokens.
+        if budget.has_unrecorded_calls() {
+            if let Err(error) = record_tree_llm_calls(&state, &budget).await {
+                tracing::warn!(target: "kronn::workflow_guard", run_id = %run.id, %error,
+                    "Workflow run stopped: its LLM-call count is not recorded");
+                let mut row = budget_unrecorded_row(&error);
+                row.started_at = Some(Utc::now());
+                run.step_results.push(row);
+                all_success = false;
+                break;
+            }
+        }
         if budget.llm_calls() >= budget.max_llm_calls() {
             tracing::warn!(target: "kronn::workflow_guard",
                 run_id = %run.id, kind = "MaxLlmCalls",
@@ -1787,6 +2160,8 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1798,10 +2173,12 @@ async fn execute_run_body(
         // explicitly rejected "total iter count" as fragile.
         let visit_count = {
             let name = &workflow.steps[step_idx].name;
-            let n = step_revisits.entry(name.clone()).or_insert(0);
+            let n = guard_counters.visits.entry(name.clone()).or_insert(0);
             *n += 1;
             *n
         };
+        guard_counters.llm_calls = budget.llm_calls();
+        guard_counters.store(&mut run.state);
         // 0.7.0 Phase 6 — expose `{{iter.<step_name>}}` in templates so
         // a step can react to its own re-execution (e.g. "first pass:
         // generate; subsequent: refine"). Updated EVERY iteration so
@@ -1847,6 +2224,8 @@ async fn execute_run_body(
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             });
             stopped_by_guard = true;
             break;
@@ -1909,6 +2288,8 @@ async fn execute_run_body(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         };
         apply_step_snapshot(
             step,
@@ -2002,15 +2383,16 @@ async fn execute_run_body(
                     // 0.8.6 (#59) — stamp source=workflow + run_id on the
                     // api_call_logs row so the audit table can filter by
                     // run.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::api_call_executor::execute_api_call_step_with_db_as(
                         step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -2024,6 +2406,7 @@ async fn execute_run_body(
                     let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
                         &mut hydrated,
                         &state.db,
+                        Some(&run.id),
                     )
                     .await;
                     // Observe documents before launch, including dirty/indexed
@@ -2083,6 +2466,8 @@ async fn execute_run_body(
                                 cached_prompt_tokens: None,
                                 cache_write_prompt_tokens: None,
                                 last_activity: None,
+                                quota_wait: None,
+                                terminal_stop: None,
                             },
                             condition_action: None,
                         }
@@ -2220,88 +2605,37 @@ async fn execute_run_body(
                     // the operator's decision (POST /runs/:id/decide) calls
                     // `resume_run` to continue from the next step.
                     //
-                    // 0.8.6 (#25) — checkpoint commit. When the step has
-                    // `gate_checkpoint_before: Some(true)`, snapshot the
-                    // working tree FIRST so a future "Request Changes" Goto
-                    // can `git reset --hard` to this SHA before re-running
-                    // the target. Skipped silently in Isolated worktree
-                    // mode (the worktree manages its own branch lifecycle).
-                    if step.gate_checkpoint_before.unwrap_or(false) {
-                        // Isolated workspace = the run has its own
-                        // worktree path. Skip checkpoint there — the
-                        // worktree manages its own branch lifecycle.
-                        let is_isolated = run.workspace_path.is_some();
-                        if is_isolated {
-                            tracing::info!(
+                    // Checkpoint the run's own worktree only: in shared mode the
+                    // commit would sweep the operator's work (KT-1042).
+                    let checkpoint_notice = if step.gate_checkpoint_before.unwrap_or(false) {
+                        let notice = super::gate_checkpoint::checkpoint_gate(
+                            run.workspace_path.as_deref(),
+                            &run.id,
+                            &mut run.state,
+                            &step.name,
+                        );
+                        match &notice {
+                            None => tracing::info!(
                                 run_id = %run.id,
                                 step = %step.name,
-                                "gate_checkpoint_before skipped — workflow uses Isolated worktree mode",
-                            );
-                        } else if let Some(pid) = workflow.project_id.as_ref() {
-                            let project_path_opt = match state
-                                .db
-                                .with_conn({
-                                    let pid2 = pid.clone();
-                                    move |conn| crate::db::projects::get_project(conn, &pid2)
-                                })
-                                .await
-                            {
-                                Ok(p) => p,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        run_id = %run.id,
-                                        step = %step.name,
-                                        error = %e,
-                                        "project lookup failed — gate checkpoint commit skipped"
-                                    );
-                                    None
-                                }
-                            };
-                            if let Some(proj) = project_path_opt {
-                                let ckp = super::gate_checkpoint::commit_checkpoint(
-                                    std::path::Path::new(&proj.path),
-                                    &step.name,
-                                    &run.id,
-                                );
-                                match ckp {
-                                    super::gate_checkpoint::CheckpointOutcome::Committed { sha } => {
-                                        let key = format!("{}{}", super::gate_checkpoint::CHECKPOINT_STATE_PREFIX, step.name);
-                                        run.state.insert(key, sha.clone());
-                                        tracing::info!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            sha = %sha,
-                                            "gate_checkpoint_before committed",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::NotAGitRepo => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            project_path = %proj.path,
-                                            "gate_checkpoint_before requested but project_path is not a git repo — skipping",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::StagedChangesPresent => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            "gate_checkpoint_before refused — index has staged changes (user WIP)",
-                                        );
-                                    }
-                                    super::gate_checkpoint::CheckpointOutcome::GitCommandFailed { stderr } => {
-                                        tracing::warn!(
-                                            run_id = %run.id,
-                                            step = %step.name,
-                                            stderr = %stderr,
-                                            "gate_checkpoint_before commit failed — continuing without checkpoint",
-                                        );
-                                    }
-                                }
-                            }
+                                "gate_checkpoint_before committed in the run worktree",
+                            ),
+                            Some(reason) => tracing::warn!(
+                                run_id = %run.id,
+                                step = %step.name,
+                                reason = %reason,
+                                "gate_checkpoint_before not taken",
+                            ),
                         }
+                        notice
+                    } else {
+                        None
+                    };
+                    let mut gate = super::gate_step::execute_gate_step(step, &ctx);
+                    if let Some(notice) = checkpoint_notice {
+                        gate.result.output = format!("{}\n\n> {notice}", gate.result.output);
                     }
-                    super::gate_step::execute_gate_step(step, &ctx)
+                    gate
                 }
                 StepType::Exec => {
                     // 0.7.0 Phase 5 — direct shell execution. Zero tokens.
@@ -2316,6 +2650,11 @@ async fn execute_run_body(
                         &ctx,
                         workflow.project_id.as_deref(),
                         carrying_repository.as_deref(),
+                        super::exec_step::output_limit_for(
+                            step,
+                            &workflow.steps,
+                            &workflow.on_failure,
+                        ),
                     )
                     .await
                 }
@@ -2324,14 +2663,15 @@ async fn execute_run_body(
                     // items. Zero tokens, parallel HTTP, idempotency-by-prompt
                     // moved to idempotency-by-construction. See
                     // batch_apicall_step.rs for the executor.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::batch_apicall_step::execute_batch_apicall_step(
                         step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -2342,16 +2682,17 @@ async fn execute_run_body(
                     super::json_data_step::execute_json_data_step(step).await
                 }
                 StepType::CollectApiData => {
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::collect_api_data_step::execute_collect_api_data_step(
                         step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
+                        &api_caller,
                     )
                     .await
                 }
@@ -2364,6 +2705,15 @@ async fn execute_run_body(
                         &workflow.id,
                         &run.id,
                         run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                        &state,
+                        &ctx,
+                    )
+                    .await
+                }
+                StepType::TaskBoard => {
+                    super::task_board_step::execute_task_board_step(
+                        step,
+                        &workflow.id,
                         &state,
                         &ctx,
                     )
@@ -2394,6 +2744,25 @@ async fn execute_run_body(
                 StepType::TriggerWorkflow => {
                     super::trigger_workflow_step::execute_trigger_workflow_step(
                         &state, workflow, &run.id, step, &ctx,
+                    )
+                    .await
+                }
+                StepType::DelegateSubtasks => {
+                    // Boxed: inlined, its state machine overflows the run's stack.
+                    Box::pin(
+                        super::delegate_subtasks_step::execute_delegate_subtasks_step(
+                            &state,
+                            step,
+                            &run.id,
+                            run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                            &project_path,
+                            &work_dir,
+                            &ctx,
+                            tokens_config,
+                            agents_config,
+                            &ollama_context_overrides,
+                            budget.clone(),
+                        ),
                     )
                     .await
                 }
@@ -2451,6 +2820,8 @@ async fn execute_run_body(
                         cached_prompt_tokens: None,
                         cache_write_prompt_tokens: None,
                         last_activity: None,
+                        quota_wait: None,
+                        terminal_stop: None,
                     },
                     condition_action: None,
                 }
@@ -2498,6 +2869,8 @@ async fn execute_run_body(
                         cached_prompt_tokens: None,
                         cache_write_prompt_tokens: None,
                         last_activity: None,
+                        quota_wait: None,
+                        terminal_stop: None,
                     },
                     condition_action: None,
                 }
@@ -2507,6 +2880,7 @@ async fn execute_run_body(
         if outcome.result.started_at.is_none() {
             outcome.result.started_at = Some(step_started_at);
         }
+        apply_terminal_stop(&mut outcome);
 
         // Snapshot "what actually ran" onto the result row FIRST, then seed
         // the template ctx from it — set_step_meta reads step_agent/step_model,
@@ -2541,15 +2915,62 @@ async fn execute_run_body(
             run.state.insert(k, v);
         }
 
+        // After the step's declared artifacts are written: they are the run's changes too.
+        if let Some(baseline) = safety_baseline.as_ref().filter(|_| {
+            matches!(
+                outcome.result.status,
+                RunStatus::Success | RunStatus::Partial | RunStatus::Failed
+            )
+        }) {
+            if let Some(reason) = safety_breach(workflow, &work_dir, baseline).await {
+                fail_safety_limit(&mut outcome, &reason);
+            }
+        }
+        apply_terminal_stop(&mut outcome);
+
         // Accumulate tokens
         run.tokens_used += outcome.result.tokens_used.unwrap_or(0);
 
+        // KT-811 — a quota refusal waits for the reset instead of failing the
+        // run. Children are resumed through their parent, so they still fail.
+        if outcome.result.status == RunStatus::Failed
+            && run.parent_run_id.is_none()
+            && run.run_type == "linear"
+        {
+            if let Some(classified) = outcome.result.quota_wait.take() {
+                let timeout =
+                    i64::try_from(resolved_guards.timeout_seconds).unwrap_or(i64::MAX / 4);
+                let wait = super::quota_wait::plan_wait(
+                    &mut run.state,
+                    &step.name,
+                    classified,
+                    Utc::now(),
+                    run.started_at + chrono::Duration::seconds(timeout),
+                );
+                tracing::info!(
+                    run_id = %run.id,
+                    step = %step.name,
+                    wake_at = ?wait.wake_at,
+                    parked = ?wait.parked,
+                    "provider quota refusal — the step waits instead of failing"
+                );
+                outcome.result.quota_wait = Some(wait);
+                outcome.result.status = RunStatus::WaitingQuota;
+            }
+        } else if outcome.result.status != RunStatus::Failed {
+            run.state
+                .remove(super::quota_wait::QUOTA_ATTEMPTS_STATE_KEY);
+        }
+        let waiting_quota_here = outcome.result.status == RunStatus::WaitingQuota;
         // 0.7.0 — count this step toward the LLM-calls quota. Only step
         // types that spawn an agent are counted: BatchQuickPrompt counts
         // as the number of children actually spawned (read from the
         // outcome's batch metadata when present, else 1 — conservative).
-        // ApiCall and Notify cost zero by design.
+        // ApiCall and Notify cost zero by design. A call refused for quota spent
+        // nothing and is replayed, so it does not count (KT-1046).
+        let llm_calls_before = budget.llm_calls();
         match step.step_type {
+            StepType::Agent | StepType::BatchQuickPrompt if waiting_quota_here => {}
             StepType::Agent => {
                 budget.add_llm_calls(1);
             }
@@ -2573,13 +2994,29 @@ async fn execute_run_body(
             | StepType::CollectApiData
             | StepType::TransformData
             | StepType::PublishPageData
+            | StepType::TaskBoard
             // A triggered run has its own budget.
-            | StepType::TriggerWorkflow => {}
+            | StepType::TriggerWorkflow
+            // Counts each review call itself, as it happens.
+            | StepType::DelegateSubtasks => {}
             // SubWorkflow itself spawns no LLM directly; its child run's
             // Agent steps consume LLM calls. Phase 1b aggregates the child's
             // count into the SHARED budget so the parent quota isn't bypassed
             // (spec §4.2). Stub today → zero direct cost.
             StepType::SubWorkflow => {}
+        }
+
+        guard_counters.llm_calls = budget.llm_calls();
+        guard_counters.store(&mut run.state);
+        // Also covers calls a sub-workflow child spent on the shared budget.
+        if guard_counters.llm_calls != llm_calls_before || budget.has_unrecorded_calls() {
+            if let Err(error) = record_tree_llm_calls(&state, &budget).await {
+                // Not durably counted, so not durably done: a resume re-runs it.
+                // Counted after the quota verdict, hence its own application.
+                outcome.result.terminal_stop =
+                    Some(format!("The LLM-call count could not be recorded: {error}"));
+                apply_terminal_stop(&mut outcome);
+            }
         }
 
         let step_failed = outcome.result.status == RunStatus::Failed;
@@ -2608,8 +3045,11 @@ async fn execute_run_body(
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
         // The current_step is cleared since this step is now finished.
-        let post_step_status = if outcome.result.status == RunStatus::WaitingApproval {
-            RunStatus::WaitingApproval
+        let post_step_status = if matches!(
+            outcome.result.status,
+            RunStatus::WaitingApproval | RunStatus::WaitingQuota
+        ) {
+            outcome.result.status.clone()
         } else {
             run.status.clone()
         };
@@ -2788,6 +3228,10 @@ async fn execute_run_body(
             all_success = false;
             break;
         }
+        if waiting_quota_here {
+            paused_for_quota = true;
+            break;
+        }
 
         if step_failed {
             all_success = false;
@@ -2807,7 +3251,7 @@ async fn execute_run_body(
                 }) => {
                     if let Some(target) = workflow.steps.iter().position(|s| s.name == *step_name) {
                         let edge = (step.name.clone(), step_name.clone());
-                        let count = goto_fires.entry(edge.clone()).or_insert(0);
+                        let count = guard_counters.goto_fires.entry(edge.clone()).or_insert(0);
                         if let Some(cap) = max_iterations {
                             if *count >= cap {
                                 tracing::info!(
@@ -3021,7 +3465,7 @@ async fn execute_run_body(
                     // (capped only by the workflow-level loop_detection
                     // guard).
                     let edge = (step.name.clone(), step_name.clone());
-                    let count = goto_fires.entry(edge.clone()).or_insert(0);
+                    let count = guard_counters.goto_fires.entry(edge.clone()).or_insert(0);
                     if let Some(cap) = max_iterations {
                         if *count >= cap {
                             tracing::info!(
@@ -3056,7 +3500,8 @@ async fn execute_run_body(
     }
 
     // Run after_run hook (skip when paused — the run isn't done yet).
-    if !paused_for_approval {
+    let paused = paused_for_approval || paused_for_quota;
+    if !paused {
         if let Some(ref ws) = workspace {
             if let Err(e) = ws.after_run().await {
                 tracing::warn!(
@@ -3064,6 +3509,21 @@ async fn execute_run_body(
                     error = %e,
                     "after_run hook could not be executed"
                 );
+            }
+        }
+    }
+    // The last writes (final artifacts, after_run) are measured before any verdict.
+    if !paused && !cancelled_by_user && super::safety::run_terminal_stop(run).is_none() {
+        if let Some(baseline) = safety_baseline.as_ref() {
+            if let Some(reason) = safety_breach(workflow, &work_dir, baseline).await {
+                tracing::warn!(target: "kronn::workflow_safety", "{reason}");
+                let mut stop = super::safety::refusal_result(&reason);
+                stop.terminal_stop = Some(reason);
+                emit(RunEvent::StepDone {
+                    step_result: Box::new(stop.clone()),
+                });
+                run.step_results.push(stop);
+                all_success = false;
             }
         }
     }
@@ -3080,6 +3540,8 @@ async fn execute_run_body(
         RunStatus::Cancelled
     } else if paused_for_approval {
         RunStatus::WaitingApproval
+    } else if paused_for_quota {
+        RunStatus::WaitingQuota
     } else if stopped_by_guard {
         RunStatus::StoppedByGuard
     } else if all_success {
@@ -3094,7 +3556,8 @@ async fn execute_run_body(
     // `{{failed_step.*}}` so they can react to what specifically broke.
     // If a rollback step itself fails, subsequent rollback steps are
     // skipped — the run stays `Failed` regardless of rollback outcome.
-    if run.status == RunStatus::Failed && !workflow.on_failure.is_empty() {
+    let terminal_stop = super::safety::run_terminal_stop(run).is_some();
+    if run.status == RunStatus::Failed && !terminal_stop && !workflow.on_failure.is_empty() {
         let failed = run
             .step_results
             .iter()
@@ -3150,68 +3613,87 @@ async fn execute_run_body(
                     // 0.8.6 (#59) — same audit stamping as the primary
                     // step dispatch above. This is the rollback / branch
                     // step replay path.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::api_call_executor::execute_api_call_step_with_db_as(
                         rb_step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
                 StepType::Agent => {
                     let room_started = std::time::Instant::now();
-                    match super::step_room::activate(
-                        &state.workflow_step_rooms,
+                    // KT-1096 — a rollback Agent step loads its pinned Quick
+                    // Prompt, as the main path does.
+                    let mut hydrated = rb_step.clone();
+                    let hydration = super::quick_prompt_hydrate::hydrate_step_from_quick_prompt(
+                        &mut hydrated,
                         &state.db,
-                        &run.id,
-                        run.project_id.as_deref().or(workflow.project_id.as_deref()),
-                        rb_step,
-                        &ctx,
+                        Some(&run.id),
                     )
-                    .await
-                    {
-                        Err(error) => super::step_room::refused_outcome(
+                    .await;
+                    let rb_step = &hydrated;
+                    if let Err(error) = hydration {
+                        super::step_room::refused_outcome(
                             rb_step,
                             error,
                             room_started.elapsed().as_millis() as u64,
-                        ),
-                        Ok(step_room) => {
-                            let full_access = agents_config.full_access_for(&rb_step.agent);
-                            let native_tools = Some(KronnToolExecutor::workflow_arc(
-                                state.clone(),
-                                workflow.project_id.clone(),
-                                run.id.clone(),
-                                rb_step.name.clone(),
-                            ));
-                            let outcome = execute_step(
+                        )
+                    } else {
+                        match super::step_room::activate(
+                            &state.workflow_step_rooms,
+                            &state.db,
+                            &run.id,
+                            run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                            rb_step,
+                            &ctx,
+                        )
+                        .await
+                        {
+                            Err(error) => super::step_room::refused_outcome(
                                 rb_step,
-                                &project_path,
-                                workflow.project_id.as_deref(),
-                                &work_dir,
-                                tokens_config,
-                                full_access,
-                                &ctx,
-                                None,
-                                None,
-                                Some(&agents_config.model_tiers),
-                                Some(&crate::models::setup::HttpEndpoints::from_agents(
-                                    agents_config,
-                                )),
-                                Some(&ollama_context_overrides),
-                                native_tools,
-                                Some(&state.db),
-                                step_room.as_ref().map(|room| room.context()),
-                                Some(&run.id),
-                            )
-                            .await;
-                            if let Some(room) = step_room {
-                                room.finish().await;
+                                error,
+                                room_started.elapsed().as_millis() as u64,
+                            ),
+                            Ok(step_room) => {
+                                let full_access = agents_config.full_access_for(&rb_step.agent);
+                                let native_tools = Some(KronnToolExecutor::workflow_arc(
+                                    state.clone(),
+                                    workflow.project_id.clone(),
+                                    run.id.clone(),
+                                    rb_step.name.clone(),
+                                ));
+                                let outcome = execute_step(
+                                    rb_step,
+                                    &project_path,
+                                    workflow.project_id.as_deref(),
+                                    &work_dir,
+                                    tokens_config,
+                                    full_access,
+                                    &ctx,
+                                    None,
+                                    None,
+                                    Some(&agents_config.model_tiers),
+                                    Some(&crate::models::setup::HttpEndpoints::from_agents(
+                                        agents_config,
+                                    )),
+                                    Some(&ollama_context_overrides),
+                                    native_tools,
+                                    Some(&state.db),
+                                    step_room.as_ref().map(|room| room.context()),
+                                    Some(&run.id),
+                                )
+                                .await;
+                                if let Some(room) = step_room {
+                                    room.finish().await;
+                                }
+                                outcome
                             }
-                            outcome
                         }
                     }
                 }
@@ -3232,6 +3714,11 @@ async fn execute_run_body(
                         &ctx,
                         workflow.project_id.as_deref(),
                         carrying_repository.as_deref(),
+                        super::exec_step::output_limit_for(
+                            rb_step,
+                            &workflow.steps,
+                            &workflow.on_failure,
+                        ),
                     )
                     .await
                 }
@@ -3240,14 +3727,15 @@ async fn execute_run_body(
                     // (e.g. POST /issue/{key}/transitions = "Cancelled" over
                     // every ticket the failed run had created). Same plugin
                     // wiring as the linear path.
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::batch_apicall_step::execute_batch_apicall_step(
                         rb_step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
+                        &api_caller,
                     )
                     .await
                 }
@@ -3258,16 +3746,17 @@ async fn execute_run_body(
                     super::json_data_step::execute_json_data_step(rb_step).await
                 }
                 StepType::CollectApiData => {
+                    let api_caller =
+                        crate::core::api_access::workflow_caller(&state, workflow).await;
                     super::collect_api_data_step::execute_collect_api_data_step(
                         rb_step,
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
-                            run.id.clone(),
-                        ),
+                        super::api_call_executor::ApiCallLogContext::workflow_step(run.id.clone()),
                         &workflow.exec_allowlist,
                         &work_dir,
+                        &api_caller,
                     )
                     .await
                 }
@@ -3280,6 +3769,15 @@ async fn execute_run_body(
                         &workflow.id,
                         &run.id,
                         run.project_id.as_deref().or(workflow.project_id.as_deref()),
+                        &state,
+                        &ctx,
+                    )
+                    .await
+                }
+                StepType::TaskBoard => {
+                    super::task_board_step::execute_task_board_step(
+                        rb_step,
+                        &workflow.id,
                         &state,
                         &ctx,
                     )
@@ -3298,6 +3796,10 @@ async fn execute_run_body(
                     )
                     .await
                 }
+                // Forbidden in on_failure (save-validated); a hand-edited JSON fails here.
+                StepType::DelegateSubtasks => {
+                    super::delegate_subtasks_step::forbidden_in_rollback(rb_step)
+                }
             };
 
             ctx.set_step_output(&rb_step.name, &rb_outcome.result.output);
@@ -3310,6 +3812,7 @@ async fn execute_run_body(
                 &mut rb_outcome.result,
                 Some(&agents_config.model_tiers),
             );
+            ctx.set_step_kind(&rb_step.name, rb_outcome.result.step_kind.as_deref());
             // 2026-06-10 (audit P1) — mark this result as COMPENSATION so the
             // UI renders it under a dedicated rollback section. Pre-fix a
             // green rollback step right after the failed step read as "the
@@ -3333,12 +3836,12 @@ async fn execute_run_body(
         }
     }
 
-    if !paused_for_approval {
+    if !paused {
         run.finished_at = Some(Utc::now());
     }
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-    let terminal_snapshot_run_id = (!paused_for_approval).then(|| run.id.clone());
+    let terminal_snapshot_run_id = (!paused).then(|| run.id.clone());
     let db5 = db.clone();
     db5.with_conn(move |conn| {
         let updated = crate::db::workflows::update_run_progress(conn, snap)?;
@@ -3349,6 +3852,7 @@ async fn execute_run_body(
                 run_id,
                 Utc::now(),
             )?;
+            super::run_pins::purge(conn, run_id)?;
         }
         Ok(updated)
     })
@@ -3402,10 +3906,34 @@ async fn execute_run_body(
     } else {
         0
     };
-    if !paused_for_approval && !is_inherited_workspace && active_child_dispatches == 0 {
+    if !paused && !is_inherited_workspace && active_child_dispatches == 0 {
         if let Some(ws) = workspace {
-            match ws.cleanup().await {
+            // KT-1096 — only a fully successful run discards what it left
+            // uncommitted: its steps finished, so leftovers are its own scratch.
+            let cleaned = if run.status == RunStatus::Success {
+                ws.cleanup().await
+            } else {
+                ws.cleanup_keeping_work().await
+            };
+            match cleaned {
                 Ok(outcome) => {
+                    if let Some(kept) = &outcome.kept {
+                        let note = kept_checkout_note(kept);
+                        tracing::warn!(run_id = %run.id, "{note}");
+                        if let Some(last) = run.step_results.last_mut() {
+                            last.output = format!("{}\n\n{note}", last.output);
+                        }
+                        let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                        if let Err(error) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::workflows::update_run_progress(conn, snap)
+                            })
+                            .await
+                        {
+                            tracing::error!(run_id = %run.id, "failed to record the kept worktree: {error}");
+                        }
+                    }
                     if let Some(preserved) = outcome.preserved {
                         // Persist the preserved branch on the run row so the
                         // UI can surface it — without this, the operator only
@@ -3506,6 +4034,13 @@ pub async fn resume_run(
     events_tx: Option<EventSender>,
 ) -> Result<()> {
     use anyhow::anyhow;
+    // The gate's targets come from the revision the run executes (KT-1096).
+    let pinned_run_id = run.id.clone();
+    let pinned = state
+        .db
+        .with_read_conn(move |conn| super::run_pins::pinned_workflow(conn, &pinned_run_id))
+        .await?;
+    let workflow = pinned.as_ref().unwrap_or(workflow);
     let workflow_in_project = workflow_in_run_project(workflow, run);
     let workflow: &Workflow = &workflow_in_project;
 
@@ -3656,58 +4191,39 @@ pub async fn resume_run(
         let cut = request_changes_cut(&run.step_results, target_step_name.as_deref(), target_idx);
         run.step_results.truncate(cut);
 
-        // 0.8.6 (#25) — checkpoint reset. If the gate captured a
-        // checkpoint SHA on its way in, `git reset --hard` to it
-        // BEFORE re-running the target step. Makes Goto loops
-        // idempotent : the agent re-implements on the same tree
-        // state the previous iteration started on, not on top of
-        // its own previous output.
+        // The target re-runs on top of the checkpoint; verify the run's own
+        // worktree is still exactly that commit (KT-1042).
         let checkpoint_key = format!(
             "{}{}",
             super::gate_checkpoint::CHECKPOINT_STATE_PREFIX,
             gate_step_name,
         );
         if let Some(sha) = run.state.get(&checkpoint_key).cloned() {
-            if let Some(pid) = workflow.project_id.as_ref() {
-                let pid2 = pid.clone();
-                let project = match state
-                    .db
-                    .with_conn(move |conn| crate::db::projects::get_project(conn, &pid2))
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            run_id = %run.id,
-                            gate = %gate_step_name,
-                            error = %e,
-                            "project lookup failed — checkpoint reset skipped before Goto"
-                        );
-                        None
-                    }
-                };
-                if let Some(proj) = project {
-                    match super::gate_checkpoint::reset_to_checkpoint(
-                        std::path::Path::new(&proj.path),
+            match run.workspace_path.as_deref() {
+                None => tracing::warn!(
+                    run_id = %run.id,
+                    gate = %gate_step_name,
+                    sha = %sha,
+                    "checkpoint check skipped — the run has no worktree of its own",
+                ),
+                Some(worktree) => {
+                    match super::gate_checkpoint::verify_checkpoint(
+                        std::path::Path::new(worktree),
                         &sha,
                     ) {
-                        Ok(()) => {
-                            tracing::info!(
-                                run_id = %run.id,
-                                gate = %gate_step_name,
-                                sha = %sha,
-                                "checkpoint reset applied before Goto",
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                run_id = %run.id,
-                                gate = %gate_step_name,
-                                sha = %sha,
-                                error = %e,
-                                "checkpoint reset failed — continuing Goto without reset",
-                            );
-                        }
+                        Ok(()) => tracing::info!(
+                            run_id = %run.id,
+                            gate = %gate_step_name,
+                            sha = %sha,
+                            "worktree still at the checkpoint before Goto",
+                        ),
+                        Err(e) => tracing::warn!(
+                            run_id = %run.id,
+                            gate = %gate_step_name,
+                            sha = %sha,
+                            error = %e,
+                            "worktree moved since the checkpoint — continuing Goto on its current state",
+                        ),
                     }
                 }
             }
@@ -3729,6 +4245,112 @@ pub async fn resume_run(
     .await
 }
 
+/// The LLM calls a root run's tree already spent, for a (re)started root: the
+/// durable tree count, its own stored counters, or for a run from before both,
+/// its history and its sub-workflow children's.
+async fn root_llm_calls_spent(
+    state: &AppState,
+    run: &WorkflowRun,
+    counters: &super::guard_counters::GuardCounters,
+) -> Result<u32> {
+    let root = run.id.clone();
+    let legacy = !super::guard_counters::GuardCounters::is_stored(&run.state);
+    let durable = state
+        .db
+        .with_conn(move |conn| {
+            let tree = crate::db::workflows::tree_llm_calls(conn, &root)?;
+            let children = if legacy {
+                crate::db::workflows::descendant_llm_calls_from_history(conn, &root)?
+            } else {
+                0
+            };
+            Ok((tree, children))
+        })
+        .await;
+    let (tree, children) = durable
+        .map_err(|error| anyhow::anyhow!("the run's LLM-call count is unreadable: {error}"))?;
+    Ok(tree.max(counters.llm_calls + children))
+}
+
+/// Raises the root's durable count to the shared total: a child's calls must
+/// survive a crash before its parent's step returns (KT-1046).
+pub(crate) async fn record_tree_llm_calls(state: &AppState, budget: &SharedBudget) -> Result<()> {
+    let Some(root) = budget.root_run_id().map(str::to_string) else {
+        return Ok(());
+    };
+    let total = budget.llm_calls();
+    state
+        .db
+        .with_conn(move |conn| crate::db::workflows::raise_tree_llm_calls(conn, &root, total))
+        .await?;
+    budget
+        .recorded
+        .fetch_max(total, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Takes back one call counted before launch that the provider refused for
+/// quota: a refused call spent nothing (KT-1046). Interrupted calls stay counted.
+pub(crate) async fn release_quota_refused_llm_call(
+    state: &AppState,
+    budget: &SharedBudget,
+) -> Result<()> {
+    if let Some(root) = budget.root_run_id().map(str::to_string) {
+        state
+            .db
+            .with_conn(move |conn| crate::db::workflows::release_tree_llm_call(conn, &root))
+            .await?;
+    }
+    decrement_saturating(&budget.llm_calls);
+    decrement_saturating(&budget.recorded);
+    Ok(())
+}
+
+/// Lowers a counter by one, never below zero. A plain CAS loop: `fetch_update`
+/// is deprecated on newer toolchains and `try_update` is missing on older ones.
+fn decrement_saturating(counter: &std::sync::atomic::AtomicU32) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut current = counter.load(SeqCst);
+    while current > 0 {
+        match counter.compare_exchange_weak(current, current - 1, SeqCst, SeqCst) {
+            Ok(_) => return,
+            Err(seen) => current = seen,
+        }
+    }
+}
+
+/// The row that stops a run whose tree spent calls the database did not take.
+fn budget_unrecorded_row(error: &anyhow::Error) -> StepResult {
+    let reason = format!(
+        "Stopped before the next step: the LLM calls already spent could not be \
+         recorded ({error}), so the budget is not known."
+    );
+    StepResult {
+        step_name: "__guard_llm_calls_unrecorded__".to_string(),
+        status: RunStatus::Failed,
+        output: reason.clone(),
+        tokens_used: Some(0),
+        duration_ms: 0,
+        started_at: None,
+        condition_result: None,
+        envelope_detected: None,
+        step_kind: None,
+        step_agent: None,
+        step_model: None,
+        step_api_plugin_slug: None,
+        step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
+        agent_provenance: None,
+        native_tool_calls: Box::default(),
+        cached_prompt_tokens: None,
+        cache_write_prompt_tokens: None,
+        last_activity: None,
+        quota_wait: None,
+        terminal_stop: Some(reason),
+    }
+}
+
 pub const RUN_RESUME_HISTORY_KEY: &str = "__kronn.resume_history";
 
 fn append_resume_transition(run: &mut WorkflowRun) {
@@ -3748,13 +4370,14 @@ fn append_resume_transition(run: &mut WorkflowRun) {
     let events = history["events"]
         .as_array_mut()
         .expect("resume history events normalized to an array");
+    let paused_status = format!("{:?}", run.status);
     let last_status = events
         .last()
         .and_then(|event| event.get("status"))
         .and_then(serde_json::Value::as_str);
-    if last_status != Some("Interrupted") {
+    if last_status != Some(paused_status.as_str()) {
         events.push(serde_json::json!({
-            "status": "Interrupted",
+            "status": paused_status,
             "at": run.finished_at.unwrap_or(now).to_rfc3339(),
         }));
     }
@@ -3776,7 +4399,8 @@ pub(crate) async fn claim_interrupted_run_row(
         .map_err(|reason| anyhow::anyhow!("Run {id} cannot resume: {reason}"))
 }
 
-/// Claims an `Interrupted` run, its concurrency key and resume trail included,
+/// Claims an `Interrupted` or `WaitingQuota` run, its concurrency key and
+/// resume trail included,
 /// in the same closure as the admission check. `Ok(Err(reason))`: the
 /// workflow's concurrency limit refused it; `run` is then left unchanged, so
 /// the caller may wait and try again. `deadline`: the earliest timeout the
@@ -3787,13 +4411,21 @@ pub(crate) async fn try_claim_interrupted_run_row(
     deadline: Option<chrono::DateTime<Utc>>,
 ) -> Result<std::result::Result<(), String>> {
     use anyhow::anyhow;
-    if run.status != RunStatus::Interrupted {
+    if !matches!(run.status, RunStatus::Interrupted | RunStatus::WaitingQuota) {
         return Err(anyhow!(
-            "Run {} is {:?} — only Interrupted runs can be resumed",
+            "Run {} is {:?} — only Interrupted or quota-waiting runs can be resumed",
             run.id,
             run.status
         ));
     }
+    let from_status = run.status.clone();
+    // The wait this copy read; owned so the closure below can carry it.
+    let quota_wait = (run.status == RunStatus::WaitingQuota).then(|| {
+        (
+            run.step_results.len().saturating_sub(1),
+            super::quota_wait::pending_wait(run).and_then(|wait| wait.id.clone()),
+        )
+    });
     let mut claim_run = run.clone();
     append_resume_transition(&mut claim_run);
     let candidate = claim_run.clone();
@@ -3820,9 +4452,13 @@ pub(crate) async fn try_claim_interrupted_run_row(
                     return Ok(Err(reason));
                 }
             }
-            crate::db::workflows::claim_interrupted_run_status(
+            crate::db::workflows::claim_paused_run_status(
                 conn,
                 &candidate.id,
+                &from_status,
+                quota_wait
+                    .as_ref()
+                    .map(|(index, id)| (*index, id.as_deref())),
                 &candidate.state,
                 candidate.concurrency_key.as_deref(),
             )
@@ -3859,6 +4495,17 @@ pub(crate) async fn try_claim_interrupted_run_row(
 ///     exactly the require_isolation hazard — refuse instead
 pub async fn claim_interrupted_run(
     state: &AppState,
+    run: &mut WorkflowRun,
+    retry_uncertain_effect: bool,
+) -> Result<()> {
+    check_resume_preconditions(run, retry_uncertain_effect)?;
+    claim_interrupted_run_row(state, run).await
+}
+
+/// The refusals every top-level resume applies, manual or after a quota reset
+/// (KT-811): children and batches, a vanished worktree, and an external effect
+/// with no durable result (fail-closed, KT-150).
+pub(crate) fn check_resume_preconditions(
     run: &mut WorkflowRun,
     retry_uncertain_effect: bool,
 ) -> Result<()> {
@@ -3904,7 +4551,24 @@ pub async fn claim_interrupted_run(
         }
         run.state.remove(UNCERTAIN_SIDE_EFFECT_STATE_KEY);
     }
-    claim_interrupted_run_row(state, run).await
+    Ok(())
+}
+
+/// Continues a run its caller already claimed, in the background, with the
+/// same settle and unattended-failure notification as every resume.
+pub(crate) fn spawn_claimed_resume(state: AppState, workflow: Workflow, mut run: WorkflowRun) {
+    tokio::spawn(async move {
+        let cfg = state.config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        if let Err(e) =
+            resume_interrupted_run(state.clone(), &workflow, &mut run, &tokens, &agents, None).await
+        {
+            settle_errored_run(&state, &workflow, &mut run, &e).await;
+        }
+        crate::core::run_notify::notify_if_failed(&state, &workflow, &run).await;
+    });
 }
 
 /// A2 — continue an `Interrupted` run the caller just claimed via
@@ -4013,6 +4677,22 @@ pub(crate) fn persist_declared_artifacts(
     }
 }
 
+/// Replays a run's recorded step results into the context, in run order, as
+/// if the run had never paused.
+pub(crate) fn replay_prior_results(ctx: &mut TemplateContext, results: &[StepResult]) {
+    for prior in results {
+        ctx.set_step_output(&prior.step_name, &prior.output);
+        ctx.set_step_kind(&prior.step_name, prior.step_kind.as_deref());
+        let prior_agent = prior.step_agent.as_ref().map(|a| format!("{a:?}"));
+        ctx.set_step_meta(
+            &prior.step_name,
+            prior_agent.as_deref(),
+            prior.step_model.as_deref(),
+        );
+        ctx.set_step_provenance(&prior.step_name, prior.agent_provenance.as_deref());
+    }
+}
+
 /// Stamp the step's "what was actually used here" metadata onto a
 /// freshly-produced [`StepResult`] so editing the workflow afterwards
 /// (swapping the agent, retargeting the plugin, changing the endpoint)
@@ -4039,6 +4719,7 @@ pub(crate) fn record_step_completion(
 ) {
     apply_step_snapshot(step, result, model_tiers);
     ctx.set_step_output(&step.name, &result.output);
+    ctx.set_step_kind(&step.name, result.step_kind.as_deref());
     let agent_name = result.step_agent.as_ref().map(|a| format!("{a:?}"));
     ctx.set_step_meta(
         &step.name,
@@ -4067,6 +4748,8 @@ pub(crate) fn apply_step_snapshot(
         StepType::PublishPageData => "PublishPageData",
         StepType::SubWorkflow => "SubWorkflow",
         StepType::TriggerWorkflow => "TriggerWorkflow",
+        StepType::DelegateSubtasks => "DelegateSubtasks",
+        StepType::TaskBoard => "TaskBoard",
     };
     result.step_kind = Some(kind.into());
     if matches!(step.step_type, StepType::Agent) {
@@ -4158,7 +4841,10 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
 /// reported; only step kinds that run no model can claim a measured zero.
 fn interrupted_step_tokens(step_type: &StepType) -> Option<u64> {
     match step_type {
-        StepType::Agent | StepType::BatchQuickPrompt | StepType::SubWorkflow => None,
+        StepType::Agent
+        | StepType::BatchQuickPrompt
+        | StepType::SubWorkflow
+        | StepType::DelegateSubtasks => None,
         _ => Some(0),
     }
 }
@@ -4457,11 +5143,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -4491,6 +5179,8 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -4806,11 +5496,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,
@@ -4841,6 +5533,8 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -4972,6 +5666,8 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         }
     }
 
@@ -5238,6 +5934,7 @@ mod tests {
         artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
     ) -> Workflow {
         Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "test".into(),
@@ -5411,6 +6108,7 @@ mod tests {
 
     fn pending_run(id: &str, workflow_id: &str) -> WorkflowRun {
         WorkflowRun {
+            outcome: None,
             id: id.into(),
             workflow_id: workflow_id.into(),
             status: RunStatus::Pending,
@@ -6800,7 +7498,9 @@ mod tests {
             .map(|_| run)
         });
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // The paused turn holds the step open, so the readable activity is the event;
+        // a run that ends first stops the wait too. The ceiling only bounds a hang.
+        let status = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 let axum::Json(response) = crate::api::mcp_remote::workflow_run_status(
                     axum::extract::State(state.clone()),
@@ -6808,16 +7508,24 @@ mod tests {
                     axum::extract::Path("run-activity".to_string()),
                 )
                 .await;
-                if let Some(status) = response.data.filter(|s| s.current_activity.is_some()) {
+                if let Some(status) = response
+                    .data
+                    .filter(|s| s.current_activity.is_some() || s.finished_at.is_some())
+                {
                     return status;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("the running step's activity must become readable");
+        .expect("the run neither exposed its activity nor ended");
+        let activity = status.current_activity.clone().unwrap_or_else(|| {
+            panic!(
+                "the running step's activity must become readable, run ended {}",
+                status.status
+            )
+        });
         assert_eq!(status.current_step.as_deref(), Some("orchestrateur"));
-        let activity = status.current_activity.clone().unwrap();
         assert_eq!(activity.category, crate::models::ActivityCategory::Execute);
         let axum::Json(detail) = crate::api::workflows::get_run(
             axum::extract::State(state.clone()),
@@ -7527,6 +8235,679 @@ mod tests {
         let output = &run.step_results.last().unwrap().output;
         assert!(output.contains("ref:workflow:no-such-workflow"), "{output}");
         assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    // ─── KT-920 — repository profile ─────────────────────────────────────
+
+    const PROFILE_MAIN: &str =
+        "schema_version = 1\n[validation.targets.lint]\ncommand = \"make lint-from-main\"\n";
+
+    #[tokio::test]
+    async fn an_exec_step_reads_the_profile_of_the_default_branch_not_of_its_worktree() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-profile").await;
+        let root = repo.path();
+        std::fs::create_dir_all(root.join("kronn")).unwrap();
+        std::fs::write(root.join("kronn/project.toml"), PROFILE_MAIN).unwrap();
+        git_in(root, &["add", "."]).await;
+        git_in(root, &["commit", "-q", "-m", "profile"]).await;
+        // The checkout sits on a branch that rewrites the profile: the run's
+        // worktree starts from it, the profile must not.
+        git_in(root, &["checkout", "-q", "-b", "pr-branch"]).await;
+        std::fs::write(
+            root.join("kronn/project.toml"),
+            PROFILE_MAIN.replace("lint-from-main", "lint-from-pr"),
+        )
+        .unwrap();
+        git_in(root, &["commit", "-q", "-am", "pr rewrites its rules"]).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-profile".into();
+        workflow.name = "profile".into();
+        workflow.project_id = Some("proj-profile".into());
+        workflow.workspace_config = Some(WorkspaceConfig {
+            hooks: WorkspaceHooks::default(),
+            require_isolation: true,
+            main_tree_read_only: false,
+            base_ref: None,
+        });
+        workflow.exec_allowlist = vec!["cat".into(), "echo".into()];
+        workflow.steps = vec![
+            exec_step("worktree_copy", "cat", &["kronn/project.toml"]),
+            exec_step(
+                "profile_value",
+                "echo",
+                &["lint={{project.validation.targets.lint.command}}"],
+            ),
+        ];
+        let mut run = pending_run("run-profile", &workflow.id);
+        run.project_id = Some("proj-profile".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(run.workspace_path.is_some(), "the run is isolated");
+        assert!(
+            run.step_results[0].output.contains("lint-from-pr"),
+            "{}",
+            run.step_results[0].output
+        );
+        let read = &run.step_results[1].output;
+        assert!(read.contains("lint=make lint-from-main"), "{read}");
+        assert!(!read.contains("lint-from-pr"), "{read}");
+    }
+
+    #[tokio::test]
+    async fn a_run_reading_a_profile_its_project_lacks_fails_before_its_first_step() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-no-profile").await;
+        let marker = repo.path().join("launched");
+        let marker_arg = marker.to_string_lossy().to_string();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-no-profile".into();
+        workflow.project_id = Some("proj-no-profile".into());
+        workflow.exec_allowlist = vec!["touch".into()];
+        workflow.steps = vec![exec_step(
+            "launch",
+            "touch",
+            &[marker_arg.as_str(), "{{project.forge.base_branch}}"],
+        )];
+        let mut run = pending_run("run-no-profile", &workflow.id);
+        run.project_id = Some("proj-no-profile".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Failed, "{:?}", run.step_results);
+        let result = run.step_results.last().unwrap();
+        assert_eq!(result.step_name, "__project_profile__");
+        assert!(
+            result.output.contains("kronn/project.toml")
+                && result.output.contains("project.forge.base_branch"),
+            "{}",
+            result.output
+        );
+        assert!(!marker.exists(), "the command must not have been launched");
+    }
+
+    #[tokio::test]
+    async fn a_project_without_a_profile_runs_a_workflow_that_does_not_read_one() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo = git_project(&state, "proj-plain").await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-plain".into();
+        workflow.project_id = Some("proj-plain".into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step(
+            "hello",
+            "echo",
+            &["branch={{project.forge.base_branch ?? \"none\"}}"],
+        )];
+        let mut run = pending_run("run-plain", &workflow.id);
+        run.project_id = Some("proj-plain".into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        assert!(run.step_results[0].output.contains("branch=none"));
+    }
+
+    /// Commits `content` as the profile on main (or removes it when `None`).
+    async fn commit_profile(root: &std::path::Path, content: Option<&str>) {
+        let file = root.join("kronn/project.toml");
+        match content {
+            Some(text) => {
+                std::fs::create_dir_all(root.join("kronn")).unwrap();
+                std::fs::write(&file, text).unwrap();
+                git_in(root, &["add", "."]).await;
+            }
+            None => {
+                git_in(root, &["rm", "-q", "kronn/project.toml"]).await;
+            }
+        }
+        git_in(root, &["commit", "-q", "-m", "profile"]).await;
+    }
+
+    fn restarted(state: &crate::AppState) -> crate::AppState {
+        let cfg = crate::core::config::default_config();
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
+        crate::AppState::new_defaults(
+            config,
+            state.db.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        )
+    }
+
+    /// Runs `echo before`, a Gate, `echo after`; `pause` edits the repository
+    /// while the run waits, then a restarted Kronn approves the Gate.
+    async fn profile_across_a_gate(
+        id: &str,
+        initial: Option<&str>,
+        pause: Option<Option<&str>>,
+        read: &str,
+    ) -> WorkflowRun {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, id).await;
+        if let Some(text) = initial {
+            commit_profile(repo.path(), Some(text)).await;
+        }
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{id}");
+        workflow.project_id = Some(id.into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![
+            exec_step("before", "echo", &[read]),
+            gate,
+            exec_step("after", "echo", &[read]),
+        ];
+        let mut run = pending_run(&format!("run-{id}"), &workflow.id);
+        run.project_id = Some(id.into());
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        assert_eq!(
+            run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            run.step_results
+        );
+        if let Some(change) = pause {
+            commit_profile(repo.path(), change).await;
+        }
+        // As the approval endpoint does: claim the waiting run, then resume.
+        let claimed_id = run.id.clone();
+        let claimed = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap();
+        assert!(claimed);
+        run.status = RunStatus::Running;
+        resume_run(
+            restarted(&state),
+            &workflow,
+            &mut run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("approval resumes");
+        assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+        run
+    }
+
+    fn step_output<'a>(run: &'a WorkflowRun, name: &str) -> &'a str {
+        &run.step_results
+            .iter()
+            .rfind(|step| step.step_name == name)
+            .unwrap_or_else(|| panic!("{name} ran: {:?}", run.step_results))
+            .output
+    }
+
+    #[tokio::test]
+    async fn a_resumed_run_keeps_the_profile_it_started_with() {
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let modified = PROFILE_MAIN.replace("lint-from-main", "lint-changed-in-pause");
+        for (id, pause) in [
+            ("proj-pin-modified", Some(modified.as_str())),
+            ("proj-pin-deleted", None),
+        ] {
+            let run = profile_across_a_gate(id, Some(PROFILE_MAIN), Some(pause), read).await;
+            for step in ["before", "after"] {
+                let output = step_output(&run, step);
+                assert!(
+                    output.contains("lint=make lint-from-main"),
+                    "{id} {step}: {output}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_profile_added_during_a_pause_does_not_reach_the_resumed_run() {
+        let read = "lint={{project.validation.targets.lint.command ?? \"none\"}}";
+        let run =
+            profile_across_a_gate("proj-pin-added", None, Some(Some(PROFILE_MAIN)), read).await;
+        assert!(step_output(&run, "before").contains("lint=none"));
+        let after = step_output(&run, "after");
+        assert!(after.contains("lint=none"), "{after}");
+    }
+
+    #[tokio::test]
+    async fn a_child_run_reads_the_profile_its_parent_pinned() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, "proj-pin-child").await;
+        commit_profile(repo.path(), Some(PROFILE_MAIN)).await;
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = "wf-pin-parent".into();
+        parent.project_id = Some("proj-pin-child".into());
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        parent.steps = vec![gate];
+        let mut parent_run = pending_run("run-pin-parent", &parent.id);
+        parent_run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &parent_run).await;
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut parent_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent");
+        assert_eq!(parent_run.status, RunStatus::WaitingApproval);
+        commit_profile(
+            repo.path(),
+            Some(&PROFILE_MAIN.replace("lint-from-main", "lint-after-parent")),
+        )
+        .await;
+
+        let mut child = make_workflow_with_artifacts(Default::default());
+        child.id = "wf-pin-child".into();
+        child.project_id = parent.project_id.clone();
+        child.exec_allowlist = vec!["echo".into()];
+        child.steps = vec![exec_step(
+            "item",
+            "echo",
+            &["lint={{project.validation.targets.lint.command}}"],
+        )];
+        let mut child_run = pending_run("run-pin-child", &child.id);
+        child_run.project_id = child.project_id.clone();
+        child_run.parent_run_id = Some(parent_run.id.clone());
+        insert_wf_and_run(&state, &child, &child_run).await;
+        execute_run(
+            state.clone(),
+            &child,
+            &mut child_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("child");
+        assert_eq!(
+            child_run.status,
+            RunStatus::Success,
+            "{:?}",
+            child_run.step_results
+        );
+        let output = step_output(&child_run, "item");
+        assert!(output.contains("lint=make lint-from-main"), "{output}");
+    }
+
+    /// Parent in project A paused at a Gate; child B1 (project B) runs, B's
+    /// profile changes, then child B2 runs, pauses at a Gate and resumes on a
+    /// restarted Kronn. Returns what B1 and B2 (before and after) read.
+    async fn two_children_of_another_project(
+        tag: &str,
+        initial_b: Option<&str>,
+        changed_b: Option<&str>,
+        read: &str,
+    ) -> (String, String, String) {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo_a = git_project(&state, &format!("proj-{tag}-a")).await;
+        let repo_b = git_project(&state, &format!("proj-{tag}-b")).await;
+        if let Some(text) = initial_b {
+            commit_profile(repo_b.path(), Some(text)).await;
+        }
+        let mut parent = make_workflow_with_artifacts(Default::default());
+        parent.id = format!("wf-{tag}-parent");
+        parent.project_id = Some(format!("proj-{tag}-a"));
+        let mut gate = fake_step("hold");
+        gate.step_type = StepType::Gate;
+        parent.steps = vec![gate];
+        let mut parent_run = pending_run(&format!("run-{tag}-parent"), &parent.id);
+        parent_run.project_id = parent.project_id.clone();
+        insert_wf_and_run(&state, &parent, &parent_run).await;
+        execute_run(
+            state.clone(),
+            &parent,
+            &mut parent_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("parent");
+        assert_eq!(parent_run.status, RunStatus::WaitingApproval);
+
+        let child_run_of = |id: &str, workflow: &Workflow| {
+            let mut run = pending_run(id, &workflow.id);
+            run.project_id = workflow.project_id.clone();
+            run.parent_run_id = Some(parent_run.id.clone());
+            run
+        };
+        let mut b1 = make_workflow_with_artifacts(Default::default());
+        b1.id = format!("wf-{tag}-b1");
+        b1.project_id = Some(format!("proj-{tag}-b"));
+        b1.exec_allowlist = vec!["echo".into()];
+        b1.steps = vec![exec_step("item", "echo", &[read])];
+        let mut b1_run = child_run_of(&format!("run-{tag}-b1"), &b1);
+        insert_wf_and_run(&state, &b1, &b1_run).await;
+        execute_run(
+            state.clone(),
+            &b1,
+            &mut b1_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("b1");
+        assert_eq!(
+            b1_run.status,
+            RunStatus::Success,
+            "{:?}",
+            b1_run.step_results
+        );
+
+        commit_profile(repo_b.path(), changed_b).await;
+
+        let mut b2 = make_workflow_with_artifacts(Default::default());
+        b2.id = format!("wf-{tag}-b2");
+        b2.project_id = Some(format!("proj-{tag}-b"));
+        b2.exec_allowlist = vec!["echo".into()];
+        let mut gate = fake_step("review");
+        gate.step_type = StepType::Gate;
+        b2.steps = vec![
+            exec_step("before", "echo", &[read]),
+            gate,
+            exec_step("after", "echo", &[read]),
+        ];
+        let mut b2_run = child_run_of(&format!("run-{tag}-b2"), &b2);
+        insert_wf_and_run(&state, &b2, &b2_run).await;
+        execute_run(
+            state.clone(),
+            &b2,
+            &mut b2_run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("b2");
+        assert_eq!(
+            b2_run.status,
+            RunStatus::WaitingApproval,
+            "{:?}",
+            b2_run.step_results
+        );
+        let claimed_id = b2_run.id.clone();
+        assert!(state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::claim_waiting_run(conn, &claimed_id, &RunStatus::Running)
+            })
+            .await
+            .unwrap());
+        b2_run.status = RunStatus::Running;
+        resume_run(
+            restarted(&state),
+            &b2,
+            &mut b2_run,
+            GateDecision::Approve { comment: None },
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        .expect("b2 resumes");
+        assert_eq!(
+            b2_run.status,
+            RunStatus::Success,
+            "{:?}",
+            b2_run.step_results
+        );
+        (
+            step_output(&b1_run, "item").to_string(),
+            step_output(&b2_run, "before").to_string(),
+            step_output(&b2_run, "after").to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn children_of_another_project_share_one_profile_snapshot() {
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let changed = PROFILE_MAIN.replace("lint-from-main", "lint-changed-between-children");
+        let (b1, before, after) =
+            two_children_of_another_project("share", Some(PROFILE_MAIN), Some(&changed), read)
+                .await;
+        for output in [&b1, &before, &after] {
+            assert!(output.contains("lint=make lint-from-main"), "{output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn children_of_another_project_share_its_absence_of_profile() {
+        let read = "lint={{project.validation.targets.lint.command ?? \"none\"}}";
+        let (b1, before, after) =
+            two_children_of_another_project("absent", None, Some(PROFILE_MAIN), read).await;
+        for output in [&b1, &before, &after] {
+            assert!(output.contains("lint=none"), "{output}");
+        }
+    }
+
+    /// A workflow whose single Gate pauses its run, keeping its pin alive.
+    fn paused_workflow(id: &str, project: &str) -> Workflow {
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = id.into();
+        workflow.project_id = Some(project.into());
+        let mut gate = fake_step("hold");
+        gate.step_type = StepType::Gate;
+        workflow.steps = vec![gate];
+        workflow
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_shares_its_profile_read_with_the_whole_tree() {
+        let (state, tokens, agents) = test_state_and_configs();
+        let _repo_a = git_project(&state, "proj-tree-a").await;
+        let repo_b = git_project(&state, "proj-tree-b").await;
+        commit_profile(repo_b.path(), Some(PROFILE_MAIN)).await;
+        let read = "lint={{project.validation.targets.lint.command}}";
+        let echo = |id: &str| {
+            let mut workflow = make_workflow_with_artifacts(Default::default());
+            workflow.id = id.into();
+            workflow.project_id = Some("proj-tree-b".into());
+            workflow.exec_allowlist = vec!["echo".into()];
+            workflow.steps = vec![exec_step("item", "echo", &[read])];
+            workflow
+        };
+        let start = |id: &str, workflow: &Workflow, parent: Option<&str>| {
+            let mut run = pending_run(id, &workflow.id);
+            run.project_id = workflow.project_id.clone();
+            run.parent_run_id = parent.map(str::to_string);
+            run
+        };
+        let mut finished = Vec::new();
+        for (run_id, workflow, parent) in [
+            (
+                "run-tree-root",
+                paused_workflow("wf-tree-root", "proj-tree-a"),
+                None,
+            ),
+            (
+                "run-tree-c",
+                paused_workflow("wf-tree-c", "proj-tree-a"),
+                Some("run-tree-root"),
+            ),
+            ("run-tree-b1", echo("wf-tree-b1"), Some("run-tree-c")),
+            ("run-tree-b2", echo("wf-tree-b2"), Some("run-tree-root")),
+        ] {
+            if run_id == "run-tree-b2" {
+                commit_profile(
+                    repo_b.path(),
+                    Some(&PROFILE_MAIN.replace("lint-from-main", "lint-changed-in-tree")),
+                )
+                .await;
+            }
+            let mut run = start(run_id, &workflow, parent);
+            insert_wf_and_run(&state, &workflow, &run).await;
+            execute_run(
+                state.clone(),
+                &workflow,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect(run_id);
+            finished.push(run);
+        }
+        assert_eq!(finished[0].status, RunStatus::WaitingApproval);
+        assert_eq!(finished[1].status, RunStatus::WaitingApproval);
+        for run in &finished[2..] {
+            assert_eq!(run.status, RunStatus::Success, "{:?}", run.step_results);
+            let output = step_output(run, "item");
+            assert!(
+                output.contains("lint=make lint-from-main"),
+                "{}: {output}",
+                run.id
+            );
+        }
+    }
+
+    const SECRET: &str = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+
+    #[tokio::test]
+    async fn a_profile_refusal_stores_no_value_from_the_file() {
+        refusal_stores_no_secret(
+            "proj-profile-secret",
+            &format!(
+                "schema_version = 1\n[forge]\nrequired_approvals = \"{SECRET}\"\napi_token = \"{SECRET}\"\n"
+            ),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_dynamic_key_reaches_neither_the_result_nor_the_pin() {
+        refusal_stores_no_secret(
+            "proj-profile-key",
+            &format!(
+                "schema_version = 1\n[tracker]\nkind = \"jira\"\n[tracker.statuses]\n\"{SECRET}\" = \"To Review\"\n"
+            ),
+        )
+        .await;
+    }
+
+    async fn refusal_stores_no_secret(project: &str, profile: &str) {
+        let (state, tokens, agents) = test_state_and_configs();
+        let repo = git_project(&state, project).await;
+        let token = SECRET;
+        commit_profile(repo.path(), Some(profile)).await;
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = format!("wf-{project}");
+        workflow.project_id = Some(project.into());
+        workflow.exec_allowlist = vec!["echo".into()];
+        workflow.steps = vec![exec_step("x", "echo", &["{{project.forge.base_branch}}"])];
+        let run_id = format!("run-{project}");
+        let mut run = pending_run(&run_id, &workflow.id);
+        run.project_id = workflow.project_id.clone();
+        insert_wf_and_run(&state, &workflow, &run).await;
+        execute_run(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("run");
+        assert_eq!(run.status, RunStatus::Failed);
+        let result = run.step_results.last().unwrap();
+        assert_eq!(result.step_name, "__project_profile__");
+        assert!(
+            result.output.contains("kronn/project.toml"),
+            "{}",
+            result.output
+        );
+        assert!(!result.output.contains(token), "{}", result.output);
+        let persisted = state
+            .db
+            .with_conn(move |conn| {
+                let run = crate::db::workflows::get_run(conn, &run_id)?;
+                let pins: Vec<String> = conn
+                    .prepare("SELECT content_json FROM workflow_run_pins")?
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok((serde_json::to_string(&run)?, pins.join("\n")))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !persisted.0.contains(token),
+            "the durable run holds the value"
+        );
+        assert!(!persisted.1.contains(token), "the pin holds the value");
     }
 
     // ─── KT-910 — the run's artifacts directory ──────────────────────────
@@ -9104,6 +10485,14 @@ mod tests {
             ]
         );
     }
+
+    mod gate_guard_runs;
+    mod native_full_access_runs;
+    mod quota_wait_runs;
+    mod run_effect_runs;
+    mod run_pin_runs;
+    mod task_board_runs;
+    mod workflow_safety_runs;
 }
 
 #[cfg(test)]

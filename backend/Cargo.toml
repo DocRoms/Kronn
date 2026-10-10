@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.14.3"
+version = "0.15.0"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -40,6 +40,8 @@ rusqlite = { version = "0.39", features = ["bundled", "backup", "trace", "hooks"
 cron = "0.16"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+# Machine timezone (macOS/Windows/Linux); already in the tree through chrono.
+iana-time-zone = "0.1"
 
 # File system
 walkdir = "2"

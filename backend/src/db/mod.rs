@@ -2,13 +2,16 @@ pub mod acp_runtime_sessions;
 pub mod agent_decisions;
 pub mod agent_dispatch;
 pub mod agent_jobs;
+pub mod api_access_policies;
 pub mod api_call_logs;
+pub mod assistant_conversations;
 pub mod audit_runs;
 pub mod cli_telemetry;
 pub(crate) mod cli_worker_bindings;
 pub mod compare;
 pub mod contacts;
 pub mod context_audits;
+pub mod default_contents;
 pub mod delivery_summaries;
 pub mod disc_source;
 pub mod discussion_actions;
@@ -31,6 +34,7 @@ pub mod id_resolver;
 pub(crate) mod kronn_action_engine;
 pub mod learnings;
 pub mod lite_llm_model_failures;
+pub mod live_page_action_trusts;
 pub mod live_page_actions;
 pub mod live_pages;
 pub mod mcps;
@@ -56,11 +60,14 @@ pub mod run_retention;
 pub mod run_state;
 pub mod shared_runs;
 pub mod stored_credentials;
+pub mod task_boards;
 pub mod ui_preferences;
 pub mod worker_deliveries;
 pub mod worker_offers;
 pub mod worker_reviews;
+pub mod workflow_run_pins;
 pub mod workflow_step_rooms;
+pub mod workflow_watch_state;
 pub mod workflows;
 
 #[cfg(test)]
@@ -147,9 +154,16 @@ pub struct Database {
     /// Raised whenever the write connection changes a row a repository
     /// resource is rendered from — see [`resource_changes`].
     resource_changes: Arc<resource_changes::ResourceChanges>,
+    /// KT-1111 — what masks assistant conversations at every write; lent to
+    /// the closures run on this database's connections.
+    assistant_guard: Arc<assistant_conversations::AssistantGuard>,
 }
 
 impl Database {
+    pub fn assistant_guard(&self) -> &Arc<assistant_conversations::AssistantGuard> {
+        &self.assistant_guard
+    }
+
     /// The signal of resource writes, for whoever has to react to them.
     pub fn resource_changes(&self) -> Arc<resource_changes::ResourceChanges> {
         Arc::clone(&self.resource_changes)
@@ -180,6 +194,7 @@ impl Database {
             boot_interrupted: Mutex::new(Vec::new()),
             catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
             resource_changes,
+            assistant_guard: Arc::default(),
         })
     }
 
@@ -348,6 +363,7 @@ impl Database {
             boot_interrupted: Mutex::new(boot_interrupted),
             catalog_refresh_locks: Mutex::new(std::collections::HashMap::new()),
             resource_changes,
+            assistant_guard: Arc::default(),
         })
     }
 
@@ -409,7 +425,7 @@ impl Database {
             Some(rc) => rc.clone(),
             None => self.conn.clone(),
         };
-        Self::run_on(conn, f).await
+        Self::run_on(conn, self.assistant_guard.clone(), f).await
     }
 
     /// Execute a blocking closure with the database connection.
@@ -420,12 +436,16 @@ impl Database {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        Self::run_on(self.conn.clone(), f).await
+        Self::run_on(self.conn.clone(), self.assistant_guard.clone(), f).await
     }
 
     /// Shared executor for both connections: spawn_blocking + poison
     /// recovery + panic containment (0.8.11 hardening semantics).
-    async fn run_on<F, T>(conn: Arc<Mutex<Connection>>, f: F) -> Result<T>
+    async fn run_on<F, T>(
+        conn: Arc<Mutex<Connection>>,
+        assistant_guard: Arc<assistant_conversations::AssistantGuard>,
+        f: F,
+    ) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,
@@ -448,6 +468,7 @@ impl Database {
             };
             // Catch panics BEFORE they unwind through the guard: the mutex
             // never poisons, and the panic message reaches the API error.
+            let _lent = assistant_conversations::lend_guard(assistant_guard);
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&guard))) {
                 Ok(r) => r,
                 Err(payload) => {

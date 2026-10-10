@@ -237,6 +237,7 @@ mod tests {
         }))
         .unwrap();
         let workflow = crate::models::Workflow {
+            retention: None,
             project_scope: None,
             pinned: false,
             id: "wf-reclaim".into(),
@@ -279,6 +280,7 @@ mod tests {
     fn run_row(run_id: &str, status: RunStatus, age_days: i64, path: &Path) -> WorkflowRun {
         let finished = Utc::now() - chrono::Duration::days(age_days);
         WorkflowRun {
+            outcome: None,
             id: run_id.into(),
             workflow_id: "wf-reclaim".into(),
             status,

@@ -48,6 +48,31 @@ that quiet returns cost nothing. The bridge's runtime functions did not change.
 [src: file: backend/scripts/disc-introspection-mcp.py:9743-9747]
 [src: file: backend/scripts/disc-introspection-mcp.py:10815]
 
+## Deaf windows in the bridge wait (KT-703)
+
+The bridge loop applied the server's `pacing.next_delay_seconds` as a sleep
+after every quiet 15-second poll. That pacing was designed for agents that
+re-arm the wait themselves; once the bridge chained polls itself, the sleep
+only removed listening time. It lasted 40 s while a human was active and up to
+480 s after about 23 quiet minutes. A turn posted during the sleep was seen at
+the next poll, so a reply could take more than 8 minutes while presence showed
+the session as dormant but present. The bridge now chains polls without a pause,
+with a 1-second floor if the server answers early. The server's pacing values
+and the `next_poll_at` presence projection are unchanged.
+[src: file: backend/scripts/disc-introspection-mcp.py:7306-7415]
+[src: file: backend/src/api/disc_introspection.rs:175-185]
+
+The `session_budget` block on a wake said "rotate this session" to any long
+session, including the principal of a shared room. A session that read it
+stopped listening there. The verdict is now attached only in a delegated
+task's execution room.
+[src: file: backend/src/api/disc_invite.rs:1829-1860]
+
+These fixes do not cover host behaviour. A host can still move a long wait to
+the background. Any other Kronn call ends the wait (`wait_preempted`), and an
+interactive turn that ends while the wait runs in the background is outside
+Kronn's control. A real Claude Code run is still needed to check that case.
+
 ## Qualification scope
 
 Three new join-contract tests failed before the instruction change; the six

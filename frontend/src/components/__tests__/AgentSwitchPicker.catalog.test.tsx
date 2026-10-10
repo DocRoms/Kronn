@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApiMock } from '../../test/apiMock';
 import type { CatalogModelEntry, ModelTiersConfig } from '../../types/generated';
@@ -6,6 +6,7 @@ import type { CatalogModelEntry, ModelTiersConfig } from '../../types/generated'
 const { list } = vi.hoisted(() => ({ list: vi.fn() }));
 vi.mock('../../lib/api', () => buildApiMock({ modelCatalogApi: { list: list as never } }));
 import { AgentSwitchPicker } from '../AgentSwitchPicker';
+import { MentionTierChoices } from '../MentionTierChoices';
 
 function model(id: string, tier: CatalogModelEntry['tier_assignment'] = null): CatalogModelEntry {
   return { id, runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode',
@@ -253,4 +254,36 @@ describe('AgentSwitchPicker — configured identity and catalogue provenance', (
     expect(screen.queryByRole('dialog', { name: 'Choose' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Choose' })).toHaveFocus();
   });
+});
+
+// KT-667 — a launchable tier absent from the CLI's complete listing shows a
+// visible warning on the choice, with the detail in its title, and stays usable.
+it('presents the launchable catalogue warning visually before choosing the agent tier', async () => {
+  const notice = 'model operator-choice is absent from the complete CLI listing; this launch can still try it';
+  list.mockResolvedValue({ targets: [{
+    runtime_target_id: 'agent:claude-code', agent_type: 'ClaudeCode', stale: false, live_refresh_ok: true,
+    models: [model('operator-choice', 'reasoning')],
+    tier_verdicts: [{ tier: 'reasoning', requested_model: 'operator-choice', effective_model: 'operator-choice', launchable: true, notice }],
+  }] });
+  await show('operator-choice');
+  const button = await screen.findByRole('menuitem', { name: /Claude Code.*reasoning/ });
+  await waitFor(() => expect(button.getAttribute('title') ?? '').toContain(notice));
+  expect(button).not.toBeDisabled();
+  expect(within(button).getByText(/modelCatalog\.notListedBadge/)).toBeVisible();
+});
+
+it('presents the launchable catalogue warning visually before choosing the mention tier', () => {
+  const notice = 'model operator-choice is absent from the complete CLI listing; this launch can still try it';
+  const onSelect = vi.fn();
+  render(<MentionTierChoices trigger="@claude" resolve={tier => ({
+    configured: 'operator-choice', entry: model('operator-choice', tier), view: undefined,
+    model: 'operator-choice', unavailable: false, replacement: null, refusal: null,
+    notice: tier === 'reasoning' ? notice : null, provenance: 'live' as const,
+  })} onSelect={onSelect} t={(key, ...args) => [key, ...args].join(' ')} />);
+  const button = screen.getAllByRole('button').find(candidate => candidate.getAttribute('data-tier') === 'reasoning')!;
+  expect(button.getAttribute('title')).toContain(notice);
+  expect(within(button).getByText(/modelCatalog\.notListedBadge/)).toBeVisible();
+  expect(button).not.toBeDisabled();
+  fireEvent.mouseDown(button);
+  expect(onSelect).toHaveBeenCalledWith('reasoning');
 });

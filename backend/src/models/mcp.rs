@@ -333,6 +333,68 @@ pub struct ApiEndpoint {
     pub description: String,
 }
 
+// ─── Agent access policy (KT-1026) ───────────────────────────────────────
+
+/// Who may reach a plugin, or one of its endpoints, through Kronn.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum ApiAccessRule {
+    All,
+    /// Only the listed agents, each optionally pinned to one model.
+    Agents {
+        agents: Vec<ApiAccessSubject>,
+    },
+    /// Only a model served on this machine, in a conversation or workflow
+    /// where every agent is local too.
+    LocalOnly,
+    Blocked,
+}
+
+/// One allowed agent; `model: None` admits every model of that agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiAccessSubject {
+    pub agent: super::AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+}
+
+/// A rule for one endpoint (method + path template), overriding the plugin's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiEndpointAccess {
+    pub method: String,
+    pub path: String,
+    pub access: ApiAccessRule,
+}
+
+/// A plugin's access policy. Its presence switches the broker to strict mode:
+/// only declared endpoints (the spec's and these) may be called.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiAccessPolicy {
+    pub access: ApiAccessRule,
+    #[serde(default)]
+    pub endpoints: Vec<ApiEndpointAccess>,
+}
+
+/// A stored policy, as the overview lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApiAccessPolicyEntry {
+    pub server_id: String,
+    pub policy: ApiAccessPolicy,
+}
+
+/// `PUT /api/mcps/servers/{id}/access-policy`; `policy: null` removes it.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct SetApiAccessPolicyRequest {
+    pub policy: Option<ApiAccessPolicy>,
+}
+
 /// A non-secret parameter the plugin instance needs (e.g. host, workspace id).
 /// Stored in the same encrypted env blob as the API key, but the UI renders
 /// these as plain inputs (no mask). Prompts may reference them symbolically;
@@ -788,6 +850,9 @@ pub struct McpOverview {
     /// config or remove the entry.
     #[serde(default)]
     pub incomplete_configs: Vec<McpIncompleteConfig>,
+    /// Plugins under an agent access policy (KT-1026).
+    #[serde(default)]
+    pub access_policies: Vec<ApiAccessPolicyEntry>,
 }
 
 /// A known incompatibility between an MCP server and a specific agent.

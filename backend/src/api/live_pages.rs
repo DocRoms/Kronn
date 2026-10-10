@@ -14,6 +14,7 @@ use crate::models::{
 use crate::AppState;
 
 const MAX_PAGE_HTML_BYTES: usize = 1_000_000;
+const INVALID_SLUG_MESSAGE: &str = "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id";
 
 pub async fn capability(
     State(state): State<AppState>,
@@ -179,6 +180,16 @@ pub async fn update(
             }
         };
     }
+    if let Some(slug) = request.slug.take() {
+        let slug = slug.trim().to_string();
+        if !valid_slug(&slug) {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Validation,
+                INVALID_SLUG_MESSAGE,
+            ));
+        }
+        request.slug = Some(slug);
+    }
     match state
         .db
         .with_conn(move |conn| crate::db::live_pages::update_live_page(conn, &id, &request))
@@ -189,6 +200,15 @@ pub async fn update(
             ApiErrorCode::NotFound,
             "Page not found",
         )),
+        Err(error)
+            if error.is::<crate::db::live_pages::SlugUnavailable>()
+                || error.to_string().contains("live_pages.slug") =>
+        {
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                crate::db::live_pages::SlugUnavailable.to_string(),
+            ))
+        }
         Err(error) => Json(ApiResponse::err_coded(
             ApiErrorCode::Internal,
             format!("Unable to update Page: {error}"),
@@ -353,7 +373,7 @@ pub async fn create(
     if !valid_slug(&slug) {
         return Json(ApiResponse::err_coded(
             ApiErrorCode::Validation,
-            "Page slug must contain lowercase ASCII letters, digits and single '-' separators, and must not look like a page id",
+            INVALID_SLUG_MESSAGE,
         ));
     }
 
@@ -401,8 +421,7 @@ pub async fn create(
                 // Promoting another preview with the same title creates a new
                 // Artifact. Ordinary explicit-slug creation keeps its conflict contract.
                 let base = page_for_insert.slug.clone();
-                while tx.query_row("SELECT EXISTS(SELECT 1 FROM live_pages WHERE slug = ?1)",
-                    [&page_for_insert.slug], |row| row.get::<_, bool>(0))? {
+                while crate::db::live_pages::slug_is_taken(&tx, &page_for_insert.slug)? {
                     page_for_insert.slug = format!("{}-{}", base.chars().take(80).collect::<String>().trim_end_matches('-'), Uuid::new_v4().simple());
                 }
                 if page_for_insert.project_id.is_none() {
@@ -429,7 +448,9 @@ pub async fn create(
         let message = error.to_string();
         // Slugs are unique across projects: a token learns only that this one
         // is taken, never where.
-        if bridge.is_some() && message.contains("live_pages.slug") {
+        if error.is::<crate::db::live_pages::SlugUnavailable>()
+            || (bridge.is_some() && message.contains("live_pages.slug"))
+        {
             return Json(ApiResponse::err_coded(
                 ApiErrorCode::Conflict,
                 "This Page slug is not available; choose another",
@@ -501,6 +522,128 @@ pub async fn add_dataset(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteLivePageDatasetQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// What reads or writes each dataset of a Page. Human only: it names
+/// workflows a bridge token may not see.
+pub async fn dataset_usage(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<Vec<crate::models::LivePageDatasetUsage>>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Dataset usage is shown to a human only",
+        ));
+    }
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::live_pages::list_live_page_dataset_usage(conn, &id))
+        .await
+    {
+        Ok(Some(usage)) => Json(ApiResponse::ok(usage)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Page not found",
+        )),
+        Err(error) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            format!("Unable to read dataset usage: {error}"),
+        )),
+    }
+}
+
+/// Deletes a dataset nothing uses. A dataset still written, named or bound is
+/// refused with its references; only a human may delete it anyway (`force`).
+pub async fn delete_dataset(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path((id, name)): Path<(String, String)>,
+    Query(query): Query<DeleteLivePageDatasetQuery>,
+) -> Json<ApiResponse<crate::models::DeleteLivePageDatasetResult>> {
+    if query.force && bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can delete a dataset that is still in use",
+        ));
+    }
+    let force = query.force;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::delete_live_page_dataset(conn, &id, &name, force)
+        })
+        .await;
+    match result {
+        Ok(deleted) => {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::LivePageDataChanged {
+                    page_id: deleted.page_id.clone(),
+                    data_revision: deleted.data_revision,
+                });
+            Json(ApiResponse::ok(deleted))
+        }
+        Err(error) => Json(dataset_error(error, "Unable to delete dataset")),
+    }
+}
+
+/// Changes a dataset's retention limits; existing points are pruned at once.
+/// Human only, like `clear`: pruning destroys data.
+pub async fn update_dataset(
+    State(state): State<AppState>,
+    bridge: Option<axum::Extension<crate::core::bridge_token::BridgeCaller>>,
+    Path((id, name)): Path<(String, String)>,
+    Json(request): Json<crate::models::UpdateLivePageDatasetRequest>,
+) -> Json<ApiResponse<crate::models::UpdateLivePageDatasetResult>> {
+    if bridge.is_some() {
+        return Json(ApiResponse::err_coded(
+            ApiErrorCode::Validation,
+            "Only a human can change a dataset's retention limits",
+        ));
+    }
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::live_pages::update_live_page_dataset_limits(conn, &id, &name, &request)
+        })
+        .await;
+    match result {
+        Ok(updated) => {
+            if updated.points_removed > 0 {
+                let _ = state
+                    .ws_broadcast
+                    .send(crate::models::WsMessage::LivePageDataChanged {
+                        page_id: updated.dataset.page_id.clone(),
+                        data_revision: updated.data_revision,
+                    });
+            }
+            Json(ApiResponse::ok(updated))
+        }
+        Err(error) => Json(dataset_error(error, "Unable to update dataset")),
+    }
+}
+
+fn dataset_error<T: serde::Serialize>(error: anyhow::Error, context: &str) -> ApiResponse<T> {
+    let message = error.to_string();
+    let code =
+        if message == "Page not found" || error.is::<crate::db::live_pages::DatasetNotFound>() {
+            ApiErrorCode::NotFound
+        } else if error.is::<crate::db::live_pages::DatasetReferenced>() {
+            ApiErrorCode::Conflict
+        } else if message.contains("must be greater than zero") {
+            ApiErrorCode::Validation
+        } else {
+            return ApiResponse::err_coded(ApiErrorCode::Internal, format!("{context}: {message}"));
+        };
+    ApiResponse::err_coded(code, message)
+}
+
 pub async fn publish(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -511,7 +654,10 @@ pub async fn publish(
         .with_conn(move |conn| crate::db::live_pages::publish_live_page(conn, &id, &request))
         .await;
     match result {
-        Ok(publication) => Json(ApiResponse::ok(publication)),
+        Ok(publication) => {
+            announce_page_data_changed(&state, &publication);
+            Json(ApiResponse::ok(publication))
+        }
         Err(error) => {
             let message = error.to_string();
             let code = if message == "Page not found" {
@@ -617,6 +763,106 @@ pub async fn embed_frame_src(
     )
 }
 
+/// Tell every open tab that the allowed sites changed: they re-read the list
+/// and take down what was revoked. The event names the change, never the list.
+/// Tell open views of the Page its data changed; nothing when it did not.
+pub fn announce_page_data_changed(
+    state: &AppState,
+    publication: &crate::models::PublishLivePageResult,
+) {
+    if publication.content_changed || publication.points_added > 0 {
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::LivePageDataChanged {
+                page_id: publication.page_id.clone(),
+                data_revision: publication.data_revision,
+            });
+    }
+}
+
+pub fn announce_embed_origins_changed(state: &AppState) {
+    let _ = state
+        .ws_broadcast
+        .send(crate::models::WsMessage::EmbedOriginsChanged);
+}
+
+fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("text/html"))
+}
+
+/// Puts the host frame policy on every response of the app's static files,
+/// so the browser itself refuses to frame a site that is not allowed, even
+/// after a redirect. Documents lose their validators: a reload must carry the
+/// current list, never a 304 for an older one.
+pub async fn document_frame_policy(
+    State(state): State<AppState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    use axum::response::IntoResponse;
+    if accepts_html(request.headers()) {
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+    }
+    let mut response = next.run(request).await;
+    let sources = {
+        let config = state.config.read().await;
+        crate::core::embed_origins::frame_src_sources(&config.embed_allowed_origins)
+    };
+    let policy = crate::core::embed_origins::policy_for_sources(&sources);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&policy).unwrap_or_else(|_| {
+            HeaderValue::from_static("frame-src 'self'; child-src 'self'; worker-src 'self' blob:")
+        }),
+    );
+    let is_html = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/html"));
+    if !is_html {
+        return response;
+    }
+    headers.remove(header::ETAG);
+    headers.remove(header::LAST_MODIFIED);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // The page reads the sources its CSP was served with from this marker.
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_APP_DOCUMENT_BYTES).await else {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "document too large",
+        )
+            .into_response();
+    };
+    let body = crate::core::embed_origins::inject_served_frame_src(&bytes, &sources)
+        .map(axum::body::Body::from)
+        .unwrap_or_else(|| axum::body::Body::from(bytes));
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, body)
+}
+
+/// Bound on an app document buffered to carry the served-sources marker.
+const MAX_APP_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// The app's built frontend, served with the host frame policy. The desktop
+/// serves its documents through this, the only place they get a CSP there.
+pub fn serve_app_documents(dist_dir: &std::path::Path, state: AppState) -> axum::Router {
+    axum::Router::new()
+        .fallback_service(
+            tower_http::services::ServeDir::new(dist_dir).append_index_html_on_directories(true),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            document_frame_policy,
+        ))
+}
+
 /// POST /api/config/embed-origins: allow and revoke origins, then persist.
 /// Returns the new list.
 pub async fn change_embed_origins(
@@ -640,8 +886,14 @@ pub async fn change_embed_origins(
             format!("Unable to save allowed sites: {error}"),
         ));
     }
+    drop(config);
+    announce_embed_origins_changed(&state);
     Json(ApiResponse::ok(next))
 }
+
+#[cfg(test)]
+#[path = "live_page_dataset_api_tests.rs"]
+mod dataset_api_tests;
 
 #[cfg(test)]
 mod tests {

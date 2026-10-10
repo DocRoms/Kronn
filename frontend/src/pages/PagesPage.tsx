@@ -6,7 +6,7 @@ import {
   PanelsTopLeft, RotateCcw, Save, Star, Table2, Trash2, Upload, Workflow, X,
 } from 'lucide-react';
 import type {
-  LivePage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
+  LivePage, LivePageDatasetUsage, LivePageDetail, LivePageDiscussionLink, LivePagePublication,
   LivePageRevision, LivePageWorkflowLink, Project,
 } from '../types/generated';
 import { docs as docsApi, pages as pagesApi, workflows as workflowsApi } from '../lib/api';
@@ -26,8 +26,12 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { exportRedactionNotice } from '../lib/redactedFields';
 import { standaloneDiscussionMessageUrl } from '../lib/live-page-navigation';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { LivePageSlugEditor } from '../components/LivePageSlugEditor';
+import { LivePageDatasetControls, LivePageDatasetUsageLine } from '../components/LivePageDatasetControls';
 import { RunStatusCard } from '../components/RunStatusCard';
 import { LivePageActionOverlay } from '../components/LivePageActionOverlay';
+import { LivePageTrustedActions } from '../components/LivePageTrustedActions';
+import { DefaultTodoOffer } from '../components/DefaultTodoOffer';
 import { LivePageEmbedOverlay } from '../components/LivePageEmbedOverlay';
 import type { RunStatusCardModel } from '../lib/runStatusCardModel';
 import { CollectionFavoritesHeader } from '../components/CollectionFavoritesHeader';
@@ -47,6 +51,7 @@ import {
   useLivePageTheme,
   usePublishPageDataWhenChanged,
 } from '../hooks/useLivePageActions';
+import { useLivePageDataPush } from '../hooks/useLivePageDataPush';
 import { userError } from '../lib/userError';
 import {
   livePageMosaicLayouts,
@@ -212,6 +217,7 @@ export function PagesPage({
   const refreshMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const mosaicMenuRef = useDismissibleDetails<HTMLDetailsElement>();
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+  const [datasetUsage, setDatasetUsage] = useState<LivePageDatasetUsage[]>([]);
   const [datasetExportBusy, setDatasetExportBusy] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const linkRelayRef = useRef<ReturnType<typeof createLivePageOpenLinkRelay> | null>(null);
@@ -220,6 +226,8 @@ export function PagesPage({
     selectedAction: pageSelectedAction,
     selectedOffer: pageSelectedOffer,
     launches: pageLaunches,
+    trusts: pageActionTrusts,
+    reloadTrusts: reloadPageActionTrusts,
     close: closePageAction,
     handleIntent: handlePageActionIntent,
     moveAnchor: movePageActionAnchor,
@@ -252,17 +260,20 @@ export function PagesPage({
   }, [collapsedSections]);
 
   const loadDetail = useCallback(async (pageId: string) => {
-    const [[nextDetail, workflows, publications, discussions, pageRevisions]] = await Promise.all([
+    const [[nextDetail, workflows, publications, discussions, pageRevisions, usage]] = await Promise.all([
       Promise.all([
         pagesApi.get(pageId),
         pagesApi.workflows(pageId),
         pagesApi.publications(pageId),
         pagesApi.discussions(pageId),
         pagesApi.revisions(pageId),
+        // Informational: a failed usage read leaves the Page usable.
+        pagesApi.datasetUsage(pageId).catch((): LivePageDatasetUsage[] => []),
       ]),
       reloadPageActions(pageId),
     ]);
     setDetail(nextDetail);
+    setDatasetUsage(usage);
     setLinkedWorkflows(workflows);
     setRecentPublications(publications);
     setLinkedDiscussions(discussions);
@@ -290,6 +301,7 @@ export function PagesPage({
         await loadDetail(target);
       } else {
         setDetail(null);
+        setDatasetUsage([]);
         setLinkedWorkflows([]);
         setRecentPublications([]);
         setLinkedDiscussions([]);
@@ -323,6 +335,15 @@ export function PagesPage({
     const timer = window.setInterval(() => { void refreshRef.current(); }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [editingHtml]);
+
+  // A publish reaches the open Page at once; HTML edits in progress are kept.
+  useLivePageDataPush(selectedId, () => {
+    const pageId = selectedId;
+    if (!pageId) return;
+    void Promise.all([pagesApi.get(pageId), reloadPageActions(pageId)]).then(([next]) => {
+      setDetail(current => (current && current.id === next.id ? next : current));
+    }).catch(() => { /* the poll retries */ });
+  });
 
   const select = useCallback(async (page: LivePage) => {
     setSelectedId(page.id);
@@ -651,8 +672,12 @@ export function PagesPage({
   // applies to the document that reported it.
   const [embedsReport, setEmbedsReport] = useState<{ doc: string; embeds: LivePageEmbedPlacement[] } | null>(null);
   const pageEmbeds = embedsReport && embedsReport.doc === document ? embedsReport.embeds : NO_EMBEDS;
+  // Display preferences a Page asks to keep are stored for the Page shown.
+  const shownPageIdRef = useRef<string | null>(null);
+  useEffect(() => { shownPageIdRef.current = detail?.id ?? null; }, [detail]);
   useEffect(() => {
     const relay = createLivePageOpenLinkRelay(bridgeChannel, {
+      pageId: () => shownPageIdRef.current,
       onAction: intent => {
         setError(null);
         handlePageActionIntent(intent);
@@ -904,6 +929,7 @@ export function PagesPage({
             </div>
           )}
 
+          <DefaultTodoOffer refreshKey={pages} onInstalled={pageId => { void refresh(pageId); }} />
           {visibleItems.length === 0 && <div className="disc-empty">{t(query ? 'pages.noSearchResults' : 'pages.empty')}</div>}
             </div>;
           },
@@ -968,7 +994,15 @@ export function PagesPage({
                     <ChevronDown size={11} />
                   </button>
                   {detail.archived && <span className="live-pages-archived-badge"><Archive size={11} />{t('pages.archived')}</span>}
-                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} />
+                  <LivePageSlugEditor
+                    key={detail.id}
+                    page={detail}
+                    onSaved={(updated) => {
+                      setPages(current => current.map(item => item.id === updated.id ? updated : item));
+                      setDetail(current => current?.id === updated.id ? updated : current);
+                    }}
+                  />
+                  <CopyIdPill id={detail.id} title={t('pages.copyId', detail.title)} className="live-pages-id-pill" />
                 </div>
               </div>
               <div className="live-pages-header-actions">
@@ -981,7 +1015,7 @@ export function PagesPage({
                   title={t('pages.openInNewTab', detail.title)}
                 >
                   <ExternalLink size={13} />
-                  <span>{t('pages.openInNewTabLabel')}</span>
+                  <span className="live-pages-open-tab-label">{t('pages.openInNewTabLabel')}</span>
                 </a>
                 <button type="button" className="live-pages-header-icon" onClick={() => void updatePage(detail, { pinned: !detail.pinned })} title={detail.pinned ? t('pages.unfavorite') : t('pages.favorite')}>
                   <Star size={14} fill={detail.pinned ? 'currentColor' : 'none'} />
@@ -1078,6 +1112,7 @@ export function PagesPage({
                           <button type="button" key={dataset.id} onClick={() => setSelectedDatasetId(dataset.id)} title={t('pages.datasetSizeTitle', dataset.name, formatBytes(dataset.data_size_bytes))}>
                             <strong>{dataset.name}</strong>
                             {formatBytes(dataset.data_size_bytes)}
+                            <LivePageDatasetUsageLine dataset={dataset} usage={datasetUsage.find(item => item.name === dataset.name)} />
                           </button>
                         ))}
                       </div>
@@ -1165,6 +1200,7 @@ export function PagesPage({
               </div>
             </header>
             <div className="live-pages-relations">
+              <LivePageTrustedActions trusts={pageActionTrusts} onChanged={reloadPageActionTrusts} />
               {linkedDiscussions.length > 0 && (
                 <div className="live-pages-workflows">
                   <div><MessageSquare size={13} /><strong>{t('pages.linkedDiscussions')}</strong></div>
@@ -1210,6 +1246,14 @@ export function PagesPage({
                     {selectedDatasetRecords.length > 100 && <small>{t('pages.datasetPreviewLimit', selectedDatasetRecords.length)}</small>}
                   </div>
                 ) : <pre>{JSON.stringify(selectedDataset.current, null, 2)}</pre>}
+                <LivePageDatasetUsageLine dataset={selectedDataset} usage={datasetUsage.find(item => item.name === selectedDataset.name)} />
+                <LivePageDatasetControls
+                  key={`${selectedDataset.id}:${selectedDataset.max_points}:${selectedDataset.max_age_days ?? ''}`}
+                  pageId={detail.id}
+                  dataset={selectedDataset}
+                  onChanged={() => loadDetail(detail.id)}
+                  onDeleted={() => setSelectedDatasetId(null)}
+                />
               </section>
             )}
             {editingHtml ? (
@@ -1271,7 +1315,13 @@ export function PagesPage({
                 )}
               </div>
             ) : (
-              <div className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}>
+              <div
+                className={frameHeight ? "live-pages-frame-shell is-content-sized" : "live-pages-frame-shell"}
+                // A content-sized shell scrolls the Page, so the keyboard must be able to reach it.
+                role={frameHeight ? 'region' : undefined}
+                tabIndex={frameHeight ? 0 : undefined}
+                aria-label={frameHeight ? t('pages.frameRegion', detail.title) : undefined}
+              >
                 <iframe
                   ref={iframeRef}
                   style={frameHeight ? { height: frameHeight } : undefined}

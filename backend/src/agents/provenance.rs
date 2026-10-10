@@ -1,6 +1,6 @@
-//! Payload-free observations owned by one agent launch: the models it served
-//! and the CLI session it ran in. A caller keeps the capture even when launch
-//! or output collection returns an error.
+//! Payload-free runtime observations owned by one agent launch: the models it
+//! served, the CLI session it ran in and any npx fallback. A caller keeps the
+//! capture even when launch or output collection returns an error.
 
 use std::sync::{Arc, Mutex};
 
@@ -14,9 +14,24 @@ pub struct AgentRuntimeProvenance {
     /// of the transcript it writes (KT-911). `None` until observed, and for a
     /// runtime that has no CLI session (HTTP providers).
     pub session_id: Option<String>,
+    pub npx_fallback_command: Option<Vec<String>>,
+    pub npx_fallback_version: Option<String>,
 }
 
 pub type AgentProvenanceCapture = Arc<Mutex<AgentRuntimeProvenance>>;
+
+pub fn record_npx_fallback(
+    capture: Option<&AgentProvenanceCapture>,
+    command: Vec<String>,
+    version: Option<String>,
+) {
+    if let Some(capture) = capture {
+        if let Ok(mut state) = capture.lock() {
+            state.npx_fallback_command = Some(command);
+            state.npx_fallback_version = version;
+        }
+    }
+}
 
 pub fn observe_model(capture: Option<&AgentProvenanceCapture>, model: &str) {
     // This is a protocol identifier, not arbitrary provider output. Bound

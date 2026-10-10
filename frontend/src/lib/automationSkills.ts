@@ -2,7 +2,7 @@
 // it has no run, no variables and no server-side favorite or modification date.
 // What the page needs from it lives here, pure, so the sidebar, the sheet and
 // the tests read one definition.
-import type { Project, ProjectUsedSkill, Skill } from '../types/generated';
+import type { Project, ProjectRepositoryResourceStatus, ProjectUsedSkill, Skill } from '../types/generated';
 
 export const SKILL_FAVORITES_STORAGE_KEY = 'kronn:automationSkillFavorites';
 
@@ -57,6 +57,53 @@ export function repositorySkillId(projectId: string, slug: string): string {
   return `repository:${projectId}:${slug}`;
 }
 
+/** The body without a leading frontmatter: the backend writes it from the fields. */
+export function skillBody(content: string): string {
+  return content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '');
+}
+
+/** A skill scoped to a project is offered there only; a global one everywhere. */
+export function offeredToProject(skill: Pick<Skill, 'project_id'>, projectId: string | null | undefined): boolean {
+  return !skill.project_id || skill.project_id === projectId;
+}
+
+/** The skills only `projectId`'s repository holds, as a skill picker lists them. */
+export function repositorySkillsOf(usedSkills: readonly ProjectUsedSkill[], projectId: string): Skill[] {
+  return usedSkills
+    .filter(used => used.project_id === projectId && !used.skill_id)
+    .map(repositorySkill);
+}
+
+/** The ids already picked that `offered` does not list, as skills a picker can
+ *  show to remove them: another project's, or one that no longer exists. */
+export function pickedButNotOffered(
+  pickedIds: readonly string[],
+  offered: readonly Skill[],
+  catalog: readonly Skill[],
+  usedSkills: readonly ProjectUsedSkill[],
+): Skill[] {
+  const listed = new Set(offered.map(skill => skill.id));
+  const known = new Map<string, Skill>([
+    ...usedSkills.filter(used => !used.skill_id).map(used => {
+      const skill = repositorySkill(used);
+      return [skill.id, skill] as const;
+    }),
+    ...catalog.map(skill => [skill.id, skill] as const),
+  ]);
+  return pickedIds
+    .filter(id => !listed.has(id))
+    .map(id => known.get(id) ?? {
+      id,
+      name: isRepositorySkillId(id) ? id.slice(id.lastIndexOf(':') + 1) || id : id,
+      description: '',
+      icon: '❔',
+      category: 'Domain',
+      content: '',
+      is_builtin: false,
+      token_estimate: 0,
+    });
+}
+
 export function isRepositorySkillId(id: string): boolean {
   return id.startsWith('repository:');
 }
@@ -86,7 +133,8 @@ export interface AutomationSkillEntry {
   repository?: RepositorySkillOrigin;
   /** Used by at least one project. The others are only *available*: the
    *  sidebar folds them away instead of listing the whole catalog. */
-  used: boolean;
+  used: boolean;  /** Its sync state on each project the backend reported one for. */
+  syncStates: ProjectRepositoryResourceStatus[];
 }
 
 function repositorySkill(used: ProjectUsedSkill): Skill {
@@ -121,6 +169,7 @@ export function automationSkillEntries(
 ): AutomationSkillEntry[] {
   const known = new Set(projects.map(project => project.id));
   const publishedBy = new Map<string, Set<string>>();
+  const syncStatesOf = new Map<string, ProjectRepositoryResourceStatus[]>();
   const repositoryOnly: ProjectUsedSkill[] = [];
   for (const used of usedSkills) {
     if (!known.has(used.project_id)) continue;
@@ -128,6 +177,7 @@ export function automationSkillEntries(
       const ids = publishedBy.get(used.skill_id) ?? new Set<string>();
       ids.add(used.project_id);
       publishedBy.set(used.skill_id, ids);
+      if (used.sync_status) syncStatesOf.set(used.skill_id, [...(syncStatesOf.get(used.skill_id) ?? []), used.sync_status]);
     } else {
       repositoryOnly.push(used);
     }
@@ -136,10 +186,11 @@ export function automationSkillEntries(
     const using = new Set([
       ...projectsUsingSkill(skill.id, projects).map(project => project.id),
       ...(publishedBy.get(skill.id) ?? []),
+      ...(skill.project_id ? [skill.project_id] : []),
     ]);
     // Kept in the order the page received the projects.
     const projectIds = projects.filter(project => using.has(project.id)).map(project => project.id);
-    return { id: skill.id, skill, projectIds, used: projectIds.length > 0 };
+    return { id: skill.id, skill, projectIds, used: projectIds.length > 0, syncStates: syncStatesOf.get(skill.id) ?? [] };
   });
   for (const used of repositoryOnly) {
     const skill = repositorySkill(used);
@@ -155,6 +206,7 @@ export function automationSkillEntries(
         published: used.published,
       },
       used: true,
+      syncStates: used.sync_status ? [used.sync_status] : [],
     });
   }
   return entries;

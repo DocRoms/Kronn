@@ -126,10 +126,13 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Workflow** — Unified automation unit: `Trigger → Steps`. Replaces the old scheduled tasks concept. Created via the dashboard wizard and portable through Kronn's versioned JSON export/import envelope. `WORKFLOW.md` import is not implemented. Post-step operations (create PR, comment issue, etc.) are handled by agents using the tools available within steps.
 
-**WorkflowTrigger** — What starts a workflow run. Three types:
+**WorkflowTrigger** — What starts a workflow run. Four types:
 - **Cron** — time-based schedule. 1 tick = 1 run, always same prompt.
 - **Tracker** — polls an issue tracker API at intervals. Each new matching issue = 1 run with issue context injected. Pull-based (polling, not webhooks).
 - **Manual** — triggered from dashboard or CLI on demand.
+- **Watch** — polls an API source through the broker at intervals and creates a run only when the source changed (304 / ETag / body or JSONPath fingerprint). A poll creates no run.
+
+Cron and Watch take an optional IANA `timezone`; without one they follow Kronn's global timezone (Settings, default the machine's zone, UTC fallback). Triggers saved before 0.15.0 were pinned to `UTC` on upgrade. A local time the spring DST change skips does not fire that day; one the autumn change repeats fires once. Tracker intervals stay in UTC.
 
 **WorkflowStep** — A single unit of work within a workflow. Has an agent, optional per-step capabilities, a prompt using Kronn's purpose-built `{{variable}}` syntax (not Liquid; no filters), optional debate mode, optional `on_result` conditions, and optional `AgentSettings` override.
 
@@ -147,7 +150,7 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **RunEvent** — SSE event enum for live workflow run progress. Variants: `StepStart { step_name, step_index }`, `StepDone { step_result }`, `RunDone { status }`, `RunError { message }`. Frontend uses these to display a live progress panel with animated step indicators.
 
-**WorkflowSafety** — Guards: sandbox mode (Docker), max files/lines changed, approval gate, concurrency limit.
+**WorkflowSafety** — A workflow's Security settings, enforced by the runner (`backend/src/workflows/safety.rs`): sandbox (refuses to start outside a container), a human approval before any worktree, hook or step (not available to agents' bridge tokens), and max files/lines the run may change in its git working tree, measured by content against the tree before its hooks.
 
 **AgentSettings** — Per-step agent configuration override: `model`, `reasoning_effort`, `max_tokens`. Allows different steps to use different agent configurations.
 
@@ -245,13 +248,11 @@ Project-specific terms. For deep dives, follow the linked `docs/architecture/` f
 
 **Model inactivity watchdog** (KT-932) — `backend/src/agents/idle_watchdog.rs`. Fails an ACP or native-HTTP agent run whose model stays silent for the whole delay (bytes on the HTTP stream, frames from the ACP agent; progress restarts it) and cancels the generation, so Ollama is free for the next request. Delay: the discussion's agent inactivity timeout (at least 15 min) or the step's `stall_timeout_secs`; default 15 min. Distinct from the stall timeout, which watches what the consumer reads. While an ACP tool call is open (no terminal `completed`/`failed`/`cancelled` update yet) the model's delay is suspended in favour of `tool_execution_timeout` — 8× wider — so a long but healthy tool (a build, a test run) is never mistaken for a dead model; a tool call that never closes is still cut by that wider bound, named in the failure reason.
 
-**Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events. Shows what the agent is doing (reading files, running commands, editing) during a conversation or workflow step.
-
-**format_tool_log** — Formats rich log lines from tool name + JSON input. Displays human-readable activity: `Read path`, `$ command`, `Edit path`, etc. Used in agent activity log rendering.
+**Agent activity logs** — Real-time stderr + stream-json tool activity streamed via SSE `log` events to the requester's bubble. A tool call leaves as its category only (`→ Read`, `✓ Execute`), never its name, input, path or URL — the same no-leak rule as the KT-1108 run progress (KT-1120). A stderr diagnostic shows as a fixed `⚠ Diagnostic` notice, once per run; its text stays in a failed run's error message.
 
 **sendingStartMap** — Lifted `Record<string, number>` timestamp map tracking when each discussion's agent request started. Persists across page switches so the elapsed timer remains accurate when navigating away and back.
 
-**Tauri desktop app** — Native desktop wrapper (Windows/macOS/Linux) in `desktop/`. Backend is embedded (no Docker needed), frontend served via HTTP with COOP/COEP headers for SharedArrayBuffer (required by WASM workers). Auto-detects and installs agents (npm required). Same features as web version. Built via `.github/workflows/desktop-build.yml`.
+**Tauri desktop app** — Native desktop wrapper (Windows/macOS/Linux) in `desktop/`. Backend is embedded (no Docker needed), frontend served via HTTP from the embedded backend, without COOP/COEP so allowed third-party players load (the TTS/STT WASM workers run single-threaded, as in Docker). Auto-detects and installs agents (npm required). Same features as web version. Built via `.github/workflows/desktop-build.yml`.
 
 **ModelTier** — Enum: `economy`, `default`, `reasoning`. Selects the model quality/cost tier per agent. Configured globally in `ModelTiersConfig` (one `ModelTierConfig` per agent). Can be overridden per-message or per-workflow-step via `AgentSettings`. Stored in DB via migrations 015-016.
 

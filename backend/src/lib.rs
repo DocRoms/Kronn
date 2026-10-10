@@ -34,6 +34,24 @@ pub use crate::db::Database;
 pub use crate::models::AppConfig;
 pub use crate::workflows::WorkflowEngine;
 
+/// Loads the config (defaults when none is saved) and arms the process-wide
+/// timezone from it. Every entry point (standalone, desktop) loads its config
+/// through this, so no scheduler tick or preview runs in the wrong zone.
+pub async fn load_startup_config() -> anyhow::Result<AppConfig> {
+    load_startup_config_with(crate::core::timezone::detect_machine_timezone).await
+}
+
+async fn load_startup_config_with(
+    detect: impl FnOnce() -> chrono_tz::Tz,
+) -> anyhow::Result<AppConfig> {
+    let config = match crate::core::config::load().await? {
+        Some(cfg) => cfg,
+        None => crate::core::config::default_config_without_key(),
+    };
+    crate::core::timezone::apply_with(config.server.timezone.as_deref(), detect());
+    Ok(config)
+}
+
 /// Resolve the encryption key and load the stored credentials, right after the
 /// database opens. Both startup paths call this; an `Err` must stop the boot:
 /// continuing could mint or mirror over the only copy of the key (KT-1007).
@@ -421,6 +439,8 @@ pub struct AppState {
     /// not yet returned. Cancellation registration happens earlier, so it must
     /// not be used as process-liveness evidence.
     pub agent_runtime_registry: Arc<Mutex<HashSet<String>>>,
+    /// KT-1108 — the discussion runs in progress, for a page that opens mid-run.
+    pub live_runs: Arc<crate::agents::run_progress::LiveRuns>,
     /// Task executions with a `/resume` in flight. Boot resumes run once HTTP is
     /// served, so a concurrent resume of the same execution is refused.
     pub execution_resumes: Arc<Mutex<HashSet<String>>>,
@@ -483,10 +503,11 @@ impl AppState {
     ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel::<crate::models::WsMessage>(256);
         // Nothing else holds the fresh config yet.
-        let p2p_enabled = config
+        let (p2p_enabled, key) = config
             .try_read()
-            .map(|config| config.server.p2p_enabled)
-            .unwrap_or(false);
+            .map(|config| (config.server.p2p_enabled, config.encryption_secret.clone()))
+            .unwrap_or((false, None));
+        db.assistant_guard().set_key(key);
         Self {
             p2p: Arc::new(P2pGate::new(p2p_enabled)),
             config,
@@ -496,6 +517,7 @@ impl AppState {
             ws_broadcast: Arc::new(ws_tx),
             cancel_registry: Arc::new(Mutex::new(HashMap::new())),
             agent_runtime_registry: Arc::new(Mutex::new(HashSet::new())),
+            live_runs: Arc::default(),
             execution_resumes: Arc::new(Mutex::new(HashSet::new())),
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1056,6 +1078,7 @@ async fn bridge_gate(
         project: project.clone(),
         own_discussions: grant.own_discussions(),
         own_run: grant.scope.workflow_run_id.clone(),
+        agent: grant.scope.agent.clone(),
     });
     let response = next
         .run(axum::extract::Request::from_parts(parts, body))
@@ -1396,6 +1419,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/pages/{id}/datasets",
             post(api::live_pages::add_dataset),
         )
+        .route(
+            "/api/pages/{id}/datasets/{name}",
+            delete(api::live_pages::delete_dataset).patch(api::live_pages::update_dataset),
+        )
+        .route(
+            "/api/pages/{id}/dataset-usage",
+            get(api::live_pages::dataset_usage),
+        )
         .route("/api/pages/{id}/publish", post(api::live_pages::publish))
         // ── Live Page inline Kronn actions (KT-538) ──
         .route(
@@ -1421,6 +1452,24 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/live-page-actions/{id}/prefill",
             post(api::live_page_actions::prefill),
+        )
+        // KT-1030: Kronn's default todo board; reinstalling is a human's call.
+        .route(
+            "/api/defaults/todo",
+            get(api::default_contents::todo_status),
+        )
+        .route(
+            "/api/defaults/todo/install",
+            post(api::default_contents::install_todo),
+        )
+        // KT-1029: human approvals, deliberately absent from the bridge-token list.
+        .route(
+            "/api/pages/{id}/action-trusts",
+            get(api::live_page_actions::trusts_for_live_page),
+        )
+        .route(
+            "/api/live-page-actions/{id}/trust",
+            post(api::live_page_actions::trust).delete(api::live_page_actions::revoke_trust),
         )
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
@@ -1469,6 +1518,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/ui-preferences",
             get(api::ui_preferences::get).put(api::ui_preferences::put),
+        )
+        .route(
+            "/api/assistant-conversations",
+            get(api::assistant_conversations::list),
+        )
+        .route(
+            "/api/assistant-conversations/{discussion_id}",
+            patch(api::assistant_conversations::update),
         )
         .route(
             "/api/config/global-context",
@@ -1977,6 +2034,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/agents/install", post(api::agents::install))
         .route("/api/agents/uninstall", post(api::agents::uninstall))
         .route("/api/agents/toggle", post(api::agents::toggle))
+        .route("/api/agents/readiness", post(api::agents::readiness))
         // ── Dynamic model catalogs (KT-531) ──
         .route("/api/model-catalogs", get(api::model_catalog::list))
         .route(
@@ -2118,6 +2176,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/mcps/configs/{id}/probe",
             post(api::mcps::probe_config),
         )
+        .route(
+            "/api/mcps/servers/{server_id}/access-policy",
+            put(api::mcps::set_access_policy),
+        )
         // 0.8.6 — Custom API plugin spec edit. Lets the user fix a
         // typo / add endpoints / change docs_url WITHOUT delete+recreate.
         // Server_id is preserved; configs & workflow ApiCall refs stay valid.
@@ -2194,6 +2256,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/workflows/reenable", post(api::workflows::reenable))
         .route(
+            "/api/workflows/safety-check",
+            post(api::workflows::safety_check),
+        )
+        .route(
+            "/api/workflows/cron-preview",
+            post(api::workflows::cron_preview),
+        )
+        .route(
             "/api/workflows/bundle/human",
             post(api::bundle::create_human_bundle),
         )
@@ -2215,8 +2285,16 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .delete(api::workflows::delete),
         )
         .route(
+            "/api/workflows/{id}/step",
+            patch(api::workflows::update_step),
+        )
+        .route(
             "/api/workflows/{id}/unsafe-steps",
             get(api::workflows::unsafe_steps),
+        )
+        .route(
+            "/api/workflows/{id}/readiness",
+            get(api::workflows::readiness),
         )
         .route(
             "/api/exec/line-check",
@@ -2596,6 +2674,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         )
         .route("/api/discussions/{id}", get(api::discussions::get))
         .route("/api/discussions/{id}/poll", get(api::discussions::poll))
+        .route(
+            "/api/discussions/{id}/run-progress",
+            get(api::discussions::run_progress),
+        )
         .route(
             "/api/discussions/{id}/native-agent",
             get(api::discussions::native_agent_mode),
@@ -3558,5 +3640,97 @@ mod auth_tests {
         assert!(!is_local_ip(""));
         assert!(!is_local_ip("not-an-ip"));
         assert!(!is_local_ip("172.foo.0.1"));
+    }
+}
+
+#[cfg(test)]
+mod startup_config_tests {
+    use super::*;
+    use chrono_tz::Tz;
+    use serial_test::serial;
+
+    /// Points the config dir at a fresh directory, returning the previous one.
+    fn fresh_config_dir(name: &str) -> Option<std::ffi::OsString> {
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        let base = previous
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("startup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::core::child_env::set_var("KRONN_DATA_DIR", &dir);
+        previous
+    }
+
+    fn restore(previous: Option<std::ffi::OsString>) {
+        // Back to UTC, the zone every other test of this binary assumes.
+        crate::core::timezone::apply_with(None, Tz::UTC);
+        match previous {
+            Some(dir) => crate::core::child_env::set_var("KRONN_DATA_DIR", dir),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+
+    fn preview_zone() -> String {
+        let req = crate::api::workflows::CronPreviewRequest {
+            schedule: "0 7 * * *".into(),
+            timezone: None,
+        };
+        crate::api::workflows::cron_preview_at(
+            &req,
+            crate::core::timezone::current(),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .timezone
+    }
+
+    // Etc/* aliases render like UTC, so a concurrent test never sees a shift.
+    #[tokio::test]
+    #[serial]
+    async fn startup_applies_the_configured_zone_before_any_tick() {
+        let previous = fresh_config_dir("explicit");
+        let mut cfg = crate::core::config::default_config();
+        cfg.server.timezone = Some("Etc/UTC".into());
+        crate::core::config::save(&cfg).await.unwrap();
+        crate::core::timezone::apply_with(None, Tz::UTC);
+
+        let loaded = load_startup_config().await.unwrap();
+        let (zone, preview) = (crate::core::timezone::current(), preview_zone());
+        restore(previous);
+        assert_eq!(loaded.server.timezone.as_deref(), Some("Etc/UTC"));
+        assert_eq!(zone, Tz::Etc__UTC);
+        assert_eq!(preview, "Etc/UTC");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn startup_without_a_saved_zone_applies_the_machine_zone() {
+        let previous = fresh_config_dir("empty");
+        crate::core::timezone::apply_with(None, Tz::UTC);
+
+        let loaded = load_startup_config_with(|| Tz::Etc__UCT).await.unwrap();
+        let (zone, preview) = (crate::core::timezone::current(), preview_zone());
+        restore(previous);
+        assert_eq!(loaded.server.timezone, None);
+        assert_eq!(zone, Tz::Etc__UCT);
+        assert_eq!(preview, "Etc/UCT");
+    }
+
+    #[test]
+    fn every_entry_point_loads_its_config_through_the_shared_startup() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        for entry in ["backend/src/main.rs", "desktop/src-tauri/src/main.rs"] {
+            let source = std::fs::read_to_string(root.join(entry)).unwrap();
+            assert!(
+                source.contains("kronn::load_startup_config().await"),
+                "{entry} must load its config through kronn::load_startup_config"
+            );
+            assert!(
+                !source.contains("config::load().await"),
+                "{entry} loads its config directly and skips the timezone"
+            );
+        }
     }
 }

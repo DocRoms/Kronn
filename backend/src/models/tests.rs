@@ -118,11 +118,12 @@ fn workflow_trigger_manual_roundtrip() {
 fn workflow_trigger_cron_roundtrip() {
     let trigger = WorkflowTrigger::Cron {
         schedule: "0 * * * *".into(),
+        timezone: None,
     };
     let json = serde_json::to_string(&trigger).unwrap();
     let parsed: WorkflowTrigger = serde_json::from_str(&json).unwrap();
     match parsed {
-        WorkflowTrigger::Cron { schedule } => assert_eq!(schedule, "0 * * * *"),
+        WorkflowTrigger::Cron { schedule, .. } => assert_eq!(schedule, "0 * * * *"),
         _ => panic!("Expected Cron trigger"),
     }
 }
@@ -855,11 +856,13 @@ fn workflow_step_api_call_roundtrip() {
         collect_api_data: None,
         transform_data: None,
         page_publish: None,
+        task_board: None,
         sub_workflow_id: None,
         sub_workflow_foreach_file: None,
         multi_agent_review: None,
         room_id: None,
         read_only_repos: vec![],
+        delegate_subtasks: None,
         exec_script_files: vec![],
         exec_unmodelled_args_approved: None,
         exec_agent_written: None,

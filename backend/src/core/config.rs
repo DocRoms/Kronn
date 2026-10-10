@@ -100,6 +100,37 @@ pub(crate) mod test_saved_access {
     }
 }
 
+/// Points `KRONN_DATA_DIR` at a fresh directory for one test, restoring the
+/// previous value when dropped. Process-wide: the test must be `#[serial]`.
+#[cfg(test)]
+pub(crate) struct TestDataDir {
+    _dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TestDataDir {
+    pub(crate) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("scratch data dir");
+        let previous = crate::core::child_env::var_os("KRONN_DATA_DIR");
+        crate::core::child_env::set_var("KRONN_DATA_DIR", dir.path());
+        Self {
+            _dir: dir,
+            previous,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDataDir {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => crate::core::child_env::set_var("KRONN_DATA_DIR", value),
+            None => crate::core::child_env::remove_var("KRONN_DATA_DIR"),
+        }
+    }
+}
+
 pub(crate) fn saved_full_access_in(content: &str, agent: &crate::models::AgentType) -> bool {
     use crate::models::AgentType;
     let key = match agent {
@@ -670,6 +701,7 @@ pub fn default_config() -> AppConfig {
             agent_handoff_paid_unlimited: false,
             agent_handoff_blocked_agents: vec![],
             discussion_weight: crate::models::DiscussionWeightConfig::default(),
+            timezone: None,
         },
         tokens: TokensConfig {
             anthropic: None,

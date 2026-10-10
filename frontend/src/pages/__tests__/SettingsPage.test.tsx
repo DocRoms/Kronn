@@ -3,6 +3,9 @@ import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-libra
 import { I18nProvider } from '../../lib/I18nContext';
 import { TourProvider } from '../../components/tour/TourProvider';
 
+// Configuration → Artifacts (KT-1115) listens on the WebSocket; no socket here.
+vi.mock('../../hooks/useWebSocket', () => ({ useWebSocket: vi.fn(() => ({ connected: false, connectionState: 'connecting' })) }));
+
 // Mock API
 vi.mock('../../lib/api', () => ({
   setAuthToken: vi.fn(),

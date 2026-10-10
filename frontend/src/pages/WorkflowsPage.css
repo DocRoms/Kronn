@@ -4518,6 +4518,30 @@
   border-color: rgba(var(--kr-warning-rgb), 0.35);
 }
 
+.wf-step-kind-badge[data-kind='quota'] {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border-color: rgba(var(--kr-warning-rgb), 0.35);
+}
+
+.wf-quota-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.3);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-quota-notice-reset {
+  color: var(--kr-text-muted);
+}
+
 .wf-step-kind-badge[data-kind='exec'] {
   color: var(--kr-error);
   background: rgba(var(--kr-error-rgb), 0.1);
@@ -8314,3 +8338,63 @@
   color: var(--kr-text-secondary);
   font-size: var(--kr-fs-xs);
 }
+
+/* KT-1100 — runs that changed nothing: greyed, folded, hidden by default. */
+.wf-run-compact[data-outcome="no_op"] { opacity: 0.6; }
+.wf-runs-noop-toggle {
+  padding: 3px 10px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: transparent;
+  border: 1px solid var(--kr-border-light);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.wf-runs-noop-toggle:hover { color: var(--kr-text-primary); background: var(--kr-bg-subtle); }
+.wf-runs-noop-toggle[data-active="true"] {
+  color: var(--kr-accent);
+  border-color: rgba(var(--kr-accent-rgb), 0.30);
+}
+.wf-run-noop-fold { margin-bottom: 4px; }
+.wf-run-noop-fold-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px dashed var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--kr-fs-xs);
+}
+.wf-run-noop-fold-header:hover { border-color: var(--kr-border); color: var(--kr-text-primary); }
+.wf-run-noop-fold-header .wf-chevron,
+.wf-run-noop-fold-header .wf-chevron-rotated { flex: 0 0 auto; color: var(--kr-text-ghost); }
+
+/* KT-1100 — per-workflow run retention card in the editor. */
+.wf-retention-card { margin-top: var(--kr-sp-4); }
+.wf-retention-toggle {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: 8px 0;
+  cursor: pointer;
+  font-weight: 600;
+}
+.wf-retention-summary { margin-left: var(--kr-sp-2); font-size: var(--kr-fs-xs); font-weight: 400; }
+.wf-retention-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-2) 0 0 22px;
+}
+.wf-retention-help { margin: 0; font-size: var(--kr-fs-xs); }
+.wf-retention-row { display: flex; align-items: center; gap: var(--kr-sp-3); flex-wrap: wrap; }
+.wf-retention-label { min-width: 160px; font-size: var(--kr-fs-sm); }
+.wf-retention-unit { margin-left: 4px; font-size: var(--kr-fs-2xs, 11px); }
+.wf-retention-input { width: 100px; }

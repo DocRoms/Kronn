@@ -7,9 +7,13 @@ import { MarkdownEditor } from './MarkdownComposerTools';
 import { SearchableSelect } from './SearchableSelect';
 import { DiscussionSkillPicker } from './DiscussionSkillPicker';
 import { withoutForeignRepositorySkills } from '../lib/discussionSkills';
-import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
+import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi, agents as agentsApi } from '../lib/api';
+import { AgentReadinessPanel } from './AgentReadinessPanel';
+import { blockingAgents, readinessFixTarget } from '../lib/agentReadiness';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
+import { userError } from '../lib/userError';
 import type { ExternalApiConnectionView } from '../lib/api';
-import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
+import type { Project, AgentDetection, AgentReadiness, AgentType, AgentsConfig, Skill, AgentProfile, Directive, MessageTarget, ModelTier, ModelTierConfig } from '../types/generated';
 import { requiresFullAccessToRun } from '../lib/agentFullAccess';
 import { AGENT_LABELS, AGENT_MENTIONS, MODEL_TIER_ICONS, agentTextColor, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import { resolveCatalogTier, matchesCatalogSearch, catalogTargetSearchTerms } from '../lib/modelCatalogSelection';
@@ -101,6 +105,8 @@ export interface NewDiscConfig {
    *  expected to invite agents later via the `[+ Inviter]` header
    *  button. Default `true` preserves the legacy behaviour. */
   launchAgentNow: boolean;
+  /** KT-1107 — the pre-launch check of a multi-agent start, shown in the room. */
+  readiness?: AgentReadiness[];
 }
 
 export interface NewDiscussionFormProps {
@@ -137,6 +143,16 @@ export function NewDiscussionForm({
 }: NewDiscussionFormProps) {
   // ─── Internal state ──────────────────────────────────────────────────────
   const [initialDraft] = useState(() => loadDraft(NEW_DISCUSSION_DRAFT_ID));
+  // KT-1107 — bumped by every way out of the form: a pending agent check then launches nothing.
+  const readinessSeqRef = useRef(0);
+  useEffect(() => {
+    const seq = readinessSeqRef;
+    return () => { seq.current += 1; };
+  }, []);
+  const dismiss = () => {
+    readinessSeqRef.current += 1;
+    onClose();
+  };
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
   const [newDiscConnectionId, setNewDiscConnectionId] = useState<string | null>(null);
@@ -375,7 +391,7 @@ export function NewDiscussionForm({
     setNewDiscWorkspaceMode('Direct');
     setNewDiscBranchName('');
     setNewDiscBaseBranch('main');
-    onClose();
+    dismiss();
   };
 
   const createMediaDiscussion = async (): Promise<string> => {
@@ -401,6 +417,24 @@ export function NewDiscussionForm({
 
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
+  const submittingRef = useRef(false);
+  // KT-1107 — a multi-agent start pings its agents first, without any token.
+  const [readinessCheck, setReadinessCheck] = useState<{
+    key: string;
+    agents: AgentType[];
+    results: AgentReadiness[] | null;
+    error: string | null;
+  } | null>(null);
+  const uniqueLaunchAgents = [...new Set(effectiveLaunchAgents)];
+  const needsReadiness = launchAgentNow && uniqueLaunchAgents.length >= 2;
+  // The check holds only for the context it was made in: agents, project and brief.
+  const readinessKey = JSON.stringify([entryMode, launchAgentNow, uniqueLaunchAgents, newDiscProjectId, newDiscPrompt]);
+  const readinessKeyRef = useRef(readinessKey);
+  useLayoutEffect(() => {
+    readinessKeyRef.current = readinessKey;
+  });
+  // A check made for another selection is moot.
+  const visibleReadiness = readinessCheck?.key === readinessKey ? readinessCheck : null;
 
   // The modal footer is fixed outside the scrollable form body. A long agent
   // list used to open blindly below the prompt and disappear behind that
@@ -540,6 +574,44 @@ export function NewDiscussionForm({
     creatingRef.current = true;
     setCreating(true);
     try {
+      let readiness: AgentReadiness[] | undefined;
+      if (needsReadiness) {
+        const seq = ++readinessSeqRef.current;
+        const key = readinessKey;
+        const agentsToCheck = uniqueLaunchAgents;
+        setReadinessCheck({ key, agents: agentsToCheck, results: null, error: null });
+        try {
+          readiness = await agentsApi.readiness({
+            project_id: newDiscProjectId || null,
+            agents: agentsToCheck,
+            force: false,
+          });
+        } catch (e) {
+          if (seq === readinessSeqRef.current) {
+            setReadinessCheck({ key, agents: agentsToCheck, results: null, error: userError(e) });
+          }
+          return;
+        }
+        // Launched anyway, cancelled or changed meanwhile: that choice stands.
+        if (seq !== readinessSeqRef.current || readinessKeyRef.current !== key) return;
+        setReadinessCheck({ key, agents: agentsToCheck, results: readiness, error: null });
+        // Nothing starts until the user chooses: fix, remove, or launch anyway.
+        if (blockingAgents(readiness).length > 0) return;
+      }
+      // The form's state now, not the one captured when the check started.
+      await submitRef.current(readiness);
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
+    }
+  };
+
+  const submitDiscussion = async (readiness?: AgentReadiness[]) => {
+    // Media owns its own action: a conversation never starts from that mode.
+    if (entryMode === 'media') return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    try {
       // `onSubmit` is typed `=> void` but the parent's implementation may be
       // async — await it through Promise.resolve so failures unblock the
       // button. Without this, if `discussions.create` throws, `creating`
@@ -603,18 +675,78 @@ export function NewDiscussionForm({
           ? { initialTargets }
           : {}),
         launchAgentNow,
+        ...(readiness ? { readiness } : {}),
       }));
       clearDraft(NEW_DISCUSSION_DRAFT_ID);
     } catch (e) {
       // Parent (`handleCreateDiscussion` in DiscussionsPage) already toasts
-      // its own errors. We swallow here only to keep the form unwedged —
-      // the `finally` reset alone isn't enough because an uncaught throw
-      // becomes an unhandled-rejection warning in the dev console.
+      // its own errors. We swallow here only to keep the form unwedged.
       console.warn('[NewDiscussionForm] onSubmit rejected:', e);
     } finally {
-      creatingRef.current = false;
-      setCreating(false);
+      submittingRef.current = false;
     }
+  };
+
+  const submitRef = useRef(submitDiscussion);
+  useLayoutEffect(() => {
+    submitRef.current = submitDiscussion;
+  });
+
+  const launchAnyway = useAsyncGuard(async () => {
+    const results = visibleReadiness?.results ?? undefined;
+    readinessSeqRef.current += 1;
+    setCreating(true);
+    try {
+      await submitDiscussion(results);
+    } finally {
+      setCreating(creatingRef.current);
+    }
+  });
+
+  const recheckReadiness = useAsyncGuard(async () => {
+    if (!visibleReadiness) return;
+    const seq = ++readinessSeqRef.current;
+    const { key, agents: agentsToCheck } = visibleReadiness;
+    setReadinessCheck({ key, agents: agentsToCheck, results: null, error: null });
+    try {
+      const results = await agentsApi.readiness({
+        project_id: newDiscProjectId || null,
+        agents: agentsToCheck,
+        force: true,
+      });
+      if (seq === readinessSeqRef.current) {
+        setReadinessCheck({ key, agents: agentsToCheck, results, error: null });
+      }
+    } catch (e) {
+      if (seq === readinessSeqRef.current) {
+        setReadinessCheck({ key, agents: agentsToCheck, results: null, error: userError(e) });
+      }
+    }
+  });
+
+  const cancelReadiness = () => {
+    readinessSeqRef.current += 1;
+    setReadinessCheck(null);
+  };
+
+  const fixReadiness = (result: AgentReadiness) => {
+    cancelReadiness();
+    const target = readinessFixTarget(result);
+    dismiss();
+    onNavigate(target.page, target.scrollTo ? { scrollTo: target.scrollTo } : undefined);
+  };
+
+  // Removing an agent drops its mention; the changed selection closes the check.
+  const removeReadinessAgent = (agent: AgentType) => {
+    const target = promptLaunchTargets.find(candidate => candidate.agent === agent);
+    if (!target) return;
+    const pattern = new RegExp(
+      `(^|[^\\p{L}\\p{N}_-])${escapedMention(target.trigger)}(?=$|[^\\p{L}\\p{N}_-])\\s?`,
+      'giu',
+    );
+    const next = newDiscPrompt.replace(pattern, '$1');
+    setNewDiscPrompt(next);
+    prunePromptAgentTiers(next);
   };
 
   // ─── Render ──────────────────────────────────────────────────────────────
@@ -1194,7 +1326,7 @@ export function NewDiscussionForm({
                       <button
                         type="button"
                         onClick={() => {
-                          onClose();
+                          dismiss();
                           onNavigate('settings', { scrollTo: 'settings-agent-handoffs' });
                         }}
                       >
@@ -1221,7 +1353,7 @@ export function NewDiscussionForm({
                 type="button"
                 className="disc-inline-link"
                 style={{ cursor: 'pointer', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, color: 'inherit', font: 'inherit' }}
-                onClick={() => { onClose(); onNavigate('settings'); }}
+                onClick={() => { dismiss(); onNavigate('settings'); }}
               >{t('config.fullAccessRequiredLink')}</button>
             </span>
           </div>
@@ -1239,7 +1371,7 @@ export function NewDiscussionForm({
                   .join(', '),
               )}
               {' — '}
-              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
+              <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { dismiss(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
             </span>
           </div>
         )}
@@ -1449,6 +1581,20 @@ export function NewDiscussionForm({
         )}
           </section>
         </div>
+
+        {entryMode === 'conversation' && visibleReadiness && (
+          <AgentReadinessPanel
+            agents={visibleReadiness.agents}
+            results={visibleReadiness.results}
+            error={visibleReadiness.error}
+            onFix={fixReadiness}
+            onRemove={removeReadinessAgent}
+            onLaunchAnyway={launchAnyway}
+            onRecheck={recheckReadiness}
+            onCancel={cancelReadiness}
+            t={t}
+          />
+        )}
 
         {entryMode === 'conversation' && (
           <div className="disc-new-footer">

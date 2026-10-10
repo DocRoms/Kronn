@@ -1107,7 +1107,7 @@ async fn a_missing_config_toml_never_offers_a_random_key() {
 fn both_mains_lock_before_loading_and_drop_the_env_token() {
     let backend = include_str!("../main.rs");
     let lock = backend.find("acquire_data_dir_lock()").unwrap();
-    let load = backend.find("config::load().await").unwrap();
+    let load = backend.find("load_startup_config().await").unwrap();
     assert!(lock < load, "backend: lock before config::load()");
     // C2-29: read and removed before the multi-threaded runtime is built.
     let take = backend.find("take_env_auth_token()").unwrap();
@@ -1138,7 +1138,7 @@ fn both_mains_lock_before_loading_and_drop_the_env_token() {
         lock < builder && builder < call,
         "desktop: lock in main(), backend started later"
     );
-    assert!(desktop.contains("config::load().await"));
+    assert!(desktop.contains("load_startup_config().await"));
     // C3-17: a database that cannot open reaches the startup error (no panic),
     // and the desktop writes kronn.log.
     assert!(!backend.contains("Database::open().expect"));

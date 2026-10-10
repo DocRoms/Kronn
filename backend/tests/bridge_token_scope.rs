@@ -556,6 +556,27 @@ async fn an_invalid_bearer_never_falls_back_to_loopback_trust() {
     assert_eq!(status, 200, "the operator token still works");
 }
 
+/// KT-1107 — the readiness probe spawns agents: a launched agent's bridge
+/// token cannot call it, even for its own project; the operator still can.
+#[tokio::test]
+async fn a_bridge_token_cannot_spawn_agents_through_the_readiness_probe() {
+    let (app, _repos) = fixture().await;
+    let guard = bridge_for("room-a");
+    let body = json!({ "project_id": "p1", "agents": ["Ollama"] });
+    let (status, json) = call(
+        &app,
+        "POST",
+        "/api/agents/readiness",
+        Some(guard.value()),
+        Some(body.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{json}");
+    let (status, json) = call(&app, "POST", "/api/agents/readiness", None, Some(body)).await;
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["data"][0]["reason"], "not_probed");
+}
+
 /// A shared workflow triggered from a project-bound room runs for that
 /// project; one that does not serve it stays refused.
 #[tokio::test]
@@ -2915,4 +2936,184 @@ async fn quick_prompt_estimates_count_only_the_token_s_launches() {
     assert_eq!(status, 200, "{response}");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"]["samples"], 0, "{response}");
+}
+
+/// KT-1098 — a renamed page stays in its project's scope under its old slug,
+/// and another project's token can neither open, rename nor squat it.
+#[tokio::test]
+async fn a_renamed_page_stays_in_scope_and_its_old_slug_stays_its_own() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO live_pages(id, project_id, title, slug, current_revision_id, \
+             created_at, updated_at) VALUES ('page-c', 'p1', 'c', 'c-old', 'rev-c', \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO live_page_revisions(id, page_id, revision, html, created_by_agent, \
+             created_at) VALUES ('rev-c', 'page-c', 1, '<p></p>', NULL, '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let own = bridge_for("room-a");
+    let foreign = bridge_for("room-b");
+
+    let (status, renamed) = call(
+        &app,
+        "PATCH",
+        "/api/pages/c-old",
+        Some(own.value()),
+        Some(json!({"slug": "c-new"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{renamed}");
+    assert_eq!(renamed["data"]["slug"], "c-new", "{renamed}");
+    let (status, opened) = call(&app, "GET", "/api/pages/c-old", Some(own.value()), None).await;
+    assert_eq!(status, 200, "{opened}");
+    assert_eq!(opened["data"]["id"], "page-c", "{opened}");
+
+    for (method, path, body) in [
+        ("GET", "/api/pages/c-old", None),
+        ("GET", "/api/pages/c-new", None),
+        ("PATCH", "/api/pages/c-old", Some(json!({"slug": "c-mine"}))),
+        (
+            "PATCH",
+            "/api/pages/page-c",
+            Some(json!({"slug": "c-mine"})),
+        ),
+    ] {
+        let (status, response) = call(&app, method, path, Some(foreign.value()), body).await;
+        assert_eq!(status, 403, "{method} {path} must be refused: {response}");
+    }
+    // Taking the old slug is refused without naming the page that keeps it.
+    for (method, path, body) in [
+        ("PATCH", "/api/pages/page-b", json!({"slug": "c-old"})),
+        (
+            "POST",
+            "/api/pages",
+            json!({"title": "squat", "slug": "c-old", "html": "<p>x</p>"}),
+        ),
+    ] {
+        let (_, response) = call(&app, method, path, Some(foreign.value()), Some(body)).await;
+        assert_eq!(
+            response["error"], "This Page slug is not available; choose another",
+            "{method} {path}: {response}"
+        );
+    }
+    let (_, still) = call(&app, "GET", "/api/pages/c-old", Some(own.value()), None).await;
+    assert_eq!(still["data"]["id"], "page-c", "{still}");
+}
+
+/// KT-1109 — attaching handoff recipients is the human's orchestration
+/// choice: an agent's token cannot widen them, even on its own room.
+#[tokio::test]
+async fn a_bridge_token_cannot_attach_agents_to_its_own_discussion() {
+    let (app, _repos, db) = fixture_with_db().await;
+    let guard = mint(BridgeScope {
+        discussion_ids: vec!["room-a".into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let token = guard.value().to_owned();
+    let participants = |disc: &'static str| {
+        let db = db.clone();
+        async move {
+            db.with_read_conn(move |conn| {
+                Ok(kronn::db::discussions::get_discussion(conn, disc)?
+                    .expect("discussion")
+                    .participants)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let attach = json!({"attach_agents": ["Codex", "OpenCode"]});
+
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-a",
+        Some(&token),
+        Some(attach.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(participants("room-a").await.is_empty(), "nothing attached");
+
+    // Any other field the token may already change still goes through.
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-a",
+        Some(&token),
+        Some(json!({"title": "renamed by the agent"})),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = call(
+        &app,
+        "PATCH",
+        "/api/discussions/room-b",
+        Some(&token),
+        Some(attach.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(participants("room-b").await.is_empty());
+
+    // The human composer path attaches them.
+    let (status, body) = call(&app, "PATCH", "/api/discussions/room-a", None, Some(attach)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["success"], true, "{body}");
+    let attached: Vec<String> = participants("room-a")
+        .await
+        .iter()
+        .map(|agent| format!("{agent:?}"))
+        .collect();
+    assert_eq!(attached, vec!["Codex", "OpenCode"]);
+}
+
+/// KT-1043 — the approval a workflow's Security settings require before a run
+/// is a human decision: `/decide` is outside the bridge token's list.
+#[tokio::test]
+async fn a_bridge_token_cannot_approve_the_security_pause() {
+    let (app, _repos, db) = fixture_with_db().await;
+    db.with_conn(|conn| {
+        conn.execute(
+            "UPDATE workflows SET safety_json = '{\"sandbox\":false,\"require_approval\":true}' \
+             WHERE id = 'wf-a'",
+            [],
+        )?;
+        let mut run = kronn::db::workflows::get_run(conn, "run-a")?.expect("run-a");
+        run.status = kronn::models::RunStatus::WaitingApproval;
+        run.step_results = vec![kronn::workflows::safety::approval_result()];
+        kronn::db::workflows::update_run_progress(
+            conn,
+            kronn::db::workflows::RunProgressSnapshot::from_run(&run),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let guard = bridge_for("room-a");
+    let (status, response) = call(
+        &app,
+        "POST",
+        "/api/workflows/wf-a/runs/run-a/decide",
+        Some(guard.value()),
+        Some(json!({"decision": "approve"})),
+    )
+    .await;
+    assert_eq!(status, 403, "{response}");
+    let run = db
+        .with_conn(|conn| kronn::db::workflows::get_run(conn, "run-a"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, kronn::models::RunStatus::WaitingApproval);
 }

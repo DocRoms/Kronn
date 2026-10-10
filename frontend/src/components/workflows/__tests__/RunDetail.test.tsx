@@ -618,6 +618,27 @@ describe('RunDetail — Gate decision panel (0.7.0 Phase 4 — human-in-the-loop
     expect(screen.getByText(/wf\.gate\.reject/)).toBeInTheDocument();
   });
 
+  it('offers only approve or reject for the approval the Security settings require before a run', () => {
+    const run = mkRun({
+      status: 'WaitingApproval',
+      finished_at: null,
+      step_results: [
+        mkResult({
+          step_name: '__safety_approval__',
+          step_kind: 'Gate',
+          status: 'WaitingApproval',
+          output: 'raw backend text',
+        }),
+      ],
+    });
+    const { container } = render(<RunDetail run={run} onDelete={() => {}} onDecide={() => {}} />);
+    const panel = container.querySelector('.wf-gate-panel');
+    expect(panel!.textContent).toContain('wf.gate.safetyApproval');
+    expect(screen.getByText(/wf\.gate\.approve/)).toBeInTheDocument();
+    expect(screen.getByText(/wf\.gate\.reject/)).toBeInTheDocument();
+    expect(screen.queryByText(/wf\.gate\.requestChanges/)).not.toBeInTheDocument();
+  });
+
   it('does not render the panel when no onDecide handler is provided', () => {
     const run = mkRun({
       status: 'WaitingApproval',

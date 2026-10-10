@@ -186,6 +186,7 @@ pub async fn execute_notify_step_with_policy(
             attach_body: &attach_body,
             has_body: send_body,
             pinned_base: None,
+            hop_guard: None,
         },
     )
     .await
@@ -268,6 +269,8 @@ pub async fn execute_notify_step_with_policy(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -338,6 +341,8 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -408,11 +413,13 @@ mod tests {
             collect_api_data: None,
             transform_data: None,
             page_publish: None,
+            task_board: None,
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
             room_id: None,
             read_only_repos: vec![],
+            delegate_subtasks: None,
             exec_script_files: vec![],
             exec_unmodelled_args_approved: None,
             exec_agent_written: None,

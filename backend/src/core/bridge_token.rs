@@ -43,6 +43,8 @@ pub struct BridgeScope {
     /// The launch's project when it names no discussion, execution or run
     /// (audits, document agents). Ignored otherwise.
     pub project_id: Option<String>,
+    /// The agent and model Kronn launched, for API access policies (KT-1026).
+    pub agent: Option<crate::core::api_access::AgentIdentity>,
 }
 
 impl BridgeScope {
@@ -154,6 +156,19 @@ pub struct BridgeCaller {
     pub own_discussions: Vec<String>,
     /// The launch's own workflow run, when it is one.
     pub own_run: Option<String>,
+    /// The agent and model Kronn launched.
+    pub agent: Option<crate::core::api_access::AgentIdentity>,
+}
+
+impl BridgeCaller {
+    /// This launch as an API broker caller.
+    pub fn api_caller(&self) -> crate::core::api_access::ApiCaller {
+        crate::core::api_access::ApiCaller::Agent {
+            identity: self.agent.clone(),
+            discussion_ids: self.own_discussions.clone(),
+            workflow_run_id: self.own_run.clone(),
+        }
+    }
 }
 
 /// Holds a live token; dropping it revokes the token.
@@ -517,7 +532,9 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("GET", "/api/workflows/step-schema", Read, &[]),
     r("GET", "/api/workflows/{id}", Read, &[("id", W)]),
     r("PUT", "/api/workflows/{id}", Write, &[("id", W)]),
+    r("PATCH", "/api/workflows/{id}/step", Write, &[("id", W)]),
     r("GET", "/api/workflows/{id}/export", Read, &[("id", W)]),
+    r("GET", "/api/workflows/{id}/readiness", Read, &[("id", W)]),
     r("GET", "/api/workflows/{id}/runs", Read, &[("id", W)]),
     r(
         "GET",
@@ -568,8 +585,15 @@ pub const BRIDGE_ROUTES: &[BridgeRoute] = &[
     r("POST", "/api/agent-api/call", Effect, &[]),
     r("POST", "/api/pages", Write, &[]),
     r("GET", "/api/pages/{id}", Read, &[("id", G)]),
+    r("PATCH", "/api/pages/{id}", Write, &[("id", G)]),
     r("PUT", "/api/pages/{id}/html", Write, &[("id", G)]),
     r("POST", "/api/pages/{id}/datasets", Write, &[("id", G)]),
+    r(
+        "DELETE",
+        "/api/pages/{id}/datasets/{name}",
+        Write,
+        &[("id", G)],
+    ),
     r("GET", "/api/pages/{id}/workflows", Read, &[("id", G)]),
     r("GET", "/api/pages/{id}/discussions", Read, &[("id", G)]),
     r("POST", "/api/media/generate", Effect, &[]),
@@ -718,6 +742,16 @@ pub fn prepare_body(
                 "a bridge token cannot propose a preference for every project".into(),
             ));
         }
+    }
+    // Widening the handoff recipients is the human's orchestration choice;
+    // an agent would grant itself new delegates.
+    if route.method == "PATCH"
+        && route.pattern == "/api/discussions/{id}"
+        && body.get("attach_agents").is_some()
+    {
+        return Err(Refusal(
+            "a bridge token cannot attach agents to a discussion".into(),
+        ));
     }
     if route.pattern == "/api/disc/link"
         && body.get("force_reassign") == Some(&serde_json::json!(true))
@@ -1779,6 +1813,12 @@ pub fn canonical(
             )
             .optional()?
             .map(|project| (Kind::Project, project))),
+        // As the page handlers resolve it, so a slug or a renamed page's old
+        // slug is checked as the page it opens.
+        Kind::Page => {
+            Ok(crate::db::live_pages::resolve_live_page_id(conn, id)?
+                .map(|page| (Kind::Page, page)))
+        }
         _ => Ok(Some((kind, id.to_owned()))),
     }
 }

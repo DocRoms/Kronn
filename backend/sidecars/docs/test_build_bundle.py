@@ -242,20 +242,23 @@ class NativeLibraryEnvironmentTests(unittest.TestCase):
 
     def test_ci_runs_every_gate_when_called_for_a_release(self) -> None:
         workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
-        for name, label, minimum in (("ci-test.yml", "ci-test", 8), ("ci-build.yml", "ci-build", 4)):
+        for name, route, label, minimum in (
+            ("ci-test.yml", "require-ci-label", "ci-test", 8),
+            ("ci-build.yml", "require-ci-build-label", "ci-build", 4),
+        ):
             workflow = (workflows / name).read_text(encoding="utf-8")
             self.assertIn("workflow_call:", workflow)
-            # Label-gated jobs run on a release call: its event is never a
-            # pull request (the caller's push or dispatch).
-            gated = [
-                line for line in re.findall(r"^    if: (.*)$", workflow, re.MULTILINE)
-                if f"'{label}'" in line and "always()" not in line
-            ]
+            # Label-gated jobs follow the route job, which lets every event
+            # but a pull request through: a release call is a push or dispatch.
+            gated = re.findall(
+                rf"^    if: needs\.{route}\.outputs\.run == 'true'$", workflow, re.MULTILINE
+            )
             self.assertGreaterEqual(len(gated), minimum, name)
-            for condition in gated:
-                self.assertIn("github.event_name != 'pull_request' ||", condition, name)
-        ci_test = (workflows / "ci-test.yml").read_text(encoding="utf-8")
-        self.assertIn('[ "$EVENT_NAME" != "pull_request" ]', ci_test)
+            route_job = workflow[workflow.index(f"\n  {route}:\n"):]
+            route_job = route_job[: route_job.index("\n\n  ", 1)]
+            self.assertIn('if [ "$EVENT_NAME" = "pull_request" ]', route_job, name)
+            self.assertIn(f"grep -qx '{label}'", route_job, name)
+            self.assertIn('echo "run=true" >> "$GITHUB_OUTPUT"', route_job, name)
 
     def test_checkout_network_retry_is_bounded(self) -> None:
         workflow = (

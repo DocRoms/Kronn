@@ -120,6 +120,15 @@ links. The library deliberately reuses the Discussion sidebar interaction
 model: search, favorite shortcuts, a canonical active section, multi-selection
 actions and a collapsed archive section.
 
+A Page's slug can be renamed (`PATCH /api/pages/{id}` with `slug`, the Page
+header, or `page_update_html` with `slug`) under the creation rules: same ASCII
+format, unique across all projects. The former slug is kept in
+`live_page_slug_aliases`, so links, workflow steps and API calls that still
+name it reach the Page. Resolution tries the id, then a live slug, then a
+former slug, so an alias never shadows another Page. A former slug stays
+reserved for its Page (only that Page may take it back) until the Page is
+deleted, so no other Page, import included, can capture its old links.
+
 Multi-selection can also open two or more Pages in one external mosaic route.
 Two-Page presets support columns or rows; three-Page presets place the first
 selected Page above, below, left or right of the other two; four or more Pages
@@ -174,6 +183,50 @@ JSON is the dataset payload format. Snapshot and collection values are stored
 as one JSON value. Time-series observations are stored as individual rows so a
 new point does not rewrite the full history.
 
+### Dataset lifecycle (KT-1104)
+
+A dataset can be emptied, re-limited and deleted after creation:
+
+- **Clear.** `clear` is a publish write valid for every kind and needs no
+  `value`. It deletes every time-series point, sets a snapshot to `null` and a
+  collection to `[]` so a Page iterating it keeps working. It is recorded in
+  the publication ledger like any write, from the API or a `PublishPageData`
+  step. Only `clear` may omit `value` (API) or `value_from` (step); the other
+  operations still require them, an explicit `null` value included.
+  `[src: file: backend/src/db/live_pages.rs:854]`
+- **Limits.** `PATCH /api/pages/{id}/datasets/{name}` with `max_points` and/or
+  `max_age_days` (`null` lifts the age limit) prunes the points beyond the new
+  limits in the same transaction, then moves the Page to a new data revision
+  when anything was removed. `[src: file: backend/src/db/live_page_datasets.rs:245]`
+- **Delete.** `DELETE /api/pages/{id}/datasets/{name}` removes the dataset and
+  its points. It is refused (`conflict`) with the list of references while a
+  saved workflow's `PublishPageData` step writes it (target matched by id, live
+  slug or retired slug), the current HTML names it as a whole word, or a Page
+  button binds to it (`<page.dataset.NAME...>`). `?force=true` deletes anyway
+  and returns the references it went past. The check and the deletion share
+  one transaction: a publication lands before (and is deleted) or after (and
+  fails with "Unknown dataset"). A workflow page target written as a runtime
+  template cannot be matched. `[src: file: backend/src/db/live_page_datasets.rs:60-88]`
+  `[src: file: backend/src/db/live_page_datasets.rs:204]`
+- **Usage.** `GET /api/pages/{id}/dataset-usage` returns, per dataset, its
+  writers, whether the HTML names it, and its bound buttons; the data panel
+  shows it next to each dataset's size and last write, with Empty, Delete and
+  (time series) limit controls behind confirmations.
+  `[src: file: backend/src/db/live_page_datasets.rs:161]`
+  `[src: file: frontend/src/components/LivePageDatasetControls.tsx:41]`
+
+Who may do what: a human may do all four. A bridge token (MCP
+`page_delete_dataset`) may delete only a dataset nothing references, within its
+Page write scope, and never with `force` (the handler refuses it). Limits,
+usage and publishing (hence `clear`) are absent from `BRIDGE_ROUTES`, so a
+token never reaches them; the limits and usage handlers also refuse a bridge
+caller.
+None of these touch what a trusted button's approval fingerprint covers (the
+block and the workflow definition), so approvals stay valid; deleting a dataset
+a button binds needs `force`, after which that button fails at launch.
+`[src: file: backend/src/api/live_pages.rs:533-620]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:7756]`
+
 CSV export normalizes that retained JSON into tabular rows: top-level arrays
 become rows, a single array inside an object envelope is expanded while scalar
 metadata is repeated, parallel nested arrays are zipped by index, and matrix
@@ -193,6 +246,88 @@ on their root element. A `prefers-color-scheme` fallback should exclude an
 explicit light value, for example with `:root:not([data-theme="light"])`.
 Custom theme names can use the Page's own fallback rules.
 `[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
+
+A publish that changes a Page (API `POST /api/pages/{id}/publish` or a
+`PublishPageData` step) broadcasts the local WebSocket event
+`live_page_data_changed { page_id, data_revision }`. The Pages view and the
+standalone tab re-read that Page at once and post `kronn:page-data` to the
+open frame without rebuilding it; their 30 s poll stays as a fallback.
+`[src: file: backend/src/api/live_pages.rs:647]`
+`[src: file: frontend/src/hooks/useLivePageDataPush.ts:1]`
+
+## « Ma Todo », the default board (KT-1030)
+
+Kronn installs one board Page and six workflows at boot, once
+(`core::default_todo::install_on_boot`, from both the standalone and the
+desktop mains). The install goes through the Artifact import machinery
+(fresh copies, ids remapped) and is recorded in `default_contents`
+(migration 240). Rules:
+
+- **Once.** A `default_contents` row means "handled"; a restart, an upgrade or
+  a deleted board never installs it again. `GET /api/defaults/todo` reports
+  `installed`, `removed`, `kept_existing` or `not_installed`;
+  `POST /api/defaults/todo/install` (human only, absent from the bridge-token
+  list) installs a fresh copy, refused while Kronn's board page exists. The
+  Pages sidebar offers it when the board is absent.
+- **An own todo is never touched.** A Page titled « Ma Todo » / « My Todo » /
+  « Mi Todo » / « 我的待办 » or slugged `ma-todo`, `my-todo`, `mi-todo`, `todo`
+  makes boot record `kept_existing` and create nothing; the sidebar proposes
+  to install Kronn's board next to it.
+- **Portable.** Every workflow is `TaskBoard` + `PublishPageData`: no Exec, no
+  HTTP, no URL or id in the shipped text. A task's discussion link is the
+  instance-relative `#discussion-<id>`.
+- **Enabled, not trusted.** The workflows arrive enabled (first-party,
+  agentless, needed for the board to work without configuration); no trust is
+  approved. The page asks the human to approve `todo-move` once in its details
+  (KT-1029) to drop without a card; `todo-toggle` is eligible too, `todo-add`
+  and `todo-edit` take typed values and keep their card.
+- **No polling.** No workflow has a schedule: every action publishes the board
+  it changed, which reaches open views through `live_page_data_changed`.
+  `todo-refresh` is a manual button for changes made elsewhere.
+- **Drag and drop.** The drop moves the card at once and clicks the move CTA
+  inside the gesture. The Page watches that CTA's `data-kronn-action-state`:
+  a failed launch puts the card back with the reason, a published board
+  confirms it, a refused trusted launch leaves the card proposed with
+  « Confirm / Cancel » while Kronn's card is open. States marked before the
+  launch (an older identical move) are ignored by launch id.
+- **First-view notice.** One dismissible notice says the page runs on
+  Kronn's Tasks and Workflows and can be edited (by hand or by an agent), with
+  the trust hint. Closing it is display-only and remembered by the host (see
+  Page preferences below).
+- **Editing never cuts.** Rows carry the whole description (the card derives
+  its one-line preview), and `edit` writes only the fields that differ from
+  the stored task, compared trimmed, so an untouched description keeps its
+  exact bytes. A description over 20 000 characters is refused, never cut.
+- **Cards.** Title, priority badge (not for `normal`), relative update date,
+  linked-discussion link, first-line description preview, tag chips (the
+  task's tags minus the board tag), actions. An empty column says so.
+- **Search.** A display-only filter over title, description, reference and
+  tags, case- and accent-insensitive; each column shows `matches of total`;
+  `/` focuses it, × or Escape clears it, a tag chip fills it.
+- **Details.** A chevron expands a card's description rendered as Markdown
+  (headings, lists, emphasis, code, http(s) links only). The text is escaped
+  before any tag is built; opening it launches nothing.
+
+### Page preferences
+
+The opaque sandbox (`allow-scripts`, no `allow-same-origin`) has no storage.
+The bridge exposes `window.KronnPagePref(key, value)`: after a live click it
+posts `kronn:page-pref { page_id, key, value }` on the private port. The host
+relay (`createLivePageOpenLinkRelay`, option `pageId`) accepts it only for an
+allow-listed key (`LIVE_PAGE_PREF_KEYS`, today `notice-dismissed`), a boolean
+value and the Page the frame shows; it stores it in the host's `localStorage`
+(`kronn:page-pref:<page id>:<key>`, errors swallowed) and never acts on it.
+`runtimeData` hands the stored flags back as `KronnPageData.prefs`.
+`[src: file: frontend/src/lib/live-page-sandbox.ts:1]`
+
+`TaskBoard` (zero tokens) reads or changes the planning tasks carrying the
+board tag; it refuses any task without it. The order of open cards lives in
+`task_board_orders` per tag, because the planning `rank` is renumbered across
+a priority band. Its `data.rows` ends with one `__col_<column>__` marker per
+column, which the Page binds to for "end of column" moves.
+`[src: file: backend/src/core/default_todo.rs:1]`
+`[src: file: backend/src/workflows/task_board_step.rs:1]`
+`[src: file: backend/src/core/default_todo/board.html:1]`
 
 ## View parameters
 
@@ -227,6 +362,28 @@ Supported operations:
 - `replace`: replace the complete snapshot value;
 - `append`: add one value or every value of an input array as observations;
 - `upsert`: insert or replace collection entries using a declared key field.
+
+A write whose `value_from` reads an `Exec` stdout (`steps.<exec>.data.stdout`
+or `previous_step.data.stdout`) gets the whole document, never a cut one. The
+checks below follow what the run recorded: the type of the step that really
+produced the value (for `previous_step`, the step that ran last, also after a
+jump or a resume). When that type is unknown, a value with the Exec envelope
+shape is checked anyway. Any other source is published as is, whatever its
+field names. The 2 MiB raise is decided before the run from list order, so it
+is a best effort: after a jump, a cut output is refused, never published.
+`{{previous_step.data…}}` and `{{steps.<name>.data…}}` no longer read an older
+step's data after a step that produced no envelope. To read an earlier
+producer, name it with `steps.<producer>.data`, which works as long as that
+producer has not been re-run without an envelope. An `Exec` step that a
+`PublishPageData` write reads keeps up to 2 MiB of output (the size
+`POST /api/pages/{id}/publish` accepts) instead of 100 KB. A stdout cut at that
+limit (flagged `stdout_truncated` in the step envelope, or carrying the
+truncation marker) fails the publish step with an explicit message and the Page
+keeps its previous data. A stdout that starts with `{` or `[` is parsed and
+stored as the JSON value; if it does not parse, the step fails the same way.
+Other text is published as a string. The Exec output is scrubbed of the
+project's GitHub token before it reaches the run record or a Page.
+`[src: file: backend/src/workflows/publish_page_step.rs:1]`
 
 Every successful publication increments the Page data revision once and stores
 its workflow run id when available. Dedupe keys make replayed append writes
@@ -289,6 +446,15 @@ atomic launch claim. Action references use at most 256 URL-safe unreserved
 characters (`A-Z`, `a-z`, `0-9`, `.`, `_`, `~`, `-`); malformed script types,
 prefixed lookalike attributes and stale proposals removed from the current
 revision fail closed.
+
+A CTA may add `data-kronn-binding-labels`, a JSON map from the same binding
+names to display text (`{"ticket":"Frame the login bug"}`). The card shows it
+in place of the selector, which stays in the tooltip and the resolved values.
+A label is a string of at most 200 characters (UTF-16 code units); a longer,
+blank or non-string label is rejected and the card shows the raw selector
+instead. Labels are display only: the host keeps only those of bindings the
+click carries, never sends them to the server, and they do not enter the trust
+fingerprint.
 
 `dynamic_binding` references may resolve `page.id`, `page.slug`, `page.title`,
 a snapshot field, or a collection row selected with `find(<field>)`. The click
@@ -428,6 +594,51 @@ Kronn-bundled declarative charts are the default. Custom JavaScript and D3 are
 an advanced escape hatch and remain subject to the same iframe, CSP, payload
 and runtime limits.
 
+#### Trusted actions (KT-1029)
+
+A human may approve, from the Page's details, that one action runs on a click
+without its card. The approval lives in `live_page_action_trusts`, never in the
+HTML, and is human only: its routes (`GET /api/pages/{id}/action-trusts`,
+`POST|DELETE /api/live-page-actions/{id}/trust`) are absent from the
+bridge-token list and the handlers refuse a bridge caller.
+[src: file: backend/src/api/live_page_actions.rs:1]
+
+- **Scope.** One declaration (`page + action_ref`), bound to a SHA-256 over the
+  block (kind, target, project, values), the Page's project and the workflow's
+  shared revision identity (`run_pins::revision_fingerprint`, KT-1096). The UI
+  sends the fingerprint it showed; a different current one is refused. Each
+  approval gets a new `approval_id`.
+- **Eligibility.** Workflow targets only; every step must be of a type known
+  to run no agent (ApiCall, Notify, Gate, Exec, BatchApiCall, JsonData,
+  CollectApiData, TransformData, PublishPageData): any other type, including
+  a future one, is refused by default, as is any Quick Prompt or sub-workflow
+  reference; no skill, profile or directive; no
+  CollectApiData Quick Exec source (a run does not pin it); no `user_input`,
+  `project_env` or overridable value; target, block and Page in one project;
+  workflow enabled.
+- **Invalidation.** Any fingerprint difference or lost eligibility marks the
+  approval invalidated with a reason, for good. SQLite triggers on `workflows`
+  and `quick_apis` invalidate at write time through
+  `live_page_action_trust_deps`: every column but `pinned` and `updated_at`
+  is compared, so a pin change in the same write as a content change still
+  counts, and a change undone before anything reads it still counts. A test
+  keeps the compared columns equal to the tables' columns.
+- **Launch.** The host relay forwards an action only with positive
+  `navigator.userActivation.isActive`; the Kronn UI sends `trusted: true` with
+  no typed value, and ignores an answer that arrives after the reader changed
+  Page or opened another card. The claim records the approval id and
+  fingerprint. `create_manual_run_admitted` then runs `admit_run`, inserts the
+  run and pins it (`run_pins::pin_within`) in one transaction, against the
+  definition it read: a claim from an older approval, an edit or a revocation
+  before that point is refused, and nothing after it changes what runs. A row
+  in flight is never relaunched; one row waits 2 s between trusted launches
+  and one action allows 30 per minute.
+- **Revocation.** Deletes the row; the next click opens the card.
+[src: file: backend/src/db/live_page_action_trusts.rs:1]
+
+Embed permission (third-party embeds) is a separate mechanism and is not
+affected by action trust.
+
 ### Third-party embeds
 
 A player nested inside a Page (for example `https://suno.com/embed/<id>`)
@@ -467,8 +678,14 @@ malformed one rejects the whole change.
 The UI is Configuration → Artifacts → External content (Allowed sites): type an
 origin, see the exact value that will be saved, add it, or remove a
 permission. Every Page view, the import dialog and that section share one
-in-tab store; another tab (a wall screen) re-reads it when it becomes visible,
-so a revoked site disappears at the next check. Changes are sent one after the
+in-tab store. Every change of the list (Configuration, an import that allowed
+sites, a configuration reset) broadcasts `{type:'embed_origins_changed'}` on
+the local WebSocket, with no origin in it (never relayed to a P2P peer); every
+open tab, a visible wall screen included, re-reads the list at once and a
+revoked site's players are unmounted. A tab also re-reads on WebSocket
+reconnect (for an event sent while it was disconnected) and on focus.
+[src: file: backend/src/api/live_pages.rs:643]
+Changes are sent one after the
 other, and a read that started before a change landed (or while one is in
 flight) is discarded, so a slow read can never bring back a revoked site or
 drop a confirmed one. An import that allowed sites invalidates the store the
@@ -476,21 +693,74 @@ same way and reads the list again at once.
 [src: file: frontend/src/components/settings/ExternalContentSection.tsx:24]
 [src: file: frontend/src/hooks/useEmbedAllowedOrigins.ts:95]
 
-Docker. The gateway's CSP applies to the app document, so its `frame-src` is
-`'self'` plus exactly the allowed sites. On every document request the gateway
-asks `GET /api/embed-origins/frame-src` through `auth_request` (open like
-`/api/health`: it carries no credentials and returns only what the document's
-CSP shows anyway) and copies `X-Kronn-Frame-Src` into its single CSP header.
-Each origin is re-checked as a plain CSP host source (no `;`, quote, space,
-wildcard, `_` or IPv6 literal). CSP lets an `http://` source also match its
-`https://` upgrade, so an `http://` site is listed only when that upgrade is
-allowed too. The value is bounded at 16 KiB: an addition that would exceed it
-is refused, so every accepted site is listed. Validators
-are dropped on the document, so a newly allowed site plays after a reload; if
-the backend does not answer, the document is served with `frame-src 'self'`.
-Assets and `/api` keep `frame-src 'self'`. Desktop (no CSP) and native mode are
-unaffected.
+Browser enforcement. The host, not only the overlay, limits what may be
+framed: every app document carries `frame-src` (and `child-src`) set to
+`'self'` plus exactly the allowed sites, built once by `frame_src_sources`
+(each origin re-checked as a plain CSP host source: no `;`, quote, space,
+wildcard, `_` or IPv6 literal; an `http://` site is listed only when its
+`https://` upgrade is allowed too, since CSP lets the former match the latter;
+bounded at 16 KiB, and an addition that would exceed it is refused). The
+browser applies it to every navigation of a player frame, so an allowed site
+that redirects, or navigates its frame, to another origin is blocked before
+any request reaches that origin (`e2e/specs/live-page-embed-frame-policy.spec.ts`).
+Each mode serves it on the real document response:
+- Docker: the gateway asks `GET /api/embed-origins/frame-src` through
+  `auth_request` on every document request (open like `/api/health`: it
+  carries no credentials and returns only what the document's CSP shows
+  anyway) and copies `X-Kronn-Frame-Src` into its single CSP header. If the
+  backend does not answer, the document gets `frame-src 'self'`. Assets and
+  `/api` keep `frame-src 'self'`.
+- Desktop: the Tauri CSP is `null`, but the webview loads the app over HTTP
+  from the embedded backend, which serves the built frontend through
+  `serve_app_documents`; its middleware puts
+  `frame-src S; child-src S; worker-src 'self' blob:` on each response, which
+  the webview enforces. The desktop sends no `Cross-Origin-Embedder-Policy`
+  or `Cross-Origin-Opener-Policy` (KT-1123): under `require-corp` the webview
+  refuses any player that does not itself send COEP + CORP (YouTube, Vimeo,
+  Suno do not), whatever the allow-list says, and `credentialless` is not
+  supported by WebKit, the macOS webview. They were set only to expose
+  `SharedArrayBuffer` to the TTS/STT workers; onnxruntime-web falls back to a
+  single WASM thread without it, as in Docker, which never sent them.
+  Proven in a native macOS WKWebView: a synthetic player without COEP/CORP is
+  blocked under the old headers and loads without them; TTS produces audio
+  without isolation. Open: the packaged app, a real player, Windows WebView2,
+  and STT, which fails there with or without the headers (KT-1143).
+- Native (`./kronn start-dev`, and the desktop dev URL): Vite serves the
+  documents; the `kronn-frame-policy` plugin reads the same backend route per
+  document request and sets the same policy, re-validating the sources and
+  falling back to `'self'` when the backend is down or the value is malformed.
+  It renders the app document itself (`transformIndexHtml` included) and
+  writes the header and the marker in one response, before Vite's later
+  layers. `vite preview` is not used by Kronn: the plugin does nothing there,
+  so its documents carry no marker and draw no player.
+Documents never answer with a 304 (validators dropped), so a reload carries
+the current list. Each document also carries the exact sources its CSP was served
+with, as `<meta name="kronn-served-frame-src" content="…">` right after
+`<head>` (HTML-escaped; the desktop middleware and the Vite plugin write it
+with the header, the Docker gateway with `sub_filter` from the same value).
+The page compares every later list against that marker, never against a list
+it read afterwards, so a site revoked between serving and the first read is
+still seen as revoked. A missing or malformed marker means an unknown policy:
+no player is drawn until a reload. A policy is fixed for the life of a
+document: a site allowed after the page was opened is shown as a "reload to
+show this content" notice, never as a frame the browser would refuse. An
+allowed `http://` site whose `https://` address is not allowed is never in
+`frame-src` (see above): it gets a notice to allow it over https, not a reload
+notice. A revoked site stays in that policy until a reload, and an allowed player may have been redirected to it, or could be
+again: so once any site the document's policy admits is revoked, every player
+of the tab is unmounted and replaced by the reload notice, whatever its own
+site; only a reload (a document with the new policy) brings players back, or
+the site being allowed again. A change event also suspends every player until
+the list is read again successfully, so a failed re-read never leaves players
+running under a list that may have shrunk. Additions alone keep the players.
+Not enforceable: a frame that an allowed site creates inside its own page is
+governed by that site's document, not by Kronn's CSP, so an allowed site can
+itself embed other origins; Kronn controls only what the Page frames directly,
+redirects included.
 [src: file: backend/src/core/embed_origins.rs:254]
+[src: file: backend/src/api/live_pages.rs:660]
+[src: file: frontend/vite-frame-policy.ts:72]
+[src: file: frontend/src/lib/served-frame-policy.ts:9]
 [src: file: .docker/nginx.conf:31]
 
 Bridge. The injected script finds every `[data-kronn-embed]` (including ones
@@ -677,7 +947,8 @@ coupling the template to every upstream provider response.
 ## Agent and MCP authoring contract
 
 The built-in Workflow Architect and the `kronn-internal` MCP expose the same
-thirteen-step taxonomy. For a Page pipeline, an agent must discover dependencies
+thirteen-step taxonomy. HTTP agents reach the same five Page tools through their
+native catalogue ([Native Page tools](../operations/native-page-tools.md)). For a Page pipeline, an agent must discover dependencies
 before composing the workflow:
 
 1. `qa_list` resolves every saved Quick API used by `CollectApiData`; `qe_list`

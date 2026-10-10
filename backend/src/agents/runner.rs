@@ -3061,6 +3061,9 @@ pub struct AgentStartConfig<'a> {
     /// setting; `None` is [`idle_watchdog::DEFAULT_IDLE_TIMEOUT`], sized for the
     /// first token of a large local model loaded cold.
     pub idle_timeout: Option<std::time::Duration>,
+    /// KT-1108 — receives the run's startup phases, tool categories and
+    /// signs of life for its live reply bubble.
+    pub run_progress: Option<super::run_progress::RunProgress>,
     /// Optional lifecycle owned by the caller (discussion/workflow). HTTP
     /// agents derive a child token from it so cancellation also interrupts the
     /// initial request, before an `AgentProcess`/lifeline exists.
@@ -3144,6 +3147,7 @@ impl<'a> AgentStartConfig<'a> {
             ollama_context_overrides: None,
             http_request_timeout: None,
             idle_timeout: None,
+            run_progress: None,
             cancel_token: None,
             #[cfg(test)]
             test_acp_transport: None,
@@ -3521,12 +3525,36 @@ fn resolve_reasoning_effort(
             "Cannot apply reasoning effort '{candidate}': no available model is resolved for this run. Choose an available catalogue model or clear the effort setting."
         )
     })?;
-    crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model)
-        .filter(|modes| effort_is_advertised(&candidate, modes))
-        .map(|_| Some(candidate.clone()))
-        .ok_or_else(|| format!(
-            "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
-        ))
+    let modes = crate::core::model_catalog::reasoning_modes_for_agent_model(agent_type, &model);
+    effort_catalogue_decision(&candidate, &model, modes.as_deref())
+}
+
+/// A near-miss (case, or stray whitespace on the catalogue side) is refused
+/// with the actual mismatch named, instead of the generic "absent" reason.
+fn effort_catalogue_decision(
+    candidate: &str,
+    model: &str,
+    modes: Option<&[String]>,
+) -> Result<Option<String>, String> {
+    match modes {
+        Some(modes) if effort_is_advertised(candidate, modes) => Ok(Some(candidate.to_owned())),
+        Some(modes) => Err(match effort_close_match(candidate, modes) {
+            Some(EffortNearMiss::Case(actual)) => format!(
+                "Cannot apply reasoning effort '{candidate}' to model '{model}': the catalogue lists '{actual}', not '{candidate}'. A free-text override (workflow step or Quick Prompt) must match the catalogue value exactly, including case and spacing — use '{actual}'."
+            ),
+            Some(EffortNearMiss::CatalogueWhitespace) => format!(
+                "Cannot apply reasoning effort '{candidate}' to model '{model}': the catalogue entry carries extraneous whitespace, so no override can ever match it exactly. Refresh the model catalogue or correct the stored entry — retyping the override will not help."
+            ),
+            None => effort_catalogue_absent_error(candidate, model),
+        }),
+        None => Err(effort_catalogue_absent_error(candidate, model)),
+    }
+}
+
+fn effort_catalogue_absent_error(candidate: &str, model: &str) -> String {
+    format!(
+        "Cannot apply reasoning effort '{candidate}' to model '{model}': the current catalogue does not list that available model/mode combination. Refresh the model catalogue or choose a supported effort."
+    )
 }
 
 /// Pure precedence portion of effort resolution. The catalogue validation is
@@ -3555,6 +3583,42 @@ pub(crate) fn reasoning_effort_candidate(
 
 pub(crate) fn effort_is_advertised(candidate: &str, modes: &[String]) -> bool {
     modes.iter().any(|mode| mode == candidate)
+}
+
+/// Diagnostic-only classification of a near-miss catalogue mode: never
+/// applied to the run, since actual matching stays exact in
+/// `effort_is_advertised` above.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EffortNearMiss<'a> {
+    /// The catalogue mode matches once case is ignored — name that spelling.
+    Case(&'a str),
+    /// The catalogue mode matches once trimmed — the catalogue entry itself,
+    /// not the override, carries the stray whitespace an override can never
+    /// reproduce (candidates are already trimmed before this check runs).
+    CatalogueWhitespace,
+}
+
+pub(crate) fn effort_close_match<'a>(
+    candidate: &str,
+    modes: &'a [String],
+) -> Option<EffortNearMiss<'a>> {
+    modes.iter().map(String::as_str).find_map(|mode| {
+        if mode == candidate {
+            None
+        } else if mode.trim() == candidate {
+            Some(EffortNearMiss::CatalogueWhitespace)
+        } else if mode.trim().eq_ignore_ascii_case(candidate) {
+            // A padded entry cannot be matched, whatever the case: suggesting
+            // its spelling would name a value that never passes.
+            Some(if mode.trim() == mode {
+                EffortNearMiss::Case(mode)
+            } else {
+                EffortNearMiss::CatalogueWhitespace
+            })
+        } else {
+            None
+        }
+    })
 }
 
 fn missing_ollama_model_error() -> String {
@@ -3740,8 +3804,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // it. For a normal discussion `work_dir` is None → falls back to
     // `project_path` (unchanged behaviour). Additive: only creates missing
     // files, never removes others.
+    if !config.skill_ids.is_empty() {
+        let launched_skills = match config.run_snapshot_id {
+            Some(run_id) => crate::core::skills::get_skills_snapshot(run_id, config.skill_ids),
+            None => crate::core::skills::get_skills_by_ids(config.skill_ids),
+        };
+        crate::core::skills::refuse_foreign_project_skills(&launched_skills, config.project_id)?;
+    }
     let agent_cwd = config.work_dir.unwrap_or(config.project_path);
-    let native_sync_ok = if !agent_cwd.is_empty()
+    // KT-1096 — a pinned run gets its skills and profiles inline: a shared
+    // native file can be rewritten from the live catalog during its turn.
+    let native_sync_ok = if config.run_snapshot_id.is_none()
+        && !agent_cwd.is_empty()
         && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty())
     {
         let profile_ids_vec: Vec<String> = config.profile_ids.to_vec();
@@ -4122,6 +4196,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 }
             },
         );
+        // API access policies decide on the model this launch really runs.
+        if let Some(tools) = config.tools.as_ref() {
+            tools.bind_launch_identity(crate::core::api_access::AgentIdentity {
+                agent_type: config.agent_type.clone(),
+                model: Some(model.to_string()),
+            });
+        }
         return start_ollama_http_with_idle(
             config.agent_type,
             config.prompt,
@@ -4140,6 +4221,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.idle_timeout,
             config.context_images,
             config.activity,
+            config.run_progress,
         )
         .await;
     }
@@ -4211,6 +4293,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
             #[cfg(test)]
@@ -4258,6 +4341,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 provenance: config.provenance.clone(),
                 activity: config.activity.clone(),
                 idle_timeout: config.idle_timeout,
+                run_progress: config.run_progress.clone(),
                 step_tools: config.step_tools,
             };
             #[cfg(test)]
@@ -4465,6 +4549,19 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         Err(e) => {
             tracing::info!("Direct binary '{}' failed ({}), trying npx...", binary, e);
             if let Some(pkg) = npx_pkg {
+                let runtime = super::probe_npx_runtime(pkg, false, &work_dir).await;
+                tracing::warn!(
+                    binary,
+                    command = ?runtime.command,
+                    version = ?runtime.version,
+                    direct_error = %e,
+                    "Agent CLI npx fallback"
+                );
+                provenance::record_npx_fallback(
+                    config.provenance.as_ref(),
+                    runtime.command,
+                    runtime.version,
+                );
                 try_spawn(
                     "npx",
                     Some(pkg),
@@ -4479,7 +4576,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     config.workflow_step_context,
                     &github_env,
                     bridge_value.as_deref(),
-                )?
+                )
+                .map_err(|error| {
+                    format!("Direct CLI launch failed: {e}; npx fallback failed: {error}")
+                })?
             } else {
                 return Err(e);
             }
@@ -4640,6 +4740,15 @@ fn mint_launch_bridge_token(
             .workflow_step_context
             .map(|context| context.run_id.clone()),
         project_id: config.project_id.map(str::to_owned),
+        agent: Some(crate::core::api_access::AgentIdentity {
+            agent_type: config.agent_type.clone(),
+            model: effective_model_flag(
+                config.model_override,
+                config.agent_type,
+                config.tier,
+                config.model_tiers,
+            ),
+        }),
     })
     .map_err(|error| format!("Agent launch refused: {error}"))
 }
@@ -4722,6 +4831,7 @@ struct AcpSessionRequest<'a> {
     activity: Option<super::activity::AgentActivitySink>,
     /// KT-932 — silence after which the turn is cancelled; `None` is the default.
     idle_timeout: Option<Duration>,
+    run_progress: Option<super::run_progress::RunProgress>,
     /// KT-908 — narrows the MCP servers offered to the session.
     step_tools: Option<&'a crate::models::StepTools>,
 }
@@ -4747,6 +4857,9 @@ async fn start_native_acp(
         acp_project_mcp_servers(request.project_path, false),
         request.step_tools,
     );
+    if let Some(progress) = request.run_progress.as_ref() {
+        progress.phase(crate::models::AgentRunPhase::Launching);
+    }
     let transport: Arc<dyn AcpTransport> = Arc::new(
         AcpJsonRpcTransport::spawn_native(
             acp_agent_kind,
@@ -4826,6 +4939,169 @@ async fn start_adapted_acp(
     .await
 }
 
+/// Bounds of a readiness probe's ACP handshake (KT-1107).
+#[derive(Debug, Clone, Copy)]
+pub struct AcpProbeBounds {
+    pub initialize: Duration,
+    pub session: Duration,
+    pub shutdown: Duration,
+}
+
+impl AcpProbeBounds {
+    /// A launch's own budgets, so the probe fails exactly where a launch would.
+    pub const LAUNCH: Self = Self {
+        initialize: Duration::from_secs(30),
+        session: crate::acp::SESSION_SETUP_TIMEOUT,
+        shutdown: Duration::from_secs(5),
+    };
+}
+
+/// The provider key a launch of `agent` would receive, if any.
+pub(crate) fn configured_api_key(agent: &AgentType, tokens: &TokensConfig) -> Option<String> {
+    crate::core::child_env::AgentFamily::from_agent_type(agent)
+        .provider_key_env()
+        .and_then(|env_key| get_api_key(env_key, tokens))
+}
+
+/// The project MCP servers an ACP session of `agent` would declare here.
+pub(crate) fn probe_mcp_servers(
+    agent: &AgentType,
+    project_path: &str,
+) -> Vec<crate::acp::AcpMcpServer> {
+    acp_project_mcp_servers(project_path, *agent == AgentType::ClaudeCode)
+}
+
+/// Start `agent`'s native ACP runtime the way a launch does, run `initialize`
+/// and `session/new` without any prompt, then stop it (KT-1107). It takes no
+/// prompt at all, so it cannot reach the model.
+pub(crate) async fn probe_native_acp_session(
+    agent_type: &AgentType,
+    project_path: &str,
+    project_id: Option<&str>,
+    tokens: &TokensConfig,
+    bounds: AcpProbeBounds,
+) -> Result<(), super::acp_start::AcpStartFailure> {
+    use super::acp_start::{AcpStartFailure, AcpStartPhase};
+    use crate::acp::{AcpCapability, AcpHost, AcpInitialize, AcpSessionScope, AcpTransport};
+
+    let failed = |phase, error: String| AcpStartFailure::failed(phase, &error);
+    let work_dir = resolve_agent_work_dir(None, project_path)
+        .map_err(|error| failed(AcpStartPhase::Start, error))?;
+    let mcp_servers = probe_mcp_servers(agent_type, project_path);
+    let project_servers: Vec<String> = mcp_servers
+        .iter()
+        .filter(|server| !crate::acp::is_bridge_like(&server.id))
+        .map(|server| server.id.clone())
+        .collect();
+    // Held for the whole probe: the bridge the session starts uses it.
+    let mut _bridge = None;
+    #[cfg(test)]
+    let routed = test_acp_routes::transport_at(&work_dir);
+    #[cfg(not(test))]
+    let routed: Option<Arc<dyn AcpTransport>> = None;
+    let transport: Arc<dyn AcpTransport> = match routed {
+        Some(transport) => transport,
+        None => {
+            let kind = crate::acp::acp_agent(agent_type).ok_or_else(|| {
+                failed(
+                    AcpStartPhase::Start,
+                    format!("{agent_type:?} is not an ACP agent"),
+                )
+            })?;
+            let bridge = crate::core::bridge_token::mint(crate::core::bridge_token::BridgeScope {
+                project_id: project_id.map(str::to_owned),
+                agent: Some(crate::core::api_access::AgentIdentity {
+                    agent_type: agent_type.clone(),
+                    model: None,
+                }),
+                ..Default::default()
+            })
+            .map_err(|error| failed(AcpStartPhase::Start, error))?;
+            let native_env = crate::acp::NativeLaunchEnv {
+                api_key: configured_api_key(agent_type, tokens),
+                bridge_token: Some(bridge.value().to_owned()),
+                github_env: crate::core::github_connection::env_for_launch(project_id).await,
+                ..Default::default()
+            };
+            _bridge = Some(bridge);
+            let project_root = (!project_path.is_empty()).then(|| work_dir.clone());
+            let spawned = crate::acp::AcpJsonRpcTransport::spawn_native(
+                kind,
+                &work_dir.to_string_lossy(),
+                true,
+                native_env,
+                AcpSessionScope::new(project_root, "readiness-probe"),
+                mcp_servers.clone(),
+            )
+            .await
+            .map_err(|error| {
+                failed(
+                    AcpStartPhase::Initialize,
+                    format!("{agent_type:?} ACP spawn failed: {error}"),
+                )
+            })?;
+            Arc::new(spawned)
+        }
+    };
+    let mut host = AcpHost::new(1, transport);
+    let outcome = async {
+        let started = Instant::now();
+        let initialize = AcpInitialize {
+            protocol_version: 1,
+            cwd: work_dir.to_string_lossy().into_owned(),
+            mcp_servers: mcp_servers.clone(),
+        };
+        match tokio::time::timeout(bounds.initialize, host.negotiate(initialize)).await {
+            Err(_) | Ok(Err(crate::acp::AcpError::Timeout(_))) => {
+                return Err(AcpStartFailure::new(
+                    AcpStartPhase::Initialize,
+                    started.elapsed(),
+                    Vec::new(),
+                ))
+            }
+            Ok(Err(error)) => {
+                return Err(failed(
+                    AcpStartPhase::Initialize,
+                    format!("{agent_type:?} ACP initialize failed: {error}"),
+                ))
+            }
+            Ok(Ok(_)) => {}
+        }
+        if !mcp_servers.is_empty() {
+            if let Err(error) = host.require_capability(AcpCapability::McpInjection) {
+                return Err(failed(
+                    AcpStartPhase::Initialize,
+                    format!(
+                        "{agent_type:?} ACP cannot start with the project MCP registry: {error}"
+                    ),
+                ));
+            }
+        }
+        let started = Instant::now();
+        match tokio::time::timeout(bounds.session, host.create_session()).await {
+            Err(_) | Ok(Err(crate::acp::AcpError::Timeout(_))) => Err(AcpStartFailure::new(
+                AcpStartPhase::Session,
+                started.elapsed(),
+                project_servers.clone(),
+            )),
+            Ok(Err(error)) => Err(failed(
+                AcpStartPhase::Session,
+                format!("{agent_type:?} ACP session creation failed: {error}"),
+            )),
+            Ok(Ok(_)) => Ok(()),
+        }
+    }
+    .await;
+    // A shutdown that hangs is abandoned: dropping the transport kills the group.
+    if tokio::time::timeout(bounds.shutdown, host.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(agent = ?agent_type, "readiness probe: ACP shutdown timed out");
+    }
+    outcome
+}
+
 /// Test-only routing of every ACP launch in one working directory to a
 /// fixture transport, so tests can drive callers that build their own
 /// `AgentStartConfig` (workflow steps, discussion turns).
@@ -4861,6 +5137,10 @@ pub(crate) mod test_acp_routes {
 
     pub(crate) fn is_routed(work_dir: &Path) -> bool {
         ROUTES.lock().unwrap().contains_key(work_dir)
+    }
+
+    pub(crate) fn transport_at(work_dir: &Path) -> Option<Transport> {
+        ROUTES.lock().unwrap().get(work_dir).cloned()
     }
 
     pub(super) fn transport_for(
@@ -4908,8 +5188,18 @@ async fn run_acp_session(
         provenance,
         activity,
         idle_timeout,
+        run_progress,
         step_tools,
     } = request;
+    use crate::models::{AgentRunPhase, AgentRunStop};
+    // Each startup phase shows the bound that ends it, so its countdown is real.
+    let startup_bounds = crate::acp::AcpRequestTimeouts::DEFAULT;
+    let enter = |phase: AgentRunPhase, bound: Option<Duration>| {
+        if let Some(progress) = run_progress.as_ref() {
+            progress.phase(phase);
+            progress.idle_limit(bound);
+        }
+    };
     use super::acp_start::{AcpStartFailure, AcpStartPhase};
     use crate::acp::{
         acp_agent, AcpCapability, AcpHost, AcpInitialize, AcpSessionEvent, AcpSessionTarget,
@@ -4945,6 +5235,7 @@ async fn run_acp_session(
     };
     let cancelled = || format!("{agent_type:?} ACP start cancelled");
 
+    enter(AgentRunPhase::Initializing, Some(startup_bounds.control));
     let started = Instant::now();
     let negotiated = until_cancelled(
         parent_cancel,
@@ -4978,6 +5269,13 @@ async fn run_acp_session(
             return Err(acp_start_failure(&host, failure).await);
         }
     }
+    if let Some(progress) = run_progress.as_ref() {
+        progress.mcp_servers(mcp_servers.len());
+    }
+    enter(
+        AgentRunPhase::OpeningSession,
+        Some(startup_bounds.session_setup),
+    );
     let (resumed, resume_failed) = match resume_id {
         Some(conversation_id) => {
             let agent = match acp_agent(agent_type) {
@@ -5070,6 +5368,7 @@ async fn run_acp_session(
     // models of the directory it runs in, so a model seen from elsewhere can be
     // absent here. That launch is refused, before any prompt is sent.
     if let Some(model) = model_flag {
+        enter(AgentRunPhase::SelectingModel, Some(startup_bounds.control));
         let started = Instant::now();
         let Some(selected) =
             until_cancelled(parent_cancel, host.select_model(&session, model)).await
@@ -5169,6 +5468,20 @@ async fn run_acp_session(
         }
     };
     let lifeline_stdin = lifeline.stdin.take();
+    // An adapter spawns its CLI with the prompt: the CLI then starts its own
+    // MCP servers before it says it is ready.
+    let adapted =
+        crate::acp::resolve_acp_route(agent_type) == crate::acp::AcpProductionRoute::AdaptedAcp;
+    enter(
+        if adapted {
+            AgentRunPhase::StartingCli
+        } else {
+            AgentRunPhase::WaitingModel
+        },
+        Some(model_idle_limit),
+    );
+    let forwarder_progress = run_progress.clone();
+    let stall_progress = run_progress.clone();
 
     tokio::spawn(async move {
         let mut lifeline_stdin = lifeline_stdin;
@@ -5183,6 +5496,18 @@ async fn run_acp_session(
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 forwarder_idle.beat();
+                if let Some(progress) = forwarder_progress.as_ref() {
+                    match &event {
+                        AcpSessionEvent::TextDelta(_) => progress.text(),
+                        AcpSessionEvent::Thought => progress.thought(),
+                        AcpSessionEvent::ToolActivity(update) => progress.tool(update),
+                        AcpSessionEvent::CliSessionObserved(_)
+                        | AcpSessionEvent::NativeSessionId(_) => {
+                            progress.phase(AgentRunPhase::WaitingModel)
+                        }
+                        _ => progress.beat(),
+                    }
+                }
                 match event {
                     AcpSessionEvent::TextDelta(text) => {
                         if tx.send(text).await.is_err() {
@@ -5215,10 +5540,16 @@ async fn run_acp_session(
                         // silence against ITS OWN wider bound, not the
                         // model's, until a terminal update closes it.
                         forwarder_idle.begin_tool(id.as_deref(), &name, tool_execution_limit);
+                        if let Some(progress) = forwarder_progress.as_ref() {
+                            progress.idle_limit(Some(forwarder_idle.limit()));
+                        }
                     }
                     AcpSessionEvent::ToolCallEnded { id } => {
                         // Back to watching the model itself.
                         forwarder_idle.end_tool(id.as_deref());
+                        if let Some(progress) = forwarder_progress.as_ref() {
+                            progress.idle_limit(Some(forwarder_idle.limit()));
+                        }
                     }
                     AcpSessionEvent::ToolActivity(update) => {
                         // Counted once per call, whatever its progress updates.
@@ -5272,7 +5603,9 @@ async fn run_acp_session(
                         }
                     }
                     // Proof of life that has nothing to show: it only beat the clock.
-                    AcpSessionEvent::Activity | AcpSessionEvent::Completed => {}
+                    AcpSessionEvent::Activity
+                    | AcpSessionEvent::Thought
+                    | AcpSessionEvent::Completed => {}
                 }
             }
         });
@@ -5314,6 +5647,9 @@ async fn run_acp_session(
                     }
                 };
                 tracing::warn!(agent = %event_agent_label, "{reason}");
+                if let Some(progress) = stall_progress.as_ref() {
+                    progress.stop(AgentRunStop::Idle);
+                }
                 if let Ok(mut capture) = task_stderr.lock() {
                     capture.push(reason);
                 }
@@ -7419,6 +7755,8 @@ pub(crate) struct TokenTally {
     eval: u64,
     cost_usd_micros: Option<u64>,
     provenance: Option<AgentProvenanceCapture>,
+    /// KT-1108 — the run's live progress: reasoning, text and signs of life.
+    progress: Option<super::run_progress::RunProgress>,
 }
 
 /// Cumulative ceiling telemetry carried in stderr; the last marker wins.
@@ -7786,6 +8124,11 @@ pub(crate) struct LeadingThinkingFilter {
 }
 
 impl LeadingThinkingFilter {
+    /// Inside a leading reasoning block the model's text is withheld.
+    pub(crate) fn is_suppressing(&self) -> bool {
+        self.state == LeadingThinkingState::Suppressing
+    }
+
     const OPEN_TAGS: [&'static str; 2] = ["<think>", "<thinking>"];
     const CLOSE_TAGS: [&'static str; 2] = ["</think>", "</thinking>"];
 
@@ -7963,6 +8306,8 @@ pub(crate) async fn forward_chat_line(
     let Some(chunk) = codec.parse_line(line) else {
         return true;
     };
+    // Shape only: which kind of chunk it is, never its text.
+    let reasoning = super::activity::is_reasoning_frame(line);
     if let Some(model) = &chunk.model {
         provenance::observe_model(tally.provenance.as_ref(), model);
     }
@@ -7992,13 +8337,26 @@ pub(crate) async fn forward_chat_line(
         *provider_error = Some(err.clone());
         *got_error = true;
     }
+    let mut shown = false;
+    let mut withheld_thought = false;
     if let Some(text) = chunk.delta {
         let visible = replay_hold.push(thinking_filter.push(&text));
+        withheld_thought = thinking_filter.is_suppressing();
+        shown = !visible.is_empty();
         if !visible.is_empty() {
             *emitted_any = true;
         }
         if !visible.is_empty() && tx.send(visible).await.is_err() {
             return false;
+        }
+    }
+    if let Some(progress) = tally.progress.as_ref() {
+        if shown {
+            progress.text();
+        } else if reasoning || withheld_thought {
+            progress.thought();
+        } else {
+            progress.beat();
         }
     }
     if chunk.prompt_tokens > 0 {
@@ -8253,6 +8611,7 @@ async fn send_http_agent_request(
     retry_allowed: bool,
     stderr: &Arc<Mutex<Vec<String>>>,
     idle: Duration,
+    progress: Option<&super::run_progress::RunProgress>,
 ) -> Result<(reqwest::Response, usize), HttpProviderFailure> {
     // Anthropic caches only the prefixes a request marks. Measured at about a
     // quarter of the uncached input cost; `KRONN_LITELLM_PROMPT_CACHE=0` opts out.
@@ -8269,6 +8628,10 @@ async fn send_http_agent_request(
     let first_token_within = body["stream"].as_bool().unwrap_or(true).then_some(idle);
     let mut attempt = first_attempt;
     loop {
+        // Each attempt has its own first-token bound: the bubble shows it.
+        if let Some(progress) = progress {
+            progress.request_sent(first_token_within);
+        }
         let mut request = client.post(url).json(body);
         if let Some(key) = auth_key {
             request = request.bearer_auth(key);
@@ -8281,6 +8644,9 @@ async fn send_http_agent_request(
                 // dropped future closes it, which is what frees the model.
                 Err(_) => {
                     super::http_diagnostics::record_failure(stderr, None);
+                    if let Some(progress) = progress {
+                        progress.stop(crate::models::AgentRunStop::Idle);
+                    }
                     return Err(HttpProviderFailure {
                         status: None,
                         detail: idle_watchdog::stall_reason(
@@ -8297,6 +8663,10 @@ async fn send_http_agent_request(
         match sent {
             Ok(response) if response.status().is_success() => {
                 super::http_diagnostics::clear_failure(stderr);
+                // Reading the body starts a new bound: the bubble shows it from now.
+                if let Some(progress) = progress {
+                    progress.restart_deadline(first_token_within);
+                }
                 return Ok((response, attempt));
             }
             Ok(response) => {
@@ -8317,6 +8687,9 @@ async fn send_http_agent_request(
                             delay.as_millis()
                         ),
                     );
+                    if let Some(progress) = progress {
+                        progress.backoff();
+                    }
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -8341,6 +8714,9 @@ async fn send_http_agent_request(
                             delay.as_millis()
                         ),
                     );
+                    if let Some(progress) = progress {
+                        progress.backoff();
+                    }
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -8421,6 +8797,7 @@ async fn start_ollama_http(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -8463,6 +8840,7 @@ async fn start_ollama_http_with_idle(
     idle_timeout: Option<Duration>,
     images: Option<&super::vision::ContextImages>,
     activity: Option<super::activity::AgentActivitySink>,
+    run_progress: Option<super::run_progress::RunProgress>,
 ) -> Result<AgentProcess, String> {
     let idle_limit = idle_timeout.unwrap_or(idle_watchdog::DEFAULT_IDLE_TIMEOUT);
     let identity_context = http_agent_identity_context(agent_type, model);
@@ -8885,6 +9263,9 @@ async fn start_ollama_http_with_idle(
         .map(tokio_util::sync::CancellationToken::child_token)
         .unwrap_or_default();
     let initial_request_started_at = std::time::Instant::now();
+    // A streamed run bounds every silence itself (first token, each chunk), so
+    // the consumer's text timer stands down, as for ACP; a non-streamed one does not.
+    let streamed = body["stream"].as_bool().unwrap_or(true);
     provenance::resolve_model(provenance.as_ref(), Some(model), Some(true));
     let mut initial = tokio::select! {
         biased;
@@ -8902,6 +9283,7 @@ async fn start_ollama_http_with_idle(
             true,
             &stderr_capture,
                     idle_limit,
+                    run_progress.as_ref(),
         ) => response,
     };
     // Workflow prompts already carry the schema and the caller validates the
@@ -8940,6 +9322,7 @@ async fn start_ollama_http_with_idle(
                     &client, &url, &body, auth_key.as_deref(), backend,
                     attempt, attempt, false, &stderr_capture,
                     idle_limit,
+                    run_progress.as_ref(),
                 ) => response,
             };
         }
@@ -9145,6 +9528,7 @@ async fn start_ollama_http_with_idle(
             // counts; parse_token_usage later sums the independent markers.
             let mut tally = TokenTally {
                 provenance: provenance.clone(),
+                progress: run_progress.clone(),
                 ..Default::default()
             };
             // The response below was generated from this exact catalogue. A
@@ -9204,6 +9588,9 @@ async fn start_ollama_http_with_idle(
                             };
                             let reason = idle_watchdog::stall_reason(backend, idle_limit, &progress);
                             tracing::warn!(target: "kronn::agent::idle", "{reason}");
+                            if let Some(run) = run_progress.as_ref() {
+                                run.stop(crate::models::AgentRunStop::Idle);
+                            }
                             if let Ok(mut se) = stderr_clone.lock() {
                                 se.push(reason);
                             }
@@ -9214,6 +9601,10 @@ async fn start_ollama_http_with_idle(
                 };
                 let Some(chunk) = chunk else { break };
                 received_chunks += 1;
+                // Every chunk re-arms the stream's bound, keepalives included.
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.beat();
+                }
                 let bytes = match chunk {
                     Ok(b) => b,
                     Err(e) => {
@@ -9288,6 +9679,9 @@ async fn start_ollama_http_with_idle(
             }
             if had_trailing {
                 emitted_this_turn = true;
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.text();
+                }
             }
             emitted_text |= emitted_this_turn;
 
@@ -9419,6 +9813,9 @@ async fn start_ollama_http_with_idle(
                     ),
                 );
                 replay_hold.discard();
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.backoff();
+                }
                 tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {
@@ -9447,6 +9844,7 @@ async fn start_ollama_http_with_idle(
                         !external_effect_observed,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 match retried {
@@ -9486,6 +9884,9 @@ async fn start_ollama_http_with_idle(
                 if tx.send(held).await.is_err() {
                     finish(&mut lifeline, false).await;
                     return;
+                }
+                if let Some(progress) = run_progress.as_ref() {
+                    progress.text();
                 }
                 emitted_text = true;
             }
@@ -9591,6 +9992,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match delivery_retry {
@@ -9681,6 +10083,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match repair_retry {
@@ -9757,6 +10160,7 @@ async fn start_ollama_http_with_idle(
                         false,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 response = match finalization_retry {
@@ -9872,6 +10276,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match finalization_retry {
@@ -9937,6 +10342,7 @@ async fn start_ollama_http_with_idle(
                         false,
                         &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                     ) => result,
                 };
                 response = match worker_retry {
@@ -10002,6 +10408,7 @@ async fn start_ollama_http_with_idle(
                             false,
                             &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                         ) => result,
                     };
                     response = match final_answer {
@@ -10562,6 +10969,14 @@ async fn start_ollama_http_with_idle(
                         // From this point onward no provider retry is safe.
                         external_effect_observed = true;
                         fresh_execution = true;
+                        if let Some(progress) = run_progress.as_ref() {
+                            // Its category only, before it runs; no inactivity
+                            // bound applies while Kronn executes it.
+                            progress.tool(&super::activity::ToolActivityUpdate::named(
+                                None, &call.name,
+                            ));
+                            progress.idle_limit(None);
+                        }
                         let fresh = tokio::select! {
                             biased;
                             _ = task_cancel.cancelled() => {
@@ -11498,6 +11913,7 @@ async fn start_ollama_http_with_idle(
                     false,
                     &stderr_clone,
                     idle_limit,
+                    run_progress.as_ref(),
                 ) => result,
             };
             response = match next_turn {
@@ -11557,7 +11973,7 @@ async fn start_ollama_http_with_idle(
         http_cancel: Some(http_cancel),
         pgid: None,
         token_fragments: false,
-        activity_watched: false,
+        activity_watched: streamed,
         bridge_token: None,
     })
 }
@@ -12890,12 +13306,7 @@ fn resolve_agent_invocation(
     args: &[String],
 ) -> Result<(String, Vec<String>, bool), String> {
     if let Some(package) = npx_package {
-        let mut npx_args = vec!["--yes".to_string(), package.to_string()];
-        npx_args.extend_from_slice(args);
-        let via_wsl = super::find_binary("npx")
-            .map(|location| location.via_wsl)
-            .unwrap_or(false);
-        Ok(("npx".to_string(), npx_args, via_wsl))
+        Ok(super::npx_invocation(package, args))
     } else {
         let location =
             super::find_binary(binary).ok_or_else(|| format!("Binary '{binary}' not found"))?;
@@ -14077,6 +14488,7 @@ mod acp_resume_tests {
                 provenance: None,
                 activity: None,
                 idle_timeout: None,
+                run_progress: None,
             },
             transport,
         )
@@ -14423,6 +14835,7 @@ mod acp_resume_tests {
                     provenance: None,
                     activity: None,
                     idle_timeout: None,
+                    run_progress: None,
                 },
                 transport.clone(),
             )
@@ -14664,6 +15077,7 @@ mod acp_resume_tests {
             provenance: None,
             activity: None,
             idle_timeout: None,
+            run_progress: None,
         }
     }
 

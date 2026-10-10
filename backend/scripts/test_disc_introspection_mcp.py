@@ -130,6 +130,94 @@ class WriteNoticeTests(unittest.TestCase):
         self.assertEqual(self.mod._unwrap({"success": True, "data": {"id": "w"}}), {"id": "w"})
 
 
+class WorkflowReadinessTests(unittest.TestCase):
+    """KT-1138: the backend's ready/blockers verdict reaches the agent intact."""
+
+    READINESS = {
+        "workflow_id": "wf1", "workflow_name": "WF1", "enabled": True, "ready": False,
+        "blockers": [
+            {"workflow_id": "wf2", "workflow_name": "WF2", "step": "release",
+             "on_failure": True, "kind": "human_approval", "phase": "stdin",
+             "reason": "unmodelled_program", "message": "m", "action": "a",
+             "human_only": True},
+        ],
+        "human_approval_count": 1, "checked_workflow_ids": ["wf1", "wf2"],
+        "summary": "NOT READY: 1 blocker(s)",
+    }
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._current_project_id = lambda: None
+
+    def _envelope(self, data, **extra):
+        return {"success": True, "data": data, **extra}
+
+    def test_the_verdict_comes_first_and_the_notice_is_kept(self):
+        out = self.mod._unwrap(self._envelope(
+            {"id": "wf1"}, notice="approve release", readiness=self.READINESS))
+        self.assertEqual(next(iter(out)), "kronn_readiness")
+        self.assertEqual(out["kronn_readiness"], self.READINESS)
+        self.assertEqual(out["kronn_notice"], "approve release")
+        self.assertEqual(out["id"], "wf1")
+
+    def test_create_update_and_get_surface_the_verdict(self):
+        envelope = self._envelope({"id": "wf1", "enabled": False}, readiness=self.READINESS)
+        self.mod._http = mock.Mock(return_value=envelope)
+        drafted = self.mod.call_workflow_create_draft(
+            {"name": "WF1", "trigger": {"type": "Manual"}, "steps": [{"name": "s"}]})
+        updated = self.mod.call_workflow_update({"workflow_id": "wf1", "name": "WF1"})
+        fetched = self.mod.call_workflow_get({"workflow_id": "wf1"})
+        for out in (drafted, updated, fetched):
+            self.assertFalse(out["kronn_readiness"]["ready"])
+            self.assertTrue(out["kronn_readiness"]["blockers"][0]["human_only"])
+
+    def test_workflow_validate_reads_the_backend_verdict_without_writing(self):
+        self.mod._http = mock.Mock(return_value=self._envelope(self.READINESS))
+        out = self.mod.call_workflow_validate({"workflow_id": "wf1"})
+        self.mod._http.assert_called_once_with("GET", "/api/workflows/wf1/readiness")
+        self.assertEqual(out, self.READINESS)
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_validate({})
+
+    def test_workflow_list_keeps_every_counter_including_zero(self):
+        summary = {
+            "id": "wf1", "name": "WF1", "enabled": True, "step_count": 3,
+            "misconfigured_step_count": 0, "unsafe_step_count": 4,
+            "blocker_count": 30, "human_approval_count": 30, "last_run": None,
+        }
+        self.mod._http = mock.Mock(return_value=self._envelope([summary]))
+        out = self.mod.call_workflow_list({})[0]
+        self.assertEqual(out["misconfigured_step_count"], 0)
+        self.assertEqual(out["unsafe_step_count"], 4)
+        self.assertEqual(out["blocker_count"], 30)
+        self.assertEqual(out["human_approval_count"], 30)
+
+    def test_workflow_list_reads_an_older_backend_without_inventing_zeros(self):
+        legacy = {"id": "wf1", "name": "WF1", "enabled": True, "step_count": 3,
+                  "misconfigured_step_count": 1}
+        self.mod._http = mock.Mock(return_value=self._envelope([legacy]))
+        out = self.mod.call_workflow_list({})[0]
+        self.assertEqual(out["misconfigured_step_count"], 1)
+        for absent in ("unsafe_step_count", "blocker_count", "human_approval_count"):
+            self.assertNotIn(absent, out)
+
+    def test_no_tool_offers_an_approval(self):
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertIn("workflow_validate", names)
+        self.assertFalse([n for n in names if "approv" in n])
+        validate = next(t for t in self.mod.TOOLS if t["name"] == "workflow_validate")
+        self.assertIn("cannot approve", validate["description"])
+
+    def test_the_manual_separates_save_enable_preflight_and_run(self):
+        manual = self.mod.TOOL_MANUALS["workflow_create_draft"]
+        for phrase in ("saved", "enabled", "kronn_readiness", "workflow_run_get",
+                       "never approve", "human_only"):
+            self.assertIn(phrase, manual)
+        self.assertIn("authorization to run", manual)
+        self.assertIn("configuration diagnosis", manual)
+        self.assertNotIn("schedules only", manual)
+
+
 class DeclaredStepToolsTests(unittest.TestCase):
     """KT-908: a workflow step's `--step-tools=` list is the whole surface."""
 
@@ -443,6 +531,35 @@ class DiscAppendCredentialInjectionTests(unittest.TestCase):
         ):
             self._append()
         self.assertNotIn("session_credential", self._body())
+
+    ROOM_AGENT = {
+        "discussion_id": "disc-1",
+        "agent_type": "OpenCode",
+        "dispatch_job_id": "job-judge",
+        "source_message_id": "root",
+    }
+
+    def test_a_native_runner_names_its_running_turn(self):
+        """KT-1151 — the runner's own turn rides the append so the backend can
+        attach the post to it instead of starting a second branch."""
+        env = {"KRONN_ROOM_AGENT_CONTEXT": json.dumps(self.ROOM_AGENT)}
+        with mock.patch.dict(os.environ, env):
+            self._append()
+        self.assertEqual(self._body().get("room_agent"), self.ROOM_AGENT)
+
+    def test_no_room_agent_context_for_another_room_or_a_broken_one(self):
+        other = dict(self.ROOM_AGENT, discussion_id="disc-other")
+        for raw in (json.dumps(other), "{not json", json.dumps({"discussion_id": "disc-1"})):
+            self.fake_http.reset_mock()
+            with mock.patch.dict(os.environ, {"KRONN_ROOM_AGENT_CONTEXT": raw}):
+                self._append()
+            self.assertNotIn("room_agent", self._body())
+
+    def test_the_room_agent_context_is_absent_from_the_tool_schemas(self):
+        schemas = json.dumps(self.mod.tool_definitions()
+                             if hasattr(self.mod, "tool_definitions")
+                             else self.mod.TOOLS)
+        self.assertNotIn("room_agent", schemas)
 
     def test_the_credential_is_absent_from_the_tool_schemas(self):
         """A model cannot set what it is never offered. If this ever fails,
@@ -2494,6 +2611,49 @@ class McpListEnrichedOutputTests(unittest.TestCase):
         )
         self.assertIn("necessary but not sufficient", out["api_call_contract"])
         self.assertIn("api_spec", out["api_call_contract"])
+
+    def test_mcp_list_shows_each_plugin_and_endpoint_access_policy(self):
+        fake_backend = {
+            "success": True,
+            "data": {
+                "configs": [],
+                "servers": [
+                    {
+                        "id": "custom-notion",
+                        "name": "Notion",
+                        "api_spec": {"endpoints": [
+                            {"path": "/users/me", "method": "GET"},
+                            {"path": "/pages/{id}", "method": "GET"},
+                        ]},
+                    },
+                    {"id": "open-api", "name": "Open", "api_spec": {"endpoints": [
+                        {"path": "/x", "method": "GET"},
+                    ]}},
+                ],
+                "access_policies": [{
+                    "server_id": "custom-notion",
+                    "policy": {
+                        "access": {"kind": "local_only"},
+                        "endpoints": [
+                            {"method": "GET", "path": "/users/me", "access": {"kind": "all"}},
+                            {"method": "POST", "path": "/search", "access": {
+                                "kind": "agents", "agents": [{"agent": "Ollama", "model": "qwen3:8b"}]}},
+                        ],
+                    },
+                }],
+            },
+        }
+        with mock.patch.object(self.mod, "_http", return_value=fake_backend):
+            out = self.mod.call_mcp_list({})
+        notion, other = out["servers_with_api"]
+        self.assertEqual(notion["access"], "local models only")
+        self.assertIn("only the listed endpoints", notion["strict"])
+        by_path = {(e["method"], e["path"]): e["access"] for e in notion["endpoints"]}
+        self.assertEqual(by_path[("GET", "/users/me")], "all agents")
+        self.assertEqual(by_path[("GET", "/pages/{id}")], "local models only")
+        self.assertEqual(by_path[("POST", "/search")], "only Ollama (qwen3:8b)")
+        self.assertNotIn("access", other)
+        self.assertNotIn("strict", other)
 
     def test_mcp_list_surfaces_docs_url_description_and_custom_flag(self):
         fake_backend = {
@@ -6379,6 +6539,19 @@ class WorkflowQpCrudToolTests(unittest.TestCase):
         self.assertEqual(body["concurrency_limit"], 1,
                          "Cron with no concurrency_limit must default to 1 (no self-overlap)")
 
+    def test_create_draft_defaults_concurrency_1_for_watch(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "On change", "trigger": {"type": "Watch", "quick_api_id": "qa",
+                                                 "interval": "*/5 * * * *"},
+                "steps": [{"name": "s", "step_type": "Notify", "notify_config": {}}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["concurrency_limit"], 1)
+        self.assertEqual(body["trigger"]["type"], "Watch", "the trigger is forwarded as given")
+
     def test_create_draft_respects_explicit_concurrency(self):
         fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
         with mock.patch.object(self.mod, "_http", fake), \
@@ -6618,13 +6791,14 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
         return {"success": True, "data": data}
 
     # ── workflow_step_schema ─────────────────────────────────────────
-    def test_step_schema_lists_the_closed_thirteen_set(self):
+    def test_step_schema_lists_the_closed_fifteen_set(self):
         out = self.mod.call_workflow_step_schema({})
         self.assertEqual(
             set(out["step_types_closed_set"]),
             {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
              "Gate", "Notify", "JsonData", "CollectApiData", "TransformData",
-             "PublishPageData", "SubWorkflow", "TriggerWorkflow"},
+             "PublishPageData", "SubWorkflow", "TriggerWorkflow", "DelegateSubtasks",
+             "TaskBoard"},
         )
         # every type has a field spec
         for st in out["step_types_closed_set"]:
@@ -6793,7 +6967,7 @@ class LivePageToolTests(unittest.TestCase):
         names = [tool["name"] for tool in self.mod.TOOLS]
         for name in [
             "page_list", "page_get", "page_create", "page_update_html",
-            "page_add_dataset",
+            "page_add_dataset", "page_delete_dataset",
         ]:
             self.assertIn(name, names)
             self.assertIn(name, self.mod.DISPATCH)
@@ -6807,6 +6981,7 @@ class LivePageToolTests(unittest.TestCase):
         self.assertIn("Live Pages", instructions)
         self.assertIn("page_list", instructions)
         self.assertIn("page_add_dataset", instructions)
+        self.assertIn("page_delete_dataset", instructions)
         self.assertIn("closed 12", instructions)
         self.assertNotIn("closed 9", instructions)
 
@@ -6922,6 +7097,61 @@ class LivePageToolTests(unittest.TestCase):
             },
         )
 
+    def test_page_update_html_renames_the_slug_without_a_revision(self):
+        page = {"id": "page-1", "title": "T", "slug": "team-front",
+                "slug_aliases": ["team-v2"], "project_id": None, "updated_at": "x",
+                "revision": {"html": "big"}}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(page)) as http:
+            result = self.mod.call_page_update_html({"page_id": "team-v2", "slug": "team-front"})
+        http.assert_called_once_with("PATCH", "/api/pages/team-v2", {"slug": "team-front"})
+        self.assertEqual(result["slug_aliases"], ["team-v2"])
+        self.assertNotIn("revision", result)
+
+    def test_page_update_html_renames_then_revises_by_id(self):
+        responses = [self._env({"id": "page-1", "slug": "new"}), self._env({"revision": 3})]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", side_effect=responses) as http:
+            result = self.mod.call_page_update_html(
+                {"page_id": "old", "slug": "new", "html": "<p>x</p>"})
+        self.assertEqual(result["revision"], 3)
+        self.assertEqual(http.call_args_list[1].args[:2], ("PUT", "/api/pages/page-1/html"))
+
+    def test_page_update_html_refuses_invalid_html_before_any_rename(self):
+        for html in ["", "  \n\t", 3, "é" * 500_001]:
+            with self.subTest(html=repr(html)[:20]), \
+                 mock.patch.object(self.mod, "_http") as http:
+                with self.assertRaisesRegex(RuntimeError, "html"):
+                    self.mod.call_page_update_html(
+                        {"page_id": "old", "slug": "new", "html": html})
+                http.assert_not_called()
+
+    def test_page_update_html_says_the_slug_changed_when_the_revision_fails(self):
+        responses = [
+            self._env({"id": "page-1", "slug": "new"}),
+            {"success": False, "error": "Page HTML must be non-empty and at most 1 MB"},
+        ]
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "page 'page-1' was already renamed to slug 'new'.*1 MB"):
+                self.mod.call_page_update_html(
+                    {"page_id": "old", "slug": "new", "html": "<p>x</p>"})
+
+    def test_page_update_html_html_only_keeps_its_contract(self):
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", return_value=self._env({"revision": 2})) as http:
+            self.assertEqual(
+                self.mod.call_page_update_html({"page_id": "old", "html": "<p>ok</p>"}),
+                {"revision": 2})
+        self.assertEqual(http.call_args.args[:2], ("PUT", "/api/pages/old/html"))
+        with self.assertRaisesRegex(RuntimeError, "html"):
+            self.mod.call_page_update_html({"page_id": "old", "html": "   "})
+
+    def test_page_update_html_needs_html_or_slug(self):
+        with self.assertRaisesRegex(RuntimeError, "html.*slug"):
+            self.mod.call_page_update_html({"page_id": "p"})
+        with self.assertRaisesRegex(RuntimeError, "slug.*string"):
+            self.mod.call_page_update_html({"page_id": "p", "slug": 3})
+
     def test_page_add_dataset_sends_the_full_contract(self):
         with mock.patch.object(
             self.mod, "_http",
@@ -6955,6 +7185,31 @@ class LivePageToolTests(unittest.TestCase):
             self.mod.call_page_add_dataset({
                 "page_id": "page-1", "name": "auto_reviews", "kind": "bogus",
             })
+
+
+    def test_page_delete_dataset_never_forces(self):
+        # Overriding the reference guard is a human's call: the tool has no
+        # `force` and never sends one, whatever the agent passes.
+        declaration = next(
+            tool for tool in self.mod.TOOLS if tool["name"] == "page_delete_dataset"
+        )
+        self.assertNotIn("force", declaration["inputSchema"]["properties"])
+        with mock.patch.object(
+            self.mod, "_http",
+            return_value=self._env({"page_id": "page-1", "name": "auto reviews"}),
+        ) as http:
+            self.mod.call_page_delete_dataset({
+                "page_id": "page/one", "name": " auto reviews ", "force": True,
+            })
+        http.assert_called_once_with(
+            "DELETE", "/api/pages/page%2Fone/datasets/auto%20reviews",
+        )
+
+    def test_page_delete_dataset_requires_page_id_and_name(self):
+        with self.assertRaisesRegex(RuntimeError, "page_id"):
+            self.mod.call_page_delete_dataset({"name": "auto_reviews"})
+        with self.assertRaisesRegex(RuntimeError, "name"):
+            self.mod.call_page_delete_dataset({"page_id": "page-1", "name": " "})
 
 
 class WorkflowRunHistoryTests(unittest.TestCase):
@@ -8259,8 +8514,14 @@ class AuditBridgeHardeningTests(unittest.TestCase):
             return result
         with mock.patch.object(self.mod.tempfile, "mkstemp", side_effect=recording_mkstemp):
             self.assertFalse(self.mod._perform_scheduled_bridge_reload())
-        self.assertEqual(len(created), 1)
-        self.assertFalse(os.path.exists(created[0]))
+        # KT-1139: the size is checked before any file exists; the reload waits.
+        self.assertEqual(created, [])
+        self.assertNotIn(self.mod._BRIDGE_RELOAD_HANDOFF_FD_ENV, os.environ)
+        self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 91)
+        if self.mod._BRIDGE_ARTIFACT_FD is not None:
+            os.close(self.mod._BRIDGE_ARTIFACT_FD)
+            self.mod._BRIDGE_ARTIFACT_FD = None
 
     def test_central_guard_blocks_principal_and_worker_mutations(self):
         self.mod._BRIDGE_SCRIPT_SHA256_AT_LOAD = "outdated-contract"
@@ -9847,7 +10108,7 @@ class PlanningToolTests(unittest.TestCase):
         resp = self.mod._handle(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         )
-        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.10")
+        self.assertEqual(resp["result"]["serverInfo"]["version"], "0.3.11")
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -11513,24 +11774,87 @@ class WaitOutsideLlmLoopTests(unittest.TestCase):
         self.assertEqual(self.mod._WAIT_PREEMPTED["notice"]["listening"], False)
         self.mod._WAIT_PREEMPTED["notice"] = None
 
-    def test_interruption_during_pacing_sleep_keeps_its_captured_reason(self):
+    def _isolate_side_probes(self):
+        """Stub probes outside the loop under test: their subprocesses sleep on the fake clock."""
+        for name in ("_maybe_report_telemetry", "_attempt_orchestrator_return_resume"):
+            patch = mock.patch.object(self.mod, name, return_value=None)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _room_server(self, posts):
+        """Fake `/wait`: blocks for its window, answers at a post's instant."""
+        self._isolate_side_probes()
+        calls = []
+
         def fake_wait_once(args):
-            self.now[0] += 60
-            return self._quiet(delay=30)
+            calls.append(dict(args))
+            since = args.get("since_sort_order") or 0
+            window_end = self.now[0] + args["timeout_secs"]
+            for order, posted_at in posts:
+                if order > since and posted_at <= window_end:
+                    self.now[0] = max(self.now[0], posted_at)
+                    return {"timed_out": False, "latest_sort_order": order,
+                            "messages": [{"message_id": f"m{order}", "sort_order": order}]}
+            self.now[0] = window_end
+            # Cold ramp cap: what a room quiet for 23+ minutes gets.
+            return {"timed_out": True, "messages": [], "latest_sort_order": since,
+                    "pacing": {"regime": "cold", "next_delay_seconds": 480}}
 
-        def queue_during_sleep(_seconds):
-            self.now[0] += 1
-            if self.mod._REQUEST_QUEUE.empty():
-                self.mod._REQUEST_QUEUE.put({"method": "tools/call", "id": 13,
-                                             "params": {"name": "disc_meta", "arguments": {}}})
+        return fake_wait_once, calls
 
-        with mock.patch.object(self.mod, "_wait_once", fake_wait_once), \
-             mock.patch.object(self.mod.time, "sleep", queue_during_sleep):
+    def test_a_turn_posted_after_a_quiet_cold_poll_arrives_within_one_poll(self):
+        # KT-703 — the bridge used to sleep the server's 480 s cold pacing
+        # between polls, deaf to a turn posted just after a quiet poll.
+        posted_at = self.mod._WAIT_POLL_SECS + 0.5
+        fake, calls = self._room_server([(42, posted_at)])
+        with mock.patch.object(self.mod, "_wait_once", fake):
             result = self.mod.call_disc_wait_for_peer({})
 
-        self.assertEqual(result["interrupted"], "new_request")
-        self.assertEqual(self.mod._REQUEST_QUEUE.get_nowait()["id"], 13)
-        self.mod._WAIT_PREEMPTED["notice"] = None
+        self.assertEqual(result["messages"][0]["message_id"], "m42")
+        self.assertLessEqual(self.now[0] - posted_at, self.mod._WAIT_POLL_SECS)
+        self.assertEqual(len(calls), 2)
+
+    def test_two_turns_after_long_silences_each_arrive_within_one_poll(self):
+        # KT-703 DoD — two new messages after quiet periods, no manual nudge.
+        posts = [(42, 1_100.0), (43, 2_600.0)]
+        fake, _calls = self._room_server(posts)
+        with mock.patch.object(self.mod, "_wait_once", fake):
+            first = self.mod.call_disc_wait_for_peer({"since_sort_order": 41})
+            self.assertEqual(first["messages"][0]["message_id"], "m42")
+            self.assertLessEqual(self.now[0] - 1_100.0, self.mod._WAIT_POLL_SECS)
+            second = self.mod.call_disc_wait_for_peer({"since_sort_order": 42})
+
+        self.assertEqual(second["messages"][0]["message_id"], "m43")
+        self.assertLessEqual(self.now[0] - 2_600.0, self.mod._WAIT_POLL_SECS)
+
+    def test_quiet_polls_are_chained_without_a_listening_gap(self):
+        # Each inner poll starts where the previous one ended: no deaf window.
+        fake, calls = self._room_server([(42, 200.0)])
+        starts = []
+
+        def recording(args):
+            starts.append(self.now[0])
+            return fake(args)
+
+        with mock.patch.object(self.mod, "_wait_once", recording):
+            self.mod.call_disc_wait_for_peer({})
+
+        windows = [call["timeout_secs"] for call in calls]
+        for index in range(1, len(starts)):
+            self.assertEqual(starts[index], starts[index - 1] + windows[index - 1])
+
+    def test_a_server_answering_early_cannot_spin_the_loop(self):
+        self._isolate_side_probes()
+
+        def instant_quiet(_args):
+            self.now[0] += 0.01
+            return self._quiet(delay=480)
+
+        with mock.patch.object(self.mod, "_wait_once", instant_quiet):
+            result = self.mod.call_disc_wait_for_peer({"max_total_secs": 10})
+
+        self.assertTrue(result["timed_out"])
+        self.assertLessEqual(result["bridge_polls"], 11)
 
     def _call(self, rid, name, fn):
         with mock.patch.dict(self.mod.DISPATCH, {name: fn}), \
@@ -12383,6 +12707,490 @@ class OpenAiWireSchemaTests(unittest.TestCase):
                     "OpenAI wire, and it refuses the whole request — express the rule in the "
                     "field descriptions instead",
                 )
+
+
+
+def _request_line(rid, name="workflow_update", arguments=None, id_last=False):
+    """One JSON-RPC tools/call line, bytes, without its newline."""
+    message = {"jsonrpc": "2.0", "method": "tools/call",
+               "params": {"name": name, "arguments": arguments or {}}}
+    if id_last:
+        message["id"] = rid
+    else:
+        message = {"id": rid, **message}
+    return json.dumps(message, ensure_ascii=False).encode("utf-8")
+
+
+def _padded_line(rid, size, filler="é"):
+    """A tools/call line of exactly `size` UTF-8 bytes."""
+    base = _request_line(rid, arguments={"workflow_id": "wf-1", "name": ""})
+    room = size - len(base)
+    unit = len(filler.encode("utf-8"))
+    text = filler * (room // unit) + "x" * (room % unit)
+    line = _request_line(rid, arguments={"workflow_id": "wf-1", "name": text})
+    assert len(line) == size, (len(line), size)
+    return line
+
+
+def _large_workflow_arguments(target_bytes=1_100_000):
+    """A workflow_update shaped like WF3: twenty Agent steps, >1 MiB, Unicode."""
+    prompt = ("Révise le ticket 🎫 « {{ticket}} » — vérifie chaque étape.\n" * 400)
+    steps = []
+    while len(json.dumps(steps, ensure_ascii=False).encode()) < target_bytes:
+        steps.append({"name": f"étape-{len(steps)}", "step_type": "Agent",
+                      "agent": "ClaudeCode", "prompt_template": prompt})
+    return {"workflow_id": "wf-big", "steps": steps}
+
+
+class TransportSizeContractTests(unittest.TestCase):
+    """KT-1139: the stdio transport accepts every line within the documented
+    contract, refuses longer ones explicitly, and keeps serving."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def drain_queue(self):
+        items = []
+        while True:
+            try:
+                items.append(self.mod._REQUEST_QUEUE.get_nowait())
+            except Exception:
+                return items
+
+    def feed(self, data, chunk=65536):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            for start in range(0, len(data), chunk):
+                self.mod._consume_stdin_chunk(data[start:start + chunk])
+        return err.getvalue()
+
+    def test_a_workflow_update_over_one_mib_arrives_whole_in_fragments(self):
+        arguments = _large_workflow_arguments()
+        line = _request_line(41, arguments=arguments)
+        self.assertGreater(len(line), 1024 * 1024)
+        # 4093 is odd so multi-byte characters straddle fragment boundaries.
+        self.feed(line + b"\n", chunk=4093)
+        queued = self.drain_queue()
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["id"], 41)
+        self.assertEqual(queued[0]["params"]["arguments"], arguments)
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), b"")
+
+    def test_unicode_split_at_every_byte_survives(self):
+        line = _request_line(42, arguments={"name": "é🎉中 "})
+        for split in range(1, len(line)):
+            self.feed(line[:split])
+            self.feed(line[split:] + b"\n")
+            queued = self.drain_queue()
+            self.assertEqual(len(queued), 1, split)
+            self.assertEqual(queued[0]["params"]["arguments"]["name"], "é🎉中 ")
+
+    def test_exact_limit_is_accepted_and_one_byte_more_refused_complete_frame(self):
+        limit = self.mod._BRIDGE_REQUEST_MAX_BYTES
+        at_limit = _padded_line(43, limit)
+        self.feed(at_limit + b"\n", chunk=len(at_limit) + 1)
+        queued = self.drain_queue()
+        self.assertEqual([item["id"] for item in queued], [43])
+        self.assertEqual(queued[0]["method"], "tools/call")
+
+        over = _padded_line(44, limit + 1, filler="x")
+        self.feed(over + b"\n", chunk=len(over) + 1)
+        queued = self.drain_queue()
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["method"], self.mod._REQUEST_TOO_LARGE_METHOD)
+        self.assertEqual(queued[0]["id"], 44)
+        self.assertEqual(queued[0]["params"]["received_bytes"], limit + 1)
+
+    def test_exact_limit_is_accepted_and_one_byte_more_refused_fragmented(self):
+        limit = self.mod._BRIDGE_REQUEST_MAX_BYTES
+        at_limit = _padded_line(45, limit)
+        self.feed(at_limit + b"\n", chunk=65521)
+        self.assertEqual([item["id"] for item in self.drain_queue()], [45])
+        over = _padded_line(46, limit + 1)
+        # The newline arrives alone, after the limit was crossed mid-stream.
+        self.feed(over, chunk=65521)
+        self.assertEqual(self.drain_queue(), [])
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), b"", "an oversized line is never kept")
+        self.feed(b"\n")
+        queued = self.drain_queue()
+        self.assertEqual(queued[0]["id"], 46)
+        self.assertEqual(queued[0]["method"], self.mod._REQUEST_TOO_LARGE_METHOD)
+
+    def test_several_frames_in_one_read_and_a_partial_tail(self):
+        lines = [_request_line(rid, name="agent_list") for rid in (51, 52, 53)]
+        tail = _request_line(54, name="agent_list")
+        self.feed(b"\n".join(lines) + b"\n" + tail[:10], chunk=1 << 20)
+        self.assertEqual([item["id"] for item in self.drain_queue()], [51, 52, 53])
+        self.assertEqual(bytes(self.mod._STDIN_PENDING), tail[:10])
+        self.feed(tail[10:] + b"\n")
+        self.assertEqual([item["id"] for item in self.drain_queue()], [54])
+
+    def test_an_overflow_then_a_valid_call_on_the_same_read(self):
+        secret = "SECRET-PAYLOAD-7f3a"
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 4096):
+            big = _request_line(61, arguments={"steps": [{"prompt_template": secret * 400}]},
+                                id_last=True)
+            ping = json.dumps({"jsonrpc": "2.0", "id": 62, "method": "ping"}).encode()
+            stderr = self.feed(big + b"\n" + ping + b"\n", chunk=1000)
+            queued = self.drain_queue()
+            self.assertEqual([item["id"] for item in queued], [61, 62])
+            refusal = self.mod._handle(queued[0])
+        self.assertEqual(refusal["id"], 61)
+        self.assertTrue(refusal["result"]["isError"])
+        payload = json.loads(refusal["result"]["content"][0]["text"])
+        self.assertEqual(payload["error_code"], "request_too_large")
+        self.assertFalse(payload["mutation_applied"])
+        self.assertEqual(payload["limit_bytes"], 4096)
+        self.assertEqual(payload["received_bytes"], len(big))
+        self.assertIn("workflow_update_step", payload["action"])
+        self.assertEqual(self.mod._handle(queued[1]), {"jsonrpc": "2.0", "id": 62, "result": {}})
+        for text in (json.dumps(refusal), stderr):
+            self.assertNotIn(secret, text, "no payload excerpt in any diagnostic")
+            self.assertNotIn("prompt_template", text)
+
+    def test_the_top_level_id_wins_over_a_nested_one(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 256):
+            line = json.dumps({
+                "method": "tools/call", "jsonrpc": "2.0",
+                "params": {"arguments": {"id": "nested", "s": "\\\"}{[" + "y" * 400}},
+                "id": "top-7",
+            }).encode()
+            self.feed(line + b"\n", chunk=7)
+        queued = self.drain_queue()
+        self.assertEqual(queued[0]["id"], "top-7")
+        self.assertEqual(queued[0]["params"]["request_method"], "tools/call")
+
+    def test_an_oversized_notification_gets_no_response(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 128):
+            line = json.dumps({"jsonrpc": "2.0", "method": "notifications/progress",
+                               "params": {"x": "z" * 400}}).encode()
+            self.feed(line + b"\n")
+        self.assertEqual(self.drain_queue(), [])
+
+    def test_an_unreadable_oversized_line_is_refused_with_a_null_id(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 128):
+            self.feed(b"{\"id\": 3, \"method\": \"ping\", \"broken" + b"q" * 400 + b"\n")
+            queued = self.drain_queue()
+            self.assertEqual(len(queued), 1)
+            response = self.mod._handle(queued[0])
+        self.assertIsNone(response["id"])
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertEqual(response["error"]["data"]["error_code"], "request_too_large")
+
+    def test_the_reader_survives_an_overflow_and_serves_the_next_line(self):
+        with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 512):
+            big = _request_line(71, arguments={"s": "w" * 2000}).decode() + "\n"
+            ping = json.dumps({"jsonrpc": "2.0", "id": 72, "method": "ping"}) + "\n"
+            with mock.patch.object(self.mod.sys, "stdin", iter([big[:300], big[300:], ping])), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.mod._stdin_reader()
+        queued = self.drain_queue()
+        self.assertEqual([item and item["id"] for item in queued], [71, 72, None])
+        self.assertFalse(self.mod._READER_FAILED.is_set())
+
+    def test_a_malformed_line_is_dropped_without_stopping_the_reader(self):
+        bad = json.dumps({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                          "params": ["not", "an", "object"]}) + "\n"
+        ping = json.dumps({"jsonrpc": "2.0", "id": 73, "method": "ping"}) + "\n"
+        with mock.patch.object(self.mod.sys, "stdin", iter([bad, ping])), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.mod._stdin_reader()
+        self.assertEqual([item and item["id"] for item in self.drain_queue()], [73, None])
+
+    def test_a_dead_reader_ends_the_process_visibly(self):
+        with mock.patch.object(self.mod, "_read_stdin", side_effect=OSError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            self.mod._stdin_reader()
+        self.assertTrue(self.mod._READER_FAILED.is_set())
+        self.assertIn("stdin reader failed (OSError)", err.getvalue())
+        self.assertNotIn("boom", err.getvalue())
+        with mock.patch.object(self.mod.threading, "Thread"):
+            self.assertEqual(self.mod.main(), 1, "main exits non-zero instead of hanging")
+
+    def test_reload_waits_for_an_unfinished_line_too_long_to_hand_over(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        try:
+            partial = _request_line(81, arguments={"s": "v" * (300 * 1024)})
+            self.feed(partial[:-5])
+            self.assertGreater(len(self.mod._STDIN_PENDING),
+                               self.mod._BRIDGE_HANDOFF_PENDING_MAX_BYTES)
+            with mock.patch.object(self.mod.os, "execv") as execv:
+                self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+            execv.assert_not_called()
+            self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+            self.assertFalse(self.mod._STDIN_READ_LOCK.locked())
+            self.feed(partial[-5:] + b"\n")
+            self.assertEqual([item["id"] for item in self.drain_queue()], [81])
+
+            with mock.patch.object(self.mod, "_BRIDGE_REQUEST_MAX_BYTES", 1024):
+                self.feed(b"{\"id\": 82, " + b"u" * 4096)
+                self.assertIsNotNone(self.mod._STDIN_OVERSIZED)
+                with mock.patch.object(self.mod.os, "execv") as execv:
+                    self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+                execv.assert_not_called()
+                self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+        finally:
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_reload_waits_while_queued_requests_exceed_the_handoff(self):
+        self.assertEqual(self.mod._schedule_bridge_reload()["status"], "scheduled")
+        try:
+            self.feed(_request_line(91, arguments=_large_workflow_arguments()) + b"\n")
+            self.feed(json.dumps({"jsonrpc": "2.0", "id": 92, "method": "ping"}).encode() + b"\n")
+            with mock.patch.object(self.mod.os, "execv") as execv:
+                self.assertFalse(self.mod._perform_scheduled_bridge_reload())
+            execv.assert_not_called()
+            self.assertEqual(self.mod._BRIDGE_RELOAD_STATE["status"], "scheduled")
+            self.assertFalse(self.mod._STDIN_READ_LOCK.locked())
+            self.assertEqual([item["id"] for item in self.drain_queue()], [91, 92],
+                             "deferred requests keep their order")
+        finally:
+            if self.mod._BRIDGE_ARTIFACT_FD is not None:
+                os.close(self.mod._BRIDGE_ARTIFACT_FD)
+                self.mod._BRIDGE_ARTIFACT_FD = None
+
+    def test_the_contract_is_published_to_clients(self):
+        response = self.mod._handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                     "params": {}})
+        capabilities = response["result"]["capabilities"]
+        self.assertTrue(capabilities["tools"]["listChanged"])
+        contract = capabilities["experimental"]["kronnTransport"]
+        self.assertEqual(contract["request_max_bytes"], self.mod._BRIDGE_REQUEST_MAX_BYTES)
+        self.assertGreater(contract["request_max_bytes"], contract["reload_handoff_max_bytes"])
+        self.assertEqual(self.mod.call_bridge_info({})["transport"], contract)
+
+
+class WorkflowUpdateStepTests(unittest.TestCase):
+    """KT-1139: the targeted write sends one step to the backend's merge route."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_sends_only_the_step_fields_to_the_patch_route(self):
+        http = mock.Mock(return_value={"success": True, "data": {"id": "wf 1"}})
+        with mock.patch.object(self.mod, "_http", http):
+            out = self.mod.call_workflow_update_step({
+                "workflow_id": "wf 1", "step_index": 2, "on_failure": False,
+                "fields": {"step_type": "Exec", "exec_args": ["plan"]},
+            })
+        self.assertEqual(out, {"id": "wf 1"})
+        http.assert_called_once_with("PATCH", "/api/workflows/wf%201/step", {
+            "fields": {"step_type": {"type": "Exec"}, "exec_args": ["plan"]},
+            "step_index": 2, "on_failure": False,
+        })
+
+    def test_refuses_before_any_call_without_fields(self):
+        for args in ({"workflow_id": "w"}, {"workflow_id": "w", "fields": {}},
+                     {"fields": {"a": 1}}):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_workflow_update_step(args)
+
+    def test_workflow_get_reads_one_step_by_name_or_position(self):
+        workflow = {"id": "wf", "name": "big", "enabled": False,
+                    "steps": [{"name": "a"}, {"name": "b", "prompt_template": "p"}],
+                    "on_failure": [{"name": "undo"}]}
+        envelope = {"success": True, "data": workflow}
+        with mock.patch.object(self.mod, "_http", return_value=envelope):
+            self.assertEqual(self.mod.call_workflow_get({"workflow_id": "wf"}), workflow)
+            by_name = self.mod.call_workflow_get({"workflow_id": "wf", "step_name": "b"})
+            by_index = self.mod.call_workflow_get({"workflow_id": "wf", "step_index": 2})
+            rollback = self.mod.call_workflow_get(
+                {"workflow_id": "wf", "step_index": 1, "on_failure": True})
+            for bad in ({"step_name": "zz"}, {"step_index": 3}, {"step_index": 0},
+                        {"step_name": "a", "step_index": 1}):
+                with self.assertRaises(RuntimeError) as raised:
+                    self.mod.call_workflow_get({"workflow_id": "wf", **bad})
+                self.assertIn("step", str(raised.exception))
+        self.assertEqual(by_name, by_index)
+        self.assertEqual(by_name["step"], {"name": "b", "prompt_template": "p"})
+        self.assertEqual((by_name["step_index"], by_name["step_count"]), (2, 2))
+        self.assertEqual(rollback["step"], {"name": "undo"})
+
+    def test_a_one_step_read_keeps_the_readiness_verdict_first(self):
+        envelope = {"success": True, "readiness": {"ready": False, "blockers": [1]},
+                    "notice": "approve plan",
+                    "data": {"id": "wf", "steps": [{"name": "a"}]}}
+        with mock.patch.object(self.mod, "_http", return_value=envelope):
+            one = self.mod.call_workflow_get({"workflow_id": "wf", "step_index": 1})
+            updated = self.mod.call_workflow_update_step(
+                {"workflow_id": "wf", "step_index": 1, "fields": {"description": "d"}})
+        for out in (one, updated):
+            self.assertEqual(next(iter(out)), "kronn_readiness")
+            self.assertEqual(out["kronn_readiness"]["ready"], False)
+            self.assertEqual(out["kronn_notice"], "approve plan")
+
+    def test_is_declared_and_dispatched(self):
+        self.assertIn("workflow_update_step", self.mod.DISPATCH)
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "workflow_update_step")
+        self.assertEqual(tool["inputSchema"]["required"], ["workflow_id", "fields"])
+
+
+class _StubBackend:
+    """A loopback HTTP stub standing in for Kronn: records each request and
+    answers with an ApiResponse envelope. No real Kronn is involved."""
+
+    def __init__(self):
+        import http.server
+        import threading
+        calls = self.calls = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else b""
+                calls.append((self.command, self.path, body))
+                data = json.dumps({"success": True, "data": {"id": "wf-1", "saved": len(body)}})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data.encode())
+
+            do_GET = do_POST = do_PUT = do_PATCH = _answer
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class RealStdioSizeContractTests(unittest.TestCase):
+    """KT-1139 end to end: a real bridge process on real pipes."""
+
+    def test_big_call_then_overflow_then_small_call_on_one_connection(self):
+        backend = _StubBackend()
+        self.addCleanup(backend.close)
+        env = {key: value for key, value in os.environ.items() if key not in {
+            "KRONN_TASK_WORKER_CONTEXT", "KRONN_DISCUSSION_ID", "KRONN_AUTH_TOKEN",
+            "KRONN_BRIDGE_TOKEN", "KRONN_SESSION_ID",
+        }}
+        env["KRONN_BACKEND_URL"] = backend.url
+        with tempfile.TemporaryDirectory() as home:
+            env["HOME"] = home
+            process = subprocess.Popen(
+                [sys.executable, str(_SCRIPT)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            )
+            try:
+                def send(payload, chunk=65536):
+                    for start in range(0, len(payload), chunk):
+                        process.stdin.write(payload[start:start + chunk])
+                        process.stdin.flush()
+
+                def receive(timeout=30):
+                    ready, _, _ = select.select([process.stdout], [], [], timeout)
+                    self.assertTrue(ready, "the bridge stopped answering")
+                    return json.loads(process.stdout.readline())
+
+                send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                 "params": {"clientInfo": {"name": "codex-cli"}}}).encode()
+                     + b"\n")
+                self.assertEqual(receive()["id"], 1)
+
+                arguments = _large_workflow_arguments()
+                big = _request_line(2, arguments=arguments, id_last=True)
+                self.assertGreater(len(big), 1024 * 1024)
+                send(big + b"\n", chunk=4093)
+                saved = receive()
+                self.assertEqual(saved["id"], 2)
+                self.assertNotIn("isError", saved["result"])
+                puts = [call for call in backend.calls if call[0] == "PUT"]
+                self.assertEqual(len(puts), 1)
+                self.assertEqual(puts[0][1], "/api/workflows/wf-big")
+                self.assertEqual(len(json.loads(puts[0][2])["steps"]), len(arguments["steps"]))
+                calls_before = len(backend.calls)
+
+                secret = "SECRET-WORKFLOW-CONTENT"
+                limit = 8 * 1024 * 1024
+                over = _request_line(3, arguments={
+                    "workflow_id": "wf-big", "name": secret + "z" * limit})
+                send(over + b"\n", chunk=1 << 20)
+                refused = receive()
+                self.assertEqual(refused["id"], 3)
+                payload = json.loads(refused["result"]["content"][0]["text"])
+                self.assertEqual(payload["error_code"], "request_too_large")
+                self.assertEqual(payload["limit_bytes"], limit)
+                self.assertEqual(len(backend.calls), calls_before, "nothing was executed")
+
+                small = _request_line(4, name="workflow_update_step", arguments={
+                    "workflow_id": "wf-big", "step_name": "étape-0",
+                    "fields": {"prompt_template": "Nouvelle consigne"}})
+                send(small + b"\n")
+                patched = receive()
+                self.assertEqual(patched["id"], 4)
+                self.assertNotIn("isError", patched["result"])
+                method, path, body = backend.calls[-1]
+                self.assertEqual((method, path), ("PATCH", "/api/workflows/wf-big/step"))
+                self.assertEqual(json.loads(body)["fields"],
+                                 {"prompt_template": "Nouvelle consigne"})
+                self.assertIsNone(process.poll(), "the process is alive and serving")
+            finally:
+                process.stdin.close()
+                process.wait(timeout=10)
+                stderr = process.stderr.read().decode("utf-8", errors="replace")
+                process.stdout.close()
+                process.stderr.close()
+        self.assertEqual(process.returncode, 0)
+        self.assertNotIn(secret, stderr)
+
+
+class BridgeSecretEnvFileTests(unittest.TestCase):
+    """KT-1082: Vibe declares the secrets file; the bridge loads it at start."""
+
+    _NAMES = ("KRONN_BRIDGE_SECRET_ENV_FILE", "KRONN_BRIDGE_TOKEN", "KRONN_WORKFLOW_STEP_CONTEXT")
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        saved = {name: os.environ.pop(name, None) for name in self._NAMES}
+
+        def restore():
+            for name, value in saved.items():
+                os.environ.pop(name, None)
+                if value is not None:
+                    os.environ[name] = value
+
+        self.addCleanup(restore)
+
+    def _write(self, mode):
+        path = os.path.join(self._dir.name, "env.json")
+        with open(path, "w") as handle:
+            json.dump({"KRONN_BRIDGE_TOKEN": "kbt_file", "KRONN_AUTH_TOKEN": "admin"}, handle)
+        os.chmod(path, mode)
+        os.environ["KRONN_BRIDGE_SECRET_ENV_FILE"] = path
+        return path
+
+    def test_an_owner_only_file_sets_the_bridge_token(self):
+        self._write(0o600)
+        module = _load_module()
+        self.assertEqual(module._bearer_token(), "kbt_file")
+
+    def test_an_unnamed_variable_is_never_loaded(self):
+        before = os.environ.get("KRONN_AUTH_TOKEN")
+        self._write(0o600)
+        _load_module()
+        self.assertEqual(os.environ.get("KRONN_AUTH_TOKEN"), before)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions")
+    def test_a_file_others_can_read_is_ignored(self):
+        self._write(0o644)
+        with contextlib.redirect_stderr(io.StringIO()):
+            _load_module()
+        self.assertIsNone(os.environ.get("KRONN_BRIDGE_TOKEN"))
+
+    def test_a_held_value_wins_over_the_file(self):
+        self._write(0o600)
+        os.environ["KRONN_BRIDGE_TOKEN"] = "kbt_env"
+        module = _load_module()
+        self.assertEqual(module._bearer_token(), "kbt_env")
 
 
 if __name__ == "__main__":

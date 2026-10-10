@@ -67,3 +67,12 @@
   font: inherit;
   cursor: pointer;
 }
+
+/* Allowed after this document loaded: its frame policy needs a reload. */
+.live-page-embed-overlay__blocked--reload {
+  border-color: var(--kr-info);
+}
+
+.live-page-embed-overlay__blocked--reload > svg {
+  color: var(--kr-info);
+}

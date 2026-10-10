@@ -2,14 +2,18 @@
 //!
 //! The default action blanks the step outputs of old runs in place: the row,
 //! its status, timings, counters and every link to it stay, so no foreign key
-//! cascade fires. Deleting whole rows stays opt-in (`run_retention_days`) and
-//! goes through the same eligibility rules.
+//! cascade fires. Deleting whole rows goes through the same eligibility rules,
+//! per class of run (KT-1100): no-op runs after a short default window, the
+//! others only when opted in (`run_retention_days`), each overridable by a
+//! workflow's own retention.
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
-/// Statuses a run never leaves. `Interrupted` and `WaitingApproval` are absent
-/// on purpose: they resume from their step results.
+use crate::models::WorkflowRetention;
+
+/// Statuses a run never leaves. `Interrupted`, `WaitingApproval` and
+/// `WaitingQuota` are absent on purpose: they resume from their step results.
 const TERMINAL_STATUSES: &str = "'Success','Partial','Failed','Cancelled','StoppedByGuard'";
 
 /// Plain workflow runs. Batch and compare rows carry human and AI ratings and
@@ -22,7 +26,8 @@ const PLAIN_RUN_TYPES: &str = "'linear','subworkflow'";
 /// Columns that point at a run but are not listed here are logs with their own
 /// lifetime and read no step output: `agent_decisions.run_id`,
 /// `api_call_logs.run_id`, `execution_variable_snapshots.run_id`,
-/// `workflow_step_room_sessions.run_id`. `shared_runs.id` is not listed either:
+/// `workflow_step_room_sessions.run_id`. Nor are the rows a run owns outright,
+/// [`OWNED_COLUMNS`]. `shared_runs.id` is not listed either:
 /// every workflow run has that card, which renders step names and links to the
 /// run rather than reading its outputs; listing it would protect every run.
 pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
@@ -47,6 +52,14 @@ pub const REFERENCING_COLUMNS: &[(&str, &str)] = &[
     ("workflow_step_room_activities", "run_id"),
 ];
 
+/// Columns whose rows belong to the run itself and go with it (ON DELETE
+/// CASCADE). Every run has some, so listing them as references would protect
+/// every run.
+pub const OWNED_COLUMNS: &[(&str, &str)] = &[
+    // The definitions the run froze when it started.
+    ("workflow_run_pins", "run_id"),
+];
+
 /// What a blanked step output reads afterwards.
 pub const REMOVED_OUTPUT: &str = "[Output removed by run retention]";
 
@@ -54,12 +67,19 @@ pub const REMOVED_OUTPUT: &str = "[Output removed by run retention]";
 /// write connection is shared with every request.
 pub const CHUNK_ROWS: usize = 25;
 
-fn not_referenced(alias: &str) -> String {
+fn not_referenced(alias: &str, class: Option<RunClass>) -> String {
     REFERENCING_COLUMNS
         .iter()
         .map(|(table, column)| {
+            // A no-op run's own publication changed nothing: it does not hold it.
+            let unchanged = if class == Some(RunClass::NoOp) && *table == "live_page_publications" {
+                " AND (points_added > 0 OR points_removed > 0
+                       OR COALESCE(changed_datasets_json, '[]') <> '[]')"
+            } else {
+                ""
+            };
             format!(
-                " AND {alias}.id NOT IN (SELECT {column} FROM {table} WHERE {column} IS NOT NULL)"
+                " AND {alias}.id NOT IN (SELECT {column} FROM {table} WHERE {column} IS NOT NULL{unchanged})"
             )
         })
         .collect()
@@ -70,6 +90,10 @@ fn not_referenced(alias: &str) -> String {
 /// A run that still owns a worktree (`workspace_path`) is left alone, and so
 /// is a child whose parent can still resume and read it.
 pub(crate) fn eligible_runs(alias: &str) -> String {
+    eligible_runs_of(alias, None)
+}
+
+fn eligible_runs_of(alias: &str, class: Option<RunClass>) -> String {
     format!(
         "{alias}.status IN ({TERMINAL_STATUSES})
          AND {alias}.finished_at IS NOT NULL
@@ -81,7 +105,7 @@ pub(crate) fn eligible_runs(alias: &str) -> String {
               WHERE parent.id = {alias}.parent_run_id
                 AND parent.status NOT IN ({TERMINAL_STATUSES})
          ){}",
-        not_referenced(alias)
+        not_referenced(alias, class)
     )
 }
 
@@ -101,7 +125,12 @@ pub(crate) fn payload_candidates_sql() -> String {
 
 /// The cutoff for a retention of `days`.
 pub fn cutoff(now: DateTime<Utc>, days: u32) -> String {
-    (now - chrono::Duration::days(i64::from(days))).to_rfc3339()
+    cutoff_hours(now, days.saturating_mul(24))
+}
+
+/// The cutoff for a retention of `hours`.
+pub fn cutoff_hours(now: DateTime<Utc>, hours: u32) -> String {
+    (now - chrono::Duration::hours(i64::from(hours))).to_rfc3339()
 }
 
 /// Blank the step outputs of at most `limit` eligible runs finished before
@@ -132,18 +161,94 @@ pub fn compact_run_payloads_chunk(conn: &Connection, cutoff: &str, limit: usize)
     )?)
 }
 
-/// Delete at most `limit` eligible runs finished before `cutoff`. Opt-in only
-/// (`run_retention_days`), same rules as the payload trim.
-pub fn delete_runs_chunk(conn: &Connection, cutoff: &str, limit: usize) -> Result<usize> {
+/// The classes of finished run a retention window applies to (KT-1100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunClass {
+    /// Successful runs classified as having changed nothing.
+    NoOp,
+    /// Every other successful run, unclassified ones included.
+    Success,
+    /// Partial, failed, cancelled and guard-stopped runs.
+    Failure,
+}
+
+impl RunClass {
+    pub const ALL: [RunClass; 3] = [RunClass::NoOp, RunClass::Success, RunClass::Failure];
+
+    fn clause(self, alias: &str) -> String {
+        match self {
+            Self::NoOp => format!("{alias}.status = 'Success' AND {alias}.outcome = 'no_op'"),
+            Self::Success => {
+                format!("{alias}.status = 'Success' AND {alias}.outcome IS NOT 'no_op'")
+            }
+            Self::Failure => {
+                format!("{alias}.status IN ('Partial','Failed','Cancelled','StoppedByGuard')")
+            }
+        }
+    }
+}
+
+/// Which workflows' runs a deletion chunk reads.
+#[derive(Debug, Clone)]
+pub enum WorkflowScope {
+    /// One workflow, under its own retention.
+    Only(String),
+    /// Every workflow but these, under the global retention.
+    Except(Vec<String>),
+}
+
+pub(crate) fn delete_candidates_sql(class: RunClass, scope: &WorkflowScope) -> String {
+    let scope = match scope {
+        WorkflowScope::Only(_) => "run.workflow_id = ?3",
+        WorkflowScope::Except(_) => "run.workflow_id NOT IN (SELECT value FROM json_each(?3))",
+    };
+    format!(
+        "SELECT run.id FROM workflow_runs run
+          WHERE {} AND {scope} AND {}
+          ORDER BY run.finished_at
+          LIMIT ?2",
+        class.clause("run"),
+        eligible_runs_of("run", Some(class))
+    )
+}
+
+/// Delete at most `limit` eligible runs of `class` in `scope` finished before
+/// `cutoff`, with the same eligibility rules as the payload trim: a run that
+/// still owns a worktree or that something points at stays.
+pub fn delete_runs_chunk(
+    conn: &Connection,
+    class: RunClass,
+    scope: &WorkflowScope,
+    cutoff: &str,
+    limit: usize,
+) -> Result<usize> {
     let sql = format!(
-        "DELETE FROM workflow_runs
-          WHERE id IN (SELECT run.id FROM workflow_runs run
-                        WHERE {}
-                        ORDER BY run.finished_at
-                        LIMIT ?2)",
-        eligible_runs("run")
+        "DELETE FROM workflow_runs WHERE id IN ({})",
+        delete_candidates_sql(class, scope)
     );
-    Ok(conn.execute(&sql, params![cutoff, limit as i64])?)
+    let scope_param = match scope {
+        WorkflowScope::Only(id) => id.clone(),
+        WorkflowScope::Except(ids) => serde_json::to_string(ids)?,
+    };
+    Ok(conn.execute(&sql, params![cutoff, limit as i64, scope_param])?)
+}
+
+/// Every workflow carrying its own retention, read before a pass.
+pub fn workflow_retentions(conn: &Connection) -> Result<Vec<(String, WorkflowRetention)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, retention_json FROM workflows WHERE retention_json IS NOT NULL")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, raw)| {
+            let retention = crate::db::workflows::retention_from_column(&id, raw)?;
+            Some((id, retention))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -389,6 +494,43 @@ mod tests {
     }
 
     #[test]
+    fn a_run_s_own_pins_do_not_protect_it_and_go_with_it() {
+        let conn = db();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        run(&conn, "pinned", "Success", "linear", Some(OLD));
+        run(&conn, "pinned-noop", "Success", "linear", Some(OLD));
+        conn.execute(
+            "UPDATE workflow_runs SET outcome = 'no_op' WHERE id = 'pinned-noop'",
+            [],
+        )
+        .unwrap();
+        for id in ["pinned", "pinned-noop"] {
+            for (table, column) in OWNED_COLUMNS {
+                reference(&conn, table, column, id);
+            }
+        }
+        assert_eq!(compact_all(&conn), 2);
+        let everywhere = WorkflowScope::Except(Vec::new());
+        for class in [RunClass::Success, RunClass::NoOp] {
+            assert_eq!(
+                delete_runs_chunk(&conn, class, &everywhere, CUTOFF, CHUNK_ROWS).unwrap(),
+                1,
+                "{class:?}"
+            );
+        }
+        for (table, column) in OWNED_COLUMNS {
+            let left: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} LIKE 'pinned%'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(left, 0, "{table}.{column} is deleted with its run");
+        }
+    }
+
+    #[test]
     fn a_trimmed_run_keeps_its_steps_and_metadata() {
         let conn = db();
         run(&conn, "plain", "Success", "linear", Some(OLD));
@@ -486,7 +628,12 @@ mod tests {
             [OLD],
         )
         .unwrap();
-        assert_eq!(delete_runs_chunk(&conn, CUTOFF, CHUNK_ROWS).unwrap(), 1);
+        let everywhere = WorkflowScope::Except(Vec::new());
+        let deleted: usize = RunClass::ALL
+            .iter()
+            .map(|class| delete_runs_chunk(&conn, *class, &everywhere, CUTOFF, CHUNK_ROWS).unwrap())
+            .sum();
+        assert_eq!(deleted, 1);
         let left: Vec<String> = conn
             .prepare("SELECT id FROM workflow_runs ORDER BY id")
             .unwrap()
@@ -543,7 +690,18 @@ mod tests {
             "SELECT run.id FROM workflow_runs run WHERE {} ORDER BY run.finished_at LIMIT ?2",
             eligible_runs("run")
         );
-        for sql in [payload_candidates_sql(), delete] {
+        let mut statements = vec![payload_candidates_sql(), delete];
+        for class in RunClass::ALL {
+            statements.push(delete_candidates_sql(
+                class,
+                &WorkflowScope::Except(Vec::new()),
+            ));
+            statements.push(delete_candidates_sql(
+                class,
+                &WorkflowScope::Only("wf".into()),
+            ));
+        }
+        for sql in statements {
             let plan = crate::db::query_plan(&conn, &sql);
             for (table, _) in REFERENCING_COLUMNS {
                 let full_reads: Vec<_> = plan
@@ -593,6 +751,7 @@ mod tests {
                 }
                 let known = REFERENCING_COLUMNS
                     .iter()
+                    .chain(OWNED_COLUMNS)
                     .any(|(t, c)| *t == table && *c == column);
                 assert!(
                     known,

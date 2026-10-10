@@ -43,6 +43,9 @@ mod signal_bench;
 #[path = "agent_workflow_tools.rs"]
 mod workflow_tools;
 
+#[path = "agent_page_tools.rs"]
+mod page_tools;
+
 pub struct KronnToolExecutor {
     state: AppState,
     /// Scopes `api_call` to the calling conversation when there is one, so the
@@ -81,6 +84,9 @@ pub struct KronnToolExecutor {
     audit_workspace: Option<std::path::PathBuf>,
     /// The audit step's own target file, to refuse writing another step's.
     audit_step_target: Option<String>,
+    /// The agent and model the runner resolved for this launch, for API
+    /// access policies; never re-read from the discussion afterwards.
+    launch_identity: std::sync::Mutex<Option<crate::core::api_access::AgentIdentity>>,
 }
 
 impl KronnToolExecutor {
@@ -98,6 +104,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         }
     }
 
@@ -123,6 +130,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -151,6 +159,7 @@ impl KronnToolExecutor {
             worker_scope,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -176,6 +185,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: None,
             audit_step_target: None,
+            launch_identity: Default::default(),
         })
     }
 
@@ -247,6 +257,7 @@ impl KronnToolExecutor {
             worker_scope: None,
             audit_workspace: Some(workspace),
             audit_step_target: step_target.map(str::to_string),
+            launch_identity: Default::default(),
         })
     }
 }
@@ -320,6 +331,11 @@ fn fail(call: &ToolCall, message: impl Into<String>) -> ToolOutcome {
 /// remain available for the run. Quick Prompt batch launch and deletion are omitted
 /// to prevent unbounded fan-out and removal of saved run history.
 pub(crate) const TOOL_FAMILIES: &[(&str, &str, &[&str])] = &[
+    (
+        "pages",
+        "find, create and update shared live Pages for workflow data: `page_list`, `page_get`, `page_create`, `page_update_html`, `page_add_dataset`",
+        &["page_list", "page_get", "page_create", "page_update_html", "page_add_dataset"],
+    ),
     (
         "media",
         "make an image or a video: `media_generate`, `media_job_status` (the connection comes from `agent_list`, in the core)",
@@ -951,6 +967,7 @@ pub fn tool_catalogue() -> Vec<Value> {
         }),
     ];
     catalogue.extend(workflow_tools::declarations());
+    catalogue.extend(page_tools::declarations());
     catalogue
 }
 
@@ -1098,7 +1115,7 @@ fn orchestration_tool_catalogue() -> Vec<Value> {
     vec![
         tool(
             "agent_list",
-            "List the worker identities this principal room can pass verbatim to task_exec_prepare, and the media connections `media_generate` can be billed on. Separates configured, reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
+            "List the worker identities this principal room can pass verbatim to task_exec_prepare, and the media connections `media_generate` can be billed on. Separates configured, probed reachable and available with stable secret-free reason codes; availability proves transport readiness only, never task or model success.",
             json!({}),
             json!([]),
         ),
@@ -1332,7 +1349,19 @@ fn workflow_workspace_tool_catalogue() -> Vec<Value> {
 }
 
 fn workflow_tool_catalogue(has_project: bool) -> Vec<Value> {
-    const WORKFLOW_TOOLS: &[&str] = &["mcp_list", "api_endpoints", "qa_list", "qa_run", "api_call"];
+    const WORKFLOW_TOOLS: &[&str] = &[
+        "mcp_list",
+        "api_endpoints",
+        "qa_list",
+        "qa_run",
+        "api_call",
+        "tool_manual",
+        "page_list",
+        "page_get",
+        "page_create",
+        "page_update_html",
+        "page_add_dataset",
+    ];
     tool_catalogue()
         .into_iter()
         .filter(|tool| {
@@ -1471,6 +1500,12 @@ fn worker_room_catalogue(catalogue: Vec<Value>) -> Vec<Value> {
 
 #[async_trait::async_trait]
 impl ToolExecutor for KronnToolExecutor {
+    fn bind_launch_identity(&self, identity: crate::core::api_access::AgentIdentity) {
+        if let Ok(mut bound) = self.launch_identity.lock() {
+            *bound = Some(identity);
+        }
+    }
+
     fn catalogue(&self) -> Vec<Value> {
         if self.audit_workspace.is_some() {
             return audit_tool_catalogue();
@@ -1651,6 +1686,9 @@ impl ToolExecutor for KronnToolExecutor {
                 }
             }
             "tool_manual" => ok(call, tool_manual(call.arguments["tool"].as_str())),
+            "page_list" | "page_get" | "page_create" | "page_update_html" | "page_add_dataset" => {
+                self.execute_page_tool(call).await
+            }
             "workflow_list"
             | "workflow_get"
             | "workflow_step_schema"
@@ -1947,6 +1985,7 @@ impl ToolExecutor for KronnToolExecutor {
                         workflow_run_id: self.workflow_run_id.clone(),
                         agent: Some(self.actor_id.clone()),
                         launch: None,
+                        caller: Some(self.api_caller().await),
                     }),
                 )
                 .await;
@@ -1981,6 +2020,7 @@ impl ToolExecutor for KronnToolExecutor {
                 req.project_id = self.project_id.clone();
                 req.workflow_run_id = self.workflow_run_id.clone();
                 req.agent = Some(self.actor_id.clone());
+                req.caller = Some(self.api_caller().await);
                 let Json(res) = crate::api::agent_api::agent_api_call(
                     State(self.state.clone()),
                     None,
@@ -3621,6 +3661,29 @@ impl KronnToolExecutor {
         }
     }
 
+    /// This run as an API broker caller: the identity the runner bound at
+    /// launch. Unbound, the agent type alone (an unknown model).
+    async fn api_caller(&self) -> crate::core::api_access::ApiCaller {
+        let bound = self
+            .launch_identity
+            .lock()
+            .ok()
+            .and_then(|bound| bound.clone());
+        let identity = bound.or_else(|| {
+            self.actor_type
+                .clone()
+                .map(|agent_type| crate::core::api_access::AgentIdentity {
+                    agent_type,
+                    model: None,
+                })
+        });
+        crate::core::api_access::ApiCaller::Agent {
+            identity,
+            discussion_ids: self.disc_id.iter().cloned().collect(),
+            workflow_run_id: self.workflow_run_id.clone(),
+        }
+    }
+
     async fn effective_project_id(&self) -> Option<String> {
         if self.project_id.is_some() {
             return self.project_id.clone();
@@ -3928,12 +3991,17 @@ fn compact_plugin_list(overview: &Value, project_id: Option<&str>) -> Value {
                 // called; listing it would only invite a failing api_call.
                 .filter_map(|s| {
                     let config_id = config_for(&s["id"])?;
-                    Some(json!({
+                    let mut plugin = json!({
                         "slug": s["id"],
                         "api_config_id": config_id,
                         "name": s["name"],
                         "purpose": brief(&s["description"], 160),
-                    }))
+                    });
+                    if let Some(policy) = access_policy_for(overview, &s["id"]) {
+                        plugin["access"] =
+                            json!(crate::core::api_access::describe_rule(&policy.access));
+                    }
+                    Some(plugin)
                 })
                 .collect()
         })
@@ -3945,6 +4013,15 @@ fn compact_plugin_list(overview: &Value, project_id: Option<&str>) -> Value {
     })
 }
 
+/// A plugin's access policy from the overview (KT-1026), if it has one.
+fn access_policy_for(overview: &Value, slug: &Value) -> Option<crate::models::ApiAccessPolicy> {
+    overview["access_policies"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["server_id"] == *slug)
+        .and_then(|entry| serde_json::from_value(entry["policy"].clone()).ok())
+}
+
 /// Endpoint paths for a single plugin. Method + path + a short summary is
 /// what `api_call` actually needs; the rest of the spec is noise to a model.
 fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
@@ -3952,21 +4029,52 @@ fn compact_endpoints(overview: &Value, slug: &str) -> Option<Value> {
         .as_array()?
         .iter()
         .find(|s| s["id"] == slug && !s["api_spec"].is_null())?;
-    let endpoints: Vec<Value> = server["api_spec"]["endpoints"]
+    let policy = access_policy_for(overview, &json!(slug));
+    let mut endpoints: Vec<Value> = server["api_spec"]["endpoints"]
         .as_array()
         .map(|eps| {
             eps.iter()
                 .map(|e| {
-                    json!({
-                        "method": e["method"].as_str().unwrap_or("GET"),
+                    let method = e["method"].as_str().unwrap_or("GET");
+                    let mut endpoint = json!({
+                        "method": method,
                         "path": e["path"],
                         "summary": brief(&e["description"], 120),
-                    })
+                    });
+                    if let Some(policy) = &policy {
+                        let rule = crate::core::api_access::endpoint_rule(
+                            policy,
+                            method,
+                            e["path"].as_str().unwrap_or(""),
+                        );
+                        endpoint["access"] = json!(crate::core::api_access::describe_rule(rule));
+                    }
+                    endpoint
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Some(json!({ "slug": slug, "endpoints": endpoints }))
+    let Some(policy) = policy else {
+        return Some(json!({ "slug": slug, "endpoints": endpoints }));
+    };
+    for extra in &policy.endpoints {
+        let listed = endpoints
+            .iter()
+            .any(|e| e["method"] == extra.method.as_str() && e["path"] == extra.path.as_str());
+        if !listed {
+            endpoints.push(json!({
+                "method": extra.method,
+                "path": extra.path,
+                "access": crate::core::api_access::describe_rule(&extra.access),
+            }));
+        }
+    }
+    Some(json!({
+        "slug": slug,
+        "access": crate::core::api_access::describe_rule(&policy.access),
+        "strict": "only these endpoints can be called",
+        "endpoints": endpoints,
+    }))
 }
 
 /// Quick APIs, minus the machinery. `variables`, extraction specs and
@@ -4009,6 +4117,8 @@ fn merged_definition<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 /// about to author something pays for it.
 fn tool_manual(name: Option<&str>) -> Value {
     const MANUALS: &[(&str, &str)] = &[
+        ("page_create", page_tools::CREATE_MANUAL),
+        ("page_update_html", page_tools::UPDATE_MANUAL),
         (
             "workflow_create_draft",
             "Read workflow_step_schema for the canonical step contracts; step_type narrows the result. \
@@ -4338,6 +4448,7 @@ fn api_call_request(
         extract: api_call_extract(arguments)?,
         workflow_run_id: None,
         agent: None,
+        caller: None,
     })
 }
 
@@ -4375,10 +4486,20 @@ pub(super) fn unwrap_api_noticed<T: serde::Serialize>(
     response: crate::models::ApiResponse<T>,
 ) -> ToolOutcome {
     let notice = response.notice.clone();
+    let readiness = response.readiness.clone();
     let data = response.data.map(|data| {
         let mut value = serde_json::to_value(data).unwrap_or_default();
-        if let (Some(notice), Some(object)) = (notice, value.as_object_mut()) {
-            object.insert("kronn_notice".into(), serde_json::Value::String(notice));
+        if let Some(object) = value.as_object_mut() {
+            if let Some(notice) = notice {
+                object.insert("kronn_notice".into(), serde_json::Value::String(notice));
+            }
+            // The verdict an agent reads before saying a workflow is ready.
+            if let Some(readiness) = readiness {
+                object.insert(
+                    "kronn_readiness".into(),
+                    serde_json::to_value(readiness).unwrap_or_default(),
+                );
+            }
         }
         value
     });
@@ -5182,6 +5303,16 @@ mod tests {
             "workflow_update",
         ];
         let items = tool_catalogue();
+        let expected = expected
+            .into_iter()
+            .chain([
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
+            ])
+            .collect::<Vec<_>>();
         assert_eq!(items.len(), expected.len());
         for (item, name) in items.iter().zip(expected) {
             assert_eq!(item["type"], "function");
@@ -5210,24 +5341,51 @@ mod tests {
                 "api_endpoints",
                 "qa_list",
                 "qa_run",
+                "tool_manual",
                 "api_call",
                 "task_list",
-                "task_get"
+                "task_get",
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
             ]
         );
-        assert!(!names.iter().any(|name| {
-            name.contains("create")
-                || name.contains("update")
-                || name.contains("remove")
-                || name.contains("link")
-        }));
         let projectless_names: Vec<String> = workflow_tool_catalogue(false)
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();
-        assert!(!projectless_names
-            .iter()
-            .any(|name| name.starts_with("task_")));
+        assert_eq!(
+            projectless_names,
+            vec![
+                "mcp_list",
+                "api_endpoints",
+                "qa_list",
+                "qa_run",
+                "tool_manual",
+                "api_call",
+                "page_list",
+                "page_get",
+                "page_create",
+                "page_update_html",
+                "page_add_dataset",
+            ]
+        );
+        for name in names
+            .into_iter()
+            .chain(projectless_names.iter().map(String::as_str))
+        {
+            if ["create", "update", "remove", "link"]
+                .iter()
+                .any(|verb| name.contains(verb))
+            {
+                assert!(
+                    ["page_create", "page_update_html", "page_add_dataset"].contains(&name),
+                    "unexpected workflow mutation: {name}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -5599,6 +5757,45 @@ mod tests {
         // An unknown slug must fail loudly, not return an empty list the model
         // would read as "this plugin has no endpoints".
         assert!(compact_endpoints(&overview, "nope").is_none());
+    }
+
+    #[test]
+    fn plugin_list_and_endpoints_show_the_access_policy() {
+        let overview = json!({
+            "servers": [{
+                "id": "custom-notion", "name": "Notion", "description": "Notes",
+                "api_spec": { "endpoints": [
+                    { "method": "GET", "path": "/users/me", "description": "me" },
+                    { "method": "GET", "path": "/pages/{id}", "description": "page" },
+                ] },
+            }],
+            "configs": [{ "id": "cfg", "server_id": "custom-notion", "is_global": true }],
+            "access_policies": [{
+                "server_id": "custom-notion",
+                "policy": {
+                    "access": { "kind": "local_only" },
+                    "endpoints": [
+                        { "method": "GET", "path": "/users/me", "access": { "kind": "all" } },
+                        { "method": "POST", "path": "/search", "access": { "kind": "blocked" } },
+                    ],
+                },
+            }],
+        });
+        let list = compact_plugin_list(&overview, None);
+        assert_eq!(list["plugins"][0]["access"], "local models only");
+        let out = compact_endpoints(&overview, "custom-notion").expect("known slug");
+        assert_eq!(out["access"], "local models only");
+        assert!(out["strict"]
+            .as_str()
+            .unwrap()
+            .contains("only these endpoints"));
+        assert_eq!(out["endpoints"][0]["access"], "all agents");
+        assert_eq!(out["endpoints"][1]["access"], "local models only");
+        assert_eq!(out["endpoints"][2]["path"], "/search");
+        assert_eq!(out["endpoints"][2]["access"], "blocked");
+        // A plugin without a policy keeps the plain shape.
+        let open = json!({ "servers": overview["servers"].clone() });
+        assert!(compact_endpoints(&open, "custom-notion").unwrap()["access"].is_null());
     }
 
     #[test]

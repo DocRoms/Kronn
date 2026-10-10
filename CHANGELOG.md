@@ -11,6 +11,738 @@ Release notes for 0.9.3 and earlier are available in the
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-10
+
+### Upgrade notes
+
+- Workflow Security settings saved before this version now apply as stored
+  (KT-1043); nothing is unticked or disabled for you. Check the warning on
+  each affected workflow's page. A workflow with "Sandbox (Docker)" ticked has
+  every run refused on a native (non-Docker) install, its Cron and Tracker
+  runs included. One with "Approval required" now waits for a human before
+  every run: a Cron or Tracker trigger leaves runs waiting for approval
+  instead of running unattended. One with "Max files" or "Max lines" is
+  refused when its project has no directory or is not a git repository. A run
+  that had already started when you upgrade is not paused for approval when it
+  resumes (after a Gate, a quota wait or a restart), but it is refused by the
+  sandbox setting, and newly set limits measure from the point it resumes.
+- Cron and Watch triggers saved before this version are pinned to `UTC`
+  (KT-1103, migration 242), so they keep firing at the same instants. A new
+  trigger without a timezone follows Kronn's timezone instead: to write a
+  schedule in local time, clear the `UTC` of an existing trigger and rewrite
+  its hours (e.g. `5-19` UTC becomes `7-21` in Europe/Paris, with no rewrite
+  at each DST change). `{{time.now}}` without `tz:` now renders in Kronn's
+  timezone; add `|tz:UTC` where a template needs UTC.
+
+### Added
+
+- Kronn has a timezone (KT-1103): Settings > Server, an IANA name, by
+  default the machine's zone (`TZ`, then the OS setting, then UTC; a Docker
+  container reports UTC unless the compose `TZ` is set). Cron and Watch
+  triggers without their own `timezone`, and `{{time.now}}` without `tz:`,
+  use it. A local time the spring DST change skips does not fire that day;
+  one the autumn change repeats fires once. The trigger editor shows the zone
+  in use and the next 3 firings in it (`POST /api/workflows/cron-preview`).
+  Tracker intervals stay in UTC.
+  A run renders its dates in the zone it started under, through Gate,
+  quota and restart resumes and in its child runs; a run pinned before this
+  version renders in UTC. The desktop app applies the zone at boot too.
+- Live Pages: a dataset can now be emptied, re-limited and deleted
+  (KT-1104). `clear` is a publish write for every kind (time-series points
+  deleted, snapshot set to `null`, collection to `[]`), also usable in a
+  `PublishPageData` step without `value_from`. `PATCH
+  /api/pages/{id}/datasets/{name}` changes `max_points` / `max_age_days` and
+  prunes the existing points at once. `DELETE /api/pages/{id}/datasets/{name}`
+  (MCP `page_delete_dataset`) is refused, with the list of references, while a
+  workflow writes the dataset, the Page HTML names it or a Page button binds
+  to it; a human can force it from the Page, an agent cannot. The data panel
+  now shows each dataset's size, last write, writing workflows and whether the
+  HTML names it, with Empty, Delete and limit controls behind confirmations.
+  Changing limits and reading usage are human-only. The MCP catalogue stays
+  within its byte ceiling (lowered to 85,341 B).
+
+- « Ma Todo » ships with Kronn (KT-1030): a board Page (to do / in progress /
+  done) over the planning tasks tagged `todo`, with add, edit, ⤒ ▶ ◀ ✓ ↺,
+  tags, one discussion per task, and a chevron that shows a card's
+  description as rendered Markdown. It is installed once at first launch,
+  never again after you delete it, and never over a todo page of your own;
+  the Pages sidebar offers to (re)install it. Its six workflows use only the
+  new zero-token `TaskBoard` step and `PublishPageData` (no Python, no URL),
+  arrive enabled, and no action is pre-approved: approve « todo-move » once in
+  the Page's details to save a drag and drop without its card. A drop moves
+  the card at once and puts it back with the reason if the launch fails. A
+  first-view notice, dismissible, says the page runs without an agent, on
+  Kronn's Tasks (Planning) and Workflows (Automation), and that any configured
+  agent can adapt it and its workflows through Kronn's MCP tools (blocks, new
+  statistics, a validation or sorting step).
+  Editing a task writes only what changed, so a long description is never
+  cut. Closing the notice is remembered by Kronn for that Page (a sandboxed
+  Page has no storage of its own).
+  Cards show tags as chips, a priority badge, a relative date, a description
+  preview and the linked discussion; a search bar filters the board live by
+  title, description or tag, ignoring case and accents.
+- An open Page follows a publish at once (`live_page_data_changed` WebSocket
+  event) instead of waiting for its 30-second refresh (KT-1030).
+- A skill can belong to one project (KT-1128). "Nouveau skill" joins the
+  Automation page's create menu, and a custom skill's sheet gets "Modifier";
+  the form takes an optional project (the page's project filter by default).
+  A project skill is a custom skill of the library carrying
+  `metadata.kronn-project`: same file, same `custom-<slug>` id, so the run
+  pins and every reference keep working. It is listed on its project's
+  AI & automation tab as a project skill ("Dans Kronn seulement" until it is
+  published) without becoming a default of its discussions. No other project
+  offers it, in its discussions, workflow steps or tab. An agent launch of
+  another project that names it is refused by name, before anything starts.
+  The tab proposes the user's global skills before Kronn's built-in ones.
+  `POST`/`PUT /api/skills` and the MCP `skill_create`/`skill_update` take
+  `project_id`: absent keeps it on update, `null` (or `""` through the MCP)
+  makes the skill global, and an unknown project is refused. A `skill:<slug>`
+  reference resolves the project's own skill and its repository skill in the
+  project scope (both at once is refused as ambiguous), then a global custom
+  skill, then a built-in; another project's skill never resolves.
+- A workflow Agent step loads the project's repository skills (KT-1128). A
+  step may name a `repository:<project>:<slug>` skill, which a run used to
+  drop without a word. The run pin (KT-1096) reads it as committed on the
+  repository's default branch (the remote one when the clone has it) and pins
+  it with the other skills: neither the branch the checkout is on, nor the
+  run's worktree, nor a later commit changes what the step loads. A skill the
+  pin lacks (another project's, not committed on the default branch, no longer
+  used by the project, or a launch outside a run) stops the step by name. The
+  step editor offers the workflow project's repository skills.
+
+- Repository profile `kronn/project.toml` (KT-920, ADR-005 slice 7).
+  Workflows read what is specific to a repository (validation targets, forge
+  labels and rules, tracker statuses and transitions, delivery workflows) as
+  `{{project.<path>}}` instead of hard-coding it. Kronn reads the file at the
+  commit of the main checkout's default-branch ref, never from a run's
+  worktree, so a pull request cannot change the rules of its own run, and
+  pins what it read with the run tree, one snapshot per project: a resume or
+  any child run sees the same values even if the file changes during a
+  pause, and the pinned revision fingerprint covers them, as does a trusted
+  Page action's approval: changing a profile value invalidates it, and the
+  run it admits pins the snapshot that was checked. The schema is typed and
+  refuses unknown keys, malformed files and anything that looks like a
+  secret, without ever quoting the file in its error; a run that needs a
+  missing key fails before its first step, naming it, and projects without a
+  profile are unaffected. A completed Full audit drafts a starter profile
+  when the repository has none and keeps it with the audit run, without
+  writing into the checkout; the audit view shows it read-only with a Copy
+  button. Schema and an example:
+  `docs/guides/project-profile.md`.
+- A workflow step now delegates a plan's subtasks without an orchestrator
+  agent (KT-909). `DelegateSubtasks` takes a parent task, launches each ready
+  subtask with the worker named by its `worker:<key>` tag, in plan order,
+  within the step's concurrency and the plan's blockers, and waits on the
+  executions' durable state with no model call. Each delivery is reviewed by
+  the step's agent in one fresh, short session that sees the DoD, the diff and
+  the worker's report, and answers approve, request changes, reassign or
+  escalate. The diff is cut at 40,000 characters: an HTTP reviewer has no
+  tool to read the worktree, so past that cut it does not review the whole
+  change; Kronn applies the verdict and integrates approved work into the
+  run's branch, validations included, through the existing review and
+  integration code. The step ends with OK, or with ESCALATED, CONFLICT,
+  BLOCKED, FAILED or TIMEOUT for `on_result` to route, and lists per subtask
+  its status, integrated SHA, review rounds and cost. The step timeout also
+  bounds a review in flight: a verdict that comes back late is kept, never
+  applied or integrated past the deadline. Each review is recorded in the run's
+  durable LLM-call count before it starts, so a restart keeps the cap, and
+  a refused write ends the run before another review. A restarted step picks
+  its campaign back up: nothing is launched twice, a verdict already recorded
+  is applied without a new review, a reassignment interrupted midway is
+  applied once instead of escalating, and boot recovery no longer wakes a paid
+  principal turn in the step's room.
+- Workflows can use a `Watch` trigger (KT-1099): on its interval, the
+  scheduler polls a source with a GET through the API broker (an API
+  configured in Kronn, or a saved Quick API; stored credentials, the API's
+  default headers, guarded outbound HTTP) and creates a run only when the
+  source changed. The stored ETag / Last-Modified go out as a conditional
+  request, so a 304 costs nothing; a 200 is then compared by its validators,
+  by a fingerprint of the body, or by a fingerprint of a JSONPath result, so
+  volatile fields can be ignored. A poll creates no `workflow_runs` row: the
+  validators, fingerprint and unchanged/changed/error counters live in
+  `workflow_watch_state` (migration 237) and show on the workflow card, and
+  three failed polls in a row show the workflow as failing. The first poll of
+  a source records a baseline without a run. Each served project's admission
+  of a change is recorded with its run, and the baseline advances only once
+  every project has its run, so a change detected again (a restart before
+  the poll was acknowledged, a project refused by its concurrency limit or
+  preflight) runs once per project and never twice. A Quick API the trigger
+  polls counts as a dependency: an agent's edit of it disables the workflow,
+  it cannot be deleted while named, it travels with the workflow's export,
+  and a human edit of it starts a new baseline. The run receives the triggering response as `{{trigger.body}}`
+  (credentials removed, cut at 64 KiB) with `{{trigger.status}}`,
+  `{{trigger.fingerprint}}`, `{{trigger.etag}}`, `{{trigger.last_modified}}`
+  and, in JSONPath mode, `{{trigger.extract}}`. The trigger is editable in the
+  wizard and through MCP `workflow_update`; as for any trigger, an agent's
+  edit disables an enabled workflow until a human turns it back on, and
+  `workflow_create_draft` defaults a Watch to one concurrent run. Watch
+  intervals take five cron fields (at most one poll a minute).
+- Cron and Watch triggers take an optional IANA `timezone` (KT-1099), so
+  "7h–21h Paris" is `0 7-21 * * *` with `Europe/Paris` and follows the DST
+  change. Without one the schedule stays in UTC, as before, and the editor
+  says so. On the change days, a local time that does not exist (spring) does
+  not fire that day, and a repeated one (autumn) fires once, at its first pass.
+- Workflow tools now say whether a saved workflow can start (KT-1138). Every
+  create, update, import, read and bundle returns a structured readiness
+  verdict (`readiness` in the API envelope, `kronn_readiness` first in agent
+  tool results, `readiness` in the bundle response): `ready` plus each blocker
+  with its workflow, step, rollback flag, kind (validation error, misconfigured
+  step, human approval, unsafe interpolation, missing child, cycle, collection
+  error), the runtime reason, the action and whether only a human can lift it.
+  It covers sub-workflows, triggered workflows and every `on_failure` chain,
+  and reads the run's own validators (the Exec allowlist, path and
+  irreversible-operation refusals of the main and setup lines now live in
+  functions shared by the run and the verdict; a line with a template is left
+  to the run). `GET /api/workflows/{id}/readiness` and the new
+  `workflow_validate` MCP tool return it on demand; `workflow_list` keeps the
+  `misconfigured_step_count` and `unsafe_step_count` it used to drop, zero
+  included, and adds `blocker_count` and `human_approval_count` (the misconfigured
+  count now includes rollback steps). Saving or enabling is no longer presented
+  as readiness, and `ready` means no known refusal, not a guaranteed run. Agents
+  still cannot approve a line, pin a script hash or clear its provenance
+  (KT-1017): the `workflow-architect` skill and the manuals tell them to fix
+  what they can and to list each pending approval to the human. In the
+  workflow view, a line that only lacks a human approval is no longer described
+  as a dangerous interpolation; it offers "Review and approve", and blocked
+  sub-workflows and rollbacks are named. The Exec step schema explains the
+  code/data split and the approval agent-written lines need.
+- Runs that change nothing are marked, hidden and purged fast (KT-1100). A
+  successful top-level run is stored with `outcome: no_op` when every step
+  declared or proved that it changed nothing: an Exec step prints a
+  `KRONN_NOOP` line, an Agent step puts `"no_change": true` in its envelope,
+  and Kronn infers an identical Page publish, a `GET`/`HEAD` call, a Collect
+  step made of Quick API reads and the pure data steps. Anything else, a
+  worktree, a preserved branch, a dataset write that changed content, a
+  recorded non-`GET` call or any row pointing at the run, keeps it `changed`.
+  The outcome is returned by the run API and by MCP `workflow_runs` /
+  `workflow_run_get`. The run list hides these runs by default
+  (`hide_no_op=true` on `GET /api/workflows/{id}/runs` and `/runs/count`),
+  offers "Show runs without changes (N)", and folds a streak of them into one
+  greyed row, "N runs without changes since HH:MM". A no-op run keeps the
+  first 2 000 characters of each step output and is deleted 24 h after it
+  finished by the existing run retention pass. A workflow can carry its own
+  retention (`retention: {no_op_hours, success_days, failure_days}`, editor
+  card "Run retention", `workflow_update`), which overrides the global
+  windows per class; `0` keeps forever. Runs that own a worktree or that
+  something references are never deleted. Retention is human-only on a
+  stored workflow: an agent's `workflow_update` refuses a changed
+  `retention`, and a `kronn/` re-import keeps the stored one.
+- Multi-agent discussions now say who is launched and how (KT-1109). While a
+  draft names several agents, the composer shows "N agents launched in
+  parallel" with one chip per agent, and the sent message's routing line adds
+  "N in parallel". When the first named agent is told to delegate to the
+  others ("@opencode lance @codex et @claude", "ask", "demande à", "fais
+  juger par"…), sending first asks whether that agent should orchestrate
+  them. Orchestrating attaches the other agents to the discussion
+  (`attach_agents` on `PATCH /api/discussions/{id}`, which never dispatches
+  them and is refused to agents' bridge tokens) and sends the message to the first agent alone, which hands off with
+  the existing `kronn:handoff` marker; the routing line then reads
+  "orchestrates @codex, @claude". The choice is offered only when agent
+  collaboration is on, warns when the paid handoff limit is below the number
+  of delegated agents, and launching everyone in parallel stays one click
+  away. The answer is bound to its discussion and draft: editing the text,
+  switching discussion or cancelling while the attachment is pending sends
+  nothing, and only the first choice taken runs. A native reply that names an agent in prose without launching it now
+  carries a discreet note saying so and why: already scheduled on this turn,
+  or a plain mention with no handoff.
+- The orchestrate-or-parallel choice is also offered when the first named
+  agent is given a role or job over the others (KT-1152): "@opencode tu es
+  juge des blagues de @codex et @litellm", "compare les réponses de",
+  "arbitre entre", "you are the judge of", "eres el juez de", "评判"… The role
+  must reach the next agent within one clause, so a plain list, a parallel
+  ask ("@a et @b donnez votre avis") or "@a compare X, @b aussi" still
+  launches everyone in parallel without asking.
+- The configuration assistants (custom API plugin, workflow and Quick API
+  ApiCall step) keep their conversation when closed instead of deleting it
+  (KT-1111). Each one is created and filed in one transaction as an assistant
+  conversation linked to the plugin or the step it configures (migration 226,
+  `assistant_conversations`; `POST /api/discussions` takes an `assistant`
+  context). It shows in a new Assistants section of the discussion list rather
+  than in Recent or the project tree, and the global search finds it. The plugin
+  form and the ApiCall step list their "Assistant conversations" (date, agent,
+  whether the last proposal was applied); "Resume" reopens the same
+  conversation in the assistant, and deleting one is an explicit, confirmed
+  action. Conversations started before a plugin, workflow or Quick API is saved
+  are attached to it on save, and stay attachable after a failed save: the
+  browser records them as owed to the saved plugin or step (by conversation id,
+  never by name), which lists them and attaches one on resume. Without browser
+  storage (disabled or cleared), such a conversation stays reachable from the
+  Assistants section but is no longer reattached to its plugin or step on its
+  own. A saved ApiCall step is known by its durable id, so renaming it keeps its
+  conversations. Every write into an assistant conversation (its creation, user
+  messages, agent replies and streamed checkpoints, edit-resend and revisions)
+  masks the stored credentials of the linked plugin, common token shapes, and
+  the form values the assistant names with a message: those are held in memory
+  only, per dispatch, until that dispatch's reply is written or the dispatch is
+  over (a queued or running one keeps them however long it lasts). The assistant
+  masks them on display too. A custom API's literal header values
+  reach the agent only for known non-sensitive headers or `${ENV.*}` references
+  (KT-1041). The logical export (v7) carries the links; older archives still
+  import. The new routes (`GET /api/assistant-conversations`,
+  `PATCH /api/assistant-conversations/{discussion_id}`) are not open to agents'
+  bridge tokens. Conversations deleted by earlier versions cannot be recovered.
+- A plugin's API can now be limited to chosen agents (optionally one model
+  each), to local models only, or blocked, as a whole and per endpoint, from
+  the plugin's Access tab (KT-1026). Under a policy the broker is strict: only
+  declared endpoints (the spec's and the policy's) can be called, with exact
+  method and segment matching (a placeholder keeps the literal text around it,
+  so `report-{id}.json` never opens `private.csv`; malformed braces are
+  refused), so `/blocks/{id}/children` no longer reaches what a rule on
+  `/pages/{id}` protects; an encoded slash, a dot segment or a path leaving the
+  base URL is refused. Every request the call sends is re-decided: each next
+  page and each redirect hop, including one that turns a POST into a GET. The
+  decision uses the identity Kronn issued at launch (the bridge token carries
+  the agent and its model; a native agent's tools are told the model the
+  runner actually sends), never the request; a call without a token is an
+  agent with no identity. "Local only" means an Ollama model on a loopback host
+  that is not a cloud model, in a discussion whose agents are all local (a
+  joined CLI counts as remote), or a workflow whose Agent steps all are,
+  rollback steps included, read from the definition the run pinned (a run
+  with no readable pin counts as an unknown, hence remote, audience; so does
+  any step type that may hand data to an agent Kronn cannot name, including
+  ones added later). Requests and rules are compared in one canonical form:
+  an encoded unreserved character is decoded (`/users/%6De` is `/users/me`),
+  other escapes take uppercase hex, an ASCII character the URL escapes in a
+  path (space, quote, angle brackets, backtick, braces) is escaped, and a
+  non-ASCII character (a Unicode space included, never trimmed) is its UTF-8
+  escapes, as the request URL is sent. A rule holding a control character
+  (which the URL drops or escapes) is refused, and a stored one makes the
+  plugin refuse every call until it is fixed. A rule is stored in that form, and two rules that reach the same
+  form are refused. Workflow ApiCall, BatchApiCall and
+  CollectApiData steps, Quick API runs and the MCP `api_call` all pass the same
+  gate, before any token exchange or outbound request; a refusal names the
+  rule and no secret. The API context, `mcp_list` and `api_endpoints` show each
+  plugin's and endpoint's rule. Only a person sets or widens a policy
+  (`PUT /api/mcps/servers/{id}/access-policy` is not open to bridge tokens). A
+  plugin without a policy behaves as before. The `api_call` description no
+  longer claims undeclared paths are refused when they are not. Database
+  exports move to v7 and carry the policies; an older export keeps the local
+  ones. On a hybrid plugin the panel says its MCP connection keeps its own
+  access, outside this restriction.
+
+- A Live Page action can run without its validation card once a human has
+  approved it from the Page's details (KT-1029), for example moving a card
+  between columns of a Todo page. Only workflow actions whose steps are all of
+  a type known to run no agent (any other or future type is refused), without skills,
+  profiles, directives or Quick Exec data sources, without a typed or
+  project-environment value and in the Page's own project are eligible; the
+  panel says why the others are not. The approval is bound to a fingerprint of
+  the action block, the Page's project and the workflow's shared revision
+  identity, and falls for good, with a visible notice, as soon as the block
+  changes or leaves the Page, or the moment its workflow or one of its Quick
+  APIs is written, disabled or deleted, even if the change is undone. Each
+  trusted launch needs a proven live click, runs only under the approval it
+  was claimed with, and its run is admitted, created and pinned to the
+  approved definition in one transaction, so a later edit or revocation never
+  makes it execute anything else; it is rate-limited per row and per action
+  and appears in the button's history. Withdrawing an approval is one click and applies to the next click.
+  Neither the Page nor an agent can approve: the routes are outside the
+  bridge-token list and refuse an agent identity; `page_get` shows agents which
+  actions are trusted.
+- The waiting reply bubble now shows what the agent is doing from the first
+  message on, for every agent (KT-1108). Before the first word it lists the
+  real startup phases with their times: a native ACP runtime being launched,
+  `initialize`, `session/new` while the project's MCP servers start (with
+  their count), model selection, a Claude or Codex CLI starting with its own
+  MCP servers, then the prompt sent and the wait for the model. Once the model
+  works, the phase follows it (thinking, using a tool, writing) and an
+  expandable list shows its tool calls by category, as in the audit Details
+  panel. When the agent is silent, the bubble counts down the inactivity
+  delay in force (a startup phase's own bound, the model's delay, or a tool's
+  wider one), and a stop by Kronn is announced in the same bubble. Every phase
+  comes from the code path that observed it; frames carry categories, counts
+  and durations only, never a tool's name, a path, a URL or agent text. They
+  travel on the local WebSocket only, coalesced per run (a phase or tool change
+  at most every 0.5 s, a mere sign of life at most every 5 s), and a frame
+  older than the one shown, or one after the run stopped, is ignored. A page
+  opened or reconnected mid-run reads the runs in progress from
+  `GET /api/discussions/{id}/run-progress` (not open to agents' bridge
+  tokens); reading it never restarts a run's silence. A reply always shows its
+  latest attempt, and a run is shown only in the bubble of its own dispatch or
+  turn. HTTP agents (Ollama, LiteLLM, OpenAI-compatible) report each request
+  with its first-token deadline (each retry attempt with its own, no countdown
+  during the backoff), the wait for the model's next answer after a tool,
+  reasoning and keepalive chunks as activity, a Kronn tool from the moment it
+  starts, and their own inactivity stop. A streamed HTTP run now owns its
+  silence bounds the way an ACP run does (first token, then a fresh bound once
+  the headers come, then each chunk), so the discussion and workflow
+  consumers no longer arm a second text-only timer on it; the global deadline
+  still holds.
+- HTTP agents (Ollama, LiteLLM, NVIDIA, custom connections) can find, create
+  and update Pages: `page_list`, `page_get`, `page_create`, `page_update_html`
+  and `page_add_dataset` join their native catalogue and call the same handlers
+  as the MCP bridge, within the same scope: project-less Pages and the current
+  project's Pages, never another project's. A discussion agent gets them in
+  the full catalogue (or in the `pages` family with `KRONN_TIERED_TOOLS=1`); a
+  workflow Agent step gets them too, while Planning mutations stay out of its
+  catalogue. Asked to find a Page, create one and draft the workflow that
+  feeds it, a local `qwen3.8:27b` did all three; the workflow published to the
+  new Page on its first run.
+- Before a multi-agent discussion or room starts, Kronn checks every selected
+  agent in parallel without calling any model (KT-1107): installed, full access
+  on for the native ACP agents, signed in where the CLI has a status command
+  (`claude auth status`, `codex login status`, `kiro-cli whoami`), and, for the
+  native ACP agents, a real `initialize` + `session/new` with no prompt, in the
+  project directory, so a project MCP server that blocks the start is caught
+  within the launch's own 90 s bound. The form shows ✅/❌/❔ with the reason;
+  if an agent is not ready, nothing starts until you fix it, remove it, or
+  launch anyway, and the room shows the same state in a compact notice. Results
+  are cached for 3 minutes per agent and project, and dropped when the agent's
+  settings, full access, key or the project's MCP servers change. A check that
+  cannot be made without the model (OpenCode, Gemini, Copilot and Vibe sign-in)
+  is reported unknown, never ready. `POST /api/agents/readiness` is not open to
+  a launched agent's bridge token.
+- Settings → Agents shows the command Kronn actually runs for each agent (the
+  installed CLI's path, or the `npx` command it falls back to) and the version
+  that command reports, with a warning when it is the `npx` fallback. A run
+  that falls back to `npx` records the command and version in its provenance,
+  never in the agent's output.
+- A Live Page's slug can be renamed: from the slug pill in the Page header
+  (with a preview of the new link), through `PATCH /api/pages/{id}` with
+  `slug`, or by an agent with `page_update_html({page_id, slug})` (MCP or
+  native tools). The new slug
+  follows the creation rules (lowercase ASCII, unique across all projects). The
+  former slug keeps opening the Page, so links, workflow steps and API calls
+  that name it still work, and it stays reserved for that Page until the Page is
+  deleted: no other Page, import included, can take over its old links.
+  Exports name the Page by id where a workflow still used an old slug, so the
+  bundle imports cleanly (KT-1098).
+
+### Changed
+
+- "Invite" in a discussion now copies the `kr-join-…` token alone as soon as
+  it is minted, and the modal says so (KT-1146). Three tabs replace the "Full
+  handoff" checkbox: Token only (default), Simple instruction and Detailed
+  instruction, each with its own copy button. When the browser refuses the
+  clipboard, the modal says the copy failed and leaves the text selected for a
+  manual copy. The token itself is unchanged. The copy is started inside the
+  click, so the desktop app's WebKit view accepts it even when minting is slow.
+- A task description in Planning, and in the discussion plan panel, now shows
+  as rendered Markdown by default, with the same safe renderer as discussion
+  messages (no raw HTML, safe links), instead of raw source (KT-1137). A "Raw"
+  switch at the top of the block shows the source, where it can be edited in
+  Planning; the chosen mode is remembered in the browser. Switching never
+  drops an unsaved edit, and saving is unchanged.
+- `{{previous_step.data…}}` and `{{steps.<name>.data…}}` no longer read an
+  older step's data after a step that produced no envelope (KT-1105). To read
+  an earlier producer, name it with `steps.<producer>.data`, which works as
+  long as that producer has not been re-run without an envelope.
+- The "Run without confirmation" panel of a Page is now one collapsed summary
+  line, for example "4 to approve · 1 approved · 22 not eligible" (KT-1141).
+  "Details" opens the list: eligible actions first, with their approve and
+  withdraw controls, then the others grouped by reason, each group collapsed
+  with its count. The browser remembers whether you left it open. Approving
+  and withdrawing work as before.
+- Kronn's built-in skills are now listed apart from the user's (KT-1140). On
+  the Automation page's Skills cards and on a project's AI & automation tab,
+  the skills in use split into "Skills Kronn" and "Mes skills" (custom,
+  project and repository skills). Both screens use one shared rule and the
+  same badges: "Projet", "Dépôt" and "Pas synchro". "Pas synchro" shows only
+  on the project tab, the one screen that knows the sync state. Unused skills
+  stay folded below, as before.
+- A pull request page now lists only real CI results (KT-1159). Adding a
+  label or editing the description no longer starts CI Tests and CI Build,
+  whose skipped jobs used to hide the results of the run that really tested
+  the change. Those events start CI Verdict instead, which publishes only
+  `ci-quality-gates` and `ci-build-gates`, repeating the verdict of the run
+  for the same head and base. A label added after a push re-runs that run, so
+  its real results appear. CONTRIBUTING explains which checks to read.
+
+### Fixed
+
+- In a multi-agent room, a native agent that posts through MCP during its own
+  run no longer starts agents a second time, cancels itself or runs out of turn
+  (KT-1151). Its post now belongs to its turn: it replies to the message that
+  started the turn and carries the turn's job. Agents already scheduled on the
+  same human message are not started again. The bridge sends the turn it was
+  launched for, and Kronn checks it against the running job. After a restart,
+  the agent's own post no longer cancels its turn, but a newer human message
+  still does. Turns in one discussion now run in the order of their messages
+  (then creation). Before, whichever turn won a race ran first.
+- Under Vibe, Kronn's bridge now knows its discussion: `disc_meta` no longer
+  fails with "no disc bound" (KT-1082). Vibe starts MCP servers without its own
+  environment, so Kronn declares the discussion id and backend URL for the
+  bridge in `session/new`. The bridge token and a workflow step's capability
+  are not declared, because Vibe saves that declaration in its session files:
+  they go in an owner-only file (mode 0600, in a 0700 directory) that the
+  declaration names and that is deleted when the session ends. The other
+  native agents are unchanged.
+- A workflow Agent step on OpenCode, Vibe, GitHub Copilot, Gemini CLI or Kiro
+  whose full access is off now fails at once with
+  `native_full_access_required` and a message naming the agent and the fix
+  (KT-1086). It is not retried, not read as a quota limit, and the
+  `on_failure` chain still runs. The workflow's readiness check lists it as a
+  blocker before the run, and the step's agent picker badges such agents
+  "Needs full access" until the setting is turned on.
+- Kronn's action card names the row in words a Page gives it (KT-1030). A
+  Page can add `data-kronn-binding-labels` next to `data-kronn-bindings`; the
+  card shows those labels instead of raw selectors such as
+  `__col_in_progress__`, with the selectors still in the tooltip and in the
+  resolved values. Labels are display only: they never reach the server, and
+  the action block and its trust approvals are unchanged. « Ma Todo » labels
+  its moves in four languages (task title, position, column). In a narrow
+  column the card now puts its title on its own line and wraps the row
+  instead of cutting it.
+- `agent_list` no longer reports a named HTTP connection as reachable just
+  because an address is saved (KT-697). Each connection now gets a short
+  network probe (an unauthenticated `GET /v1/models`, 3 s max, all connections
+  in parallel, results cached 30 s). A connection whose host does not resolve,
+  refuses, times out, fails TLS or answers 5xx is `reachable: false`, not
+  `available`, with the `endpoint_unreachable` code the legacy LiteLLM family
+  already used. A new `connectivity` field tells `verified`, `unreachable`
+  (with `unreachable_reason`: `dns`, `refused`, `timeout`, `tls`,
+  `http_status`, ...) and `unverified` (no probe, or a result older than 60 s)
+  apart. The connection stays listed with its id and media slots either way.
+  The field never contains the address or a credential.
+- The desktop app no longer blocks allowed third-party players in Live Pages
+  by its own headers (KT-1123). It sent
+  `Cross-Origin-Embedder-Policy: require-corp` and
+  `Cross-Origin-Opener-Policy: same-origin` on every response, so the webview
+  refused any frame whose site does not opt in to that policy, whatever the
+  allow-list said. Both headers are gone, as in Docker, which never sent
+  them; the frame policy (`frame-src`) is unchanged. They only made
+  `SharedArrayBuffer` available, so the local voice workers now run on a
+  single WASM thread in the desktop app, as in Docker. Proven: in a native
+  macOS WKWebView, a synthetic player without COEP/CORP is blocked under the
+  old headers and loads without them, and text-to-speech still produces
+  audio without isolation. Not yet checked: the packaged app, a real player
+  (YouTube…), Windows WebView2. Local speech-to-text currently fails in
+  WKWebView with or without these headers (KT-1143), unrelated to this change.
+
+- The `kronn-internal` MCP bridge no longer hangs on a large request
+  (KT-1139). A `workflow_update` of more than 256 KiB, such as a 1 MiB
+  workflow, killed the bridge's input reader, and every later call waited
+  forever. A request may now carry up to 8 MiB. A larger one is refused with a
+  `request_too_large` error that runs nothing, and the connection keeps
+  working. If the reader stops on an unexpected error, the process exits
+  instead of hanging. The limits are listed by `bridge_info` and in
+  `initialize`. Large workflows are now edited one step at a time:
+  `workflow_get` takes `step_name` or `step_index` to read one step, and the
+  new `workflow_update_step` changes one step through the same save as
+  `workflow_update`, with every authorship, approval and enable rule unchanged.
+  If another save changed the workflow after the edit read it, the edit is
+  refused with a conflict and nothing is written.
+  See `docs/operations/mcp-servers/kronn-internal.md`, "Transport size
+  contract".
+
+- The header of a Page in the Artifacts view no longer puts the Page id under
+  the "Open in new tab" button (KT-1141). The id stays with the title and
+  ends in an ellipsis when space runs out; the buttons share one height and
+  wrap onto their own row when the view is narrow, and below 480 px "Open in
+  new tab" shows only its icon.
+
+- A CLI listening in a room with `disc_wait_for_peer` no longer goes deaf
+  between polls (KT-703). The bridge slept the server's pacing delay after
+  each quiet 15-second poll: 40 s while a human was active, up to 480 s in a
+  quiet room. A message posted during that sleep waited for the next poll,
+  so after a calm period a reply could take more than 8 minutes while the
+  session still looked present. The bridge now starts the next poll right
+  away, so it listens continuously and a new message arrives within one poll.
+  The server's pacing values are unchanged. A CLI reading a wake result is
+  also no longer told to rotate its session in a shared room. The
+  `session_budget` verdict now appears only in a delegated task's execution
+  room, where rotating is the intended response. In a shared room, it had
+  been read as an order to stop listening.
+- On macOS, the `caffeinate` that keeps the Mac awake during a run no longer
+  outlives Kronn (KT-1127). It is now started as `caffeinate -i -w <backend
+  pid>`, so macOS ends it when the backend exits, however it exits (crash,
+  SIGKILL, update, desktop quit, normal exit while a run holds the lease).
+  Before, an orphaned `caffeinate` stayed alive forever and the Mac never
+  idle-slept again. It also no longer inherits descriptors the backend itself
+  inherited without close-on-exec.
+- The workflow Security settings now take effect (KT-1043). They were saved
+  but nothing read them. "Sandbox (Docker)" refuses to start a run outside a
+  container. "Approval required" pauses each run before its worktree, its
+  hooks and its first step, until a human approves or rejects it from Kronn;
+  an agent's bridge token cannot decide it, and a sub-workflow child with this
+  setting fails instead, since it cannot pause. "Max files" and "Max lines"
+  compare the run's working tree, by content, with its state before the
+  workflow's hooks ran (changes already there are not the run's; hook changes
+  are). The run is measured after each step, its declared artifacts included,
+  and once more after the `after_run` hook. Files git is told to ignore changes
+  to (assume-unchanged, skip-worktree) are still measured, deletions
+  included; a flagged path already missing when the run started (a sparse
+  checkout) is not counted. The step that goes
+  past a limit fails and the run stops there for good: no quota wait, no
+  `on_failure` chain, changes kept for review. Such a stop in a sub-workflow
+  ends its parent the same way, and a foreach dispatches no further item. A
+  step's `---STATE:` output can no longer write Kronn's own `__kronn.*` run
+  state, and a recorded starting state that cannot be read stops the run
+  instead of being taken again. These limits need a git working tree; without one, or without a
+  project directory, the run is refused. The editor and the workflow page say
+  which stored settings this host would refuse. An agent that loosens these
+  settings on an enabled workflow disables it, as for any other execution
+  change.
+- Unticking every Security option in the workflow assistant is now saved
+  (KT-1044). An all-cleared panel used to send no settings, so the old ones
+  came back on reload.
+- The reply bubble's Logs panel follows the same no-leak rule as the run
+  progress (KT-1120). A tool call is logged by its category only (`→ Read`
+  when it starts, `✓ Read` when it ends), never by its name, input, file path,
+  URL or command. Kronn reduces the line before sending it, so the client never
+  receives those details. When the agent writes to its stderr, the panel shows
+  a fixed `⚠ Diagnostic` notice once, never the text: it can name paths and
+  URLs. A failed run's error message still carries that text, and the tool
+  calls recorded in the transcript are unchanged.
+- A `PublishPageData` write fed by an `Exec` stdout no longer publishes a
+  truncated document (KT-1105). An `Exec` step a publish reads now keeps up to
+  2 MiB of output instead of 100 KB; a stdout cut at that limit, or one that
+  looks like JSON but does not parse, fails the publish step with an explicit
+  message and the Page keeps its previous data. A JSON stdout is stored as the
+  JSON value rather than a string (pages that `JSON.parse` a string keep
+  working). The Exec envelope now flags `stdout_truncated` and
+  `stderr_truncated`, and Exec output is scrubbed of the project's GitHub
+  token by value.
+- `Exec` and `ApiCall` no longer read a whole command output or JSON response
+  into memory before cutting it (KT-1047). An Exec step drains stdout and
+  stderr as they come, keeps its limit plus a small margin and counts the
+  rest, so a command writing tens of MB stays bounded and its output ends with
+  the truncation marker. An ApiCall JSON response is read chunk by chunk and a
+  body past 16 MiB fails the step with an explicit message instead of being
+  loaded; an error body is read only as far as its excerpt needs.
+
+- A workflow run now executes only the revision it started with (KT-1096).
+  Its first execution freezes the workflow and every Quick Prompt, Quick API,
+  sub-workflow, skill, directive and profile it can load, sub-workflows' own
+  dependencies included (migration 227). Gate and quota resumes, restarts,
+  rollback steps, sub-workflow children and BatchQuickPrompt fan-out (chain
+  prompts included) read that revision, so an agent's edit made while a run
+  is in flight never reaches it. That covers the skills, directives and
+  profiles a fan-out child starts with (a pinned run gets them inline in its
+  prompt, never through the shared native skill and profile files a project
+  sync can rewrite mid-turn),
+  the `ref:` targets and `{{ref:…}}` values the run resolved, and a rollback
+  Agent step's Quick Prompt. The edit still disables the workflow for the
+  next runs, and a resume of such a run still needs a human. A dependency
+  deleted during the run fails its step with a message naming it. A run whose
+  workflow an agent's change disabled between its launch and its start does
+  not start. A run started before this version is pinned at its next
+  execution.
+- A workflow run that ends partial, fails, is cancelled or is stopped by a
+  guard no longer deletes a worktree holding uncommitted or untracked work,
+  in itself or in a worktree created inside it, and neither does the boot
+  purge of finished runs (KT-1096). The worktrees and their branches stay,
+  the run's last step says where, and a later start removes them once clean.
+  A clean set is removed without `--force` and never forced: when git
+  refuses (work written after the check, a submodule), it is kept with the
+  reason. A fully successful run still discards what it left
+  uncommitted, as before: once every step finished, those files are its own
+  scratch.
+- A Gate with `gate_checkpoint_before` no longer commits the operator's
+  checkout (KT-1042). The checkpoint commit is taken only in the run's own
+  worktree (workspace isolation). In shared mode no checkpoint is taken and
+  the Gate message says so, where Kronn used to `git add -A` the project
+  directory and commit the operator's unstaged and untracked work on their
+  branch. The checkpoint records the work under review: "Request changes"
+  re-runs the target on top of it, after checking that the worktree is still
+  exactly that commit. It no longer runs `git reset --hard`, which could only
+  discard commits made by someone other than the paused run.
+- The anti-loop guards of a workflow run no longer restart from zero at
+  every resume (KT-1046). Step visits (`loop_detection_max_revisits`, and
+  `{{iter.<step>}}`), the fires of each capped Goto edge, the total iteration
+  safeguard and the `max_llm_calls` count are stored on the run. They carry
+  over a Gate decision (approve or request changes), a quota wake-up and a
+  restart, so a loop through an auto-approved Gate stops where the same loop
+  without a Gate stops. A step replayed after a quota refusal or a crash is
+  not counted as a new visit, and a call refused for quota does not count
+  against `max_llm_calls`. The LLM calls of sub-workflow children are recorded
+  on the root run as they happen (a new `tree_llm_calls` column that only
+  grows), so a crash in the middle of a foreach no longer forgets what the
+  children that already finished spent. If that count cannot be written or
+  read, the run stops before its next call instead of continuing on a total
+  it cannot trust, and a child whose calls were not recorded is not taken as
+  done. That stop is terminal: the run ends Failed without its `on_failure`
+  compensation steps, quota wait or recovery rule, since each of those could
+  spend further calls. This covers calls that finished: a child still running when the
+  backend dies is started again on resume, so its interrupted call can be
+  billed twice. Runs paused before this version
+  rebuild their counters from their own step history and that of their
+  sub-workflow children.
+- `agent_list`, `task_exec_prepare`, `task_exec_launch` and the tier pickers
+  now read the launch preflight's own catalogue decision (KT-860). A tier the
+  preflight would refuse is listed with the reason (`model_unavailable`) and
+  is not launchable; a tier whose model disappeared shows the model that runs
+  in its place. A run refused at preflight keeps the refused model, the reason
+  and the next action in `last_error`, instead of "model catalogue preflight
+  refused this model".
+- Codex: Kronn now reads the whole `model/list` of the installed CLI, every
+  page and hidden models included (KT-667). A tier model absent from that
+  complete listing keeps its tier and launches with a warning shown
+  beforehand: a "Not listed" label on the tier choice (detail on hover), a
+  `model_not_listed` warning in `agent_list` and `task_exec_prepare`, and a
+  notice at the head of the run. It is never refused or replaced on that
+  evidence, since a listing does not prove account access; only a refusal the
+  provider actually returned blocks a model. A listing cut short or a failed
+  refresh leaves the evidence unknown, and models an older visible-only
+  listing had marked disappeared are available again. When Codex answers
+  "requires a newer version of Codex", the error names the model and the
+  detected and latest known CLI versions instead of repeating "upgrade".
+- A workflow Agent step refused for a provider quota or session limit no longer
+  fails the run and loses the steps before it (KT-811). The run waits in a new
+  `WaitingQuota` status, shown as "Quota" rather than as a failure, and resumes
+  at the refused step after the announced reset (Claude's
+  `resets 9:40pm (Europe/Paris)`, a `Retry-After`, Codex's `try again in …`,
+  an ISO reset), even across a backend restart. Without a usable reset, past
+  the workflow's time limit or after repeated refusals, the run is parked
+  with its reason and a "Resume" button; it can be cancelled while it waits.
+  Automatic resume covers linear root runs only: a sub-workflow child, a batch
+  or an `on_failure` compensation is not resumed, and a child ends `Failed`
+  with its step marked as quota.
+- On a native macOS backend, an agent CLI installed under a `KRONN_HOST_BIN`
+  directory is run instead of being skipped for `npx`: the Darwin host-binary
+  guard now applies only inside a container. In a container, resolution goes
+  on through the `PATH` after a skipped host copy, so a later Linux copy wins.
+- A workflow step with a `TypedSchema` output on an OpenAI-compatible provider
+  sends `strict: false`. The envelope schema does not satisfy OpenAI's strict
+  subset (every object `additionalProperties: false`, every property
+  required), so a provider enforcing it refused the request.
+- A reasoning-effort override that differs from the catalogue only by case
+  (`High` for `high`) is still refused, and the refusal now names the
+  catalogue's spelling. When the catalogue entry itself carries stray
+  whitespace, the refusal says so instead of asking to retype the value.
+- The custom API helper and the workflow API call helper now show an Apply
+  card when the agent wraps the `KRONN:APPLY` marker in its own code fence,
+  puts it on the first line inside the json fence, or writes it in another
+  letter case, with LF or CRLF line endings (KT-1110). Both helpers share one
+  parser, which only accepts a JSON object and ignores the word used inside a
+  sentence. When a proposal block cannot be read, even next to a valid one,
+  the chat shows a notice with a Retry action and the raw JSON instead of
+  dropping it silently. The system prompts in the 4 locales now say that the
+  marker is a bare text line outside any code fence.
+- Live Pages: the browser itself now refuses to frame a site that is not
+  allowed, in desktop, native and Docker alike (KT-1115). Every app document
+  carries `frame-src` and `child-src` set to the app plus exactly the allowed
+  sites (same rules as the Docker gateway: no wildcard, an `http://` site only
+  with its `https://` counterpart, 16 KiB bound). An allowed site that
+  redirects, or navigates its player, to another origin is blocked before any
+  request reaches that origin. The desktop sets it on the documents its
+  embedded backend serves (its Tauri CSP is null), native mode through a Vite
+  plugin reading the same backend route, Docker through the gateway as
+  before. Removing an allowed site now takes its players down at once in every
+  open tab, a visible one included, through a local WebSocket event that
+  carries no origin; a tab that was disconnected re-reads the list when it
+  reconnects. A site allowed after a page was opened shows a "Reload to show
+  this content" notice until that page is reloaded, since a document keeps the
+  policy it was served with. Because that policy still admits a revoked site,
+  revoking any site takes down every player of the open tabs, not only the
+  revoked site's (an allowed player may have been redirected to it), until the
+  page is reloaded; a change also hides the players until the new list is
+  read, so a failed read never leaves them running. Each document carries the
+  exact sources its policy was served with (`<meta
+  name="kronn-served-frame-src">`, written with the header in every mode), and
+  the page compares later lists against it, so a site revoked before a Page is
+  first opened is still treated as revoked; without that marker no player is
+  drawn. An allowed `http://` site whose `https://` address is not allowed is
+  never framed; its placeholder now says to allow it over https instead of
+  asking for a reload. This lifts the two 0.14.3 known limitations on
+  embeds, except the one below.
+
+### Known limitations
+
+- An allowed embed site can itself embed other origins inside its own page:
+  Kronn controls only what the Page frames directly, redirects included
+  (KT-1115).
+
 ## [0.14.3] - 2026-10-07
 
 ### Upgrade notes

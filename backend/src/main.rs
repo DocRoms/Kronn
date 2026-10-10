@@ -32,10 +32,8 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
 
     // Load config before tracing init so `debug_mode` can influence the
     // tracing filter's default level; `config::load()` emits no logs.
-    let mut app_config = match config::load().await? {
-        Some(cfg) => cfg,
-        None => config::default_config_without_key(),
-    };
+    // Also arms the process timezone (KT-1103), shared with the desktop boot.
+    let mut app_config = kronn::load_startup_config().await?;
 
     // 0.8.7 anti-hallucination — arm the process-global mode flag from config
     // so the runner chokepoint can gate P1/P2 without threading config through
@@ -97,6 +95,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
         .init();
 
     tracing::info!("tracing initialized — filter: {}", filter_src);
+    tracing::info!("timezone: {}", kronn::core::timezone::current());
     kronn::core::config::warn_secrets_taken_from_env(env_token.is_some());
 
     tracing::info!("Kronn — Entering the grid...");
@@ -268,6 +267,9 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
     {
         tracing::error!("Model catalog migration failed: {e}");
     }
+
+    // KT-1030: Kronn's default todo board, installed once.
+    kronn::core::default_todo::install_on_boot(&database, &app_config.language).await;
 
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).
@@ -455,7 +457,7 @@ async fn run(env_token: Option<String>) -> anyhow::Result<()> {
             )
             .await
             {
-                Ok(()) => true,
+                Ok(removed) => removed,
                 Err(error) => {
                     tracing::warn!(
                         run_id = %candidate.run_id,

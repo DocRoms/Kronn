@@ -17,12 +17,13 @@
 // buildApiMock, key-passthrough i18n stub, render + waitFor.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { Project, Workflow, WorkflowStep, WorkflowSummary } from '../../../types/generated';
 
-const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock } = vi.hoisted(() => ({
+const { createMock, updateMock, qpListMock, skillListMock, profileListMock, directiveListMock, usedSkillsMock } = vi.hoisted(() => ({
+  usedSkillsMock: vi.fn().mockResolvedValue([]),
   createMock: vi.fn(),
   updateMock: vi.fn(),
   qpListMock: vi.fn(),
@@ -41,6 +42,9 @@ vi.mock('../../../lib/api', () => buildApiMock({
   },
   skills: {
     list: skillListMock as never,
+  },
+  projects: {
+    usedSkills: usedSkillsMock as never,
   },
   profiles: {
     list: profileListMock as never,
@@ -841,6 +845,49 @@ describe('WorkflowWizard — save handler', () => {
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
   });
 
+  it('saves a DelegateSubtasks step without review guidance and shows its config read-only (KT-909)', async () => {
+    const delegate = mkStep({
+      step_type: { type: 'DelegateSubtasks' },
+      prompt_template: '',
+      output_format: { type: 'FreeText' },
+      delegate_subtasks: {
+        parent_task: '{{steps.guard.data.taskId}}',
+        worker_map: { haiku: { agent: 'ClaudeCode', tier: 'economy' } },
+        concurrency: 2,
+      },
+    });
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [delegate, mkStep({ name: 'beta' })] }) });
+    const saveBtn = screen.getByText('wiz.save').closest('button') as HTMLButtonElement;
+    expect(saveBtn).not.toBeDisabled();
+
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    const summary = screen.getByTestId('delegate-subtasks-summary');
+    expect(summary).toHaveTextContent('{{steps.guard.data.taskId}}');
+    expect(summary).toHaveTextContent('worker:haiku → ClaudeCode · economy');
+    const card = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    expect(card.querySelector('.wf-step-type-current')).toHaveTextContent('wiz.stepTypeDelegateSubtasks');
+    expect(screen.queryByText(/wiz\.errorNoPrompt/)).toBeNull();
+
+    fireEvent.click(saveBtn);
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    expect(updateMock.mock.calls[0][1].steps[0].delegate_subtasks.parent_task).toBe('{{steps.guard.data.taskId}}');
+  });
+
+  it('blocks saving a DelegateSubtasks step with no worker', () => {
+    const delegate = mkStep({
+      step_type: { type: 'DelegateSubtasks' },
+      prompt_template: '',
+      delegate_subtasks: { parent_task: 'KT-1' },
+    });
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [delegate] }) });
+    fireEvent.click(screen.getByText('wiz.next'));
+    fireEvent.click(screen.getByText('wiz.next'));
+    const saveBtn = screen.getByText('wiz.save').closest('button') as HTMLButtonElement;
+    expect(saveBtn).toBeDisabled();
+    expect(screen.getByText(/wiz\.errorDelegateSubtasksConfig/)).toBeInTheDocument();
+  });
+
   it('surfaces a save error banner when create rejects (and does not call onDone)', async () => {
     const onDone = vi.fn();
     createMock.mockRejectedValueOnce(new Error('backend boom'));
@@ -974,6 +1021,63 @@ describe('WorkflowWizard — step-type swaps', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'rust' })[0]);
 
     expect(context.textContent).toContain('wiz.agentContextSkillsCount:1');
+  });
+
+  it('offers no other project\'s skill, and keeps one already picked visible to remove it', async () => {
+    skillListMock.mockResolvedValue([
+      { id: 'skill-rust', name: 'rust' },
+      { id: 'custom-mine', name: 'mine', project_id: 'p-other' },
+      { id: 'custom-picked', name: 'picked', project_id: 'p-other' },
+    ]);
+    toSteps([mkStep({ skill_ids: ['custom-picked'] }), mkStep({ name: 'beta' })]);
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    const context = firstCard.querySelector('.wf-agent-context-config') as HTMLDetailsElement;
+    fireEvent.click(context.querySelector('.wf-agent-context-summary') as HTMLElement);
+
+    const card = within(firstCard);
+    expect(card.getByRole('button', { name: 'rust' })).toBeInTheDocument();
+    expect(card.queryByRole('button', { name: 'mine' })).toBeNull();
+    const picked = card.getByRole('button', { name: 'picked' });
+    expect(picked).toHaveAttribute('data-foreign', 'true');
+    expect(picked).toHaveAttribute('title', 'skills.otherProject');
+    fireEvent.click(picked);
+    expect(card.queryByRole('button', { name: 'picked' })).toBeNull();
+  });
+
+  it('offers the workflow project\'s repository skills, which a run reads from the default branch', async () => {
+    skillListMock.mockResolvedValue([{ id: 'skill-rust', name: 'rust' }]);
+    usedSkillsMock.mockResolvedValue([
+      { project_id: 'proj-1', slug: 'block-migration', name: 'Block migration', root: '.agents/skills', relative_path: '.agents/skills/block-migration/SKILL.md', referenced: true, published: false },
+      { project_id: 'proj-2', slug: 'elsewhere', name: 'Elsewhere', root: '.agents/skills', relative_path: '.agents/skills/elsewhere/SKILL.md', referenced: true, published: false },
+    ]);
+    toSteps();
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(firstCard.querySelector('.wf-agent-context-summary') as HTMLElement);
+    const card = within(firstCard);
+    await waitFor(() => expect(card.getByRole('button', { name: 'Block migration' })).toBeInTheDocument());
+    expect(card.queryByRole('button', { name: 'Elsewhere' })).toBeNull();
+    fireEvent.click(card.getByRole('button', { name: 'Block migration' }));
+    expect(firstCard.textContent).toContain('wiz.agentContextSkillsCount:1');
+  });
+
+  it('keeps a repository skill picked for another project removable', async () => {
+    skillListMock.mockResolvedValue([{ id: 'skill-rust', name: 'rust' }]);
+    usedSkillsMock.mockResolvedValue([
+      { project_id: 'proj-2', slug: 'review', name: 'Review', root: '.agents/skills', relative_path: '.agents/skills/review/SKILL.md', referenced: true, published: false },
+    ]);
+    toSteps([mkStep({ skill_ids: ['repository:proj-2:review'] }), mkStep({ name: 'beta' })]);
+    await waitFor(() => expect(document.querySelectorAll('.wf-agent-context-config')).toHaveLength(2));
+    const firstCard = document.querySelector('.wf-step-edit-card') as HTMLElement;
+    fireEvent.click(firstCard.querySelector('.wf-agent-context-summary') as HTMLElement);
+    const card = within(firstCard);
+    const picked = await card.findByRole('button', { name: 'Review' });
+    expect(picked).toHaveAttribute('data-foreign', 'true');
+    fireEvent.click(picked);
+    expect(card.queryByRole('button', { name: 'Review' })).toBeNull();
+    expect(firstCard.textContent).not.toContain('wiz.agentContextSkillsCount');
+    expect(firstCard.textContent).toContain('wiz.agentContextEmpty');
   });
 
   it('swapping to Notify reveals the webhook URL field and edits url/method/body', () => {
@@ -1228,6 +1332,35 @@ describe('WorkflowWizard — config tab + cron', () => {
     expect(sandbox.checked).toBe(true);
     // Exec allowlist input present.
     expect(screen.getByText('wiz.execAllowlistTitle')).toBeInTheDocument();
+  });
+
+  it('unticking every Security option is saved and stays unticked on reload', async () => {
+    const toConfig = () => {
+      fireEvent.click(screen.getByText('wiz.next')); // Infos → Trigger
+      fireEvent.click(screen.getByText('wiz.next')); // Trigger → Steps
+      fireEvent.click(screen.getByText('wiz.next')); // Steps → Config
+    };
+    renderWizard({ editWorkflow: mkWorkflow({
+      safety: { sandbox: true, require_approval: true, max_files: 3, max_lines: 40 },
+    }) });
+    toConfig();
+    fireEvent.click(screen.getByLabelText('wiz.sandbox'));
+    fireEvent.click(screen.getByLabelText('wiz.requireApproval'));
+    fireEvent.change(screen.getByLabelText('wiz.maxFiles'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('wiz.maxLines'), { target: { value: '' } });
+    fireEvent.click(screen.getByText('wiz.next')); // Config → Summary
+    fireEvent.click(screen.getByText('wiz.save'));
+    await waitFor(() => expect(updateMock).toHaveBeenCalledTimes(1));
+    const saved = updateMock.mock.calls[0][1].safety;
+    expect(saved).toEqual({ sandbox: false, require_approval: false, max_files: null, max_lines: null });
+
+    cleanup();
+    renderWizard({ editWorkflow: mkWorkflow({ steps: [mkStep(), mkStep({ name: 'review' })], safety: saved }) });
+    toConfig();
+    expect(screen.getByLabelText('wiz.sandbox')).not.toBeChecked();
+    expect(screen.getByLabelText('wiz.requireApproval')).not.toBeChecked();
+    expect(screen.getByLabelText('wiz.maxFiles')).toHaveValue(null);
+    expect(screen.getByLabelText('wiz.maxLines')).toHaveValue(null);
   });
 
   it('adding a launch variable on the Config tab renders a variable row', () => {

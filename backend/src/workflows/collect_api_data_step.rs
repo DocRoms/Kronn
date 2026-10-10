@@ -22,6 +22,7 @@ const DEFAULT_CONCURRENT_LIMIT: u32 = 5;
 const MAX_CONCURRENT_LIMIT: u32 = 20;
 const MAX_SOURCES: usize = 50;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_collect_api_data_step(
     step: &WorkflowStep,
     project_id: Option<&str>,
@@ -30,6 +31,7 @@ pub async fn execute_collect_api_data_step(
     log_context: ApiCallLogContext,
     workflow_allowlist: &[String],
     work_dir: &str,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let started = Instant::now();
     let Some(config) = step.collect_api_data.as_ref() else {
@@ -80,6 +82,7 @@ pub async fn execute_collect_api_data_step(
         let project_id = project_id.map(str::to_owned);
         let mut child_context = context.clone();
         let log_context = log_context.clone();
+        let caller = caller.clone();
         let workflow_allowlist = workflow_allowlist.to_vec();
         let work_dir = quick_exec_work_dir.clone();
         let handle = tokio::spawn(async move {
@@ -244,6 +247,7 @@ pub async fn execute_collect_api_data_step(
                         &child_context,
                         SecurityPolicy::production(),
                         log_context,
+                        &caller,
                     )
                     .await,
                     None,
@@ -651,6 +655,8 @@ fn outcome(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -919,6 +925,7 @@ mod tests {
             ApiCallLogContext::workflow(),
             &[],
             "",
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result;
@@ -999,6 +1006,7 @@ mod tests {
             ApiCallLogContext::workflow(),
             &["echo".to_string()],
             "",
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result;
@@ -1045,6 +1053,7 @@ mod tests {
             ApiCallLogContext::workflow(),
             &["expr".to_string()],
             "",
+            &crate::core::api_access::ApiCaller::Human,
         )
         .await
         .result;

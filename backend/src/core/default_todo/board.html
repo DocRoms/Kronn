@@ -1,0 +1,604 @@
+<title>Todo</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="kronn-page-height" content="auto" />
+<style>
+  :root {
+    --plane: var(--kr-bg-base, #f9f9f7); --surface: var(--kr-bg-surface, #fcfcfb); --surface-2: var(--kr-bg-elevated, #f1f0ec);
+    --ink: var(--kr-text-primary, #0b0b0b); --ink-2: var(--kr-text-secondary, #52514e); --muted: var(--kr-text-ghost, #898781);
+    --grid: var(--kr-border-medium, #e1e0d9); --accent: var(--kr-accent, #1c5cab); --good: var(--kr-success, #0c8a2e);
+    --bad: var(--kr-error, #b42318); --warn: var(--kr-warning, #9a6200); --code: var(--kr-bg-elevated, #f1f0ec);
+    --col-todo: var(--kr-text-secondary, #5b6b82); --col-doing: var(--kr-accent, #1c5cab); --col-done: var(--kr-success, #0c8a2e);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --plane: var(--kr-bg-base, #0d0d0d); --surface: var(--kr-bg-surface, #161a17); --surface-2: var(--kr-bg-elevated, #20241f);
+      --ink: var(--kr-text-primary, #ffffff); --ink-2: var(--kr-text-secondary, #c3c2b7); --muted: var(--kr-text-ghost, #898781);
+      --grid: var(--kr-border-medium, #2a2e29); --accent: var(--kr-accent, #86b6ef); --good: var(--kr-success, #4fbe88);
+      --bad: var(--kr-error, #f07a6e); --warn: var(--kr-warning, #e3b25c); --code: var(--kr-bg-elevated, #20241f);
+      --col-todo: var(--kr-text-secondary, #9fb0c8); --col-doing: var(--kr-accent, #86b6ef); --col-done: var(--kr-success, #4fbe88);
+    }
+  }
+  :root[data-theme="dark"] {
+    --plane: var(--kr-bg-base, #0d0d0d); --surface: var(--kr-bg-surface, #161a17); --surface-2: var(--kr-bg-elevated, #20241f);
+    --ink: var(--kr-text-primary, #ffffff); --ink-2: var(--kr-text-secondary, #c3c2b7); --muted: var(--kr-text-ghost, #898781);
+    --grid: var(--kr-border-medium, #2a2e29); --accent: var(--kr-accent, #86b6ef); --good: var(--kr-success, #4fbe88);
+    --bad: var(--kr-error, #f07a6e); --warn: var(--kr-warning, #e3b25c); --code: var(--kr-bg-elevated, #20241f);
+    --col-todo: var(--kr-text-secondary, #9fb0c8); --col-doing: var(--kr-accent, #86b6ef); --col-done: var(--kr-success, #4fbe88);
+  }
+  /* Kronn's light theme gives cards and panels the same white: columns are tinted from the ink instead. */
+  :root { --lane: color-mix(in srgb, var(--ink) 5%, var(--plane)); --chip: color-mix(in srgb, var(--ink) 6%, var(--surface)); --code: color-mix(in srgb, var(--ink) 7%, var(--surface)); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--plane); color: var(--ink); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 84rem; margin: 0 auto; padding: 1.25rem 1rem 2.5rem; display: grid; gap: 0.85rem; }
+  .entete { display: grid; gap: 0.7rem; }
+  .entete > [data-kronn-action-slot] { margin-top: 0.1rem; }
+  .tete { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem 1rem; flex-wrap: wrap; }
+  .outils { display: flex; gap: 0.5rem; align-items: center; margin-left: auto; }
+  h1 { font-size: 1.3rem; margin: 0; letter-spacing: -0.01em; display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 0.5rem; }
+  .compte { color: var(--muted); font: 0.8rem var(--mono); font-weight: 400; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .ajouter { border: 1px solid var(--ink); background: var(--ink); color: var(--plane); border-radius: 7px; padding: 0.38rem 0.85rem; font-weight: 600; font-size: 0.9rem; }
+  .ajouter:hover { opacity: 0.88; }
+  .recherche { position: relative; display: flex; align-items: center; max-width: 30rem; }
+  .recherche-icone { position: absolute; left: 0.6rem; top: 50%; width: 0.95rem; height: 0.95rem; margin-top: -0.475rem; color: var(--muted); pointer-events: none; }
+  .recherche input { width: 100%; font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--surface); border: 1px solid var(--grid); border-radius: 8px; padding: 0.42rem 2.6rem 0.42rem 1.9rem; }
+  .recherche input::placeholder { color: var(--muted); }
+  .recherche input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+  .recherche input::-webkit-search-cancel-button { display: none; }
+  .recherche-vider { position: absolute; right: 0.3rem; border: none; background: none; color: var(--muted); border-radius: 5px; padding: 0.1rem 0.4rem; font-size: 1rem; line-height: 1; }
+  .recherche-vider:hover { color: var(--ink); background: var(--chip); }
+  .recherche-vider[hidden] { display: none; }
+  .raccourci { position: absolute; right: 0.5rem; font: 0.7rem var(--mono); color: var(--muted); border: 1px solid var(--grid); border-radius: 4px; padding: 0 0.3rem; pointer-events: none; }
+  .raccourci[hidden] { display: none; }
+  .tableau { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; align-items: start; }
+  @media (max-width: 860px) { .tableau { grid-template-columns: 1fr; gap: 0.75rem; } }
+  .colonne { background: var(--lane); border: 1px solid var(--grid); border-radius: 12px; padding: 0.6rem; min-height: 9rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  @media (max-width: 860px) { .colonne { min-height: 0; } }
+  .colonne.survol { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .col-tete { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.15rem 0.3rem 0.25rem; }
+  .col-tete h2 { font-size: 0.78rem; margin: 0; text-transform: uppercase; letter-spacing: 0.07em; display: flex; align-items: center; gap: 0.45rem; color: var(--ink-2); }
+  .pastille { width: 0.55rem; height: 0.55rem; border-radius: 50%; display: inline-block; }
+  .col-todo .pastille { background: var(--col-todo); } .col-in_progress .pastille { background: var(--col-doing); } .col-done .pastille { background: var(--col-done); }
+  .col-tete .n { font: 0.72rem var(--mono); color: var(--muted); background: var(--surface); border: 1px solid var(--grid); border-radius: 999px; padding: 0 0.45rem; min-width: 1.6rem; text-align: center; }
+  .cartes { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+  .carte { background: var(--surface); border: 1px solid var(--grid); border-radius: 9px; padding: 0.6rem 0.7rem 0.5rem; display: grid; gap: 0.4rem; transition: border-color 0.12s, box-shadow 0.12s; min-width: 0; }
+  .carte:hover, .carte:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--grid)); box-shadow: 0 1px 3px color-mix(in srgb, var(--ink) 10%, transparent); }
+  .carte[draggable="true"] { cursor: grab; }
+  .carte[draggable="true"]:active { cursor: grabbing; }
+  .carte.glisse { opacity: 0.4; }
+  .carte.cible, .fin-cible.cible { box-shadow: 0 -3px 0 var(--accent); }
+  .carte.en-attente { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .fin-cible { min-height: 1.4rem; border-radius: 6px; }
+  .ligne1 { display: flex; gap: 0.4rem; align-items: flex-start; }
+  .poignee { color: var(--muted); font-size: 0.85rem; line-height: 1.45; user-select: none; opacity: 0.55; transition: opacity 0.12s; }
+  .carte:hover .poignee, .carte:focus-within .poignee { opacity: 1; }
+  .titre { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: 0.93rem; line-height: 1.4; }
+  .chevron { flex: none; border: 1px solid var(--grid); background: none; border-radius: 6px; width: 1.6rem; height: 1.45rem; padding: 0; color: var(--ink-2); line-height: 1; font-size: 0.9rem; }
+  .chevron:hover { color: var(--ink); border-color: var(--grid); }
+  .chevron svg { width: 0.9rem; height: 0.9rem; vertical-align: middle; transition: transform 0.12s; }
+  .chevron[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+  .chevron[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; font-size: 0.74rem; color: var(--muted); }
+  .prio { font-weight: 600; border-radius: 4px; padding: 0 0.35rem; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; border: 1px solid currentColor; }
+  .prio-critical { color: var(--bad); } .prio-high { color: var(--warn); } .prio-low { color: var(--muted); }
+  .lien-disc { color: var(--accent); text-decoration: none; border-radius: 4px; padding: 0 0.15rem; }
+  .lien-disc:hover { text-decoration: underline; }
+  .tags { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .tag { font: 0.68rem var(--mono); color: var(--ink-2); background: var(--chip); border: 1px solid var(--grid); border-radius: 999px; padding: 0.05rem 0.5rem; }
+  .tag:hover { border-color: var(--accent); color: var(--accent); }
+  .apercu { color: var(--ink-2); font-size: 0.84rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .details { color: var(--ink-2); font-size: 0.85rem; overflow-wrap: anywhere; border-top: 1px solid var(--grid); padding-top: 0.45rem; }
+  .details > :first-child { margin-top: 0; } .details > :last-child { margin-bottom: 0; }
+  .details h1, .details h2, .details h3, .details h4, .details h5, .details h6 { font-size: 0.9rem; margin: 0.6rem 0 0.25rem; color: var(--ink); text-transform: none; letter-spacing: 0; }
+  .details p, .details ul, .details ol, .details pre { margin: 0.35rem 0; }
+  .details ul, .details ol { padding-left: 1.2rem; }
+  .details code { font: 0.8rem var(--mono); background: var(--code); border-radius: 4px; padding: 0 0.25rem; }
+  .details pre { background: var(--code); border-radius: 6px; padding: 0.45rem 0.55rem; overflow-x: auto; }
+  .details pre code { background: none; padding: 0; }
+  .details a { color: var(--accent); }
+  .pied { display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; padding-top: 0.1rem; }
+  .ref { font: 0.7rem var(--mono); color: var(--muted); margin-right: auto; }
+  .btn { border: 1px solid var(--grid); background: var(--surface); border-radius: 6px; padding: 0.12rem 0.45rem; min-width: 1.85rem; color: var(--ink-2); font-size: 0.8rem; line-height: 1.4; text-decoration: none; text-align: center; }
+  .btn:hover { border-color: var(--ink-2); color: var(--ink); background: var(--chip); }
+  .btn.fait { color: var(--good); border-color: color-mix(in srgb, var(--good) 55%, var(--grid)); }
+  .attente { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; font-size: 0.8rem; color: var(--ink-2); }
+  .placer { border: 1px solid var(--accent); color: var(--accent); background: none; border-radius: 6px; padding: 0.15rem 0.55rem; font-weight: 600; }
+  .note { flex-basis: 100%; color: var(--muted); font-size: 0.76rem; }
+  .col-done .titre { color: var(--muted); text-decoration: line-through; font-weight: 500; }
+  .col-done .carte { background: color-mix(in srgb, var(--surface) 55%, transparent); }
+  .vide { color: var(--muted); font-size: 0.84rem; padding: 1rem 0.5rem; text-align: center; border: 1px dashed var(--grid); border-radius: 9px; display: grid; gap: 0.2rem; }
+  .vide strong { color: var(--ink-2); font-weight: 600; }
+  .aide { color: var(--muted); font-size: 0.78rem; margin: 0; }
+  .avis { display: flex; gap: 0.6rem; align-items: flex-start; background: var(--lane); border: 1px solid var(--grid); border-radius: 9px; padding: 0.6rem 0.75rem; color: var(--ink-2); font-size: 0.84rem; }
+  .avis[hidden] { display: none; }
+  .avis-texte { flex: 1; display: grid; gap: 0.25rem; }
+  .avis-texte p { margin: 0; }
+  .avis-corps { display: grid; gap: 0.25rem; }
+  .avis-corps strong { color: var(--ink); font-weight: 600; }
+  #aide-confiance { color: var(--muted); font-size: 0.78rem; }
+  .avis-fermer { border: none; background: none; color: var(--muted); font-size: 1rem; line-height: 1; padding: 0.15rem 0.3rem; border-radius: 5px; }
+  .avis-fermer:hover { color: var(--ink); background: var(--surface); }
+  .statut { color: var(--bad); font-size: 0.82rem; margin: 0; }
+  .statut:empty { display: none; }
+  @media (max-width: 480px) { .wrap { padding: 0.9rem 0.7rem 2rem; } .recherche { max-width: none; } h1 { font-size: 1.15rem; } }
+  [data-kronn-action][data-kronn-action-state="running"], [data-kronn-action][data-kronn-action-state="launching"] { opacity: 0.55; cursor: progress; }
+  /* The board that redraws already confirms: the injected check mark would stay on the button. */
+  [data-kronn-action][data-kronn-action-state="succeeded"]::after { content: none; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <!-- Anchor for Kronn's action cards: without it they hang off the button, at its width. -->
+  <div class="entete" data-kronn-action-slot-host>
+    <div class="tete">
+      <h1><span id="titre-page"></span><span class="compte" id="compte"></span></h1>
+      <div class="outils">
+        <button class="btn" type="button" id="rafraichir" data-kronn-action="todo-refresh"></button>
+        <button class="ajouter" type="button" id="ajouter" data-kronn-action="todo-add"></button>
+      </div>
+    </div>
+    <div class="recherche" role="search">
+      <svg class="recherche-icone" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.6"/><path d="M10.4 10.4 14 14"/></svg>
+      <input type="search" id="recherche" autocomplete="off" spellcheck="false" />
+      <kbd class="raccourci" id="raccourci" aria-hidden="true">/</kbd>
+      <button class="recherche-vider" type="button" id="recherche-vider" hidden>×</button>
+    </div>
+  </div>
+  <div class="avis" id="avis" role="note" hidden>
+    <div class="avis-texte"><div class="avis-corps" id="avis-texte"></div><p id="aide-confiance"></p></div>
+    <button class="avis-fermer" type="button" id="avis-fermer">✕</button>
+  </div>
+  <p class="statut" id="statut" role="status" aria-live="polite"></p>
+  <div class="tableau" id="tableau"></div>
+  <p class="aide" id="aide"></p>
+</div>
+
+<script type="application/kronn-action" data-action-id="todo-add">
+{"kind":"workflow","target_id":"kronn-todo-add","values":[{"name":"title","provenance":"user_input"},{"name":"description","provenance":"user_input"},{"name":"tags","provenance":"user_input"}]}
+</script>
+<script type="application/kronn-action" data-action-id="todo-toggle">
+{"kind":"workflow","target_id":"kronn-todo-toggle","values":[{"name":"task","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"}]}
+</script>
+<script type="application/kronn-action" data-action-id="todo-move">
+{"kind":"workflow","target_id":"kronn-todo-move","values":[{"name":"task","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"},{"name":"before","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"},{"name":"column","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).column>"}]}
+</script>
+<script type="application/kronn-action" data-action-id="todo-edit">
+{"kind":"workflow","target_id":"kronn-todo-edit","values":[{"name":"task","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"},{"name":"title","provenance":"user_input","source_ref":"<page.dataset.todo.find(id).title>"},{"name":"description","provenance":"user_input","source_ref":"<page.dataset.todo.find(id).description>"}]}
+</script>
+<script type="application/kronn-action" data-action-id="todo-discuss">
+{"kind":"workflow","target_id":"kronn-todo-discuss","values":[{"name":"task","provenance":"dynamic_binding","source_ref":"<page.dataset.todo.find(id).id>"}]}
+</script>
+<script type="application/kronn-action" data-action-id="todo-refresh">
+{"kind":"workflow","target_id":"kronn-todo-refresh","values":[]}
+</script>
+
+<script>
+(function () {
+  'use strict';
+  var LANG = '__KRONN_LANG__';
+  var DICT = {
+    fr: {
+      title: 'Ma Todo', notice: ['**Cette page fonctionne sans agent.** Elle s’appuie sur les **Tâches** (Planification) et les **Workflows** (Automatisation) de Kronn.', 'Vous êtes libre de l’adapter : ajouter des blocs, des statistiques issues de nouveaux workflows, une étape de validation ou de tri par un agent local ou autre.', 'Grâce au MCP et aux outils Kronn, tous vos agents configurés peuvent modifier cette page et ses workflows selon vos besoins.'], closeNotice: 'Fermer ce message', add: '+ Ajouter', addAria: 'Ajouter une tâche', refresh: '↻', refreshAria: 'Relire les tâches',
+      emptyCol: 'Rien ici pour l’instant', noMatch: 'Aucune carte ne correspond à la recherche.', search: 'Rechercher une tâche, un tag…', searchAria: 'Rechercher dans la todo', clearSearch: 'Effacer la recherche', filterTag: 'Filtrer sur ce tag', prio: { critical: 'Critique', high: 'Haute', low: 'Basse' }, updated: 'Modifiée', created: 'Créée', linked: 'Discussion liée', of: 'sur',
+      todo: 'À faire', in_progress: 'En cours', done: 'Fait', atEnd: 'En fin de colonne', beforeCard: 'Avant « % »',
+      emptyTodo: 'Rien à faire. « + Ajouter » pour noter la prochaine chose.', emptyDoing: 'Rien en cours. Glisse une carte ici ou ▶.', emptyDone: 'Rien de terminé récemment.',
+      countTodo: 'à faire', countDoing: 'en cours',
+      details: 'Afficher les détails', hideDetails: 'Masquer les détails', edit: 'Modifier le titre et la description', top: 'En tête de colonne',
+      toDoing: 'Passer en cours', toTodo: 'Remettre à faire', markDone: 'Marquer comme faite', reopen: 'Rouvrir',
+      discuss: 'Lancer une discussion', openDiscussion: 'Voir la discussion',
+      validate: 'Valider le déplacement', cancel: 'Annuler', waiting: 'En attente de validation dans la carte Kronn.',
+      moveFailed: 'Déplacement non enregistré : l’action a échoué. La carte est revenue à sa place.',
+      help: 'Glisse une carte vers une autre place ou colonne. ▶ ◀ déplacent sans glisser, ⤒ remonte en tête, ✎ modifie, ⌄ affiche la description.',
+      trustHint: 'Pour enregistrer un glisser-déposer sans carte de validation, approuve une fois l’action « todo-move » dans les détails de cette page (actions de confiance).'
+    },
+    en: {
+      title: 'My Todo', notice: ['**This page runs without an agent.** It relies on Kronn’s **Tasks** (Planning) and **Workflows** (Automation).', 'You are free to adapt it: add blocks, statistics from new workflows, or a validation or sorting step handled by a local agent or another one.', 'Thanks to the MCP and Kronn’s tools, all your configured agents can change this page and its workflows to fit your needs.'], closeNotice: 'Dismiss this message', add: '+ Add', addAria: 'Add a task', refresh: '↻', refreshAria: 'Reload the tasks',
+      emptyCol: 'Nothing here yet', noMatch: 'No card matches the search.', search: 'Search tasks or tags…', searchAria: 'Search the todo', clearSearch: 'Clear the search', filterTag: 'Filter on this tag', prio: { critical: 'Critical', high: 'High', low: 'Low' }, updated: 'Updated', created: 'Created', linked: 'Linked discussion', of: 'of',
+      todo: 'To do', in_progress: 'In progress', done: 'Done', atEnd: 'At the end of the column', beforeCard: 'Before “%”',
+      emptyTodo: 'Nothing to do. “+ Add” to note the next thing.', emptyDoing: 'Nothing in progress. Drop a card here or use ▶.', emptyDone: 'Nothing finished recently.',
+      countTodo: 'to do', countDoing: 'in progress',
+      details: 'Show details', hideDetails: 'Hide details', edit: 'Edit title and description', top: 'Top of the column',
+      toDoing: 'Start', toTodo: 'Back to to do', markDone: 'Mark as done', reopen: 'Reopen',
+      discuss: 'Start a discussion', openDiscussion: 'Open the discussion',
+      validate: 'Confirm the move', cancel: 'Cancel', waiting: 'Waiting for confirmation in the Kronn card.',
+      moveFailed: 'Move not saved: the action failed. The card is back in its place.',
+      help: 'Drag a card to another place or column. ▶ ◀ move without dragging, ⤒ moves to the top, ✎ edits, ⌄ shows the description.',
+      trustHint: 'To save a drag and drop without a confirmation card, approve the “todo-move” action once in this page’s details (trusted actions).'
+    },
+    es: {
+      title: 'Mi Todo', notice: ['**Esta página funciona sin agente.** Se apoya en las **Tareas** (Planificación) y los **Workflows** (Automatización) de Kronn.', 'Eres libre de adaptarla: añadir bloques, estadísticas de nuevos workflows, una etapa de validación o de clasificación a cargo de un agente local u otro.', 'Gracias al MCP y a las herramientas de Kronn, todos tus agentes configurados pueden modificar esta página y sus workflows según tus necesidades.'], closeNotice: 'Cerrar este mensaje', add: '+ Añadir', addAria: 'Añadir una tarea', refresh: '↻', refreshAria: 'Volver a leer las tareas',
+      emptyCol: 'Nada por aquí todavía', noMatch: 'Ninguna tarjeta coincide con la búsqueda.', search: 'Buscar tareas o etiquetas…', searchAria: 'Buscar en la lista', clearSearch: 'Borrar la búsqueda', filterTag: 'Filtrar por esta etiqueta', prio: { critical: 'Crítica', high: 'Alta', low: 'Baja' }, updated: 'Modificada', created: 'Creada', linked: 'Discusión vinculada', of: 'de',
+      todo: 'Por hacer', in_progress: 'En curso', done: 'Hecho', atEnd: 'Al final de la columna', beforeCard: 'Antes de «%»',
+      emptyTodo: 'Nada por hacer. «+ Añadir» para anotar lo siguiente.', emptyDoing: 'Nada en curso. Suelta una tarjeta aquí o usa ▶.', emptyDone: 'Nada terminado recientemente.',
+      countTodo: 'por hacer', countDoing: 'en curso',
+      details: 'Mostrar detalles', hideDetails: 'Ocultar detalles', edit: 'Editar título y descripción', top: 'Al principio de la columna',
+      toDoing: 'Empezar', toTodo: 'Volver a por hacer', markDone: 'Marcar como hecha', reopen: 'Reabrir',
+      discuss: 'Iniciar una discusión', openDiscussion: 'Ver la discusión',
+      validate: 'Confirmar el movimiento', cancel: 'Cancelar', waiting: 'Esperando la confirmación en la tarjeta de Kronn.',
+      moveFailed: 'Movimiento no guardado: la acción falló. La tarjeta volvió a su sitio.',
+      help: 'Arrastra una tarjeta a otro lugar o columna. ▶ ◀ mueven sin arrastrar, ⤒ sube al principio, ✎ edita, ⌄ muestra la descripción.',
+      trustHint: 'Para guardar un arrastre sin tarjeta de confirmación, aprueba una vez la acción «todo-move» en los detalles de esta página (acciones de confianza).'
+    },
+    zh: {
+      title: '我的待办', notice: ['**此页面无需代理即可运行。**它依托 Kronn 的**任务**（规划）和**工作流**（自动化）。', '你可以自由调整它：添加区块、来自新工作流的统计数据，或由本地代理或其他代理执行的验证或分类步骤。', '借助 MCP 和 Kronn 工具，你配置的所有代理都可以根据你的需求修改此页面及其工作流。'], closeNotice: '关闭此消息', add: '+ 添加', addAria: '添加任务', refresh: '↻', refreshAria: '重新读取任务',
+      emptyCol: '这里暂时还没有内容', noMatch: '没有卡片符合搜索条件。', search: '搜索任务或标签…', searchAria: '搜索待办', clearSearch: '清除搜索', filterTag: '按此标签筛选', prio: { critical: '紧急', high: '高', low: '低' }, updated: '更新于', created: '创建于', linked: '已关联讨论', of: '/',
+      todo: '待办', in_progress: '进行中', done: '已完成', atEnd: '列末尾', beforeCard: '在“%”之前',
+      emptyTodo: '没有待办。点击“+ 添加”记下下一件事。', emptyDoing: '没有进行中的任务。把卡片拖到这里或点 ▶。', emptyDone: '最近没有完成的任务。',
+      countTodo: '待办', countDoing: '进行中',
+      details: '显示详情', hideDetails: '隐藏详情', edit: '编辑标题和描述', top: '移到列首',
+      toDoing: '开始', toTodo: '移回待办', markDone: '标记为完成', reopen: '重新打开',
+      discuss: '发起讨论', openDiscussion: '查看讨论',
+      validate: '确认移动', cancel: '取消', waiting: '等待在 Kronn 卡片中确认。',
+      moveFailed: '移动未保存：操作失败，卡片已回到原位。',
+      help: '把卡片拖到其他位置或列。▶ ◀ 无需拖动即可移动，⤒ 移到列首，✎ 编辑，⌄ 显示描述。',
+      trustHint: '若想拖放后无需确认卡片即可保存，请在此页面详情中批准一次 “todo-move” 操作（可信操作）。'
+    }
+  };
+  var T = DICT[LANG] || DICT.en;
+  var COLUMNS = ['todo', 'in_progress', 'done'];
+
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+  // Minimal Markdown: the text is escaped FIRST, so only the tags built here
+  // reach the DOM; a link keeps only an http(s) target.
+  function inline(text) {
+    var codes = [];
+    var out = text.replace(/`([^`\n]+)`/g, function (_m, code) { codes.push(code); return '\u0000' + (codes.length - 1) + '\u0000'; });
+    out = out.replace(/\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, function (m, label, url) {
+      if (!/^https?:\/\//i.test(url)) return label;
+      return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+    });
+    out = out.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[^\w])__([^_\n]+)__(?!\w)/g, '$1<strong>$2</strong>');
+    out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>').replace(/(^|[^\w_])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>');
+    return out.replace(/\u0000(\d+)\u0000/g, function (_m, i) { return '<code>' + codes[Number(i)] + '</code>'; });
+  }
+  function markdown(source) {
+    var lines = esc(source).replace(/\r\n?/g, '\n').split('\n');
+    var html = [], para = [], list = null, i = 0;
+    function flushPara() { if (para.length) { html.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; } }
+    function flushList() { if (list) { html.push('<' + list.tag + '>' + list.items.map(function (x) { return '<li>' + inline(x) + '</li>'; }).join('') + '</' + list.tag + '>'); list = null; } }
+    while (i < lines.length) {
+      var line = lines[i], m;
+      if (/^\s*```/.test(line)) {
+        flushPara(); flushList();
+        var code = [];
+        i += 1;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i += 1; }
+        html.push('<pre><code>' + code.join('\n') + '</code></pre>');
+        i += 1;
+        continue;
+      }
+      if ((m = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line))) {
+        flushPara(); flushList();
+        html.push('<h' + m[1].length + '>' + inline(m[2]) + '</h' + m[1].length + '>');
+      } else if ((m = /^\s*[-*+]\s+(.*)$/.exec(line)) || (m = /^\s*\d+[.)]\s+(.*)$/.exec(line))) {
+        flushPara();
+        var tag = /^\s*\d/.test(line) ? 'ol' : 'ul';
+        if (list && list.tag !== tag) flushList();
+        if (!list) list = { tag: tag, items: [] };
+        list.items.push(m[1]);
+      } else if (!line.trim()) {
+        flushPara(); flushList();
+      } else {
+        flushList();
+        para.push(line.trim());
+      }
+      i += 1;
+    }
+    flushPara(); flushList();
+    return html.join('');
+  }
+  window.KronnTodoMarkdown = markdown;
+
+  function marker(c) { return '__col_' + c + '__'; }
+  function binding(o) { return esc(JSON.stringify(o)); }
+  // What Kronn's card shows for each binding; the bindings stay the row ids it resolves.
+  function titleOf(id) { var r = rows.filter(function (x) { return x.id === id; })[0]; return r && r.title ? r.title : id; }
+  function labels(o) { return ' data-kronn-binding-labels="' + binding(o) + '"'; }
+  function taskBinding(r) { return 'data-kronn-bindings="' + binding({ task: r.id }) + '"' + labels({ task: r.title || r.id }); }
+  var rows = [];
+  var pending = null;   // a move shown before Kronn saved it: { id, before, column, ... }
+  var open = {};        // cards whose details are expanded, by id
+  var dragged = null;
+  var tableau = document.getElementById('tableau');
+  var statut = document.getElementById('statut');
+
+  function columnOf(r) { return r.column === 'in_progress' || r.column === 'done' ? r.column : 'todo'; }
+  function inColumn(c) { return rows.filter(function (r) { return columnOf(r) === c; }); }
+  function shown(c) {
+    var list = inColumn(c);
+    if (!pending) return list;
+    list = list.filter(function (r) { return r.id !== pending.id; });
+    if (pending.column !== c) return list;
+    var me = rows.filter(function (r) { return r.id === pending.id; })[0];
+    if (!me) { pending = null; return inColumn(c); }
+    var at = list.map(function (r) { return r.id; }).indexOf(pending.before);
+    list.splice(at < 0 ? list.length : at, 0, me);
+    return list;
+  }
+  // A move the published board already shows is no longer pending.
+  function applied() {
+    if (!pending) return;
+    var me = rows.filter(function (r) { return r.id === pending.id; })[0];
+    if (!me) { pending = null; return; }
+    if (columnOf(me) !== pending.column) return;
+    if (pending.column === 'done') { pending = null; return; }
+    var ids = inColumn(pending.column).map(function (r) { return r.id; });
+    var i = ids.indexOf(me.id);
+    if (pending.before === marker(pending.column) ? i === ids.length - 1 : ids[i + 1] === pending.before) pending = null;
+  }
+
+  function moveButton(cls, label, aria, task, before, column) {
+    return '<button class="' + cls + '" type="button" data-kronn-action="todo-move" data-kronn-bindings="' +
+      binding({ task: task, before: before, column: marker(column) }) + '"' + labels({
+        task: titleOf(task),
+        before: before === marker(column) ? T.atEnd : T.beforeCard.replace('%', function () { return titleOf(before); }),
+        column: T[column]
+      }) + ' aria-label="' + esc(aria) + '" title="' + esc(aria) + '">' + esc(label) + '</button>';
+  }
+
+  // Accent- and case-insensitive text, for the search.
+  function fold(text) { return String(text == null ? '' : text).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+  var search = document.getElementById('recherche');
+  function query() { return fold(search.value).trim(); }
+  function matches(r, q) {
+    if (!q) return true;
+    var hay = fold([r.title, r.description, r.ref].concat(Array.isArray(r.tags) ? r.tags : []).join('\n'));
+    return q.split(/\s+/).every(function (word) { return hay.indexOf(word) >= 0; });
+  }
+  // The first line of a description, without its Markdown marks.
+  function preview(text) {
+    var line = String(text || '').split('\n').map(function (x) { return x.trim(); }).filter(Boolean)[0] || '';
+    return line.replace(/^#{1,6}\s+|^[-*+]\s+|^\d+[.)]\s+|^```.*$/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[*_`]/g, '');
+  }
+  var RELATIVE = (function () { try { return new Intl.RelativeTimeFormat(LANG, { numeric: 'auto' }); } catch (x) { return null; } })();
+  function ago(iso) {
+    var at = Date.parse(iso || '');
+    if (!isFinite(at)) return '';
+    var seconds = (at - Date.now()) / 1000, abs = Math.abs(seconds);
+    var units = [[60, 'second', 1], [3600, 'minute', 60], [86400, 'hour', 3600], [2592000, 'day', 86400], [31536000, 'month', 2592000], [Infinity, 'year', 31536000]];
+    for (var k = 0; k < units.length; k += 1) {
+      if (abs < units[k][0]) {
+        var value = Math.round(seconds / units[k][2]);
+        return RELATIVE ? RELATIVE.format(value, units[k][1]) : new Date(at).toLocaleDateString();
+      }
+    }
+    return '';
+  }
+  function chip(tag) {
+    return '<button class="tag" type="button" data-tag="' + esc(tag) + '" title="' + esc(T.filterTag) + '">#' + esc(tag) + '</button>';
+  }
+
+  function card(r, c, i, list) {
+    var mine = pending && pending.id === r.id;
+    var tags = Array.isArray(r.tags) && r.tags.length ? '<div class="tags">' + r.tags.map(chip).join('') + '</div>' : '';
+    var hasDesc = Boolean((r.description || '').trim());
+    var expanded = hasDesc && open[r.id];
+    var chevron = hasDesc ? '<button class="chevron" type="button" data-details="' + esc(r.id) + '" aria-expanded="' + (expanded ? 'true' : 'false') +
+      '" aria-label="' + esc((expanded ? T.hideDetails : T.details) + ' — ' + r.title) + '" title="' + esc(expanded ? T.hideDetails : T.details) + '">' + '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg></button>' : '';
+    var body = !hasDesc ? '' : expanded
+      ? '<div class="details">' + markdown(r.description) + '</div>'
+      : '<div class="apercu">' + esc(preview(r.description)) + '</div>';
+    var meta = [];
+    if (r.priority && T.prio[r.priority]) meta.push('<span class="prio prio-' + esc(r.priority) + '">' + esc(T.prio[r.priority]) + '</span>');
+    var when = ago(r.updated_at || r.created_at);
+    if (when) meta.push('<time datetime="' + esc(r.updated_at || r.created_at) + '" title="' + esc((r.updated_at ? T.updated : T.created) + ' ' + new Date(Date.parse(r.updated_at || r.created_at)).toLocaleString()) + '">' + esc(when) + '</time>');
+    if (r.discussion_id) meta.push('<a class="lien-disc" href="#discussion-' + encodeURIComponent(r.discussion_id) + '" target="_blank" rel="noopener noreferrer" title="' + esc(T.openDiscussion) + '" aria-label="' + esc(T.linked + ' — ' + r.title) + '">💬 ' + esc(T.linked) + ' ↗</a>');
+    var foot = '<span class="ref">' + esc(r.ref || '') + '</span>';
+    if (mine) {
+      foot = '<div class="attente">' + moveButton('placer', T.validate, T.validate + ' — ' + r.title, r.id, pending.before, pending.column) +
+        '<button class="btn" type="button" data-cancel>' + esc(T.cancel) + '</button>' +
+        (pending.waiting ? '<span class="note">' + esc(T.waiting) + '</span>' : '') + '</div>';
+    } else {
+      if (!r.discussion_id) foot += '<button class="btn" type="button" data-kronn-action="todo-discuss" ' + taskBinding(r) + ' title="' + esc(T.discuss) + '" aria-label="' + esc(T.discuss + ' — ' + r.title) + '">💬</button>';
+      foot += '<button class="btn" type="button" data-kronn-action="todo-edit" ' + taskBinding(r) + ' title="' + esc(T.edit) + '" aria-label="' + esc(T.edit + ' — ' + r.title) + '">✎</button>';
+      if (c !== 'done' && i > 0) foot += moveButton('btn', '⤒', T.top + ' — ' + r.title, r.id, list[0].id, c);
+      if (c === 'todo') foot += moveButton('btn', '▶', T.toDoing + ' — ' + r.title, r.id, marker('in_progress'), 'in_progress');
+      if (c === 'in_progress') foot += moveButton('btn', '◀', T.toTodo + ' — ' + r.title, r.id, marker('todo'), 'todo');
+      foot += c === 'done'
+        ? '<button class="btn" type="button" data-kronn-action="todo-toggle" ' + taskBinding(r) + ' title="' + esc(T.reopen) + '" aria-label="' + esc(T.reopen + ' — ' + r.title) + '">↺</button>'
+        : '<button class="btn fait" type="button" data-kronn-action="todo-toggle" ' + taskBinding(r) + ' title="' + esc(T.markDone) + '" aria-label="' + esc(T.markDone + ' — ' + r.title) + '">✓</button>';
+    }
+    return '<li class="carte' + (mine ? ' en-attente' : '') + '" draggable="true" data-id="' + esc(r.id) + '" data-colonne="' + c + '">' +
+      '<div class="ligne1"><span class="poignee" aria-hidden="true">⠿</span><span class="titre">' + esc(r.title) + '</span>' + chevron + '</div>' +
+      (meta.length ? '<div class="meta">' + meta.join('') + '</div>' : '') +
+      body + tags + '<div class="pied">' + foot + '</div></li>';
+  }
+
+  function render() {
+    applied();
+    var hints = { todo: T.emptyTodo, in_progress: T.emptyDoing, done: T.emptyDone };
+    var q = query();
+    tableau.innerHTML = COLUMNS.map(function (c) {
+      var all = shown(c);
+      var list = all.filter(function (r) { return matches(r, q) || (pending && pending.id === r.id); });
+      var count = q && all.length ? list.length + ' ' + T.of + ' ' + all.length : String(list.length);
+      var empty = q && all.length
+        ? '<li class="vide">' + esc(T.noMatch) + '</li>'
+        : '<li class="vide"><strong>' + esc(T.emptyCol) + '</strong><span>' + esc(hints[c]) + '</span></li>';
+      return '<section class="colonne col-' + c + '" data-colonne="' + c + '" aria-label="' + esc(T[c]) + '">' +
+        '<div class="col-tete"><h2><span class="pastille" aria-hidden="true"></span>' + esc(T[c]) + '</h2><span class="n" data-count="' + c + '">' + esc(count) + '</span></div>' +
+        '<ol class="cartes">' + (list.length ? list.map(function (r, i) { return card(r, c, i, all); }).join('') : empty) +
+        '<li class="fin-cible" data-fin="' + c + '" aria-hidden="true"></li></ol></section>';
+    }).join('');
+    var nTodo = inColumn('todo').length, nDoing = inColumn('in_progress').length;
+    document.getElementById('compte').textContent = [nTodo ? nTodo + ' ' + T.countTodo : '', nDoing ? nDoing + ' ' + T.countDoing : ''].filter(Boolean).join(' · ');
+  }
+
+  // Search is display-only: it filters what is drawn, never launches anything.
+  var vider = document.getElementById('recherche-vider');
+  var raccourci = document.getElementById('raccourci');
+  function searchChanged() {
+    vider.hidden = !search.value;
+    raccourci.hidden = Boolean(search.value);
+    render();
+  }
+  function setSearch(value) { search.value = value; searchChanged(); }
+  search.addEventListener('input', searchChanged);
+  search.addEventListener('keydown', function (e) { if (e.key === 'Escape' && search.value) { e.stopPropagation(); setSearch(''); } });
+  vider.addEventListener('click', function () { setSearch(''); search.focus(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    e.preventDefault();
+    search.focus();
+  });
+
+  function rollback(message) {
+    pending = null;
+    statut.textContent = message || '';
+    render();
+  }
+
+  // The pending move's own button carries the state of its launch, marked by
+  // Kronn: a launch that fails puts the card back; one never started leaves
+  // the card waiting for its confirmation card.
+  var FAILED = { failed: 1, preflight_failed: 1, cancelled: 1, expired: 1 };
+  new MutationObserver(function (records) {
+    if (!pending) return;
+    records.forEach(function (rec) {
+      var el = rec.target;
+      if (!pending || !el.classList || !el.classList.contains('placer')) return;
+      var state = el.getAttribute('data-kronn-action-state');
+      var launch = el.getAttribute('data-kronn-action-launch');
+      if (pending.baseline === undefined) return;
+      if (state === 'launching' || state === 'running') { pending.launch = launch; return; }
+      var ours = launch && (launch === pending.launch || launch !== pending.baseline);
+      if (!ours) return;
+      if (FAILED[state]) rollback(T.moveFailed);
+      else if (state === 'succeeded') pending.succeeded = true;
+    });
+  }).observe(tableau, { subtree: true, attributes: true, attributeFilter: ['data-kronn-action-state', 'data-kronn-action-launch'] });
+
+  function propose(move) {
+    statut.textContent = '';
+    pending = move;
+    render();
+    var confirm = tableau.querySelector('.carte.en-attente .placer');
+    if (!confirm) return;
+    // A state Kronn marks right after this render belongs to an older launch.
+    setTimeout(function () { if (pending === move) move.baseline = confirm.getAttribute('data-kronn-action-launch'); }, 0);
+    // Still inside the drop gesture: Kronn runs an approved move without its card.
+    confirm.click();
+    setTimeout(function () {
+      if (pending === move && !move.launch && !move.succeeded) { move.waiting = true; render(); }
+    }, 1500);
+  }
+
+  function clearMarks() { Array.prototype.forEach.call(tableau.querySelectorAll('.cible, .survol, .glisse'), function (x) { x.classList.remove('cible', 'survol', 'glisse'); }); }
+  tableau.addEventListener('dragstart', function (e) {
+    var li = e.target.closest && e.target.closest('li[data-id]');
+    if (!li) return;
+    dragged = li.getAttribute('data-id');
+    li.classList.add('glisse');
+    try { e.dataTransfer.setData('text/plain', dragged); e.dataTransfer.effectAllowed = 'move'; } catch (x) { /* no dataTransfer */ }
+  });
+  tableau.addEventListener('dragend', function () { dragged = null; clearMarks(); });
+  tableau.addEventListener('dragover', function (e) {
+    if (!dragged) return;
+    var col = e.target.closest && e.target.closest('.colonne');
+    if (!col) return;
+    e.preventDefault();
+    var li = e.target.closest('li[data-id], li[data-fin]') || col.querySelector('li[data-fin]');
+    clearMarks();
+    col.classList.add('survol');
+    if (li) li.classList.add('cible');
+  });
+  tableau.addEventListener('drop', function (e) {
+    if (!dragged) return;
+    var col = e.target.closest && e.target.closest('.colonne');
+    if (!col) return;
+    e.preventDefault();
+    var c = col.getAttribute('data-colonne');
+    var li = e.target.closest('li[data-id]');
+    var before = li && li.getAttribute('data-id') !== dragged ? li.getAttribute('data-id') : marker(c);
+    var id = dragged;
+    dragged = null;
+    clearMarks();
+    var me = rows.filter(function (r) { return r.id === id; })[0];
+    if (!me) return;
+    var ids = inColumn(c).map(function (r) { return r.id; });
+    var i = ids.indexOf(id);
+    // Dropped on its own place: nothing to move.
+    if (columnOf(me) === c && (before === id || (i >= 0 && (ids[i + 1] === before || (before === marker(c) && i === ids.length - 1))))) return;
+    propose({ id: id, before: before, column: c });
+  });
+  tableau.addEventListener('click', function (e) {
+    if (!e.target.closest) return;
+    if (e.target.closest('[data-cancel]')) { rollback(''); return; }
+    var chipEl = e.target.closest('[data-tag]');
+    if (chipEl) { setSearch(chipEl.getAttribute('data-tag')); return; }
+    var d = e.target.closest('[data-details]');
+    if (d) { var id = d.getAttribute('data-details'); open[id] = !open[id]; render(); }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && pending) rollback(''); });
+
+  function dataset(root) {
+    if (!root || typeof root !== 'object') return null;
+    var v = root.datasets && root.datasets.todo !== undefined ? root.datasets.todo : root.todo;
+    if (v && !Array.isArray(v) && v.current !== undefined) v = v.current;
+    return v;
+  }
+  function boot(root) {
+    var v = dataset(root);
+    rows = Array.isArray(v) ? v.filter(function (r) { return r && r.id && !r.sentinel; }) : [];
+    // A launch that succeeded without moving the card (changed elsewhere) ends here.
+    if (pending && pending.succeeded) { applied(); if (pending) pending = null; }
+    render();
+    showNotice(root);
+  }
+
+  document.getElementById('titre-page').textContent = T.title;
+  document.getElementById('ajouter').textContent = T.add;
+  document.getElementById('ajouter').setAttribute('aria-label', T.addAria);
+  document.getElementById('rafraichir').textContent = T.refresh;
+  document.getElementById('rafraichir').setAttribute('aria-label', T.refreshAria);
+  document.getElementById('rafraichir').setAttribute('title', T.refreshAria);
+  document.getElementById('aide').textContent = T.help;
+  search.setAttribute('placeholder', T.search);
+  search.setAttribute('aria-label', T.searchAria);
+  vider.setAttribute('aria-label', T.clearSearch);
+  vider.setAttribute('title', T.clearSearch);
+  document.getElementById('aide-confiance').textContent = T.trustHint;
+  // Read once, dismissed for good for this viewer. The sandbox has no storage:
+  // Kronn keeps the flag (KronnPagePref) and hands it back with the data.
+  var NOTICE_KEY = 'kronn-todo-notice-dismissed';
+  var avis = document.getElementById('avis');
+  var closedHere = false;
+  function locallyDismissed() { try { return window.localStorage.getItem(NOTICE_KEY) === '1'; } catch (x) { return false; } }
+  function showNotice(root) {
+    var kept = Boolean(root && root.prefs && root.prefs['notice-dismissed'] === true);
+    avis.hidden = closedHere || kept || locallyDismissed();
+  }
+  // Paragraphs with **bold** runs, built as nodes: the text never goes through innerHTML.
+  function renderNotice(el, paragraphs) {
+    el.textContent = '';
+    paragraphs.forEach(function (line) {
+      var p = document.createElement('p');
+      line.split('**').forEach(function (part, i) {
+        if (!part) return;
+        if (i % 2) { var b = document.createElement('strong'); b.textContent = part; p.appendChild(b); }
+        else p.appendChild(document.createTextNode(part));
+      });
+      el.appendChild(p);
+    });
+  }
+  renderNotice(document.getElementById('avis-texte'), T.notice);
+  var fermer = document.getElementById('avis-fermer');
+  fermer.setAttribute('aria-label', T.closeNotice);
+  fermer.setAttribute('title', T.closeNotice);
+  fermer.addEventListener('click', function () {
+    closedHere = true;
+    avis.hidden = true;
+    try { if (typeof window.KronnPagePref === 'function') window.KronnPagePref('notice-dismissed', true); } catch (x) { /* host without preferences */ }
+    try { window.localStorage.setItem(NOTICE_KEY, '1'); } catch (x) { /* refused in the sandbox */ }
+  });
+  boot(window.KronnPageData);
+  window.addEventListener('kronn:page-data', function (e) { boot((e && e.detail) || window.KronnPageData); });
+})();
+</script>

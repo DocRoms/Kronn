@@ -13,7 +13,9 @@
     "TransformData",
     "PublishPageData",
     "SubWorkflow",
-    "TriggerWorkflow"
+    "TriggerWorkflow",
+    "DelegateSubtasks",
+    "TaskBoard"
   ],
   "fields_by_type": {
     "Agent": {
@@ -50,7 +52,7 @@
         "page_publish.writes"
       ],
       "optional": [],
-      "note": "Typed, zero-token sink for Kronn Live Pages. Each write requires dataset, operation (replace|append|upsert), and value_from as one typed context path such as steps.fetch.data.series. Upsert also requires key_field; append is idempotent per workflow run by default.",
+      "note": "Typed, zero-token sink for Kronn Live Pages. Each write requires dataset, operation (replace|append|upsert|clear), and value_from as one typed context path such as steps.fetch.data.series (not for clear, which empties the dataset). Upsert also requires key_field; append is idempotent per workflow run by default.",
       "example": {
         "name": "publish-report",
         "step_type": {
@@ -166,7 +168,7 @@
         "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)",
         "exec_script_files ([{path, sha256}] — repository files the command runs: the entry script and the modules it loads, relative to the home project's repository; an empty sha256 is pinned to the current content at save. The command runs from a verified copy (cwd = the copy, env KRONN_WORKTREE = the run's checkout) and fails before running, naming the file, when one changed since approval)"
       ],
-      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{issue.title}}\"]` in Node (the `--` is required: Node, Perl, Ruby and PHP keep reading options after their code), or via exec_stdin. A value must never sit where the interpreter still reads options (before the inline code or a `--`): `[\"{{mode}}\", …]` is refused. Saving refuses anything else, and a saved step that still does it is refused at run time.",
+      "note": "exec_command binary MUST be in the workflow `exec_allowlist`. Each exec_args entry is one literal argv string, but an interpreter's inline code (`bash -c`, `python3 -c…`, `node -e` / `--eval=…`, `perl -e`, attached or clustered forms included) is parsed as code: it accepts no template value except `{{run.id}}` and `{{time.now…}}`, not even through `|sh`. Pass the value as a later argument the interpreter never parses, e.g. `bash` + `[\"-c\", \"echo \\\"$1\\\"\", \"_\", \"{{issue.title}}\"]`, or `sys.argv[1]` in Python, or `[\"-e\", \"console.log(process.argv[1])\", \"--\", \"{{issue.title}}\"]` in Node (the `--` is required: Node, Perl, Ruby and PHP keep reading options after their code), or via exec_stdin. A value must never sit where the interpreter still reads options (before the inline code or a `--`): `[\"{{mode}}\", …]` is refused. Saving refuses anything else, and a saved step that still does it is refused at run time. Code and data are separate: the inline code or script is the program, a run value is data it reads (`sys.argv`, `process.argv`, `\"$1\"`, or exec_stdin read with `json.load(sys.stdin)`); exec_stdin is never code (`bash` without `-c` or `python3 -` reading it is refused). An Exec line an agent writes that takes any run value (args, stdin, setup or a source) is saved but refused at run time until a human approves it in the workflow editor, even in a data-only shape; an agent cannot give, imply or bypass that approval. The save result's `kronn_readiness` lists each such line as a `human_only` blocker: tell the user which steps to approve, never call the workflow ready.",
       "example": {
         "name": "Tests",
         "step_type": {
@@ -186,7 +188,7 @@
       ],
       "optional": [
         "gate_request_changes_target (step name to loop back to on 'request changes')",
-        "gate_checkpoint_before (auto-commit before the gate)",
+        "gate_checkpoint_before (commit the run worktree before the gate; isolated runs only)",
         "gate_auto_approve_secs"
       ],
       "example": {
@@ -329,9 +331,93 @@
           }
         ]
       }
+    },
+    "DelegateSubtasks": {
+      "required": [
+        "agent (the reviewer)",
+        "delegate_subtasks.parent_task",
+        "delegate_subtasks.worker_map or delegate_subtasks.default_worker"
+      ],
+      "optional": [
+        "agent_settings (reviewer model/tier/effort)",
+        "prompt_template (extra review guidance)",
+        "delegate_subtasks.concurrency (1-8, default 1)",
+        "delegate_subtasks.max_review_rounds (1-10, default 3)",
+        "delegate_subtasks.validations ([{command}])",
+        "delegate_subtasks.target_branch (default: the run's branch)",
+        "delegate_subtasks.timeout_secs (default 21600)"
+      ],
+      "note": "Runs the parent task's subtasks without an orchestrator agent: launches each ready subtask (plan order, blockers, concurrency) with the worker of its first `worker:<key>` tag found in worker_map ({key: {agent, tier?, model?}}, native workers only), else default_worker; waits on the executions' durable state with no model call; reviews each delivery in ONE fresh session of `agent` (DoD, diff, worker report) whose verdict is approve | request_changes | reassign | escalate; integrates approved work into the target branch, validations included. Output data: discussion_id, campaign_id, target_branch, review_calls, subtasks[{task, status, integrated_sha, review_rounds, attempts, integration_conflicts, worker, cost_usd, tokens}]. Signals: OK (all integrated, success) or, as a failed step routable by on_result, ESCALATED (round cap or reviewer escalation), CONFLICT (a subtask conflicted twice on integration), BLOCKED (human hold, dirty target, nothing launchable, LLM budget), FAILED, TIMEOUT. Executions are never cancelled by a stop; re-running the step resumes them. Forbidden in on_failure.",
+      "example": {
+        "name": "Implement",
+        "step_type": {
+          "type": "DelegateSubtasks"
+        },
+        "agent": "ClaudeCode",
+        "agent_settings": {
+          "tier": "default"
+        },
+        "delegate_subtasks": {
+          "parent_task": "{{steps.guard.data.taskId}}",
+          "worker_map": {
+            "haiku": {
+              "agent": "ClaudeCode",
+              "tier": "economy"
+            },
+            "ollama": {
+              "agent": "Ollama"
+            }
+          },
+          "concurrency": 2
+        },
+        "on_result": [
+          {
+            "contains": "ESCALATED",
+            "action": {
+              "type": "Goto",
+              "step_name": "arbitrate"
+            }
+          }
+        ]
+      }
+    },
+    "TaskBoard": {
+      "required": [
+        "task_board.tag"
+      ],
+      "optional": [
+        "task_board.operation",
+        "task_board.task",
+        "task_board.before",
+        "task_board.column",
+        "task_board.title",
+        "task_board.description",
+        "task_board.tags",
+        "task_board.done_limit"
+      ],
+      "note": "Zero-token board over the planning tasks sharing one tag, columns todo|in_progress|done. operation: read|add (title, description, tags comma-separated)|toggle (task)|move (task, before = a task id or __col_<column>__, column)|edit (task, title, description)|discuss (task; the step's agent). Never touches a task without the tag. data.rows = open cards in board order, recent done ones, then one __col_<column>__ marker per column: publish it with PublishPageData value_from steps.<name>.data.rows.",
+      "example": {
+        "name": "board",
+        "step_type": {
+          "type": "TaskBoard"
+        },
+        "task_board": {
+          "tag": "todo",
+          "operation": "move",
+          "task": "{{task}}",
+          "before": "{{before}}",
+          "column": "{{column}}"
+        }
+      }
     }
   },
   "discovery_rule": "Do not infer the available step types from one workflow: step_types_closed_set is the complete taxonomy. To adapt an existing workflow, call workflow_list and then workflow_get with an id actually returned by that list; no named example is guaranteed to exist.",
+  "triggers": {
+    "Manual": "{\"type\":\"Manual\"}",
+    "Cron": "{\"type\":\"Cron\",\"schedule\":\"0 7 * * 1-5\",\"timezone\":\"Europe/Paris\"}: five-field cron; `timezone` (IANA) is optional, absent = Kronn's global timezone (Settings; default the machine's), so pass `UTC` for a UTC schedule. DST: a local time the spring change skips does not fire that day; one the autumn change repeats fires once.",
+    "Tracker": "{\"type\":\"Tracker\",\"source\":{\"type\":\"GitHub\",\"owner\":\"o\",\"repo\":\"r\"},\"query\":\"\",\"labels\":[],\"interval\":\"*/10 * * * *\"}: one run per new issue (UTC interval).",
+    "Watch": "{\"type\":\"Watch\",\"api_plugin_slug\":\"github\",\"api_config_id\":\"<config>\",\"api_endpoint_path\":\"/repos/o/r/commits\",\"api_query\":{},\"interval\":\"*/5 * * * *\",\"timezone\":null,\"detection\":{\"type\":\"Validators\"}} (or `quick_api_id` instead of the api_* fields). Polls the source with a GET through the API broker (stored credentials, default headers) and creates a run ONLY when it changed; a poll creates no run. Detection: the stored ETag/Last-Modified go out as If-None-Match/If-Modified-Since (304 = unchanged); on a 200, `Validators` compares ETag/Last-Modified (body fingerprint when absent), `Body` the body fingerprint, `{\"type\":\"JsonPath\",\"path\":\"$.items[*].id\"}` the fingerprint of that extract. The first poll records a baseline without a run. Interval: five fields, at most once a minute, read in `timezone` like a Cron. An unadmitted change (concurrency limit, preflight) is detected again next poll. The run reads `{{trigger.*}}`."
+  },
   "template_vars": {
     "syntax": "`{{namespace.path}}` in any string field (prompt_template, api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, gate_message, notify_config, …). Dotted nested access works incl. array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref is left VERBATIM in previews and rejected before execution, so a typo never reaches an agent, command or external API. `{{path|sh}}` renders the value as one POSIX single-quoted shell word (a quoting helper, never accepted inside Exec inline code). The one explicit fallback is `{{path ?? \"text\"}}` (or `'text'`, no escapes): it renders the literal when the path is absent or JSON null, e.g. `{{steps.check.data.stdout ?? \"\"}}` after a Goto skipped `check`; such a ref may name a later step but never an unknown one.",
     "namespaces": {
@@ -347,16 +433,18 @@
       "run.id": "id of the current workflow run (a SubWorkflow child run has its own).",
       "run.artifacts_dir": "absolute path of a directory Kronn creates for this run, outside every checkout (each run has its own; a SubWorkflow child too). Exec steps write files there (screenshots, logs, large reports); a Claude Code or Codex Agent step whose prompt names this path reads it read-only (same policy as read_only_repos: --add-dir, Edit denied, mandatory sandbox). Removed when the run ends; kept while it waits for approval or is interrupted.",
       "ref:<kind>:<slug>": "local id of another resource, kind one of workflow, qe, qa, prompt, skill, plugin, artifact; resolved at run start in the run's project, then the global scope (identity of a kronn/ import, else the slug of the resource's name). Unknown or ambiguous fails the step before launch. Structured id fields (sub_workflow_id, quick_prompt_id, quick_api_id, batch_quick_prompt_id, CollectApiData quick_api_id/quick_exec_id) also accept `ref:<kind>:<slug>`, stored as the local id at save. Scripts: GET /api/resources/resolve?ref=<kind>:<slug>&project=<id>.",
+      "project.<path>": "the run's project profile `kronn/project.toml` (schema v1: validation.targets.<name>.command, forge.{base_branch,merge_method,required_approvals,pr_template,labels.<name>.{name,triggers}}, tracker.{kind,project_key,statuses.<name>,transitions.<name>.{from,to}}, delivery.workflows.<name>.{workflow,inputs.<input>}). Read once at run start at the commit of the main checkout's default-branch ref (origin/HEAD's branch, else main, else master; local branch first), never from the run's worktree, and pinned with the run: resumes and child runs see the same values. A table or array renders as JSON, items by index. A read without `??` fails the run before its first step when the profile or key is missing; use it for repository-specific values instead of hard-coding them. Reserved name.",
       "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
-      "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand; `run.*`, `time.*`, `now*` are reserved names.",
+      "trigger.{body,body_truncated,status,etag,last_modified,fingerprint,extract}": "Watch-trigger fields: the response that changed, credentials removed, body cut at 64 KiB (`body_truncated`); `extract` only in JsonPath mode, `etag`/`last_modified` only when the server sent them (use `?? \"\"`).",
+      "time.now / now": "one timestamp captured at run start and reused by all steps and parallel CollectApiData sources, including after resume. `now` is shorthand; `run.*`, `time.*`, `now*`, `project.*` are reserved names.",
       "<launch_var>": "any `variables[].name` is referenced bare as `{{name}}`. Its source is user_input (default), project_env with source_ref `<env.NAME>`, or kronn_context with `<context.key>`. References resolve at run start; never store the resolved value."
     },
     "time_expressions": {
       "canonical": "{{time.now|shift:-24h|tz:Europe/Paris|floor:hour|fmt:local_iso_ms}}",
-      "shorthand": "{{now-24h|floor:hour}} (UTC + rfc3339 defaults)",
+      "shorthand": "{{now-24h|floor:hour}} (Kronn's global timezone + rfc3339 defaults)",
       "filters": {
         "shift": "+/- fixed duration; units s, m, h, d, w; 10-year safety limit",
-        "tz": "IANA timezone such as Europe/Paris; UTC by default",
+        "tz": "IANA timezone such as Europe/Paris; Kronn's global timezone (Settings) by default",
         "floor": "minute | hour | day; day boundaries use the selected timezone",
         "fmt": "rfc3339 | local_iso_ms | date | unix | unix_ms"
       },

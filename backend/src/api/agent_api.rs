@@ -21,13 +21,13 @@
 //! - Canonical envelope returned with `http_status` extracted from the
 //!   executor's structured response.
 //!
+//! ## Endpoint allow-list (KT-1026)
+//! Without an access policy `ApiSpec.endpoints` stays INDICATIVE: any valid
+//! path on the plugin's API is forwarded with auth, guarded by host match and
+//! public IP only. A plugin under a policy (`core::api_access`) is strict: only
+//! declared endpoints, and only for the agents its rules admit.
+//!
 //! ## Deliberately deferred to a follow-up (cf. [[project_agent_api_broker_0_8_6]])
-//! - `side_effect` opt-in gate. The executor does NOT enforce an endpoint
-//!   allow-list: `ApiSpec.endpoints` is INDICATIVE (it drives method resolution
-//!   and display only); ANY valid path on the plugin's API is forwarded with
-//!   auth. The real guard is the host-match plus public-IP `SecurityPolicy`, so
-//!   even a side-effecting call goes through today — a future safety layer
-//!   would need the caller to pass `allow_side_effects: true`.
 //! - Per-disc rate-limit.
 //! - Persistent audit log (cf. [[project_api_call_logs_0_8_6]]).
 //! - UI counter pill in `ChatHeader`.
@@ -77,13 +77,8 @@ pub struct AgentApiCallRequest {
     #[serde(default)]
     pub quick_api_id: Option<String>,
 
-    /// Endpoint path on the plugin's API. NOTE (2026-06-24): the declared
-    /// `ApiSpec.endpoints` are INDICATIVE, not an allow-list — the executor
-    /// does NOT reject undeclared paths; it forwards ANY path to the plugin's
-    /// base URL with auth injected (the declared list only drives method
-    /// resolution + display). So agents can call valid-but-undeclared
-    /// endpoints; the API itself is the real authority. The host-match +
-    /// public-IP `SecurityPolicy` is the actual guard, not the endpoint list.
+    /// Endpoint path on the plugin's API. Without an access policy any path
+    /// is forwarded; under one, only declared endpoints are (KT-1026).
     pub endpoint_path: String,
 
     /// HTTP method override. For a DECLARED path the method defaults to the
@@ -119,6 +114,11 @@ pub struct AgentApiCallRequest {
     #[serde(skip)]
     #[ts(skip)]
     pub agent: Option<String>,
+    /// Server-owned identity of a native agent (KT-1026). An HTTP request
+    /// without a bridge token is an agent with no identity.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub caller: Option<crate::core::api_access::ApiCaller>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -221,8 +221,13 @@ pub async fn agent_api_call(
         {
             return Json(ApiResponse::err(refusal));
         }
-        return agent_api_call_scoped(&state, req, caller.project).await;
+        let api_caller = caller.api_caller();
+        return agent_api_call_scoped(&state, req, caller.project, api_caller).await;
     }
+    let api_caller = req
+        .caller
+        .clone()
+        .unwrap_or_else(crate::core::api_access::ApiCaller::unidentified_agent);
     // 1. Resolve project_id. Three sources, by priority:
     //   a) explicit `project_id` on the request (agent knows the
     //      scope; e.g. passing what `mcp_list.configs[].project_ids[0]`
@@ -275,7 +280,7 @@ pub async fn agent_api_call(
         None
     };
 
-    agent_api_call_scoped(&state, req, project_id).await
+    agent_api_call_scoped(&state, req, project_id, api_caller).await
 }
 
 /// A bridge caller may use only a config its own project sees: global, linked
@@ -330,6 +335,7 @@ async fn agent_api_call_scoped(
     state: &AppState,
     req: AgentApiCallRequest,
     project_id: Option<String>,
+    api_caller: crate::core::api_access::ApiCaller,
 ) -> Json<ApiResponse<AgentApiCallResponse>> {
     // 2. Validate the request shape. Either plugin_slug+config_id OR
     //    quick_api_id is required — without one of them the executor
@@ -390,6 +396,7 @@ async fn agent_api_call_scoped(
             &ctx,
             SecurityPolicy::production(),
             log_context,
+            &api_caller,
         )
         .await
     } else {
@@ -399,6 +406,7 @@ async fn agent_api_call_scoped(
             state,
             &ctx,
             SecurityPolicy::production(),
+            &api_caller,
         )
         .await
     };
@@ -591,6 +599,7 @@ mod tests {
             extract: None,
             workflow_run_id: None,
             agent: None,
+            caller: None,
         }
     }
 

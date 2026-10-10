@@ -15,7 +15,7 @@ import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, ModelTier, RunStatus, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest, QuickExec, CreateQuickExecRequest,
-  JsonValue, Skill, UnsafeExecStep, WorkflowStep,
+  JsonValue, Skill, CreateSkillRequest, UnsafeExecStep, WorkflowStep,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -23,8 +23,9 @@ import {
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
   ToggleLeft, ToggleRight, Star, Trash2,
   Upload, Download, AlertTriangle, Workflow as WorkflowIcon,
-  PlugZap, MessageSquareText, TerminalSquare,
+  PlugZap, MessageSquareText, TerminalSquare, Sparkles,
 } from 'lucide-react';
+import { WatchStatusLine } from '../components/workflows/WatchStatusLine';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { WorkflowDetail } from '../components/workflows/WorkflowDetail';
 import { AutoDisabledReview } from '../components/workflows/AutoDisabledReview';
@@ -34,6 +35,7 @@ import { agentSettingsForSelection } from '../lib/agentSelection';
 import { QuickPromptForm } from '../components/workflows/QuickPromptForm';
 import { QuickApiForm } from '../components/workflows/QuickApiForm';
 import { QuickExecForm } from '../components/workflows/QuickExecForm';
+import { SkillForm } from '../components/workflows/SkillForm';
 import { SkillCard, SkillSheet } from '../components/SkillSheet';
 import { RepositorySkillSheet } from '../components/RepositorySkillSheet';
 import { ProvidedVariablesPreview } from '../components/workflows/ProvidedVariablesPreview';
@@ -70,8 +72,10 @@ import {
   isRepositorySkillId,
   readSkillFavorites,
   writeSkillFavorites,
+  type AutomationSkillEntry,
   type RepositorySkillOrigin,
 } from '../lib/automationSkills';
+import { catalogSkillTraits, groupSkills, skillGroupLabelKey } from '../lib/skillGroups';
 import {
   AUTOMATION_KIND_LABEL_KEYS,
   NO_AUTOMATION_FILTERS,
@@ -346,6 +350,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   cron: 'Cron',
   tracker: 'Tracker',
   manual: 'Manuel',
+  watch: 'Watch',
 };
 
 /** How a workflow's last run reads in its sidebar row. */
@@ -359,6 +364,7 @@ const WORKFLOW_RUN_STATUS_KEYS: Record<RunStatus, string> = {
   WaitingApproval: 'run.status.waiting_approval',
   StoppedByGuard: 'run.status.stopped_by_guard',
   Interrupted: 'run.status.interrupted',
+  WaitingQuota: 'run.status.quota',
 };
 
 const RUN_FETCH_PAGE_SIZE = 10;
@@ -492,6 +498,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       ? initialAutomationNavigation.resourceId
       : null,
   );
+  const [showCreateSkill, setShowCreateSkill] = useState(false);
+  const [editingSkill, setEditingSkill] = useState<Skill | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(
     initialAutomationNavigation.tab === 'skills'
       ? initialAutomationNavigation.resourceId
@@ -754,6 +762,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const [hasMoreDetailRuns, setHasMoreDetailRuns] = useState(false);
   const [loadingMoreRuns, setLoadingMoreRuns] = useState(false);
   const loadingMoreRunsRef = useRef(false);
+  // KT-1100 — runs that changed nothing stay out of the list unless asked;
+  // the ref keeps WebSocket refreshes on the current choice.
+  const [showNoOpRuns, setShowNoOpRuns] = useState(false);
+  const showNoOpRunsRef = useRef(false);
+  const [detailNoOpHidden, setDetailNoOpHidden] = useState(0);
   // Throttle clock for mirroring WorkflowRunUpdated into the run list while a
   // local SSE run is streaming (see the useWebSocket handler below).
   const lastRunsRefetchRef = useRef(0);
@@ -916,8 +929,25 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     () => [...skillEntries].sort((a, b) => a.skill.name.localeCompare(b.skill.name, undefined, { sensitivity: 'base', numeric: true })),
     [skillEntries],
   );
-  const usedSkillEntries = sortedSkillEntries.filter(entry => entry.used);
+  // The used skills split into Kronn's and the user's, like the project card
+  // (KT-1140); the unused ones stay folded below, as there.
+  const skillGroups = groupSkills(
+    sortedSkillEntries.filter(entry => entry.used),
+    entry => catalogSkillTraits(entry.skill, entry.repository, entry.syncStates),
+  );
   const availableSkillEntries = sortedSkillEntries.filter(entry => !entry.used);
+  const renderSkillCard = (entry: AutomationSkillEntry) => (
+    <SkillCard
+      key={entry.id}
+      skill={entry.skill}
+      pinned={skillFavorites.has(entry.id)}
+      onTogglePinned={() => toggleSkillFavorite(entry.id)}
+      projectCount={entry.projectIds.length}
+      repository={entry.repository}
+      syncStates={entry.syncStates}
+      onOpen={() => openSkill(entry.skill)}
+    />
+  );
   useEffect(() => {
     if (!invalidWorkflowSelection && !invalidQuickPromptSelection
       && !invalidQuickApiSelection && !invalidQuickExecSelection && !invalidSkillSelection) return;
@@ -945,14 +975,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   };
 
   const fetchRunPage = async (id: string, offset: number, pageSize: number) => {
-    const [runs, total] = await Promise.all([
-      workflowsApi.listRuns(id, pageSize, offset, true),
-      workflowsApi.countRuns(id),
+    const hideNoOp = !showNoOpRunsRef.current;
+    const [runs, total, all] = await Promise.all([
+      workflowsApi.listRuns(id, pageSize, offset, true, hideNoOp),
+      workflowsApi.countRuns(id, hideNoOp),
+      hideNoOp ? workflowsApi.countRuns(id) : Promise.resolve(null),
     ]);
     return {
       runs,
       total,
       hasMore: offset + runs.length < total,
+      noOpHidden: all == null ? 0 : Math.max(0, all - total),
     };
   };
 
@@ -983,6 +1016,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setDetailRuns(runs);
       setDetailRunPageCount(page.runs.length);
       setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
       setHasMoreDetailRuns(page.hasMore);
     } catch (e) {
       console.warn('Workflow action failed:', e);
@@ -1187,9 +1221,27 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       setDetailRuns(page.runs);
       setDetailRunPageCount(page.runs.length);
       setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
       setHasMoreDetailRuns(page.hasMore);
     }).catch(() => {});
   });
+
+  const toggleNoOpRuns = async () => {
+    if (!detailWorkflow) return;
+    const next = !showNoOpRunsRef.current;
+    showNoOpRunsRef.current = next;
+    setShowNoOpRuns(next);
+    try {
+      const page = await fetchRunPage(detailWorkflow.id, 0, Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount));
+      setDetailRuns(page.runs);
+      setDetailRunPageCount(page.runs.length);
+      setDetailRunTotal(page.total);
+      setDetailNoOpHidden(page.noOpHidden);
+      setHasMoreDetailRuns(page.hasMore);
+    } catch (e) {
+      console.warn('Workflow run history load failed:', e);
+    }
+  };
 
   const loadMoreDetailRuns = async (amount: number | 'all') => {
     if (!detailWorkflow || loadingMoreRunsRef.current) return;
@@ -1200,13 +1252,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       let nextOffset = detailRunPageCount;
       let total = detailRunTotal;
       if (amount === 'all') {
-        total = await workflowsApi.countRuns(detailWorkflow.id);
+        const hideNoOp = !showNoOpRunsRef.current;
+        total = await workflowsApi.countRuns(detailWorkflow.id, hideNoOp);
         while (nextOffset < total) {
           const page = await workflowsApi.listRuns(
             detailWorkflow.id,
             Math.min(RUN_FETCH_MAX_PAGE_SIZE, total - nextOffset),
             nextOffset,
             true,
+            hideNoOp,
           );
           if (page.length === 0) break;
           nextRuns = [...nextRuns, ...page];
@@ -1559,6 +1613,17 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQA(null);
     if (saved?.id) setSelectedQuickApiId(saved.id);
     refetchQA();
+    return saved;
+  };
+
+  const handleSaveSkill = async (request: CreateSkillRequest) => {
+    const saved = editingSkill
+      ? await skillsApi.update(editingSkill.id, request)
+      : await skillsApi.create(request);
+    setShowCreateSkill(false);
+    setEditingSkill(null);
+    if (saved?.id) setSelectedSkillId(saved.id);
+    refetchSkills();
   };
 
   const handleSaveQE = async (request: CreateQuickExecRequest) => {
@@ -2105,9 +2170,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setEditingQA(null);
     setShowCreateQE(false);
     setEditingQE(null);
+    setShowCreateSkill(false);
+    setEditingSkill(null);
   };
 
-  const openAutomationCreation = (kind: Exclude<AutomationTab, 'skills'>) => {
+  const openAutomationCreation = (kind: AutomationTab) => {
     clearAutomationEditors();
     setShowAutomationActions(false);
     setSelectedId(null);
@@ -2120,7 +2187,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     if (kind === 'workflows') setShowCreate(true);
     else if (kind === 'quickPrompts') setShowCreateQP(true);
     else if (kind === 'quickApis') setShowCreateQA(true);
-    else setShowCreateQE(true);
+    else if (kind === 'quickExecs') setShowCreateQE(true);
+    else setShowCreateSkill(true);
   };
 
   // Choosing a type on the type chip also opens its list; "All" lifts it.
@@ -2611,6 +2679,15 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               <button
                 type="button"
                 className="automation-action-option"
+                aria-label={t('skills.new')}
+                onClick={() => openAutomationCreation('skills')}
+              >
+                <Sparkles size={18} />
+                <span><strong>{t('skills.new')}</strong><small>{t('skills.newHint')}</small></span>
+              </button>
+              <button
+                type="button"
+                className="automation-action-option"
                 aria-label={t('wf.import')}
                 title={t('imp.globalHint')}
                 onClick={() => {
@@ -2802,6 +2879,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         {wf.trigger_type === 'cron' && <Clock size={10} />}
                         {wf.trigger_type === 'tracker' && <GitBranch size={10} />}
                         {wf.trigger_type === 'manual' && <Zap size={10} />}
+                        {wf.trigger_type === 'watch' && <Eye size={10} />}
                         {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
                       </span>
                       <span className="wf-card-step-count">
@@ -2827,6 +2905,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </span>
                       )}
                     </div>
+                    {wf.watch && <WatchStatusLine status={wf.watch} />}
 
                     <div className="wf-card-footer">
                       <div className="wf-card-run-summary">
@@ -2931,6 +3010,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onApproveUnsafeStep={approveUnsafeStep}
                 agentChoices={compareAgentChoices}
                 totalRuns={detailRunTotal}
+                noOpRunsHidden={detailNoOpHidden}
+                showNoOpRuns={showNoOpRuns}
+                onToggleNoOpRuns={toggleNoOpRuns}
                 hasMoreRuns={hasMoreDetailRuns}
                 loadingMoreRuns={loadingMoreRuns}
                 onLoadMoreRuns={loadMoreDetailRuns}
@@ -2952,7 +3034,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   refetch();
                 }}
                 onDeleteAllRuns={async () => {
-                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal))) return;
+                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal + detailNoOpHidden))) return;
                   await workflowsApi.deleteAllRuns(detailWorkflow.id);
                   openDetail(detailWorkflow.id);
                   refetch();
@@ -4274,11 +4356,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {/* ═══ SKILLS TAB (KT-914) ═══
-          Read-only: a skill is opened, never launched. Editing stays in
-          Settings, the one screen that has an editor for it. */}
+          A skill is opened, never launched. */}
       {tab === 'skills' && (
         <div>
-          {selectedSkill && selectedSkillEntry ? (
+          {showCreateSkill || editingSkill ? (
+            <SkillForm
+              key={editingSkill?.id ?? 'new'}
+              editSkill={editingSkill ?? undefined}
+              projects={projects}
+              initialProjectId={projects.some(project => project.id === automationProjectFilter) ? automationProjectFilter : null}
+              onSave={handleSaveSkill}
+              onCancel={() => { setShowCreateSkill(false); setEditingSkill(null); }}
+            />
+          ) : selectedSkill && selectedSkillEntry ? (
             selectedSkillEntry.repository ? (
               <RepositorySkillSheet
                 key={selectedSkill.id}
@@ -4297,6 +4387,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 pinned={skillFavorites.has(selectedSkill.id)}
                 onTogglePinned={() => toggleSkillFavorite(selectedSkill.id)}
                 onOpenSettings={onNavigateSettings}
+                onEdit={selectedSkill.is_builtin ? undefined : () => setEditingSkill(selectedSkill)}
                 onError={message => toastProp?.(message, 'error')}
                 onDelete={selectedSkill.is_builtin ? undefined : async () => {
                   await skillsApi.delete(selectedSkill.id);
@@ -4312,16 +4403,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             </div>
           ) : (
             <div className="qp-list">
-              {usedSkillEntries.map(entry => (
-                <SkillCard
-                  key={entry.id}
-                  skill={entry.skill}
-                  pinned={skillFavorites.has(entry.id)}
-                  onTogglePinned={() => toggleSkillFavorite(entry.id)}
-                  projectCount={entry.projectIds.length}
-                  repository={entry.repository}
-                  onOpen={() => openSkill(entry.skill)}
-                />
+              {skillGroups.map(({ group, items }) => (
+                <section key={group} className="skill-group" data-skill-group={group} aria-label={t(skillGroupLabelKey(group))}>
+                  <h3 className="skill-group-title">
+                    {t(skillGroupLabelKey(group))} <span>{items.length}</span>
+                  </h3>
+                  {items.map(renderSkillCard)}
+                </section>
               ))}
               {availableSkillEntries.length > 0 && (
                 <div className="skill-available" data-group="skills:available">
@@ -4334,16 +4422,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     <ChevronRight size={10} className="disc-chevron" data-expanded={availableSkillsOpen || searching} aria-hidden="true" />
                     <span className="automation-group-name">{t('automation.skill.availableToggle', availableSkillEntries.length)}</span>
                   </button>
-                  {(availableSkillsOpen || searching) && availableSkillEntries.map(entry => (
-                    <SkillCard
-                      key={entry.id}
-                      skill={entry.skill}
-                      pinned={skillFavorites.has(entry.id)}
-                      onTogglePinned={() => toggleSkillFavorite(entry.id)}
-                      projectCount={entry.projectIds.length}
-                      onOpen={() => openSkill(entry.skill)}
-                    />
-                  ))}
+                  {(availableSkillsOpen || searching) && availableSkillEntries.map(renderSkillCard)}
                 </div>
               )}
             </div>

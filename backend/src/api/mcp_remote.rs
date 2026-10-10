@@ -137,6 +137,7 @@ pub async fn workflow_trigger(
                 Some(RUN_AVG_LIMIT),
                 None,
                 visibility.as_ref(),
+                false,
             )
         })
         .await
@@ -308,6 +309,7 @@ pub async fn workflow_run_status(
                     Some(RUN_AVG_LIMIT + 1),
                     None,
                     visibility.as_ref(),
+                    false,
                 )
             }
         })
@@ -1104,6 +1106,7 @@ pub async fn workflow_wait_for_completion(
                         Some(RUN_AVG_LIMIT + 1),
                         None,
                         visibility.as_ref(),
+                        false,
                     )
                 })
                 .await
@@ -1142,6 +1145,7 @@ mod tests {
         finished: Option<chrono::DateTime<Utc>>,
     ) -> WorkflowRun {
         WorkflowRun {
+            outcome: None,
             id: Uuid::new_v4().to_string(),
             workflow_id: "wf-1".into(),
             status,
@@ -1286,6 +1290,8 @@ mod tests {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         }
     }
 

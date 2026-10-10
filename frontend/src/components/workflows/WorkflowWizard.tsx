@@ -1,13 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ArtifactImportDialog } from '../ArtifactImportDialog';
-import { buildBlankStep, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
+import { buildBlankStep, isDelegateSubtasksIncomplete, jsonPathToTarget, splitToolList, withStepTools } from '../../lib/workflowUiUtils';
+import { DelegateSubtasksSummary } from './DelegateSubtasksSummary';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
+import { offeredToProject, pickedButNotOffered, repositorySkillsOf } from '../../lib/automationSkills';
+import { workflows as workflowsApi, projects as projectsApi, pages as pagesApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, quickExecs as quickExecsApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, JsonTreeViewer, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { CopyIdPill } from '../CopyIdPill';
+import { AssistantDraftStore, savedStepKey } from '../assistantConversation';
 import { AgentSwitchPicker, type AgentSwitchTarget } from '../AgentSwitchPicker';
 import { agentSettingsForSelection } from '../../lib/agentSelection';
 import { SearchableSelect } from '../SearchableSelect';
@@ -21,19 +24,21 @@ import type {
   Project, Workflow, WorkflowTrigger,
   WorkflowStep, AgentType, WorkflowSafety,
   WorkspaceConfig, StepConditionRule,
-  CreateWorkflowRequest, Skill, AgentProfile, Directive,
-  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
+  CreateWorkflowRequest, Skill, ProjectUsedSkill, AgentProfile, Directive,
+  WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards, WorkflowRetention,
   PromptVariable, WorkflowSummary, LivePage, JsonValue, TestApiCallResponse, QuickExec,
   TransformDataField, WorkflowProjectScope,
 } from '../../types/generated';
+import { SafetyWarnings } from './SafetyWarnings';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
+import { RunRetentionCard } from './RunRetentionCard';
 import type { AgentsConfig } from '../../types/generated';
 import { promptNeedsUnboundWorkspace } from '../../lib/ollamaHints';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
   AlertTriangle, UserCircle, FileText, Layers, Send,
-  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play,
+  Info, Hand, RotateCcw, Terminal, Bot, Plug, Braces, Database, Shuffle, Play, Network, Eye,
 } from 'lucide-react';
 import { scanUndeclaredVars } from '../../lib/scanUndeclaredVars';
 import { userError } from '../../lib/userError';
@@ -42,6 +47,8 @@ import { ChildWorkflowVariablesEditor } from './ChildWorkflowVariablesEditor';
 import { ExecScriptFilesEditor } from './ExecScriptFilesEditor';
 import { UnmodelledApproval } from './UnmodelledApproval';
 import { WorkflowProjectScopeControl } from './WorkflowProjectScopeControl';
+import { WatchTriggerEditor, TimezoneField } from './WatchTriggerEditor';
+import { watchDraftFrom, buildWatchTrigger, buildCronTrigger } from '../../lib/watchTrigger';
 import '../../pages/WorkflowsPage.css';
 import { SkillVariablesBadge } from '../SkillVariablesBadge';
 
@@ -129,6 +136,14 @@ const STEP_TYPE_GROUPS: ReadonlyArray<{
   },
 ];
 
+// Shown for an existing step, never offered in the catalogue: it has no editor form (KT-909).
+const DELEGATE_SUBTASKS_OPTION: StepTypeOption = {
+  type: 'DelegateSubtasks',
+  dataType: 'delegate-subtasks',
+  labelKey: 'wiz.stepTypeDelegateSubtasks',
+  hintKey: 'wiz.stepTypeDelegateSubtasksHint',
+};
+
 // Safe, dependency-free starter used by the quick Page flow. It consumes the
 // same postMessage contract as richer agent-generated templates, so replacing
 // this HTML later never changes the workflow/dataset wiring.
@@ -150,6 +165,7 @@ function StepTypeGlyph({ type, size = 16 }: { type: string; size?: number }) {
   if (type === 'TransformData') return <Shuffle size={size} />;
   if (type === 'PublishPageData') return <FileText size={size} />;
   if (type === 'TriggerWorkflow') return <Play size={size} />;
+  if (type === 'DelegateSubtasks') return <Network size={size} />;
   return <GitBranch size={size} />;
 }
 
@@ -197,6 +213,9 @@ function isWorkflowStepIncomplete(step: WorkflowStep): boolean {
   }
   if (step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow') {
     return !step.sub_workflow_id?.trim();
+  }
+  if (step.step_type?.type === 'DelegateSubtasks') {
+    return isDelegateSubtasksIncomplete(step) || (step.on_result ?? []).some(rule => !rule.contains);
   }
   if (!step.prompt_template && !step.quick_prompt_id) return true;
   return (step.on_result ?? []).some(rule => !rule.contains);
@@ -297,9 +316,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       compact={compact}
       title={t('disc.switchAgentAndTier')}
       ariaLabel={t('wiz.agentAndTierLabel')}
+      needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
     />
   );
   const isEdit = !!editWorkflow;
+  // KT-1111 — assistant conversations started before the workflow exists.
+  const [assistantDrafts] = useState(() => new AssistantDraftStore());
+  const trackAssistantConversation = useCallback((discussionId: string, stepName: string) => {
+    assistantDrafts.track(discussionId, stepName);
+  }, [assistantDrafts]);
+  // A draft conversation follows its step's name until the workflow exists;
+  // a saved step is followed by its durable id instead.
+  const followStepRename = (from: string, to: string) => assistantDrafts.renameStep(from, to);
   // Detect if an existing workflow needs advanced mode (multi-step, cron, hooks, etc.)
   const needsAdvanced = isEdit && (
     !!initialStepId || focusedStepOnly ||
@@ -307,7 +335,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     editWorkflow.trigger?.type !== 'Manual' ||
     editWorkflow.workspace_config ||
     editWorkflow.safety?.sandbox ||
-    editWorkflow.safety?.require_approval
+    editWorkflow.safety?.require_approval ||
+    editWorkflow.safety?.max_files != null ||
+    editWorkflow.safety?.max_lines != null
   );
   const [wizardMode, setWizardMode] = useState<'simple' | 'advanced'>(needsAdvanced ? 'advanced' : 'simple');
   const isSimple = wizardMode === 'simple';
@@ -323,7 +353,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
   const [projectScope, setProjectScope] = useState<WorkflowProjectScope | null>(editWorkflow?.project_scope ?? null);
-  const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
+  const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual' | 'Watch'>(initTrigger?.type ?? 'Manual');
+  const [cronTimezone, setCronTimezone] = useState(initTrigger?.type === 'Cron' ? initTrigger.timezone ?? '' : '');
+  const [watchDraft, setWatchDraft] = useState(() => watchDraftFrom(initTrigger));
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
   const [cronAt, setCronAt] = useState(initCron?.at ?? '00:00');
@@ -376,6 +408,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   // 0.7.0 — Execution limits (timeout / max LLM calls / loop detection)
   const [guards, setGuards] = useState<WorkflowGuards | null>(editWorkflow?.guards ?? null);
+  const [retention, setRetention] = useState<WorkflowRetention | null>(editWorkflow?.retention ?? null);
 
   // Build cron expression from visual inputs (or raw if complex)
   const buildCronExpr = (): string => {
@@ -603,6 +636,16 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // FreeText, passe-la en Structured"), inutile de les masquer.
   const [saveError, setSaveError] = useState<string | null>(null);
   const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const [usedSkills, setUsedSkills] = useState<ProjectUsedSkill[]>([]);
+  // Another project's skill is never offered; one already picked stays visible so it can be removed.
+  // A run reads the project's repository skills from its default branch.
+  const offeredSkills = useMemo(
+    () => [
+      ...availableSkills.filter(skill => offeredToProject(skill, projectId || null)),
+      ...(projectId ? repositorySkillsOf(usedSkills, projectId) : []),
+    ],
+    [availableSkills, usedSkills, projectId],
+  );
   const [availableProfiles, setAvailableProfiles] = useState<AgentProfile[]>([]);
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
@@ -677,6 +720,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       .then(setAvailableProfiles)
       .catch(e => console.warn('Failed to load profiles:', e));
     skillsApi.list().then(setAvailableSkills).catch(e => console.warn('Failed to load skills:', e));
+    projectsApi.usedSkills().then(setUsedSkills).catch(e => console.warn('Failed to load repository skills:', e));
     refetchProfiles();
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
@@ -721,9 +765,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const applySuggestion = (s: WorkflowSuggestion) => {
     setName(s.title);
     setSteps(s.steps);
-    setTriggerType(s.trigger.type as 'Cron' | 'Tracker' | 'Manual');
+    setTriggerType(s.trigger.type);
+    if (s.trigger.type === 'Watch') setWatchDraft(watchDraftFrom(s.trigger));
     if (s.trigger.type === 'Cron') {
-      const parsed = parseCronExpr((s.trigger as { schedule: string }).schedule);
+      setCronTimezone(s.trigger.timezone ?? '');
+      const parsed = parseCronExpr(s.trigger.schedule);
       setCronEvery(parsed.every);
       setCronUnit(parsed.unit);
       setCronAt(parsed.at);
@@ -858,6 +904,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   };
 
   const updateStep = (idx: number, patch: Partial<WorkflowStep>) => {
+    if (patch.name !== undefined && steps[idx]) followStepRename(steps[idx].name, patch.name);
     setSteps(steps.map((s, i) => i === idx ? { ...s, ...patch } : s));
   };
 
@@ -1172,7 +1219,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   const buildTrigger = (): WorkflowTrigger => {
     switch (triggerType) {
-      case 'Cron': return { type: 'Cron', schedule: buildCronExpr() };
+      case 'Cron': return buildCronTrigger(buildCronExpr(), cronTimezone);
+      case 'Watch': return buildWatchTrigger(watchDraft);
       case 'Tracker': return {
         type: 'Tracker',
         source: { type: 'GitHub', owner: trackerOwner, repo: trackerRepo },
@@ -1212,7 +1260,6 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     try {
       const trigger = buildTrigger();
       const wsConfig = buildWorkspaceConfig();
-      const safetyVal = (safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) ? safety : undefined;
       const concurrency = concurrencyLimit ? parseInt(concurrencyLimit) : undefined;
       const trimmedConcurrencyKey = concurrencyKey.trim();
 
@@ -1223,11 +1270,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           trigger,
           steps,
           actions: [],
-          safety: safetyVal ?? editWorkflow.safety,
+          // Always sent: an all-cleared panel must replace the stored settings.
+          safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency ?? null,
           concurrency_key: trimmedConcurrencyKey || null,
           guards,
+          retention,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
@@ -1240,21 +1289,24 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           trigger,
           steps,
           actions: [],
-          safety: safetyVal,
+          safety,
           workspace_config: wsConfig ?? undefined,
           concurrency_limit: concurrency,
           concurrency_key: trimmedConcurrencyKey || undefined,
           guards: guards ?? undefined,
+          retention: retention ?? undefined,
           on_failure: onFailureSteps,
           exec_allowlist: execAllowlist,
           variables: wfVariables,
           project_scope: projectScope ?? undefined,
         };
+        let created: Workflow | null = null;
+        let createdId: string;
         if (pendingChildWorkflows.length > 0) {
           // Decomposed preset: create children first (they inherit the
           // parent's project_id server-side), then the parent whose
           // `sub_workflow_id: "@bundle:<id>"` is substituted. Atomic.
-          await workflowsApi.createHumanBundle({
+          const bundle = await workflowsApi.createHumanBundle({
             quick_prompts: [],
             quick_apis: [],
             custom_apis: [],
@@ -1269,8 +1321,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             })),
             workflow: req,
           });
+          createdId = bundle.workflow.id;
         } else {
-          await workflowsApi.create(req);
+          created = await workflowsApi.create(req);
+          createdId = created.id;
+        }
+        if (assistantDrafts.size > 0) {
+          // A saved step is known by its durable id, which survives renames.
+          const saved = created ?? await workflowsApi.get(createdId).catch(() => null);
+          // Without the saved step's id the conversation stays owed, never filed
+          // under its name: the step lists it and resuming it there attaches it.
+          await assistantDrafts.attach(createdId, undefined, savedStepKey(saved))
+            .catch(e => console.warn('Assistant conversations not attached:', e));
         }
       }
       onDone();
@@ -1689,6 +1751,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               )}
             </>
           ))}
+          {triggerType === 'Cron' && (
+            <TimezoneField id="wf-cron-timezone-simple" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
+          )}
         </div>
       )}
 
@@ -1699,12 +1764,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             {t('wiz.triggerWhenLabel')} <HelpTip hint={t('wiz.helpTriggerAdvanced')} />
           </label>
           <div className="flex-row gap-4 mb-6">
-            {(['Manual', 'Cron', 'Tracker'] as const).map(tt => {
+            {(['Manual', 'Cron', 'Tracker', 'Watch'] as const).map(tt => {
               const tooltipKey = tt === 'Manual' ? 'wiz.helpTriggerManual'
                 : tt === 'Cron' ? 'wiz.helpTriggerCron'
+                : tt === 'Watch' ? 'wiz.helpTriggerWatch'
                 : 'wiz.helpTriggerTracker';
               const labelKey = tt === 'Manual' ? 'wiz.triggerManual'
                 : tt === 'Cron' ? 'wiz.triggerScheduled'
+                : tt === 'Watch' ? 'wiz.triggerWatch'
                 : 'wiz.triggerTracker';
               return (
                 <button
@@ -1717,6 +1784,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {tt === 'Manual' && <Zap size={12} />}
                   {tt === 'Cron' && <Clock size={12} />}
                   {tt === 'Tracker' && <GitBranch size={12} />}
+                  {tt === 'Watch' && <Eye size={12} />}
                   {t(labelKey)}
                 </button>
               );
@@ -1843,6 +1911,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   {buildCronExpr()}
                 </span>
               </div>
+              <div className="mt-4">
+                <TimezoneField id="wf-cron-timezone" value={cronTimezone} onChange={setCronTimezone} schedule={buildCronExpr()} />
+              </div>
             </>
           )}
 
@@ -1863,6 +1934,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <label className="wf-label mt-4">{t('wiz.pollInterval')}</label>
               <input className="wf-input" value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" aria-label={t('wiz.pollInterval')} />
             </>
+          )}
+
+          {triggerType === 'Watch' && (
+            <WatchTriggerEditor
+              value={watchDraft}
+              onChange={setWatchDraft}
+              availableQuickApis={availableQuickApis}
+              availableApiPlugins={availableApiPlugins}
+            />
           )}
         </div>
       )}
@@ -1923,6 +2003,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     ['{{issue.number}}', t('wiz.issueNumber')],
                     ['{{issue.url}}', t('wiz.issueUrl')],
                     ['{{issue.labels}}', t('wiz.issueLabels')],
+                    ...(triggerType === 'Watch' ? [
+                      ['{{trigger.body}}', t('wiz.watchVarBody')],
+                      ['{{trigger.extract}}', t('wiz.watchVarExtract')],
+                      ['{{trigger.status}}', t('wiz.watchVarStatus')],
+                      ['{{trigger.etag}}', t('wiz.watchVarEtag')],
+                      ['{{trigger.last_modified}}', t('wiz.watchVarLastModified')],
+                      ['{{trigger.fingerprint}}', t('wiz.watchVarFingerprint')],
+                      ['{{trigger.body_truncated}}', t('wiz.watchVarTruncated')],
+                    ] : []),
                   ] as Array<[string, string]>).map(([v, d]) => (
                     <div key={v} className="wf-help-row">
                       <code
@@ -2004,8 +2093,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               step.stall_timeout_secs || step.retry || step.delay_after_secs || step.room_id || step.read_only_repos?.length;
             const multiAgentReview = step.multi_agent_review;
             const activeStepType = step.step_type?.type ?? 'Agent';
-            const activeTypeOption = STEP_TYPE_GROUPS
-              .flatMap(group => group.options)
+            const activeTypeOption = [...STEP_TYPE_GROUPS.flatMap(group => group.options), DELEGATE_SUBTASKS_OPTION]
               .find(option => option.type === activeStepType)
               ?? STEP_TYPE_GROUPS[0].options[0];
             const typePickerOpen = expandedStepTypePicker === i;
@@ -2488,6 +2576,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     nextStepType={steps[i + 1]?.step_type}
                     installedAgents={installedAgentTypes}
                     configLanguage={configLanguage}
+                    assistantOwnerId={editWorkflow?.id ?? null}
+                    onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                     availableQuickApis={availableQuickApis}
                     allowBinaryResponse
                     t={t}
@@ -2887,6 +2977,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      assistantOwnerId={editWorkflow?.id ?? null}
+                      onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                       allowBinaryResponse
                       t={t}
                     />
@@ -3579,7 +3671,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       <p className="text-2xs text-ghost mt-2">{t('wiz.jsonDataNoTemplating')}</p>
                     </div>
                   );
-                })() : step.step_type?.type === 'PublishPageData' ? (() => {
+                })() : step.step_type?.type === 'TaskBoard' ? (
+                  <div className="wf-json-data-form" data-testid="task-board-form">
+                    <div className="wf-batch-intro">
+                      <FileText size={14} />
+                      <span>{t('wiz.stepTypeTaskBoardHint')}</span>
+                    </div>
+                    <code className="text-2xs">{`${step.task_board?.operation ?? 'read'} · ${step.task_board?.tag ?? ''}`}</code>
+                  </div>
+                ) : step.step_type?.type === 'PublishPageData' ? (() => {
                   const config = step.page_publish ?? { page_id: '', writes: [] };
                   const selectedPage = availablePages.find(page => page.id === config.page_id);
                   const setConfig = (page_publish: typeof config) => updateStep(i, { page_publish });
@@ -3655,9 +3755,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           <div className="wf-page-write" key={writeIndex}>
                             <input className="wf-input text-sm" value={write.dataset} onChange={e => updateWrite({ dataset: e.target.value })} placeholder="dataset" aria-label="dataset" />
                             <select className="wf-select text-sm" value={write.operation} onChange={e => updateWrite({ operation: e.target.value as typeof write.operation })} aria-label="operation">
-                              <option value="replace">replace</option><option value="append">append</option><option value="upsert">upsert</option>
+                              <option value="replace">replace</option><option value="append">append</option><option value="upsert">upsert</option><option value="clear">clear</option>
                             </select>
-                            <input className="wf-input text-sm" value={write.value_from} onChange={e => updateWrite({ value_from: e.target.value })} placeholder={i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger'} aria-label="value_from" />
+                            <input className="wf-input text-sm" disabled={write.operation === 'clear'} value={write.value_from} onChange={e => updateWrite({ value_from: e.target.value })} placeholder={i > 0 ? `steps.${steps[i - 1].name}.data` : 'trigger'} aria-label="value_from" />
                             <button type="button" className="wf-icon-btn" onClick={() => setConfig({ ...config, writes: config.writes.filter((_, index) => index !== writeIndex) })}><X size={13} /></button>
                           </div>
                         );
@@ -3670,7 +3770,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       )}
                     </div>
                   );
-                })() : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
+                })() : step.step_type?.type === 'DelegateSubtasks' ? (
+                  <DelegateSubtasksSummary step={step} />
+                ) : step.step_type?.type === 'SubWorkflow' || step.step_type?.type === 'TriggerWorkflow' ? (() => {
                   // Phase 1c — pick the workflow to run as a nested child run.
                   // Self is excluded (the most obvious cycle); deeper cycles +
                   // "no Gate inside" + depth are enforced server-side at save.
@@ -4067,7 +4169,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     </summary>
                     <div className="wf-agent-context-body">
                 {/* Skills selector per step */}
-                {availableSkills.length > 0 && (
+                {offeredSkills.length > 0 && (
                   <details className="wf-agent-context-group" open={(step.skill_ids?.length ?? 0) > 0 || undefined}>
                     <summary>
                       <span><Zap size={12} /> {t('skills.selectSkills')}</span>
@@ -4075,9 +4177,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       <ChevronDown size={13} aria-hidden="true" />
                     </summary>
                     <div className="wf-agent-context-options">
-                      {availableSkills.map(skill => {
+                      {[
+                        ...offeredSkills,
+                        ...pickedButNotOffered(step.skill_ids ?? [], offeredSkills, availableSkills, usedSkills),
+                      ].map(skill => {
                         const ids = step.skill_ids ?? [];
                         const selected = ids.includes(skill.id);
+                        const foreign = !offeredSkills.some(offered => offered.id === skill.id);
                         return (
                           <button
                             key={skill.id}
@@ -4088,7 +4194,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             }}
                             className="wf-chip wf-chip-skill"
                             data-selected={selected}
-                            title={skill.name}
+                            data-foreign={foreign || undefined}
+                            title={foreign ? t('skills.otherProject') : skill.name}
                           >
                             {selected && <Check size={8} />}
                             {skill.name}
@@ -4687,8 +4794,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 Gate is explicitly excluded (deadlock — validated server-side). */}
             {onFailureSteps.map((rb, idx) => {
               const rbKind = rb.step_type?.type ?? 'Notify';
-              const updateRb = (patch: Partial<WorkflowStep>) =>
+              const updateRb = (patch: Partial<WorkflowStep>) => {
+                if (patch.name !== undefined) followStepRename(rb.name, patch.name);
                 setOnFailureSteps(prev => prev.map((s, i) => i === idx ? { ...s, ...patch } : s));
+              };
               return (
                 <div key={idx} className="wf-rollback-step mb-3">
                   <div className="flex-row gap-2 mb-2 flex-wrap">
@@ -4792,6 +4901,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       projectId={projectId || null}
                       installedAgents={installedAgentTypes}
                       configLanguage={configLanguage}
+                      assistantOwnerId={editWorkflow?.id ?? null}
+                      onAssistantConversationStarted={editWorkflow ? undefined : trackAssistantConversation}
                       availableQuickApis={availableQuickApis}
                       t={t}
                     />
@@ -4834,6 +4945,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               <Shield size={14} className="text-muted" />
               <span className="text-md font-semibold text-secondary">{t('wiz.security')}</span>
             </div>
+            <p className="text-xs text-muted mb-4">{t('wiz.securityHint')}</p>
+            <SafetyWarnings request={{
+              workflow_id: editWorkflow?.id,
+              project_id: projectId || undefined,
+              per_run_project: !!projectScope,
+              safety,
+            }} />
 
             <div className="flex-row gap-6 mb-4">
               <label className="wf-checkbox-label">
@@ -4855,7 +4973,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   style={{ width: 90 }}
                   value={safety.max_files ?? ''}
                   onChange={e => setSafety({ ...safety, max_files: e.target.value ? parseInt(e.target.value) : null })}
-                  placeholder="illimite"
+                  placeholder={t('wiz.securityUnlimited')}
                   aria-label={t('wiz.maxFiles')}
                 />
               </div>
@@ -4867,7 +4985,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   style={{ width: 90 }}
                   value={safety.max_lines ?? ''}
                   onChange={e => setSafety({ ...safety, max_lines: e.target.value ? parseInt(e.target.value) : null })}
-                  placeholder="illimite"
+                  placeholder={t('wiz.securityUnlimited')}
                   aria-label={t('wiz.maxLines')}
                 />
               </div>
@@ -4878,6 +4996,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               placed BEFORE the Advanced toggle (Antoine UX rationale:
               not hidden, not advanced — first-class safety control). */}
           <ExecutionLimitsCard value={guards} onChange={setGuards} t={t} />
+          <RunRetentionCard value={retention} onChange={setRetention} t={t} />
 
           {/* 0.7.0 Phase 5 — Exec allowlist. Visible by default; the
               prominent placement is intentional because Exec is a
@@ -5116,7 +5235,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           <div className="wf-summary-row"><span className="wf-summary-label">Projet</span> {projects.find(p => p.id === projectId)?.name ?? 'Aucun'}</div>
           <div className="wf-summary-row">
             <span className="wf-summary-label">Trigger</span>
-            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()})` : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}` : 'Manuel'}
+            {triggerType === 'Cron' ? `${cronHumanLabel()} (${buildCronExpr()}${cronTimezone.trim() ? `, ${cronTimezone.trim()}` : `, ${t('wiz.timezoneKronn')}`})`
+              : triggerType === 'Tracker' ? `Tracker: ${trackerOwner}/${trackerRepo}`
+              : triggerType === 'Watch' ? `Watch: ${watchDraft.interval}${watchDraft.timezone.trim() ? ` (${watchDraft.timezone.trim()})` : ` (${t('wiz.timezoneKronn')})`}`
+              : 'Manuel'}
           </div>
           {concurrencyLimit && (
             <div className="wf-summary-row"><span className="wf-summary-label">Concurrence</span> max {concurrencyLimit} runs</div>
@@ -5143,8 +5265,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'TransformData' ? 'TRANSFORM'
               : typeKind === 'JsonData' ? 'JSON'
               : typeKind === 'PublishPageData' ? 'PAGE'
+              : typeKind === 'TaskBoard' ? 'BOARD'
               : typeKind === 'SubWorkflow' ? 'SOUS-WF'
               : typeKind === 'TriggerWorkflow' ? 'TRIGGER'
+              : typeKind === 'DelegateSubtasks' ? 'DELEGATE'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
@@ -5156,8 +5280,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'TransformData' ? 'transform-data'
               : typeKind === 'JsonData' ? 'json-data'
               : typeKind === 'PublishPageData' ? 'page-data'
+              : typeKind === 'TaskBoard' ? 'page-data'
               : typeKind === 'SubWorkflow' ? 'subworkflow'
               : typeKind === 'TriggerWorkflow' ? 'trigger-workflow'
+              : typeKind === 'DelegateSubtasks' ? 'delegate-subtasks'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
@@ -5258,14 +5384,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             </div>
             );
           })}
-          {(safety.sandbox || safety.require_approval || safety.max_files || safety.max_lines) && (
+          {(safety.sandbox || safety.require_approval || safety.max_files != null || safety.max_lines != null) && (
             <div className="wf-summary-row">
-              <span className="wf-summary-label">Securite</span>
+              <span className="wf-summary-label">{t('wiz.security')}</span>
               {[
-                safety.sandbox && 'sandbox',
-                safety.require_approval && 'approbation',
-                safety.max_files && `max ${safety.max_files} fichiers`,
-                safety.max_lines && `max ${safety.max_lines} lignes`,
+                safety.sandbox && t('wiz.sandbox'),
+                safety.require_approval && t('wiz.requireApproval'),
+                safety.max_files != null && `${t('wiz.maxFiles')}: ${safety.max_files}`,
+                safety.max_lines != null && `${t('wiz.maxLines')}: ${safety.max_lines}`,
               ].filter(Boolean).join(', ')}
             </div>
           )}
@@ -5391,6 +5517,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             // sentinel resolved at save when shipped as a decomposed preset).
             if (!s.sub_workflow_id || !s.sub_workflow_id.trim()) {
               errors.push(t('wiz.errorSubWorkflowNoTarget').replace('{0}', label));
+            }
+          } else if (s.step_type?.type === 'DelegateSubtasks') {
+            if (isDelegateSubtasksIncomplete(s)) {
+              errors.push(t('wiz.errorDelegateSubtasksConfig').replace('{0}', label));
             }
           } else if (!s.prompt_template && !s.quick_prompt_id) {
             // Agent step needs SOIT un prompt_template, SOIT une référence

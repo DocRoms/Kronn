@@ -23,62 +23,53 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.14.3 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.15.0 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
-## Nouveautés de la 0.14.3
+## Nouveautés de la 0.15.0
 
-La 0.14.3 est une version de sécurité. Lisez les notes de mise à jour du
-[CHANGELOG](CHANGELOG.md) avant de mettre à jour : certains agents et le P2P
-demandent un clic pour continuer à fonctionner.
+La 0.15.0 rend les workflows et les Live Pages sûrs à laisser tourner. Lisez
+les notes de mise à jour du [CHANGELOG](CHANGELOG.md) avant de mettre à jour :
+les réglages de Sécurité enregistrés s'appliquent désormais, et les
+déclencheurs Cron et Watch existants restent en UTC.
 
-- **Un environnement étanche pour les agents :** chaque processus lancé par
-  Kronn, agents compris, reçoit un environnement construit au lieu de celui du
-  backend : aucun enfant ne voit le jeton admin de Kronn, sa clé de
-  chiffrement ni la clé fournisseur d'un autre agent. Chaque lancement d'agent
-  reçoit son propre jeton à durée limitée, borné à son projet, au lieu du
-  jeton admin, et GitHub se connecte projet par projet.
-- **Les clés quittent `config.toml` :** clés fournisseurs, clés de connexion
-  et jeton d'API passent dans la base chiffrée au premier démarrage, et la clé
-  de chiffrement ne peut plus se perdre sur un trousseau verrouillé ou une
-  mauvaise restauration : Kronn s'arrête, se verrouille ou propose une
-  récupération au lieu de l'écraser.
-- **La confiance Exec suit l'auteur :** une valeur issue d'un run (titre
-  d'issue, sortie d'étape) ne peut plus s'exécuter comme du code dans une
-  étape Exec. Seules quelques formes sûres tournent sans humain, et toute
-  ligne écrite par un agent attend votre approbation, avec une correction
-  proposée en diff.
-- **WebSocket et P2P verrouillés :** une page web visitée ne peut plus lire ni
-  écrire dans le bus d'événements de Kronn, le jeton quitte l'URL, et le P2P
-  est désactivé par défaut ; activé, il n'admet que les contacts acceptés, et
-  une discussion partagée ne circule qu'entre ses membres.
-- **HTTP sortant gardé, secrets masqués par valeur :** toute requête vers une
-  URL fournie par un utilisateur, un plugin ou un agent passe par un seul
-  transport qui bloque les adresses privées, le DNS rebinding et les
-  redirections dangereuses, et les identifiants d'un appel d'API sont masqués
-  de sa sortie, de ses erreurs et de ses logs, sous toutes leurs formes.
-- **Vous seul activez un workflow :** les workflows importés et les
-  modifications d'un agent arrivent désactivés, et un bandeau de la page
-  Automatisations les liste, avec la raison, l'auteur, la date et un bouton
-  Réactiver.
-- **Les agents natifs exigent l'accès complet :** OpenCode, Vibe, Copilot,
-  Gemini et Kiro ne tournent qu'une fois leur case d'accès complet cochée,
-  faute de mode restreint garanti ; un exécuteur isolé est prévu en 0.15.
-- **Des audits qu'on peut suivre :** une étape en cours a un panneau Détails
-  qui liste les dernières actions de l'agent par catégorie, les tokens ne
-  comptent que le trafic frais (le cache au survol), et chaque étape affiche
-  son coût, ou une estimation quand l'agent n'en donne pas.
-- **Les quick wins de l'audit :** imports jusqu'à 512 Mio sous Docker, plus de
-  double import, des sous-workflows qui respectent leur limite de
-  concurrence, des fichiers foreach confinés au worktree, et une sauvegarde
-  avant migration qui inclut le journal WAL. La rétention des runs est sur
-  option, avec un bouton pour compacter la base.
+- **Actions de Page de confiance et « Ma Todo » :** une action de Live Page
+  approuvée une fois dans les détails de la Page s'exécute sans sa carte de
+  validation, liée à l'action et au workflow exacts approuvés. Kronn livre
+  « Ma Todo », un tableau de tâches sur votre planification qui tourne sans
+  agent, et les datasets d'une Page se vident, se re-bornent et se suppriment.
+- **Un run exécute ce avec quoi il a démarré :** un run épingle sa révision
+  et chaque prompt, API, skill et sous-workflow qu'il charge, un run arrêté
+  garde le travail non commité, les garde-fous anti-boucle survivent aux
+  reprises, et un refus de quota fournisseur attend la remise à zéro au lieu
+  de faire échouer le run.
+- **Des réglages de Sécurité appliqués et un verdict de disponibilité :**
+  Sandbox, Approbation requise et Max fichiers / lignes sont appliqués, et
+  chaque enregistrement, lecture ou import de workflow dit s'il peut démarrer
+  et ce qui le bloque.
+- **Watch, fuseau horaire, runs silencieux :** un déclencheur `Watch` ne lance
+  un workflow que si sa source a changé, Kronn a un fuseau horaire pour les
+  crons et les dates, et les runs qui n'ont rien changé sont masqués et purgés,
+  avec une rétention par workflow.
+- **Permissions d'API :** l'API d'un plugin peut être réservée à des agents
+  choisis, aux modèles locaux, ou bloquée, en entier et par endpoint.
+- **Le multi-agent visible :** les agents sont vérifiés avant un démarrage
+  multi-agent, la bulle de réponse montre les phases de démarrage et
+  l'activité des outils, le composeur dit qui tourne en parallèle ou
+  orchestre, et les tours suivent l'ordre des messages.
+- **Skills et profil de dépôt :** une skill peut appartenir à un projet, les
+  steps Agent chargent les skills du dépôt, `kronn/project.toml` alimente
+  `{{project.<path>}}`, et `DelegateSubtasks` exécute les sous-tâches d'un plan
+  sans agent orchestrateur.
+- **Pont et bureau :** le pont `kronn-internal` accepte des requêtes jusqu'à
+  8 Mio et modifie un workflow step par step ; l'app de bureau charge les
+  lecteurs tiers autorisés, et `caffeinate` ne survit plus à Kronn.
 
 Les versions précédentes sont décrites dans le [CHANGELOG](CHANGELOG.md).
 
 ## Sommaire
 
-- [Nouveautés de la 0.14.3](#nouveautés-de-la-0143)
+- [Nouveautés de la 0.15.0](#nouveautés-de-la-0150)
 - [Le pitch en 60 secondes](#le-pitch-en-60-secondes)
 - [L'approche Kronn : de l'ingénierie, pas de l'incantation](#lapproche-kronn--de-lingénierie-pas-de-lincantation)
 - [Démarrage rapide](#démarrage-rapide)
@@ -142,7 +133,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.14.3 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.15.0 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

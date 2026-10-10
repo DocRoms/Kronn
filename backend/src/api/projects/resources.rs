@@ -929,12 +929,19 @@ fn project_skills(
     let mut available = Vec::new();
 
     for skill in catalog {
+        let owned = skill.project_id.as_deref() == Some(project_id);
+        if skill.project_id.is_some() && !owned {
+            // Another project's skill: never shown, attached or proposed here.
+            handled.insert(skill.id.clone());
+            continue;
+        }
         let repository = take_repository_skill(
             &mut repository_skills,
             &skill.id,
             copy_origins.get(&skill.id).map(String::as_str),
         );
-        let is_linked = linked.contains(skill.id.as_str());
+        let attached = linked.contains(skill.id.as_str());
+        let is_linked = attached || owned;
         handled.insert(skill.id.clone());
         let publication_path = crate::core::repository_resources::skill_path(
             &crate::core::native_files::slug(&skill.id),
@@ -961,7 +968,8 @@ fn project_skills(
             ProjectRepositoryResourceStatus::KronnOnly
         };
         let suggested = suggested_reason.is_some();
-        let item = skill_entry(
+        let is_builtin = skill.is_builtin;
+        let mut item = skill_entry(
             root,
             dates,
             SkillIdentity {
@@ -977,10 +985,12 @@ fn project_skills(
             repository_paths,
             publication_path,
         );
+        item.attached = attached;
+        item.project_owned = owned;
         if repository.is_some() || is_linked || suggested {
             present.push(item);
         } else {
-            available.push(item);
+            available.push((is_builtin, item));
         }
     }
 
@@ -1005,7 +1015,7 @@ fn project_skills(
             .map(|seed| seed.repository_paths)
             .unwrap_or_default();
         let status = attached_skill_status(root, &publication_path);
-        present.push(skill_entry(
+        let mut item = skill_entry(
             root,
             dates,
             SkillIdentity {
@@ -1024,7 +1034,9 @@ fn project_skills(
             status,
             repository_paths,
             publication_path,
-        ));
+        );
+        item.attached = true;
+        present.push(item);
     }
 
     for (slug, seed) in repository_skills {
@@ -1051,7 +1063,10 @@ fn project_skills(
     }
 
     present.sort_by_key(|skill| skill.name.to_lowercase());
-    available.sort_by_key(|skill| skill.name.to_lowercase());
+    // The user's own skills are proposed before Kronn's built-in ones.
+    available.sort_by_key(|(is_builtin, skill)| (*is_builtin, skill.name.to_lowercase()));
+    let available: Vec<ProjectRepositorySkill> =
+        available.into_iter().map(|(_, skill)| skill).collect();
     tracing::debug!(
         project_id,
         present = present.len(),
@@ -1091,6 +1106,8 @@ fn skill_entry(
         provenance,
         is_builtin: identity.is_builtin,
         status,
+        attached: false,
+        project_owned: false,
         suggested: identity.suggested_reason.is_some(),
         suggested_reason: identity.suggested_reason,
         approval_required: false,
@@ -1159,6 +1176,37 @@ fn align_skill(
     )?;
     let view = alignment_status(conn, root, entry, &rendered, alignment.as_ref())?;
     Ok(AlignedSkill { rendered, view })
+}
+
+/// A Kronn skill's sync state as the project card shows it: aligned against its
+/// `kronn.lock` entry, else, for a skill the project links, whether a file
+/// already sits at its publication path. `None`: the card shows none.
+pub(super) fn skill_sync_status(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    project_key: &str,
+    skill_id: &str,
+    linked: bool,
+    lock: Option<&crate::core::repository_resources::RepositoryLock>,
+) -> anyhow::Result<Option<ProjectRepositoryResourceStatus>> {
+    let slug = crate::core::native_files::slug(skill_id);
+    let entry = lock.and_then(|lock| {
+        lock.resources
+            .iter()
+            .find(|entry| entry.kind == ProjectRepositoryResourceKind::Skill && entry.slug == slug)
+    });
+    Ok(match entry {
+        Some(entry) => Some(
+            align_skill(conn, root, project_key, skill_id, &slug, entry)?
+                .view
+                .status,
+        ),
+        None if linked => Some(attached_skill_status(
+            root,
+            &crate::core::repository_resources::skill_path(&slug),
+        )),
+        None => None,
+    })
 }
 
 /// A Kronn-side automation or artifact placed against `kronn.lock` and the
@@ -1799,6 +1847,7 @@ fn imported_artifact(
             &page_id,
             &UpdateLivePageRequest {
                 title: Some(exported.title.clone()),
+                slug: None,
                 pinned: None,
                 archived: Some(false),
             },
@@ -1912,6 +1961,7 @@ fn import_document(
                     &skill.content,
                     skill.license.as_deref(),
                     skill.allowed_tools.as_deref(),
+                    None,
                 )
                 .map_err(anyhow::Error::msg)?,
                 _ => crate::core::skills::save_custom_skill(
@@ -1922,6 +1972,7 @@ fn import_document(
                     &skill.content,
                     skill.license.as_deref(),
                     skill.allowed_tools.as_deref(),
+                    None,
                 )
                 .map_err(anyhow::Error::msg)?,
             };
@@ -2007,6 +2058,11 @@ fn import_document(
             // agent's and waits for a human in the editor (KT-1017).
             crate::api::workflows::drop_foreign_fields(&mut resource.steps);
             crate::api::workflows::drop_foreign_fields(&mut resource.on_failure);
+            // Retention is human-only on a stored workflow (KT-1100): the purge
+            // would apply the file's at once, so the stored one stays.
+            if let Some(stored) = stored.as_ref() {
+                resource.retention = stored.retention;
+            }
             let (stored_steps, stored_failure) = stored
                 .map(|stored| (stored.steps, stored.on_failure))
                 .unwrap_or_default();
@@ -2565,6 +2621,7 @@ pub async fn copy_native_skill(
                             &skill.content,
                             skill.license.as_deref(),
                             skill.allowed_tools.as_deref(),
+                            None,
                         )
                         .map_err(anyhow::Error::msg)?;
                     }
@@ -2578,6 +2635,7 @@ pub async fn copy_native_skill(
                     &skill.content,
                     skill.license.as_deref(),
                     skill.allowed_tools.as_deref(),
+                    None,
                 )
                 .map_err(anyhow::Error::msg)?,
             };
@@ -3329,6 +3387,7 @@ mod tests {
             "Edited in Kronn.",
             None,
             None,
+            None,
         )
         .unwrap();
         let refused = copy_native_skill(
@@ -3525,6 +3584,64 @@ mod tests {
         assert!(exec.unwrap_err().contains("{{ticket}}"));
         same.expect("an unchanged stored line stays importable");
         assert!(changed.unwrap_err().contains("script inline"));
+    }
+
+    /// KT-1100 — a `kronn/` file is agent-writable: it sets the retention of a
+    /// new workflow, never the one a human gave a stored workflow.
+    #[tokio::test]
+    async fn a_kronn_reimport_keeps_the_stored_retention() {
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        seed_project(&state, mk_project("project-1", root.path())).await;
+        let steps = serde_json::json!([
+            {"name": "emit", "step_type": {"type": "JsonData"}, "json_data_payload": {"a": 1}}
+        ]);
+        let short = crate::models::WorkflowRetention {
+            no_op_hours: Some(1),
+            success_days: Some(1),
+            failure_days: Some(1),
+        };
+        let doc = |slug: &str| {
+            let mut document = workflow_document(slug, steps.clone());
+            document.resource["retention"] = serde_json::to_value(short).unwrap();
+            document
+        };
+        let (fresh_doc, kept_doc) = (doc("fresh"), doc("kept"));
+        let (fresh, stored) = state
+            .db
+            .with_conn(move |conn| {
+                let key = crate::db::resource_identities::project_key(conn, Some("project-1"))?;
+                let fresh = import_document(conn, "project-1", &key, &fresh_doc)?;
+                let mut kept = sample_workflow_json("wf-kept", "kept", "project-1", steps.clone());
+                kept.retention = Some(crate::models::WorkflowRetention::KEEP_ALL);
+                crate::db::workflows::insert_workflow(conn, &kept)?;
+                crate::db::resource_identities::upsert(
+                    conn,
+                    &key,
+                    ProjectRepositoryResourceKind::Workflow.identity_kind(),
+                    "kept",
+                    "wf-kept",
+                )?;
+                let stored = import_document(conn, "project-1", &key, &kept_doc)?;
+                let read = |id: &str| -> anyhow::Result<Option<crate::models::WorkflowRetention>> {
+                    Ok(crate::db::workflows::get_workflow(conn, id)?
+                        .ok_or_else(|| anyhow::anyhow!("workflow {id} missing"))?
+                        .retention)
+                };
+                Ok::<_, anyhow::Error>((read(&fresh)?, read(&stored)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fresh,
+            Some(short),
+            "a new workflow takes the file's retention"
+        );
+        assert_eq!(
+            stored,
+            Some(crate::models::WorkflowRetention::KEEP_ALL),
+            "a stored workflow keeps the human's retention"
+        );
     }
 
     /// R6-03: a `kronn/` file is something an agent can write, so a new or
@@ -4035,6 +4152,97 @@ mod tests {
             by_id(&listing.skills_present, "web-performance").is_none(),
             "nothing detected it"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_project_skill_is_listed_only_in_its_project_and_own_skills_are_proposed_first() {
+        isolate_config_dir();
+        let save = |name: &str, project: Option<&str>| {
+            crate::core::skills::save_custom_skill(
+                name,
+                "desc",
+                "🔎",
+                &crate::models::SkillCategory::Domain,
+                "Body.",
+                None,
+                None,
+                project,
+            )
+            .unwrap()
+        };
+        let mine = save("Scope Mine Review", Some("project-1"));
+        let foreign = save("Scope Foreign Review", Some("project-2"));
+        let global = save("Zz Scope Global Review", None);
+        let state = test_state();
+        let root = tempfile::tempdir().unwrap();
+        let mut project = mk_project("project-1", root.path());
+        // Even named in the defaults, another project's skill stays out.
+        project.default_skill_ids = vec![foreign.clone()];
+        seed_project(&state, project).await;
+
+        let listing = list_resources(&state, "project-1").await;
+
+        let own = by_id(&listing.skills_present, &mine).expect("listed in its project");
+        assert!(own.project_owned);
+        assert!(
+            !own.attached,
+            "not made a default of the project's discussions"
+        );
+        assert_eq!(own.provenance, ProjectRepositorySkillProvenance::Kronn);
+        assert_eq!(own.status, ProjectRepositoryResourceStatus::KronnOnly);
+        for list in [&listing.skills_present, &listing.skills_available] {
+            assert!(
+                by_id(list, &foreign).is_none(),
+                "another project's skill is never shown"
+            );
+        }
+        let proposed: Vec<&str> = listing
+            .skills_available
+            .iter()
+            .map(|skill| skill.id.as_str())
+            .collect();
+        let global_at = proposed.iter().position(|id| *id == global).unwrap();
+        let first_builtin = listing
+            .skills_available
+            .iter()
+            .position(|skill| skill.is_builtin == Some(true))
+            .unwrap();
+        assert!(
+            global_at < first_builtin,
+            "own skills come before Kronn's: {proposed:?}"
+        );
+        assert!(!listing.skills_available[global_at].project_owned);
+
+        // Published into the repository, it stays the project's own and the
+        // file carries no instance-local project id.
+        let published = publish_repository_resource(
+            State(state.clone()),
+            AxumPath("project-1".to_string()),
+            Json(PublishProjectRepositoryResourceRequest {
+                kind: ProjectRepositoryResourceKind::Skill,
+                id: mine.clone(),
+                overwrite_repository_changes: false,
+            }),
+        )
+        .await;
+        assert!(published.0.data.is_some(), "{:?}", published.0.error);
+        let written = std::fs::read_to_string(root.path().join(&own.publication_path)).unwrap();
+        assert!(!written.contains("project-1"), "{written}");
+        assert!(!written.contains("kronn-project"), "{written}");
+        let after = list_resources(&state, "project-1").await;
+        let own = by_id(&after.skills_present, &mine).unwrap();
+        assert!(own.project_owned && !own.attached);
+        assert_ne!(
+            own.status,
+            ProjectRepositoryResourceStatus::KronnOnly,
+            "{:?}",
+            own.status
+        );
+
+        for id in [mine, foreign, global] {
+            crate::core::skills::delete_custom_skill(&id).unwrap();
+        }
     }
 
     #[tokio::test]
@@ -5902,6 +6110,7 @@ mod tests {
             "Review carefully.\n\nSecond paragraph.",
             Some("MIT"),
             Some("Bash Read"),
+            None,
         )
         .unwrap();
         attach_skills(&state, &project_id, &["rust", &custom_id]).await;

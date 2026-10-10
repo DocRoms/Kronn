@@ -1,6 +1,9 @@
 import type { ArtifactBundle, ArtifactImportRequest, ArtifactImportPreview, ArtifactImportResult, AuditStepInfo, AuditRecentActivity, AuditTokenBreakdown, EmbedOriginsChange } from '../types/generated';
 import { readTextAttachmentPreview } from './textAttachmentPreview';
 import type {
+  AssistantConversation,
+  AssistantKind,
+  UpdateAssistantConversationRequest,
   DiscussionWeightConfig,
   ProjectGithubConnection,
   SetProjectGithubConnectionRequest,
@@ -34,6 +37,7 @@ import type {
   DetectedRepo,
   McpDefinition,
   McpOverview,
+  ApiAccessPolicy,
   McpConfigDisplay,
   McpProbeResponse,
   McpRescanReport,
@@ -67,7 +71,11 @@ import type {
   LaunchDiscussionActionRequest,
   LaunchLivePageActionRequest,
   LivePageAction,
+  LivePageActionTrust,
+  LivePageActionTrustState,
+  DefaultTodoStatus,
   DiscussionMeta,
+  WsMessage,
   DiscussionSession,
   DiscussionWorkspace,
   ParticipantView,
@@ -79,6 +87,8 @@ import type {
   RetryAgentDispatchResponse,
   OrchestrationRequest,
   AgentDetection,
+  AgentReadiness,
+  AgentReadinessRequest,
   RtkVersionInfo,
   AgentType,
   Contact,
@@ -111,6 +121,7 @@ import type {
   WorkflowStep,
   WorkflowSummary,
   UnsafeExecStep,
+  WorkflowReadiness,
   AutoDisabledWorkflow,
   ExecLineCheck,
   ExecLineCheckRequest,
@@ -231,6 +242,10 @@ import type {
   LivePagesCapability,
   PublishLivePageRequest,
   PublishLivePageResult,
+  LivePageDatasetUsage,
+  DeleteLivePageDatasetResult,
+  UpdateLivePageDatasetRequest,
+  UpdateLivePageDatasetResult,
   UpdateLivePageHtmlRequest,
   UpdateLivePageRequest,
   LinkLivePageDiscussionRequest,
@@ -265,6 +280,7 @@ import type {
 import { ApiRequestError } from './apiRequestError';
 import { looksLikeBackendDown, reportBackendSuspect } from './backendReachability';
 
+import type { SafetyCheckRequest, SafetyWarning, CronPreview, CronPreviewRequest } from '../types/generated';
 import type { AgentFilesPolicy, MigrateDocsResponse, ProjectAgentFiles, ReencryptResponse, RecoveryStatus, StartNewKeyResponse } from '../types/generated';
 import type {
   CatalogModelEntry,
@@ -938,7 +954,7 @@ export const config = {
       'GET',
       `/discussion-weights?discussion_ids=${encodeURIComponent(discussionIds.join(','))}`,
     ),
-  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[] }) => api<void>('POST', '/config/server', req),
+  setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; agent_global_timeout_min?: number; local_agent_global_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; discussion_notes_enabled?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'OnDemand' | 'Off'; agent_handoffs_enabled?: boolean; agent_handoff_paid_limit?: number; agent_handoff_paid_unlimited?: boolean; agent_handoff_blocked_agents?: AgentType[]; discussion_weight?: DiscussionWeightConfig; execution_variable_retention_days?: number; run_payload_retention_days?: number; p2p_enabled?: boolean; frontend_origins?: string[]; timezone?: string }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
 };
 
@@ -1601,6 +1617,8 @@ export const agents = {
   install: (agentType: AgentType) => api<string>('POST', '/agents/install', agentType),
   uninstall: (agentType: AgentType) => api<string>('POST', '/agents/uninstall', agentType),
   toggle: (agentType: AgentType) => api<boolean>('POST', '/agents/toggle', agentType),
+  readiness: (request: AgentReadinessRequest) =>
+    api<AgentReadiness[]>('POST', '/agents/readiness', request),
 };
 
 // ─── MCPs ───────────────────────────────────────────────────────────────────
@@ -1648,6 +1666,9 @@ export const mcps = {
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),
   updateConfig: (id: string, req: UpdateMcpConfigRequest) => api<McpConfigDisplay>('PATCH', `/mcps/configs/${id}`, req),
   probeConfig: (id: string) => api<McpProbeResponse>('POST', `/mcps/configs/${id}/probe`),
+  /** KT-1026 — set (or remove, with `null`) which agents may call a plugin. */
+  setAccessPolicy: (serverId: string, policy: ApiAccessPolicy | null) =>
+    api<ApiAccessPolicy | null>('PUT', `/mcps/servers/${encodeURIComponent(serverId)}/access-policy`, { policy }),
   /** 0.8.6 — update an existing Custom API plugin's spec
    *  (name/base_url/description/docs_url/fields/endpoints). Server_id
    *  is preserved so configs and workflow `ApiCall` refs stay valid.
@@ -1720,6 +1741,36 @@ function webSessionId(): string {
   }
 }
 
+/** KT-1111 — kept conversations of the configuration assistants. One is
+ *  created with `discussions.create({ assistant })`; deleting one is
+ *  `discussions.delete`: the link goes with the discussion. */
+export const assistantConversations = {
+  list: (filter: {
+    kind?: AssistantKind;
+    target_id?: string | null;
+    unattached?: boolean;
+    include_unattached?: boolean;
+    pending_ids?: string[];
+    unattached_step?: string | null;
+    target_step?: string | null;
+    plugin_id?: string | null;
+  } = {}) => {
+    const query = new URLSearchParams();
+    if (filter.kind) query.set('kind', filter.kind);
+    if (filter.target_id) query.set('target_id', filter.target_id);
+    if (filter.unattached) query.set('unattached', 'true');
+    if (filter.include_unattached) query.set('include_unattached', 'true');
+    if (filter.pending_ids?.length) query.set('pending_ids', filter.pending_ids.join(','));
+    if (filter.unattached_step) query.set('unattached_step', filter.unattached_step);
+    if (filter.target_step) query.set('target_step', filter.target_step);
+    if (filter.plugin_id) query.set('plugin_id', filter.plugin_id);
+    const qs = query.toString();
+    return api<AssistantConversation[]>('GET', `/assistant-conversations${qs ? `?${qs}` : ''}`);
+  },
+  update: (discussionId: string, patch: UpdateAssistantConversationRequest) =>
+    api<AssistantConversation>('PATCH', `/assistant-conversations/${encodeURIComponent(discussionId)}`, patch),
+};
+
 export const discussions = {
   monitor: (ids: string[], signal?: AbortSignal) => api<DiscussionMonitorItem[]>(
     'GET', `/discussions/monitor?ids=${encodeURIComponent(ids.join(','))}`, undefined, signal,
@@ -1748,7 +1799,7 @@ export const discussions = {
   ),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; connection_id?: string | null; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean; agent_handoffs_disabled?: boolean; agent_handoffs_unlimited?: boolean; attach_agents?: AgentType[]; execution_variable_retention_days?: number | null }) => api<void>('PATCH', `/discussions/${id}`, body),
   nativeAgentMode: (id: string) =>
     api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   agentHandoffMode: (id: string) =>
@@ -1771,6 +1822,8 @@ export const discussions = {
   /** Disc metadata incl. the server's `poll_policy` — the UI derives its
    *  presence thresholds from it instead of hardcoding the pacing cap. */
   meta: (id: string) => api<DiscussionMeta>('GET', `/discussions/${id}/meta`),
+  /** KT-1108 — the discussion's runs in progress, as their live frames. */
+  runProgress: (id: string) => api<WsMessage[]>('GET', `/discussions/${encodeURIComponent(id)}/run-progress`),
   /** 0.8.6 phase 2 — list active+paused participants of a disc.
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */
@@ -2427,6 +2480,8 @@ export const workflows = {
   get: (id: string) => api<Workflow>('GET', `/workflows/${id}`),
   /** KT-1017 — Exec command lines refused at run time, with suggested rewrites. */
   unsafeSteps: (id: string) => api<UnsafeExecStep[]>('GET', `/workflows/${id}/unsafe-steps`),
+  /** KT-1138 — whether the saved workflow, its sub-workflows and rollbacks can start. */
+  readiness: (id: string) => api<WorkflowReadiness>('GET', `/workflows/${id}/readiness`),
   /** KT-1017 — whether a command line sends run values to an unmodelled program. */
   execLineCheck: (req: ExecLineCheckRequest) => api<ExecLineCheck>('POST', '/exec/line-check', req),
   /** KT-918 — where each declared script file stands against its approved hash. */
@@ -2529,13 +2584,19 @@ export const workflows = {
     }
   },
 
-  listRuns: (id: string, limit?: number, offset?: number, completeGroup = false) => {
-    const query = limit == null
-      ? ''
-      : `?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset ?? 0)}${completeGroup ? '&complete_group=true' : ''}`;
+  listRuns: (id: string, limit?: number, offset?: number, completeGroup = false, hideNoOp = false) => {
+    const params: string[] = [];
+    if (limit != null) {
+      params.push(`limit=${encodeURIComponent(limit)}`, `offset=${encodeURIComponent(offset ?? 0)}`);
+      if (completeGroup) params.push('complete_group=true');
+    }
+    if (hideNoOp) params.push('hide_no_op=true');
+    const query = params.length > 0 ? `?${params.join('&')}` : '';
     return api<WorkflowRun[]>('GET', `/workflows/${id}/runs${query}`);
   },
-  countRuns: (id: string) => api<number>('GET', `/workflows/${id}/runs/count`),
+  /** KT-1100 — `hideNoOp` leaves out the runs that changed nothing. */
+  countRuns: (id: string, hideNoOp = false) =>
+    api<number>('GET', `/workflows/${id}/runs/count${hideNoOp ? '?hide_no_op=true' : ''}`),
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
@@ -2556,6 +2617,12 @@ export const workflows = {
    *  `comment` is required for request_changes (the agent needs feedback).
    *  Returns the new run status (Running on approve / request_changes,
    *  Failed on reject). The actual continuation runs in the background. */
+  /** KT-1043 — the Security settings a run on this host would refuse. */
+  safetyCheck: (request: SafetyCheckRequest) =>
+    api<SafetyWarning[]>('POST', '/workflows/safety-check', request),
+  /** KT-1103 — the zone a schedule is read in and its next 3 firings. */
+  cronPreview: (request: CronPreviewRequest) =>
+    api<CronPreview>('POST', '/workflows/cron-preview', request),
   decideRun: (id: string, runId: string, payload: DecideRunRequest) =>
     api<DecideRunResponse>(
       'POST', `/workflows/${id}/runs/${runId}/decide`, payload
@@ -2741,6 +2808,15 @@ export const pages = {
     api<void>('DELETE', `/pages/${encodeURIComponent(id)}/discussions/${encodeURIComponent(discussionId)}`),
   updateHtml: (id: string, request: UpdateLivePageHtmlRequest) =>
     api<LivePageRevision>('PUT', `/pages/${encodeURIComponent(id)}/html`, request),
+  datasetUsage: (id: string) =>
+    api<LivePageDatasetUsage[]>('GET', `/pages/${encodeURIComponent(id)}/dataset-usage`),
+  deleteDataset: (id: string, name: string, force = false) =>
+    api<DeleteLivePageDatasetResult>(
+      'DELETE',
+      `/pages/${encodeURIComponent(id)}/datasets/${encodeURIComponent(name)}${force ? '?force=true' : ''}`,
+    ),
+  updateDataset: (id: string, name: string, request: UpdateLivePageDatasetRequest) =>
+    api<UpdateLivePageDatasetResult>('PATCH', `/pages/${encodeURIComponent(id)}/datasets/${encodeURIComponent(name)}`, request),
   publish: (id: string, request: PublishLivePageRequest) =>
     api<PublishLivePageResult>('POST', `/pages/${encodeURIComponent(id)}/publish`, request),
   actions: (id: string) =>
@@ -2755,6 +2831,14 @@ export const pages = {
     api<LivePageAction>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/launch`, request),
   actionPrefill: (actionId: string, bindings: Record<string, string>) =>
     api<Record<string, string>>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/prefill`, { bindings }),
+  actionTrusts: (id: string) =>
+    api<LivePageActionTrustState[]>('GET', `/pages/${encodeURIComponent(id)}/action-trusts`),
+  trustAction: (actionId: string, fingerprint: string) =>
+    api<LivePageActionTrust>('POST', `/live-page-actions/${encodeURIComponent(actionId)}/trust`, { fingerprint }),
+  revokeActionTrust: (actionId: string) =>
+    api<boolean>('DELETE', `/live-page-actions/${encodeURIComponent(actionId)}/trust`),
+  defaultTodo: () => api<DefaultTodoStatus>('GET', '/defaults/todo'),
+  installDefaultTodo: () => api<DefaultTodoStatus>('POST', '/defaults/todo/install', {}),
 };
 
 // ─── Quick Prompts ─────────────────────────────────────────────────────────

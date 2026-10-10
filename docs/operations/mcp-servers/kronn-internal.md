@@ -550,6 +550,15 @@ keys, endpoints and hostnames are not returned. For Ollama, this discovery does
 not assert that the exact resolved tag is already pulled; a missing tag remains
 a separate, explicit `/api/chat` launch failure.
 
+HTTP entries also carry `connectivity` (KT-697): `verified` when a bounded
+probe answered, `unreachable` with an `unreachable_reason` (`dns`, `refused`,
+`timeout`, `tls`, `http_status`, `invalid_endpoint`, `connect`), or
+`unverified` when no probe result exists or the last one is older than 60 s.
+`reachable` is true only when verified. Named connections are probed with an
+unauthenticated `GET /v1/models` (3 s bound, in parallel, cached 30 s); one that
+is not verified stays listed with its media slots but is not `available`.
+[src: file: backend/src/core/endpoint_reachability.rs]
+
 The stdio bridge fingerprints the script contents it loaded. Every orchestration
 mutation, including principal review/cancel and worker commit/delivery, passes a
 central freshness guard before any HTTP request; recovery status reads remain
@@ -832,6 +841,30 @@ attempt list is preserved. The bridge does not look up today's model settings
 or infer attempts from output text.
 [src: file: backend/scripts/disc-introspection-mcp.py:7863]
 
+## Workflow readiness
+
+Saved, enabled, ready and run are four separate facts (KT-1138). Enabled is a
+human's authorization to run: a disabled workflow refuses every launch, manual
+or scheduled. Ready is the configuration diagnosis. A successful create/update
+or an enabled toggle never proves a run can start.
+`workflow_create_draft`, `workflow_update`, `workflow_get` and `workflow_clone`
+put `kronn_readiness` first in their result; `workflow_validate(workflow_id)`
+returns the same verdict on demand (`GET /api/workflows/{id}/readiness`), and
+`workflow_list` passes `misconfigured_step_count`, `unsafe_step_count`,
+`blocker_count` and `human_approval_count` through as sent, zero included.
+The verdict covers the workflow, its sub-workflows, the workflows it triggers
+and every `on_failure` chain; each blocker names its workflow, step, `kind`, runtime `reason`,
+`action` and `human_only`. Missing children, cycles and a failed collection are
+blockers, never silence. Fix every `human_only:false` blocker and save again;
+report each `human_only:true` one (an agent-written Exec line taking a run
+value, or an unpinned script) to the user by workflow and step. No tool
+approves, clears provenance or marks a line human-written. `ready:true` means no
+known refusal, not a guaranteed run: report the real outcome from
+`workflow_run_get`. The bridge forwards the backend's verdict and never
+re-derives it.
+[src: file: backend/src/workflows/readiness.rs]
+[src: file: backend/scripts/disc-introspection-mcp.py]
+
 ## Workflow trigger agents
 
 `workflow_trigger` takes an optional `step_agents`:
@@ -844,6 +877,64 @@ apply. A bridge token passes the field through; the workflow it names is still
 scope-checked. Details: `tool_manual({tool: "workflow_trigger"})`.
 [src: file: backend/scripts/disc-introspection-mcp.py]
 [src: file: backend/src/workflows/step_agents.rs]
+
+## Transport size contract
+
+KT-1139. The bridge reads one JSON-RPC message per line on stdin.
+
+- **Request:** a line may carry up to **8 MiB** (8 388 608 bytes) of UTF-8,
+  its newline excluded, whether it arrives whole or in fragments of any size.
+  Unicode split across reads is reassembled. Several messages in one read are
+  served in order.
+- **Over the limit:** the line is drained to its newline without being kept,
+  and nothing runs. A `tools/call` gets a tool error whose JSON names
+  `error_code: "request_too_large"`, `limit_bytes`, `received_bytes`,
+  `mutation_applied: false` and an `action`. Any other request gets JSON-RPC
+  error `-32600` with the same `data`. An oversized notification gets no reply.
+  The id is read from the message's top level; when it cannot be read, the
+  reply uses `id: null`. Diagnostics give sizes only, never content. The next
+  line on the same connection is served normally.
+- **Reload handoff:** a hot reload carries at most 256 KiB of an unfinished
+  line and 1 MiB of state in total. Past either, the reload waits for the next
+  request boundary instead of failing. These limits are separate from the
+  request limit.
+- **Reader failure:** if the stdin reader stops on an unexpected error, the
+  process exits with status 1 instead of staying alive without input.
+- **Published to clients:** `initialize` returns the limits under
+  `capabilities.experimental.kronnTransport`; `bridge_info` returns them as
+  `transport`.
+
+The backend still caps each HTTP JSON body at 2 MiB on workflow routes, so a
+definition is not meant to travel whole on every edit:
+
+- `workflow_get({workflow_id, step_name | step_index, on_failure?})` returns
+  one step. `workflow_list` gives the step names.
+- `workflow_update_step({workflow_id, step_name | step_index, fields,
+  on_failure?})` sets the sent fields on that step. `null` clears a field, and
+  the other fields are kept. An unknown field name is refused, whatever its
+  value. The backend
+  (`PATCH /api/workflows/{id}/step`) merges the step into the stored list and
+  saves through the same path as `PUT /api/workflows/{id}`, so every rule
+  still applies: agent authorship of Exec lines, human-only approvals, the
+  disable on an agent's change to an enabled workflow, and the refusal to
+  enable. Only the step list changes. The save is refused with a `conflict`
+  error, and nothing is written, when any column the save writes (any step,
+  any workflow field) changed after the edit read it. The check compares the
+  raw stored values on the write connection, right before the UPDATE. Read the
+  step again and retry. Both step tools keep `kronn_readiness` (first) and
+  `kronn_notice`.
+
+The targeted write was chosen over a chunked transfer. A chunked upload would
+still resend the whole definition, and it would need staging state and a
+commit protocol. A one-step edit sends only what changed and reuses the same
+atomic save.
+
+Reads are bounded on the server: `workflow_runs` returns at most 500 lean
+summaries, and `workflow_run_get` truncates step outputs. `task_list`,
+`disc_list` and `disc_search` take `limit` (and `cursor` where offered).
+[src: file: backend/scripts/disc-introspection-mcp.py:72-78]
+[src: file: backend/scripts/disc-introspection-mcp.py:11202-11240]
+[src: file: backend/src/api/workflows.rs:2748-2840]
 
 ## Joined CLI worktrees
 
@@ -960,7 +1051,9 @@ When a user gives you a `kr-join-…` invite token :
    Keep the parent room informed of delegated milestones, not just the child.
    Follow existing executions with `task_exec_status`, never duplicate launches.
    Use the unbounded `disc_wait_for_peer()` only when no actionable work or
-   execution needs following: its quiet inner polls do not return to the model.
+   execution needs following: its quiet inner polls do not return to the model,
+   and the bridge chains them without a pause, so a new turn arrives within
+   one 15-second poll whatever the room's pacing.
    A backgrounded wait stays active until its terminal result or your next
    Kronn call, which ends it and says so in that call's result
    (`wait_preempted`); never start another wait or end on a progress summary
@@ -1090,6 +1183,9 @@ contracts; they are not claimed as entries in this first version.
   and also works from an unbound host CLI for a standalone Page. Pass
   `datasets: []` for standalone HTML or seed `initial` values for a mock-backed
   Page. `page_get` returns both Workflow and Discussion links.
+- Rename a Page's slug with `page_update_html({page_id, slug})` (`html` is
+  optional then). The former slug keeps opening the Page and stays reserved for
+  it, so existing links and workflow steps keep working.
 - Put buttons on a Page that launch a real QP, QA, QE or Workflow for each data
   row. `tool_manual({tool: "page_create"})` and
   `tool_manual({tool: "page_update_html"})` carry the contract: one inert

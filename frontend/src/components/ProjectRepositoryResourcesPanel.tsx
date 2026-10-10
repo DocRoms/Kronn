@@ -39,6 +39,7 @@ import {
   type ResourceRow,
 } from '../lib/repositoryResourceRows';
 import { migratableSkillCount, SKILLS_TARGET_ROOT } from '../lib/skillMigration';
+import { groupSkills, resourceRowSkillTraits, skillGroupLabelKey } from '../lib/skillGroups';
 import { userError } from '../lib/userError';
 import type {
   ProjectRepositoryResourceKind,
@@ -406,7 +407,9 @@ export function ProjectRepositoryResourcesPanel({ projectId, onAttentionChange, 
   const sections: Array<{ id: string; title: string; kind?: string; rows: ResourceRow[] }> = [];
   if (activeTab === 'skills') {
     sections.push(
-      { id: 'present', title: t('projects.repositoryResources.skills.present'), rows: rows.skills.filter(row => !row.suggested && visibleSet.has(row.key)) },
+      // Kronn's built-in skills apart from the user's, as on the Automation page.
+      ...groupSkills(rows.skills.filter(row => !row.suggested && visibleSet.has(row.key)), resourceRowSkillTraits)
+        .map(({ group, items }) => ({ id: `present:${group}`, title: t(skillGroupLabelKey(group)), rows: items })),
       { id: 'suggested', title: t('projects.repositoryResources.skills.suggested'), rows: rows.skills.filter(row => row.suggested && visibleSet.has(row.key)) },
       { id: 'available', title: t('projects.repositoryResources.skills.available'), rows: rows.catalog.filter(row => visibleSet.has(row.key)) },
     );

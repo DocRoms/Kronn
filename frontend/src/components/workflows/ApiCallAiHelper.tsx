@@ -1,18 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, X, Send, Sparkles, Loader2, Minus, Maximize2, ChevronDown, ClipboardPaste, Link2, MessageSquareText } from 'lucide-react';
 import '../aiHelper.css';
-import { discussions as discussionsApi } from '../../lib/api';
+import { assistantConversations, discussions as discussionsApi } from '../../lib/api';
 import { AGENT_LABELS, agentColor } from '../../lib/constants';
 import { isLocaleLoaded, loadLocale, t as translate, type UILocale } from '../../lib/i18n';
-import type { AgentType, McpServer, WorkflowStep } from '../../types/generated';
+import type { AgentType, AssistantConversation, McpServer, WorkflowStep } from '../../types/generated';
+import { sanitizeForAssistant, scrubSecrets } from '../../lib/assistantSecrets';
+import { AssistantConversationList } from '../AssistantConversationList';
+import {
+  notifyAssistantConversationsChanged,
+  pendingFor,
+  recordApplied,
+  settlePending,
+  recordProposal,
+  transcriptToChat,
+} from '../assistantConversation';
 import { authSlotsForServer } from './apiCallAuth';
 import { tipsForSlug } from './apiCallPluginTips';
 import {
-  KRONN_APPLY_RX,
+  apiCallStepSecrets,
   applyToStep,
   buildContextBlock,
-  parseApplyBlocks,
 } from './apiCallAiHelperUtils';
+import { parseKronnApply } from '../../lib/kronnApply';
+import { KronnApplyNotice } from '../KronnApplyNotice';
 
 type Translator = (key: string, ...args: (string | number)[]) => string;
 
@@ -51,6 +62,12 @@ export interface ApiCallAiHelperProps {
    *  Distinct from the UI `t` translator, which targets the user's
    *  interface labels — `t` stays UI-locale, the agent stays config-locale. */
   configLanguage?: string;
+  /** Saved workflow or Quick API owning the step; null while unsaved. The
+   *  kept conversations are attached to this owner and the step's durable id. */
+  ownerId?: string | null;
+  /** Called with each conversation started, so a form can attach it to the
+   *  workflow or Quick API once saved. */
+  onConversationStarted?: (discussionId: string, stepName: string) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -128,6 +145,8 @@ export function ApiCallAiHelper({
   lastTestResponse,
   lastTestError,
   configLanguage,
+  ownerId = null,
+  onConversationStarted,
   t,
 }: ApiCallAiHelperProps) {
   // The agent's reply language follows the backend "output language" config
@@ -152,7 +171,7 @@ export function ApiCallAiHelper({
   // textarea both read `streaming === false` from the same closure
   // (state hasn't re-rendered yet) and fire `sendMessageStream` twice
   // in parallel — duplicate user bubble in the chat + 2 agent runs on
-  // the same ephemeral discussion. The ref reads/writes synchronously
+  // the same discussion. The ref reads/writes synchronously
   // so the second invocation bails out.
   const streamingRef = useRef(false);
   const [input, setInput] = useState('');
@@ -160,6 +179,15 @@ export function ApiCallAiHelper({
   const [minimized, setMinimized] = useState(false);
   const [appliedSignatures, setAppliedSignatures] = useState<Set<string>>(new Set());
   const abortRef = useRef<AbortController | null>(null);
+  // Each open/resume/switch/close starts a new session: a late response of an
+  // older one (a slow GET, a create, a stream chunk) is dropped.
+  const sessionRef = useRef(0);
+  const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
+  const formSecrets = apiCallStepSecrets(step);
+  // A saved step is known by its durable id, so a rename keeps its
+  // conversations; a draft step only has its name until saved.
+  const stepKey = step.id ?? step.name;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -199,22 +227,21 @@ export function ApiCallAiHelper({
     messagesEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
   }, [messages]);
 
-  // Cleanup the ephemeral discussion when the helper unmounts. Best-effort:
-  // we ignore the result because the user has already moved on.
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-      if (discussionId) {
-        discussionsApi.delete(discussionId).catch(() => {});
-      }
-    };
-  }, [discussionId]);
+  // The conversation is kept (KT-1111): unmounting only stops the stream.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  const beginSession = useCallback(() => {
+    abortRef.current?.abort();
+    streamingRef.current = false;
+    loadingRef.current = false;
+    setLoading(false);
+    sessionRef.current += 1;
+    return sessionRef.current;
+  }, []);
 
   const close = useCallback(() => {
-    abortRef.current?.abort();
-    if (discussionId) {
-      discussionsApi.delete(discussionId).catch(() => {});
-    }
+    beginSession();
+    if (discussionId) notifyAssistantConversationsChanged();
     setDiscussionId(null);
     setMessages([]);
     setInput('');
@@ -225,7 +252,55 @@ export function ApiCallAiHelper({
     setAgentMenuOpen(false);
     setActiveAgent(null);
     setPhase('closed');
-  }, [discussionId]);
+  }, [discussionId, beginSession]);
+
+  const resume = useCallback(async (conversation: AssistantConversation) => {
+    const session = beginSession();
+    // Nothing can be sent until the history is loaded, so it cannot be lost.
+    loadingRef.current = true;
+    setLoading(true);
+    setStreaming(false);
+    setPhase('chatting');
+    setMinimized(false);
+    setActiveAgent(conversation.agent);
+    setDiscussionId(conversation.discussion_id);
+    setMessages([]);
+    setInput('');
+    setError(null);
+    setAppliedSignatures(new Set(conversation.last_applied_signature ? [conversation.last_applied_signature] : []));
+    try {
+      if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
+      const disc = await discussionsApi.get(conversation.discussion_id);
+      if (session !== sessionRef.current) return;
+      setMessages(transcriptToChat(disc.messages, [
+        agentT('wf.apicall.helper.sys.userQuestion'),
+        t('wf.apicall.helper.sys.userQuestion'),
+      ]));
+      // A conversation left unattached by a failed save joins this step now,
+      // or the draft being created.
+      if (!conversation.target_id) {
+        if (ownerId) {
+          assistantConversations.update(conversation.discussion_id, { target_id: ownerId, target_step: stepKey })
+            .then(() => {
+              settlePending(ownerId, conversation.discussion_id);
+              notifyAssistantConversationsChanged();
+            })
+            .catch(e => console.warn('[ApiCallAiHelper] attach on resume failed:', e));
+        } else {
+          onConversationStarted?.(conversation.discussion_id, step.name);
+        }
+      }
+    } catch (e) {
+      if (session !== sessionRef.current) return;
+      console.error('[ApiCallAiHelper] resume failed:', e);
+      setError(String(e));
+    } finally {
+      if (session === sessionRef.current) {
+        loadingRef.current = false;
+        setLoading(false);
+      }
+    }
+  }, [agentLocale, agentT, t, beginSession, ownerId, step.name, stepKey, onConversationStarted]);
 
   // We forward-declare the switchAgent ref because startWithAgent is
   // defined just below and we need to call it from switchAgent without a
@@ -235,18 +310,14 @@ export function ApiCallAiHelper({
   // Triggered by the agent dropdown in the bubble header. Replaces the
   // standalone 'picking-agent' phase from 0.8.0: the user always sees the
   // chat, and switching agents is one click in the header rather than a
-  // full modality change. Reset is brutal (kill old discussion, start a
-  // new one with the same system prompt) because partial migration of an
+  // full modality change. The old conversation is kept and a new one starts
+  // with the same system prompt, because partial migration of an
   // in-flight conversation across agents is messy and not what users want
   // when they switch — they're saying "this agent isn't getting it, let
   // me try another from scratch".
   const switchAgent = useCallback((agent: AgentType) => {
     setAgentMenuOpen(false);
     if (agent === activeAgent || streaming) return;
-    abortRef.current?.abort();
-    if (discussionId) {
-      discussionsApi.delete(discussionId).catch(() => {});
-    }
     setDiscussionId(null);
     setMessages([]);
     setInput('');
@@ -255,10 +326,11 @@ export function ApiCallAiHelper({
     // Prime a fresh discussion for the new agent. Phase stays 'chatting'
     // because the bubble is already open; only the contents reset.
     void startWithAgentRef.current?.(agent);
-  }, [activeAgent, streaming, discussionId]);
+  }, [activeAgent, streaming]);
 
   const startWithAgent = useCallback(async (agent: AgentType) => {
-    // 0.8.1 UX: open the bubble and prime an ephemeral discussion with
+    const session = beginSession();
+    // 0.8.1 UX: open the bubble and prime a discussion with
     // the system prompt baked in, but DON'T fire the agent right away.
     // The user sees the welcome state (starter chips) and only spends
     // tokens once they pick a chip or type their first question. Saves
@@ -270,26 +342,42 @@ export function ApiCallAiHelper({
     setError(null);
     try {
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
-      // `project_id: null` is accepted — this is an ephemeral, one-shot
-      // helper conversation. The real context the agent needs is the API
-      // spec (`selectedServer`), which is already baked into the system
-      // prompt.
+      // The real context the agent needs is the API spec
+      // (`selectedServer`), already baked into the system prompt.
+      const label = [selectedServer?.name, step.name].filter(Boolean).join(' · ');
       const disc = await discussionsApi.create({
         project_id: projectId,
-        title: `🤖 ${t('wf.apicall.helper.discTitle')}`,
+        title: `🤖 ${t('wf.apicall.helper.discTitle')}${label ? ` · ${label}` : ''}`,
         agent,
         // Backend reads `language` to inject "Respond in {lang}" into the
         // agent's prompt. Without this the agent defaulted to French
         // regardless of the user's Output Language config.
         language: configLanguage ?? 'fr',
-        initial_prompt: buildSystemPrompt(selectedServer, step, lastTestResponse, lastTestError, agentT),
+        // Kept conversation: no credential typed in the step may enter it.
+        initial_prompt: sanitizeForAssistant(
+          buildSystemPrompt(selectedServer, step, lastTestResponse, lastTestError, agentT),
+          formSecrets,
+        ),
+        // Created and filed in one server call, masked server-side too.
+        assistant: {
+          kind: 'api_call_step',
+          target_id: ownerId,
+          target_step: ownerId ? stepKey : step.name,
+          plugin_id: selectedServer?.id ?? null,
+          target_label: label,
+          secrets: formSecrets,
+        },
       });
+      notifyAssistantConversationsChanged();
+      onConversationStarted?.(disc.id, step.name);
+      if (session !== sessionRef.current) return;
       setDiscussionId(disc.id);
     } catch (e) {
+      if (session !== sessionRef.current) return;
       console.error('[ApiCallAiHelper] startWithAgent failed:', e);
       setError(String(e));
     }
-  }, [projectId, selectedServer, step, lastTestResponse, lastTestError, t, configLanguage, agentLocale, agentT]);
+  }, [projectId, selectedServer, step, stepKey, lastTestResponse, lastTestError, t, configLanguage, agentLocale, agentT, ownerId, onConversationStarted, beginSession, formSecrets]);
 
   // Re-bind the ref every time startWithAgent's identity changes (when
   // any of its deps change). switchAgent reads this ref so it can call
@@ -298,9 +386,12 @@ export function ApiCallAiHelper({
     startWithAgentRef.current = startWithAgent;
   }, [startWithAgent]);
 
-  const sendMessage = useCallback(async () => {
-    const userText = input.trim();
-    if (!userText || !discussionId || streamingRef.current) return;
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const typed = (overrideText ?? input).trim();
+    if (!typed || !discussionId || streamingRef.current || loadingRef.current) return;
+    const session = sessionRef.current;
+    const secrets = formSecrets;
+    const userText = sanitizeForAssistant(typed, secrets);
     streamingRef.current = true;
     setInput('');
     setError(null);
@@ -315,6 +406,7 @@ export function ApiCallAiHelper({
     try {
       if (!isLocaleLoaded(agentLocale)) await loadLocale(agentLocale);
     } catch (e) {
+      if (session !== sessionRef.current) return;
       setMessages(prev => prev.slice(0, -2));
       setInput(userText);
       setError(String(e));
@@ -323,15 +415,21 @@ export function ApiCallAiHelper({
       return;
     }
     const contextBlock = buildContextBlock(selectedServer, step, lastTestResponse, lastTestError, agentT);
-    const enriched = `${contextBlock}\n\n${agentT('wf.apicall.helper.sys.userQuestion')}\n${userText}`;
+    const enriched = sanitizeForAssistant(
+      `${contextBlock}\n\n${agentT('wf.apicall.helper.sys.userQuestion')}\n${userText}`,
+      secrets,
+    );
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let reply = '';
 
     await discussionsApi.sendMessageStream(
       discussionId,
-      { content: enriched },
+      { content: enriched, assistant_secrets: secrets },
       chunk => {
+        if (session !== sessionRef.current) return;
+        reply += chunk;
         setMessages(prev => {
           const last = prev[prev.length - 1];
           if (last?.role !== 'assistant') {
@@ -340,8 +438,14 @@ export function ApiCallAiHelper({
           return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
         });
       },
-      () => { streamingRef.current = false; setStreaming(false); },
+      () => {
+        recordProposal(discussionId, reply);
+        if (session !== sessionRef.current) return;
+        streamingRef.current = false;
+        setStreaming(false);
+      },
       err => {
+        if (session !== sessionRef.current) return;
         console.error('[ApiCallAiHelper] sendMessageStream error:', err);
         setError(err);
         streamingRef.current = false;
@@ -349,7 +453,7 @@ export function ApiCallAiHelper({
       },
       controller.signal,
     );
-  }, [input, discussionId, selectedServer, step, lastTestResponse, lastTestError, agentLocale, agentT]);
+  }, [input, discussionId, selectedServer, step, formSecrets, lastTestResponse, lastTestError, agentLocale, agentT]);
 
   const stopStream = useCallback(() => {
     abortRef.current?.abort();
@@ -362,12 +466,28 @@ export function ApiCallAiHelper({
 
   const handleApply = useCallback((sig: string, parsed: Record<string, unknown>) => {
     onApply(applyToStep(parsed, step, selectedServer));
+    if (discussionId) recordApplied(discussionId, sig);
     setAppliedSignatures(prev => {
       const next = new Set(prev);
       next.add(sig);
       return next;
     });
-  }, [onApply, step, selectedServer]);
+  }, [onApply, step, selectedServer, discussionId]);
+
+  const conversationList = (
+    <AssistantConversationList
+      filter={ownerId
+        ? {
+          kind: 'api_call_step', target_id: ownerId, include_unattached: true, target_step: stepKey,
+          unattached_step: step.name, plugin_id: selectedServer?.id ?? null,
+          pending_ids: pendingFor(ownerId, [step.name, stepKey]),
+        }
+        : { kind: 'api_call_step', unattached: true, target_step: step.name, plugin_id: selectedServer?.id ?? null }}
+      activeDiscussionId={discussionId}
+      onResume={resume}
+      t={t}
+    />
+  );
 
   // ─── Phase: closed (just the trigger button) ────────────────────────
   if (phase === 'closed') {
@@ -399,6 +519,7 @@ export function ApiCallAiHelper({
         >
           <Sparkles size={11} /> {t('wf.apicall.helper.trigger')}
         </button>
+        {conversationList}
         {error && (
           <span className="wf-apicall-ai-inline-error" role="alert">
             {error}
@@ -418,6 +539,7 @@ export function ApiCallAiHelper({
       >
         <Sparkles size={11} /> {t('wf.apicall.helper.trigger')}
       </button>
+      {conversationList}
       {!minimized && (
         <div className="wf-apicall-ai-bubble" role="dialog" aria-label={t('wf.apicall.helper.bubbleTitle')}>
           <div className="wf-apicall-ai-bubble-header">
@@ -461,7 +583,7 @@ export function ApiCallAiHelper({
                 </div>
               )}
             </div>
-            <span className="wf-apicall-ai-bubble-eph">{t('wf.apicall.helper.ephemeral')}</span>
+            <span className="wf-apicall-ai-bubble-eph" title={t('aiHelper.keptHint')}>{t('aiHelper.kept')}</span>
             <button
               type="button"
               className="wf-apicall-ai-icon-btn"
@@ -546,8 +668,12 @@ export function ApiCallAiHelper({
               <ChatMessageView
                 key={idx}
                 msg={msg}
+                streaming={streaming && idx === messages.length - 1}
                 appliedSignatures={appliedSignatures}
                 onApply={handleApply}
+                onRetry={() => void sendMessage(t('aiHelper.apply.retryPrompt'))}
+                retryDisabled={streaming || loading || !discussionId}
+                secrets={formSecrets}
                 t={t}
               />
             ))}
@@ -583,7 +709,8 @@ export function ApiCallAiHelper({
               }}
               placeholder={t('wf.apicall.helper.inputPlaceholder')}
               rows={2}
-              disabled={streaming}
+              disabled={streaming || loading}
+              aria-busy={loading}
               autoFocus
             />
             {streaming ? (
@@ -601,7 +728,7 @@ export function ApiCallAiHelper({
                 type="button"
                 className="wf-apicall-ai-send-btn"
                 onClick={() => void sendMessage()}
-                disabled={!input.trim() || !discussionId}
+                disabled={!input.trim() || !discussionId || loading}
                 title={t('wf.apicall.helper.send')}
                 aria-label={t('wf.apicall.helper.send')}
               >
@@ -630,8 +757,14 @@ export function ApiCallAiHelper({
 
 interface ChatMessageViewProps {
   msg: ChatMessage;
+  /** True while this message is still being streamed: a partial block is not yet an error. */
+  streaming: boolean;
   appliedSignatures: Set<string>;
   onApply: (sig: string, parsed: Record<string, unknown>) => void;
+  onRetry: () => void;
+  retryDisabled: boolean;
+  /** Form values masked from what is displayed, replies and resumed history included. */
+  secrets: string[];
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -639,30 +772,32 @@ interface ChatMessageViewProps {
  *  KRONN:APPLY blocks and replace them with inline Apply cards — this keeps
  *  the chat tidy: the user sees the prose explanation followed by a clear
  *  one-click button, instead of a wall of fenced JSON. */
-function ChatMessageView({ msg, appliedSignatures, onApply, t }: ChatMessageViewProps) {
-  const blocks = useMemo(
-    () => (msg.role === 'assistant' ? parseApplyBlocks(msg.text) : []),
-    [msg.role, msg.text],
-  );
-  // Strip the KRONN:APPLY chunks from the displayed prose — the SuggestionCard
+function ChatMessageView({ msg, streaming, appliedSignatures, onApply, onRetry, retryDisabled, secrets, t }: ChatMessageViewProps) {
+  // The parser strips the KRONN:APPLY chunks from the prose; the SuggestionCard
   // takes their place visually.
-  const prose = useMemo(
-    () => msg.role === 'assistant' ? msg.text.replace(KRONN_APPLY_RX, '').trim() : msg.text,
+  const { blocks, prose, unreadable } = useMemo(
+    () => (msg.role === 'assistant'
+      ? parseKronnApply(msg.text)
+      : { blocks: [], prose: msg.text, unreadable: null }),
     [msg.role, msg.text],
   );
 
   return (
     <div className={`wf-apicall-ai-msg wf-apicall-ai-msg-${msg.role}`}>
-      {prose && <div className="wf-apicall-ai-msg-text">{prose}</div>}
+      {prose && <div className="wf-apicall-ai-msg-text">{scrubSecrets(prose, secrets)}</div>}
       {blocks.map(block => (
         <SuggestionCard
           key={block.signature}
           parsed={block.parsed}
           applied={appliedSignatures.has(block.signature)}
           onApply={() => onApply(block.signature, block.parsed)}
+          secrets={secrets}
           t={t}
         />
       ))}
+      {unreadable !== null && !streaming && (
+        <KronnApplyNotice raw={unreadable} onRetry={onRetry} retryDisabled={retryDisabled} t={t} />
+      )}
     </div>
   );
 }
@@ -671,10 +806,11 @@ interface SuggestionCardProps {
   parsed: Record<string, unknown>;
   applied: boolean;
   onApply: () => void;
+  secrets: string[];
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-function SuggestionCard({ parsed, applied, onApply, t }: SuggestionCardProps) {
+function SuggestionCard({ parsed, applied, onApply, secrets, t }: SuggestionCardProps) {
   const fields = Object.entries(parsed).filter(([, v]) => v !== undefined && v !== null);
   return (
     <div className={`wf-apicall-ai-suggestion${applied ? ' wf-apicall-ai-suggestion-applied' : ''}`}>
@@ -685,7 +821,7 @@ function SuggestionCard({ parsed, applied, onApply, t }: SuggestionCardProps) {
       <ul className="wf-apicall-ai-suggestion-list">
         {fields.map(([k, v]) => (
           <li key={k}>
-            <strong>{k}</strong>: <code>{typeof v === 'string' ? v : JSON.stringify(v)}</code>
+            <strong>{k}</strong>: <code>{scrubSecrets(typeof v === 'string' ? v : JSON.stringify(v), secrets)}</code>
           </li>
         ))}
       </ul>

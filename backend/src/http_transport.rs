@@ -161,6 +161,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_answered_at: None,
+            listing: crate::models::CatalogListing::Unknown,
         }
     }
 

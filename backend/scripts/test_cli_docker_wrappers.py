@@ -16,25 +16,39 @@ DOCKERFILE = ROOT / "backend/Dockerfile"
 COMPOSE = ROOT / "docker-compose.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci-test.yml"
 BUILD_WORKFLOW = ROOT / ".github/workflows/ci-build.yml"
-# A pull-request event asks for a test unless it only changed another label or
-# edited the title: those repeat the verdict already given (RELAY).
-RELAY_EVENT = (
-    "((github.event.action == 'labeled' || github.event.action == 'unlabeled') && "
-    "github.event.label.name != '{label}') || "
-    "(github.event.action == 'edited' && !github.event.changes.base)"
+VERDICT_WORKFLOW = ROOT / ".github/workflows/ci-verdict.yml"
+WORKFLOWS = ROOT / ".github/workflows"
+# Each test workflow, its label, the job that reads it live, and its aggregate.
+TEST_WORKFLOWS = (
+    (CI_WORKFLOW, "ci-test", "require-ci-label", "ci-quality-gates"),
+    (BUILD_WORKFLOW, "ci-build", "require-ci-build-label", "ci-build-gates"),
 )
-FAST_LOOP = (
-    "github.event_name != 'pull_request' || "
-    "(contains(github.event.pull_request.labels.*.name, '{label}') && !(" + RELAY_EVENT + "))"
-)
-RELAY = (
-    "github.event_name == 'pull_request' && "
-    "contains(github.event.pull_request.labels.*.name, '{label}') && (" + RELAY_EVENT + ")"
-)
+LABEL_EVENTS = ("labeled", "unlabeled", "edited")
 IDENTITY_STEP = (
     '- name: "Gate verdict for ${{ github.event_name }} #${{ github.event.pull_request.number }} '
     'head ${{ github.event.pull_request.head.sha }} base ${{ github.event.pull_request.base.sha }}"'
 )
+
+
+def job_sections(workflow: str) -> dict[str, str]:
+    """Top-level job ids of a workflow, each with its YAML section."""
+    body = workflow[workflow.index("\njobs:\n") + len("\njobs:\n"):]
+    return {
+        match.group("name"): match.group("section")
+        for match in re.finditer(
+            r"^  (?P<name>[A-Za-z0-9_-]+):\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            body,
+            re.MULTILINE | re.DOTALL,
+        )
+    }
+
+
+def pull_request_types(workflow: str) -> list[str]:
+    match = re.search(r"^  pull_request:\n(?:    #.*\n)*    types: \[(?P<types>[^\]]*)\]", workflow, re.MULTILINE)
+    if match:
+        return [kind.strip() for kind in match.group("types").split(",")]
+    # No `types`: GitHub's default, which carries no label event.
+    return ["opened", "reopened", "synchronize"] if re.search(r"^  pull_request:", workflow, re.MULTILINE) else []
 
 
 class AzureDockerWrapperTests(unittest.TestCase):
@@ -99,9 +113,10 @@ class E2eContainerWorkflowTests(unittest.TestCase):
                 "backend-ci-performance",
             ),
             BUILD_WORKFLOW: (
-                "test-desktop-compile", "test-docs-sidecar-windows",
+                "require-ci-build-label", "test-desktop-compile", "test-docs-sidecar-windows",
                 "test-backend-portability", "build-release", "ci-build-gates",
             ),
+            VERDICT_WORKFLOW: ("ci-quality-gates", "ci-build-gates"),
         }
         for path, job in ((path, job) for path, names in jobs.items() for job in names):
             workflow = path.read_text()
@@ -116,19 +131,15 @@ class E2eContainerWorkflowTests(unittest.TestCase):
             expected_timeout = {
                 "test-backend": 40,
                 "test-e2e": 45,
-                # The aggregates may wait for an earlier run's verdict.
-                "ci-quality-gates": 60,
-                "ci-build-gates": 60,
                 "build-release": 45,
                 "test-backend-portability": "${{ matrix.os == 'macos-latest' && 45 || 30 }}",
-            }.get(job, 30)
+            }.get(job, 60 if path == VERDICT_WORKFLOW else 30)
             self.assertIn(f"timeout-minutes: {expected_timeout}", section, job)
 
     def test_backend_slo_observer_is_non_blocking_and_uses_hot_cold_measurements(self):
         workflow = CI_WORKFLOW.read_text()
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("options: [hot, cold]", workflow)
-        self.assertIn("unlabeled", workflow)
         self.assertIn("backend-ci-performance:", workflow)
         self.assertIn("ci-quality-gates:", workflow)
         for gate in (
@@ -254,47 +265,96 @@ class E2eContainerWorkflowTests(unittest.TestCase):
         ).group("section")
         self.assertIn("node scripts/ci/test_backend_ci_slo.mjs", python_job)
 
-    def test_each_label_runs_only_its_own_workflow(self):
-        for path, label, other, gate in (
-            (CI_WORKFLOW, "ci-test", "ci-build", "ci-quality-gates"),
-            (BUILD_WORKFLOW, "ci-build", "ci-test", "ci-build-gates"),
-        ):
+    def test_no_label_event_starts_a_test_job(self):
+        # GitHub shows the latest check of each name: a label event that
+        # skipped a test job would hide its real result.
+        test_jobs = {
+            name
+            for path, _label, _route, gate in TEST_WORKFLOWS
+            for name in job_sections(path.read_text())
+            if name != gate
+        }
+        self.assertIn("test-backend", test_jobs)
+        self.assertIn("test-docs-sidecar-windows", test_jobs)
+        label_triggered = []
+        for path in sorted(WORKFLOWS.glob("*.yml")):
             workflow = path.read_text()
-            # `synchronize` re-runs every gate on each push while the label
-            # stays; `edited` only when the base changed.
-            self.assertIn(
-                "types: [opened, reopened, labeled, unlabeled, synchronize, edited]", workflow
+            if not set(LABEL_EVENTS) & set(pull_request_types(workflow)):
+                continue
+            label_triggered.append(path.name)
+            self.assertFalse(test_jobs & set(job_sections(workflow)), path.name)
+        self.assertEqual(label_triggered, ["ci-verdict.yml"])
+        for path, *_ in TEST_WORKFLOWS:
+            self.assertEqual(
+                pull_request_types(path.read_text()), ["opened", "reopened", "synchronize"], path.name
             )
+
+    def test_the_verdict_workflow_publishes_exactly_the_two_aggregates(self):
+        workflow = VERDICT_WORKFLOW.read_text()
+        self.assertEqual(pull_request_types(workflow), list(LABEL_EVENTS))
+        self.assertNotIn("  push:", workflow)
+        self.assertNotIn("workflow_call:", workflow)
+        self.assertIn("permissions: {}", workflow)
+        jobs = job_sections(workflow)
+        self.assertEqual(sorted(jobs), ["ci-build-gates", "ci-quality-gates"])
+        for path, label, _route, gate in TEST_WORKFLOWS:
+            section = jobs[gate]
+            # A skipped required check counts as passing: these always run.
+            self.assertNotRegex(section, r"(?m)^    (if|needs|uses|strategy):", gate)
+            self.assertIn("actions: write", section)
+            self.assertIn(
+                f"        if: \"!contains(github.event.pull_request.labels.*.name, '{label}')\"\n"
+                f"        run: |\n", section,
+            )
+            self.assertIn(f"run: scripts/ci/previous_gate_verdict.sh {path.name} {gate} {label}\n", section)
+            for name in ("PR_NUMBER", "HEAD_SHA", "BASE_SHA"):
+                self.assertIn(f"          {name}: ${{{{ github.event.pull_request.", section)
+            # Only the label guard is conditional; the verdict always runs.
+            self.assertEqual(section.count("        if: "), 1, gate)
+
+    def test_each_test_workflow_reads_its_label_live_and_aggregates_every_job(self):
+        for path, label, route, gate in TEST_WORKFLOWS:
+            workflow = path.read_text()
+            jobs = job_sections(workflow)
             self.assertIn("  push:\n    branches: [main]", workflow)
             self.assertIn("workflow_call:", workflow)
-            gated = re.findall(r"^    if: (.*)$", workflow, re.MULTILINE)
-            work = [condition for condition in gated if "always()" not in condition]
-            self.assertTrue(work, path.name)
-            for condition in work:
-                self.assertEqual(condition, FAST_LOOP.format(label=label), path.name)
-                self.assertNotIn(other, condition)
-            aggregate = re.search(
-                rf"^  {gate}:\n(?P<section>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
-                workflow,
-                re.MULTILINE | re.DOTALL,
-            ).group("section")
-            self.assertIn("if: always()", aggregate)
-            self.assertIn("actions: read", aggregate)
-            relay = RELAY.format(label=label)
-            self.assertIn(f"        if: {relay}\n", aggregate)
-            self.assertIn(f'        if: "!({relay})"\n', aggregate)
-            self.assertIn(f"run: scripts/ci/previous_gate_verdict.sh {path.name} {gate}", aggregate)
-            for name in ("PR_NUMBER", "HEAD_SHA", "BASE_SHA"):
-                self.assertIn(f"          {name}: ", aggregate)
-            # The verdict step's name is the identity the relay reads back.
+            self.assertNotIn("github.event.label", workflow)
+            self.assertNotIn("github.event.action", workflow)
+            self.assertNotIn("previous_gate_verdict", workflow)
+            route_job = jobs[route]
+            self.assertNotRegex(route_job, r"(?m)^    (if|needs):")
+            self.assertIn("pull-requests: read", route_job)
+            self.assertIn("run: ${{ steps.label.outputs.run }}", route_job)
+            self.assertIn(f"--jq '.labels[].name' | grep -qx '{label}'", route_job)
+            self.assertIn('echo "run=true" >> "$GITHUB_OUTPUT"', route_job)
+            live = f"needs.{route}.outputs.run == 'true'"
+            aggregate = jobs[gate]
+            needs = re.findall(r"^      - ([A-Za-z0-9_-]+)$", aggregate, re.MULTILINE)
+            self.assertEqual(
+                sorted(needs), sorted(name for name in jobs if name not in (gate, "backend-ci-performance")),
+                path.name,
+            )
+            self.assertIn("    if: always()\n", aggregate)
+            self.assertIn(f"        if: needs.{route}.outputs.run != 'true'\n", aggregate)
+            self.assertIn(f"        if: {live}\n", aggregate)
             self.assertIn(IDENTITY_STEP, aggregate)
             self.assertIn("jq -e 'all(.[]; . == \"success\")'", aggregate)
+            for name, section in jobs.items():
+                if name in (route, gate):
+                    continue
+                condition = re.search(r"^    if: (.*)$", section, re.MULTILINE).group(1)
+                self.assertIn(live, condition, name)
+                self.assertRegex(section, rf"(?m)^    needs: (\[[^\]]*\b)?{route}\b", name)
         build = BUILD_WORKFLOW.read_text()
         self.assertIn("Add the ci-build label before merging", build)
         # ci-test serves a cheaper e2e build: the real release profile is
         # built here, for every pull request.
         self.assertIn("cargo build --release --locked --bin kronn", build)
         self.assertIn("      - build-release", build)
+        # Desktop Build calls both: the label job's permission must be granted.
+        desktop = (WORKFLOWS / "desktop-build.yml").read_text()
+        for name in ("ci-test.yml", "ci-build.yml"):
+            self.assertIn(f"      pull-requests: read\n    uses: ./.github/workflows/{name}", desktop)
 
     def test_e2e_serves_the_dev_build_and_ci_build_the_release(self):
         e2e = re.search(

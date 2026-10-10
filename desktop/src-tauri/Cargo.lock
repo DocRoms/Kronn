@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2529,6 +2529,7 @@ dependencies = [
  "futures",
  "governor",
  "html5ever 0.40.1",
+ "iana-time-zone",
  "image",
  "keyring",
  "libc",
@@ -2565,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-desktop"
-version = "0.14.3"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2579,6 +2580,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

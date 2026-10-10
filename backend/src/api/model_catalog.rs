@@ -123,6 +123,7 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<ModelCatalo
         match model_catalog::build_view(&state.db, runtime_target_id, agent_type).await {
             Ok(mut view) => {
                 view.target_label = Some(target_label);
+                model_catalog::populate_tier_verdicts(&mut view, &config.agents.model_tiers);
                 if let Err(error) =
                     model_catalog::populate_reference_alerts(&state.db, &config, &mut view).await
                 {
@@ -190,6 +191,7 @@ pub async fn refresh(
     match refresh {
         Ok(mut view) => {
             let config = state.config.read().await.clone();
+            model_catalog::populate_tier_verdicts(&mut view, &config.agents.model_tiers);
             if let Err(error) =
                 model_catalog::populate_reference_alerts(&state.db, &config, &mut view).await
             {

@@ -149,8 +149,69 @@ pub struct Workflow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub project_scope: Option<WorkflowProjectScope>,
+    /// KT-1100 — how long this workflow's finished runs are kept, overriding
+    /// the global retention. `None` inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub retention: Option<WorkflowRetention>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Per-workflow run retention (KT-1100). Each window overrides the global one
+/// for its class of run; `None` inherits it and `0` keeps those runs forever.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowRetention {
+    /// Successful runs that changed nothing. Inherited default: 24 hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub no_op_hours: Option<u32>,
+    /// Successful runs with an effect (or not classified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub success_days: Option<u32>,
+    /// Failed, partial, cancelled and guard-stopped runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure_days: Option<u32>,
+}
+
+impl WorkflowRetention {
+    pub const KEEP_ALL: Self = Self {
+        no_op_hours: Some(0),
+        success_days: Some(0),
+        failure_days: Some(0),
+    };
+}
+
+/// What a finished run did (KT-1100). Only top-level successful runs are
+/// classified; every other run has no outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowRunOutcome {
+    /// Every step declared or proved that it changed nothing.
+    NoOp,
+    /// At least one step had, or may have had, an effect.
+    Changed,
+}
+
+impl WorkflowRunOutcome {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::NoOp => "no_op",
+            Self::Changed => "changed",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "no_op" => Some(Self::NoOp),
+            "changed" => Some(Self::Changed),
+            _ => None,
+        }
+    }
 }
 
 /// Which projects a multi-project workflow serves (KT-851).
@@ -273,6 +334,11 @@ pub enum GuardKind {
 pub enum WorkflowTrigger {
     Cron {
         schedule: String,
+        /// IANA timezone the schedule is read in; absent means Kronn's
+        /// global timezone. Triggers saved before it were pinned to UTC.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        timezone: Option<String>,
     },
     Tracker {
         source: TrackerSourceConfig,
@@ -281,6 +347,91 @@ pub enum WorkflowTrigger {
         interval: String,
     },
     Manual,
+    /// Polls a source through the API broker and creates a run only when it
+    /// changed (KT-1099).
+    Watch(WatchTrigger),
+}
+
+/// What a `Watch` trigger polls, how often, and how it detects a change.
+/// The source is an API configured in Kronn, or a saved Quick API whose
+/// fields fill the ones left empty here; the request is always a GET.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WatchTrigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub quick_api_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_plugin_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_config_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_endpoint_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_query: Option<std::collections::HashMap<String, String>>,
+    /// Cron expression of the poll cadence.
+    pub interval: String,
+    /// IANA timezone `interval` is read in; absent means Kronn's global one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub detection: WatchDetection,
+}
+
+/// How a `Watch` poll decides the source changed. Every mode sends the
+/// stored `If-None-Match` / `If-Modified-Since` first: a 304 is "unchanged".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type")]
+pub enum WatchDetection {
+    /// A 200 is a change when its ETag / Last-Modified differ from the
+    /// stored ones; without either header, the body fingerprint decides.
+    #[default]
+    Validators,
+    /// A 200 is a change when the body's fingerprint differs.
+    Body,
+    /// A 200 is a change when the fingerprint of this JSONPath's result differs.
+    JsonPath { path: String },
+}
+
+/// Outcome of the latest `Watch` poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchPollResult {
+    /// First poll of this source: its state was recorded, no run.
+    Baseline,
+    Unchanged,
+    Changed,
+    /// A change no run could be admitted for (concurrency limit, preflight);
+    /// the next poll detects it again.
+    Deferred,
+    Error,
+}
+
+/// Poll history of a `Watch` workflow, shown on its card.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WatchStatus {
+    pub last_poll_at: Option<DateTime<Utc>>,
+    pub last_result: Option<WatchPollResult>,
+    pub last_http_status: Option<u16>,
+    pub last_error: Option<String>,
+    pub last_change_at: Option<DateTime<Utc>>,
+    #[ts(type = "number")]
+    pub unchanged_count: u64,
+    #[ts(type = "number")]
+    pub changed_count: u64,
+    #[ts(type = "number")]
+    pub error_count: u64,
+    pub consecutive_failures: u32,
+    /// `consecutive_failures` reached the alert threshold.
+    pub failing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -624,16 +775,14 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_notify_url: Option<String>,
 
-    /// 0.8.6 (#25) — `true` means create a git commit checkpoint before
-    /// pausing the run on this Gate. The SHA is stored in
-    /// `WorkflowRun.state["checkpoint:<step.name>"]`. On Goto from this
-    /// gate's `gate_request_changes_target`, the runner `git reset
-    /// --hard` to that SHA before re-running the target — makes
-    /// Gate→implement loops idempotent (re-implement on a clean tree,
-    /// not on top of the previous cycle's noise). Defaults to `false`
-    /// (no behaviour change for existing workflows). Skipped silently
-    /// in `Isolated` worktree mode (the worktree already has its own
-    /// branch). Skipped + warned on non-git project_path.
+    /// 0.8.6 (#25) — `true` means commit the run's own worktree as a
+    /// checkpoint before pausing the run on this Gate. The SHA is stored in
+    /// `WorkflowRun.state["checkpoint:<step.name>"]`. On "Request changes",
+    /// the target re-runs on top of that post-implementation commit, once
+    /// the runner has checked the worktree is still clean and at that SHA.
+    /// Only a run with workspace isolation gets a checkpoint:
+    /// in shared mode none is taken and the Gate message says so, since it
+    /// would commit the operator's checkout (KT-1042). Defaults to `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_checkpoint_before: Option<bool>,
 
@@ -764,6 +913,11 @@ pub struct WorkflowStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_publish: Option<PublishPageDataConfig>,
 
+    /// KT-1030 — for `StepType::TaskBoard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_board: Option<TaskBoardConfig>,
+
     /// 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
     /// workflow to run as a nested child. Required for that step type
     /// (enforced at save). `None` for every other step type. Mirrors the
@@ -810,6 +964,64 @@ pub struct WorkflowStep {
     /// the existing launch policy. Paths are validated again before launch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_repos: Vec<String>,
+    /// KT-909 — `DelegateSubtasks` steps only. The step's `agent` and
+    /// `agent_settings` are the reviewer's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub delegate_subtasks: Option<DelegateSubtasksConfig>,
+}
+
+/// KT-909 — what a `DelegateSubtasks` step delegates and how.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DelegateSubtasksConfig {
+    /// Parent task reference or id; templated (`{{steps.guard.data.taskId}}`).
+    pub parent_task: String,
+    /// `worker:<key>` subtask tag → worker. The first tag found here wins.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(
+        as = "Option<std::collections::BTreeMap<String, DelegateWorker>>",
+        optional
+    )]
+    pub worker_map: std::collections::BTreeMap<String, DelegateWorker>,
+    /// Worker for a subtask whose tags match no `worker_map` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_worker: Option<DelegateWorker>,
+    /// Executions in flight at once. Default 1, maximum 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub concurrency: Option<u32>,
+    /// Review rounds per subtask before it escalates. Default 3, maximum 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_review_rounds: Option<u32>,
+    /// Commands run on each approved candidate before it is integrated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crate::models::ValidationSpec>>", optional)]
+    pub validations: Vec<crate::models::ValidationSpec>,
+    /// Integration branch; templated. Default: the branch checked out in the
+    /// run's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_branch: Option<String>,
+    /// Bound on the whole step. Default 6 h. Executions survive it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_secs: Option<u64>,
+}
+
+/// A native worker identity for delegated subtasks (CLI sessions excluded).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DelegateWorker {
+    pub agent: AgentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tier: Option<ModelTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
 }
 
 /// Config for the "Multi-agent review" option on an Agent step (see
@@ -1072,6 +1284,64 @@ pub enum StepType {
     /// from `sub_workflow_variables`, its own concurrency limit) and records
     /// this run as `triggered_by_run_id`; cycles between workflows are allowed.
     TriggerWorkflow,
+    /// KT-909 — run a parent task's subtasks as task executions without an
+    /// orchestrator agent: launch, wait mechanically, and call the step's
+    /// agent once per delivery, only to review it. Config: `delegate_subtasks`.
+    DelegateSubtasks,
+    /// KT-1030 — read or change the planning tasks that share one tag, as a
+    /// board (to do / in progress / done) with an order Kronn stores. Zero
+    /// tokens, no network: config in `WorkflowStep.task_board`.
+    TaskBoard,
+}
+
+/// What a `TaskBoard` step does before returning the board's rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TaskBoardOperation {
+    /// Only read the board.
+    #[default]
+    Read,
+    /// Create a task (`title`, `description`, `tags`) at the top of "to do".
+    Add,
+    /// Done becomes to do (back on top), anything else becomes done (`task`).
+    Toggle,
+    /// Move `task` into `column` before `before` (a task id, or the column's
+    /// end marker `__col_<column>__`).
+    Move,
+    /// Change the `title` and `description` of `task`.
+    Edit,
+    /// Create a discussion about `task` and link it, once per task. The
+    /// discussion uses the step's `agent`.
+    Discuss,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskBoardConfig {
+    /// The tag every task of the board carries. A step never touches a task
+    /// without it.
+    pub tag: String,
+    #[serde(default)]
+    pub operation: TaskBoardOperation,
+    /// Runtime templates, each read only by the operations that name it.
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub before: String,
+    #[serde(default)]
+    pub column: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    /// Extra tags for `add`, comma separated.
+    #[serde(default)]
+    pub tags: String,
+    /// Recently done tasks the board shows (default 15, at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub done_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1202,7 +1472,9 @@ pub struct PublishPageDataWrite {
     pub dataset: String,
     pub operation: LivePageWriteOperation,
     /// Chemin typé du contexte, avec ou sans doubles accolades.
-    /// Exemple : `steps.fetch_metrics.data.series`.
+    /// Exemple : `steps.fetch_metrics.data.series`. Absent pour `clear` ;
+    /// la validation l'exige pour les autres opérations.
+    #[serde(default)]
     pub value_from: String,
     /// Date RFC3339 optionnelle, template runtime autorisé.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1523,6 +1795,10 @@ pub struct WorkflowRun {
     /// for a global workflow. Resume and worktree cleanup read it first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// KT-1100 — set once a top-level run succeeds; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<WorkflowRunOutcome>,
     /// Provenance enrichment (DERIVED, not persisted). When this run is a
     /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
     /// workflow id + name + tick time so the UI can render
@@ -1580,6 +1856,10 @@ pub enum RunStatus {
     /// `Failed` (the workflow didn't error — the host went away) so it doesn't
     /// poison "last run succeeded" cron logic or read as a real failure.
     Interrupted,
+    /// KT-811 — non-terminal: an Agent step was refused for a provider quota or
+    /// session limit. The engine resumes it at that step after the announced
+    /// reset; without a usable reset it stays parked until a manual resume.
+    WaitingQuota,
 }
 
 impl RunStatus {
@@ -1594,9 +1874,50 @@ impl RunStatus {
             | RunStatus::Cancelled
             | RunStatus::StoppedByGuard
             | RunStatus::Interrupted => true,
-            RunStatus::Pending | RunStatus::Running | RunStatus::WaitingApproval => false,
+            RunStatus::Pending
+            | RunStatus::Running
+            | RunStatus::WaitingApproval
+            | RunStatus::WaitingQuota => false,
         }
     }
+}
+
+/// KT-811 — why a quota-refused step waits for a human instead of a timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaParkReason {
+    /// The refusal named no reset time Kronn can trust.
+    NoResetTime,
+    /// The reset falls after the workflow's absolute timeout guard.
+    AfterDeadline,
+    /// The provider kept refusing after several automatic wake-ups.
+    TooManyAttempts,
+    /// The automatic resume was refused by the resume preconditions.
+    NotResumable,
+}
+
+/// KT-811 — a step refused for a provider quota, not an agent failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuotaWait {
+    /// Identity of this wait: a park or a claim applies only to the wait it read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The reset instant the provider announced, when it could be parsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<DateTime<Utc>>,
+    /// When the engine resumes the step; `None` while parked or not waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_at: Option<DateTime<Utc>>,
+    /// Consecutive quota refusals of this step, this one included.
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<QuotaParkReason>,
+    /// Why an automatic resume was refused, when `parked` is `NotResumable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1655,6 +1976,14 @@ pub struct WorkflowAgentAttempt {
     /// Empty means unreported; never inferred from generated prose or config.
     pub observed_models: Vec<String>,
     pub format_fallback: bool,
+    /// Resolved npx executable and package arguments when direct CLI launch failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub npx_fallback_command: Option<Vec<String>>,
+    /// Last successful version probe for that command in the run's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub npx_fallback_version: Option<String>,
     pub started_at: DateTime<Utc>,
     pub duration_ms: u64,
     pub succeeded: bool,
@@ -1849,6 +2178,14 @@ pub struct StepResult {
     /// replaces the in-flight row, so it survives only an interrupted step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity: Option<AgentActivity>,
+    /// KT-811 — set when the provider refused the step for a quota or session
+    /// limit, so the run reads "quota" rather than "failed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_wait: Option<QuotaWait>,
+    /// Why the run ends at this step for good: no `on_failure`, no quota wait,
+    /// no recovery rule (a Security limit, a counter failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_stop: Option<String>,
 }
 
 fn is_empty_tool_call_log(value: &[NativeToolCallLog]) -> bool {
@@ -1898,6 +2235,9 @@ pub struct CreateWorkflowRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub project_scope: Option<WorkflowProjectScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub retention: Option<WorkflowRetention>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -1942,6 +2282,10 @@ pub struct UpdateWorkflowRequest {
     #[serde(default, deserialize_with = "super::deserialize_optional_field")]
     #[ts(optional)]
     pub project_scope: Option<Option<WorkflowProjectScope>>,
+    /// `null` returns to the global retention; omitted keeps it.
+    #[serde(default, deserialize_with = "super::deserialize_optional_field")]
+    #[ts(optional)]
+    pub retention: Option<Option<WorkflowRetention>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1962,11 +2306,24 @@ pub struct WorkflowSummary {
     /// inline code: refused at run time until fixed (KT-1017).
     #[serde(default)]
     pub unsafe_step_count: u32,
+    /// Every known refusal of a run, its sub-workflows and rollback chain
+    /// included (KT-1138). 0 is not a promise that a run succeeds.
+    #[serde(default)]
+    #[ts(optional)]
+    pub blocker_count: Option<u32>,
+    /// The blockers only a human can lift (approvals of agent-written lines).
+    #[serde(default)]
+    #[ts(optional)]
+    pub human_approval_count: Option<u32>,
     pub enabled: bool,
     /// User-pinned / favorite — the list surfaces pinned workflows first.
     #[serde(default)]
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
+    /// Poll history of a `Watch` trigger; absent for other triggers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub watch: Option<WatchStatus>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2047,6 +2404,71 @@ pub struct UnsafeExecStep {
     /// An agent wrote the line: it waits for a human's approval.
     #[serde(default)]
     pub agent_written: bool,
+}
+
+/// What keeps a run from starting (KT-1138).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowBlockerKind {
+    /// A saved rule the run checks again: missing command, allowlist, path.
+    ValidationError,
+    /// A required field of the step type is missing.
+    MisconfiguredStep,
+    /// An agent-written line or script waits for a human's approval.
+    HumanApproval,
+    /// A value reaches code or an option position: rewrite the step.
+    UnsafeInterpolation,
+    /// A sub-workflow or triggered workflow that does not exist.
+    MissingChild,
+    /// A sub-workflow that calls an ancestor, or nests too deep.
+    ChildCycle,
+    /// The diagnostic itself could not be computed.
+    CollectionError,
+}
+
+/// One known refusal, with where it is and what lifts it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowBlocker {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    /// The step, or `None` for a workflow-level blocker.
+    pub step: Option<String>,
+    /// The step belongs to the `on_failure` (rollback) chain.
+    pub on_failure: bool,
+    pub kind: WorkflowBlockerKind,
+    /// `main`, `setup`, `stdin`, `source` or `script` for an Exec line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    /// The runtime validator's own reason code, e.g. `unmodelled_program`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+    pub message: String,
+    pub action: String,
+    /// Only a human can lift it: an agent must report it, never work around it.
+    pub human_only: bool,
+}
+
+/// Whether a saved workflow can start, as far as Kronn can tell before a run
+/// (KT-1138). Saving and enabling are separate facts, not proof of readiness.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkflowReadiness {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub enabled: bool,
+    /// No known blocker in the workflow, its sub-workflows and rollback
+    /// chains. The run can still fail on what only a run reveals.
+    pub ready: bool,
+    pub blockers: Vec<WorkflowBlocker>,
+    pub human_approval_count: u32,
+    /// The workflows checked: this one, then its sub-workflows.
+    pub checked_workflow_ids: Vec<String>,
+    /// One line for an agent or a human to read first.
+    pub summary: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

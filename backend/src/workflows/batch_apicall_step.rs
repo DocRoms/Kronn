@@ -75,6 +75,7 @@ pub async fn execute_batch_apicall_step(
     state: &crate::AppState,
     ctx: &TemplateContext,
     log_ctx: ApiCallLogContext,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     execute_batch_apicall_step_with_policy(
         step,
@@ -83,6 +84,7 @@ pub async fn execute_batch_apicall_step(
         ctx,
         log_ctx,
         SecurityPolicy::production(),
+        caller,
     )
     .await
 }
@@ -95,6 +97,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
     ctx: &TemplateContext,
     log_ctx: ApiCallLogContext,
     policy: SecurityPolicy,
+    caller: &crate::core::api_access::ApiCaller,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -109,8 +112,12 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
     // partager la même règle de per-field override entre BatchApiCall et
     // ApiCall single (cf. quick_api_hydrate.rs).
     let mut step = step.clone();
-    if let Err(e) =
-        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step, &state.db).await
+    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
+        &mut step,
+        &state.db,
+        log_ctx.pinned_run_id.as_deref(),
+    )
+    .await
     {
         return fail(&step, start, e);
     }
@@ -201,6 +208,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
         let state_clone = state.clone();
 
         let log_ctx_clone = log_ctx.clone();
+        let caller = caller.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
             // 0.8.6 (#59) — one api_call_logs row per batch item.
@@ -213,6 +221,7 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
                 &child_ctx,
                 policy,
                 log_ctx_clone,
+                &caller,
             )
             .await;
             (idx, item, outcome)
@@ -349,6 +358,8 @@ pub(crate) async fn execute_batch_apicall_step_with_policy(
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -562,6 +573,8 @@ fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action,
     }
@@ -596,6 +609,8 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             cached_prompt_tokens: None,
             cache_write_prompt_tokens: None,
             last_activity: None,
+            quota_wait: None,
+            terminal_stop: None,
         },
         condition_action: None,
     }
@@ -883,6 +898,8 @@ mod tests {
                 cached_prompt_tokens: None,
                 cache_write_prompt_tokens: None,
                 last_activity: None,
+                quota_wait: None,
+                terminal_stop: None,
             },
             condition_action: None,
         };

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { UnsafeStepsPanel } from './UnsafeStepsPanel';
+import { SafetyWarnings } from './SafetyWarnings';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi, executionVariables as executionVariablesApi } from '../../lib/api';
 import type { BatchPreview, ExecutionVariableMetadata } from '../../lib/api';
 import { requiresFullAccessToRun } from '../../lib/agentFullAccess';
@@ -12,9 +13,9 @@ import {
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
-  Eye, Pencil, FileText, Database, Shuffle,
+  Eye, Pencil, FileText, Database, Shuffle, Clock,
 } from 'lucide-react';
-import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
+import { filterRuns, foldNoOpRuns, groupRunsByParent, isNoOpRun, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
 import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
@@ -210,6 +211,10 @@ export interface WorkflowDetailProps {
   /** KT-1017 — a human approves a step that waits for it. */
   onApproveUnsafeStep?: (issue: UnsafeExecStep) => Promise<void>;
   totalRuns?: number;
+  /** KT-1100 — runs that changed nothing, left out of `runs`. */
+  noOpRunsHidden?: number;
+  showNoOpRuns?: boolean;
+  onToggleNoOpRuns?: () => void;
   hasMoreRuns?: boolean;
   loadingMoreRuns?: boolean;
   onLoadMoreRuns?: (amount: number | 'all') => void;
@@ -813,7 +818,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             availableAgentTypes={availableAgentTypes}
             agentChoices={agentChoices}
             onChange={onChangeAgent}
-            modelTiers={agentAccess?.model_tiers}
+            agentAccess={agentAccess}
             t={t}
           />
         )}
@@ -1276,13 +1281,18 @@ export function LiveFinishedBanner({
   const isSuccess = status === 'Success';
   const isPartial = status === 'Partial';
   const isWaiting = status === 'WaitingApproval';
-  const dataStatus = isSuccess ? 'success' : isPartial || isWaiting ? 'waiting' : 'failed';
+  const isQuota = status === 'WaitingQuota';
+  const dataStatus = isSuccess ? 'success' : isPartial || isWaiting || isQuota ? 'waiting' : 'failed';
   const color = isSuccess
     ? 'var(--kr-success)'
-    : isPartial || isWaiting
+    : isPartial || isWaiting || isQuota
       ? 'var(--kr-warning)'
       : 'var(--kr-error)';
-  const label = isWaiting ? t('wf.runWaiting') : t('wf.runDone', status ?? '');
+  const label = isWaiting
+    ? t('wf.runWaiting')
+    : isQuota
+      ? t('run.status.quota')
+      : t('wf.runDone', status ?? '');
   return (
     <div className="wf-live-finished" data-status={dataStatus}>
       {isSuccess
@@ -1291,6 +1301,8 @@ export function LiveFinishedBanner({
           ? <AlertTriangle size={12} style={{ color }} />
           : isWaiting
           ? <Hand size={12} style={{ color }} />
+          : isQuota
+          ? <Clock size={12} style={{ color }} />
           : <X size={12} className="text-error" />}
       <span className="text-base font-semibold" style={{ color }}>{label}</span>
       <span className="text-xs text-dim">
@@ -1332,7 +1344,7 @@ function StepAgentSwitcher({
   availableAgentTypes = [],
   agentChoices,
   onChange,
-  modelTiers,
+  agentAccess,
   t,
   compact = false,
 }: {
@@ -1341,7 +1353,7 @@ function StepAgentSwitcher({
   availableAgentTypes?: AgentType[];
   agentChoices?: AgentSwitchTarget[];
   onChange?: WorkflowDetailProps['onChangeStepAgent'];
-  modelTiers?: AgentsConfig['model_tiers'];
+  agentAccess?: AgentsConfig | null;
   t: (key: string, ...args: (string | number)[]) => string;
   compact?: boolean;
 }) {
@@ -1359,11 +1371,12 @@ function StepAgentSwitcher({
         default: t('disc.tier.default'),
         reasoning: t('disc.tier.reasoning'),
       }}
-      modelTiers={modelTiers}
+      modelTiers={agentAccess?.model_tiers}
       defaultModelLabel={t('config.defaultModel')}
       compact={compact}
       title={t('disc.switchAgentAndTier')}
       ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
+      needsFullAccess={agent => requiresFullAccessToRun(agentAccess, agent)}
       staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
     />
   );
@@ -1385,6 +1398,7 @@ function compactStepMeta(step: WorkflowStep): {
     case 'CollectApiData': return { kind: 'collect-data', Icon: Database, usesTokens: false, labelKey: 'wiz.stepTypeCollectApiData' };
     case 'TransformData': return { kind: 'transform-data', Icon: Shuffle, usesTokens: false, labelKey: 'wiz.stepTypeTransformData' };
     case 'PublishPageData': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypePublishPage' };
+    case 'TaskBoard': return { kind: 'page-data', Icon: FileText, usesTokens: false, labelKey: 'wiz.stepTypeTaskBoard' };
     case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
     case 'TriggerWorkflow': return { kind: 'triggerworkflow', Icon: Play, usesTokens: false, labelKey: 'wiz.stepTypeTriggerWorkflow' };
     case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
@@ -1586,7 +1600,7 @@ function SubWorkflowOverview({
   );
 }
 
-export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoices, onChangeStepAgent, onApplyUnsafeFix, onApproveUnsafeStep, totalRuns, noOpRunsHidden = 0, showNoOpRuns = false, onToggleNoOpRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, onNavigatePage, focusRunId, onExport, onGateDecided, onToggleEnabled, toast, projects = [], configLanguage }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1617,7 +1631,8 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
   const isRunExpanded = (run: WorkflowRun): boolean =>
     expandedRunIds.has(run.id) ||
-    run.status === 'Running' || run.status === 'Pending' || run.status === 'WaitingApproval';
+    run.status === 'Running' || run.status === 'Pending' || run.status === 'WaitingApproval'
+    || run.status === 'WaitingQuota';
   const toggleRunExpanded = (id: string) => setExpandedRunIds(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -1629,10 +1644,18 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
   const [groupOverride, setGroupOverride] = useState<Record<string, boolean>>({});
   const isGroupExpanded = (key: string, groupRuns: WorkflowRun[]): boolean => {
     if (key in groupOverride) return groupOverride[key];
-    return groupRuns.some(r => r.status === 'Running' || r.status === 'Pending' || r.status === 'WaitingApproval');
+    return groupRuns.some(r => r.status === 'Running' || r.status === 'Pending'
+      || r.status === 'WaitingApproval' || r.status === 'WaitingQuota');
   };
   const toggleGroup = (key: string, groupRuns: WorkflowRun[]) =>
     setGroupOverride(prev => ({ ...prev, [key]: !isGroupExpanded(key, groupRuns) }));
+  // KT-1100 — folded streaks of no-op runs stay closed until clicked.
+  const [openNoOpFolds, setOpenNoOpFolds] = useState<Set<string>>(new Set());
+  const toggleNoOpFold = (key: string) => setOpenNoOpFolds(prev => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   // #11 — when arriving with a focus run id (drill from a parent's sub-run
   // link), make sure it's visible: clear filters, unfold the list, expand the
@@ -1798,7 +1821,12 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
 
   const triggerLabel = (() => {
     switch (workflow.trigger.type) {
-      case 'Cron': return `Cron: ${workflow.trigger.schedule}`;
+      case 'Cron': return `Cron: ${workflow.trigger.schedule} (${workflow.trigger.timezone ?? t('wiz.timezoneKronn')})`;
+      case 'Watch': {
+        const w = workflow.trigger;
+        const source = w.quick_api_id ? `Quick API ${w.quick_api_id.slice(0, 8)}` : `${w.api_plugin_slug ?? '?'} ${w.api_endpoint_path ?? ''}`;
+        return `Watch: ${source} · ${w.interval} (${w.timezone ?? t('wiz.timezoneKronn')})`;
+      }
       case 'Tracker': {
         const src = workflow.trigger.source;
         return `Tracker: ${src.owner}/${src.repo}`;
@@ -1872,6 +1900,13 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
           )}
         </div>
       </div>
+
+      <SafetyWarnings request={{
+        workflow_id: workflow.id,
+        project_id: workflow.project_id ?? undefined,
+        per_run_project: !!workflow.project_scope,
+        safety: workflow.safety,
+      }} />
 
       {onApplyUnsafeFix && (
         <UnsafeStepsPanel workflow={workflow} onApply={onApplyUnsafeFix} onApprove={onApproveUnsafeStep} />
@@ -1992,7 +2027,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
                               availableAgentTypes={availableAgentTypes}
                               agentChoices={agentChoices}
                               onChange={onChangeStepAgent}
-                              modelTiers={agentAccess?.model_tiers}
+                              agentAccess={agentAccess}
                               t={t}
                               compact
                             />
@@ -2392,13 +2427,24 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             <Trash2 size={9} /> {t('wf.deleteAll')}
           </button>
         )}
+        {onToggleNoOpRuns && (showNoOpRuns || noOpRunsHidden > 0) && (
+          <button
+            type="button"
+            className="wf-runs-noop-toggle"
+            data-active={showNoOpRuns}
+            aria-pressed={showNoOpRuns}
+            onClick={onToggleNoOpRuns}
+          >
+            {showNoOpRuns ? t('wf.runs.noOp.hide') : t('wf.runs.noOp.show', noOpRunsHidden)}
+          </button>
+        )}
         <button className="wf-icon-btn" onClick={() => setShowRuns(!showRuns)} aria-label={showRuns ? 'Collapse runs' : 'Expand runs'}>
           <ChevronRight size={12} className={showRuns ? 'wf-chevron-rotated' : 'wf-chevron'} />
         </button>
       </div>
 
       {showRuns && runs.length === 0 && (
-        <p className="text-sm text-faint mt-4">{t('wf.noRuns')}</p>
+        <p className="text-sm text-faint mt-4">{noOpRunsHidden > 0 ? t('wf.runs.noOp.onlyHidden', noOpRunsHidden) : t('wf.noRuns')}</p>
       )}
 
       {/* #2 — control bar: only when the list is long enough to warrant it. */}
@@ -2449,6 +2495,7 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
               type="button"
               className="wf-run-compact"
               data-status={run.status}
+              data-outcome={isNoOpRun(run) ? 'no_op' : undefined}
               aria-expanded={expanded}
               onClick={() => toggleRunExpanded(run.id)}
             >
@@ -2539,7 +2586,26 @@ export function WorkflowDetail({ workflow, runs, availableAgentTypes, agentChoic
             {(totalRuns ?? runs.length) > RUN_PAGE_SIZE && visible.length === 0 && (
               <p className="text-sm text-faint mt-4">{t('wf.runs.noMatch')}</p>
             )}
-            {groups.map(g => {
+            {foldNoOpRuns(groups).map(item => {
+              if (item.kind === 'noop') {
+                const open = openNoOpFolds.has(item.key);
+                const since = new Date(item.since).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                return (
+                  <div key={item.key} className="wf-run-noop-fold" data-testid="wf-run-noop-fold">
+                    <button
+                      type="button"
+                      className="wf-run-noop-fold-header"
+                      aria-expanded={open}
+                      onClick={() => toggleNoOpFold(item.key)}
+                    >
+                      <ChevronRight size={12} className={open ? 'wf-chevron-rotated' : 'wf-chevron'} />
+                      <span>{t('wf.runs.noOp.fold', item.runs.length, since)}</span>
+                    </button>
+                    {open && <div className="wf-run-group-body">{item.runs.map(renderRunItem)}</div>}
+                  </div>
+                );
+              }
+              const g = item.group;
               // A real multi-child parent tick → group accordion. Standalone or
               // single runs render as plain compact rows (no group header).
               if (g.parentRunId && g.runs.length > 1) {

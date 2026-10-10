@@ -3,8 +3,10 @@
 //! - Cron: time-based schedule evaluation
 //! - Tracker: polls issue tracker API, reconciles processed issues
 //! - Manual: always returns false (triggered via API only)
+//! - Watch: polls a source on its interval (see `watch_trigger`)
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use std::str::FromStr;
 
 use crate::models::*;
@@ -18,19 +20,134 @@ use crate::models::*;
 /// landing on the seam fired on BOTH surrounding ticks (two concurrent runs
 /// of the same cron, ~1 occurrence in 31), and a tick delayed past the window
 /// (slow tracker poll starving the loop) silently skipped the occurrence.
-pub fn should_fire(trigger: &WorkflowTrigger, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    match trigger {
-        WorkflowTrigger::Cron { schedule } => cron_fires_between(schedule, since, now),
-        WorkflowTrigger::Tracker { interval, .. } => {
-            // Tracker uses interval as a cron expression for polling frequency
-            cron_fires_between(interval, since, now)
+///
+/// A Cron or Watch without its own `timezone` is read in `default_tz`, Kronn's
+/// global zone (KT-1103); a Tracker interval stays in UTC.
+pub fn should_fire(
+    trigger: &WorkflowTrigger,
+    default_tz: Tz,
+    since: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    let fires_in = |expr: &str, timezone: Option<&str>| match trigger_timezone(timezone, default_tz)
+    {
+        Ok(tz) => cron_fires_between(expr, tz, since, now),
+        Err(e) => {
+            tracing::error!("{e}");
+            false
         }
+    };
+    match trigger {
+        WorkflowTrigger::Cron { schedule, timezone } => fires_in(schedule, timezone.as_deref()),
+        // Tracker uses interval as a cron expression for polling frequency.
+        WorkflowTrigger::Tracker { interval, .. } => fires_in(interval, Some("UTC")),
         WorkflowTrigger::Manual => false,
+        WorkflowTrigger::Watch(watch) => fires_in(&watch.interval, watch.timezone.as_deref()),
     }
 }
 
-/// True when the cron expression has an occurrence in `(since, now]`.
-fn cron_fires_between(cron_expr: &str, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+/// The zone a trigger is read in: its own, else Kronn's global one.
+pub fn trigger_timezone(timezone: Option<&str>, default_tz: Tz) -> Result<Tz, String> {
+    match timezone {
+        None => Ok(default_tz),
+        Some(name) => name.parse::<Tz>().map_err(|_| {
+            format!("Unknown timezone `{name}`: use an IANA name such as Europe/Paris.")
+        }),
+    }
+}
+
+/// The next `count` firings of `cron_expr` read in `tz`, strictly after
+/// `after`, with the scheduler's DST rules (for the editor's preview).
+pub fn next_fires(
+    cron_expr: &str,
+    tz: Tz,
+    after: DateTime<Utc>,
+    count: usize,
+) -> Result<Vec<DateTime<Tz>>, String> {
+    let schedule = parse_schedule(cron_expr)
+        .map_err(|e| format!("Invalid cron expression `{cron_expr}`: {e}"))?;
+    Ok(schedule
+        .after(&after.with_timezone(&tz))
+        .filter(|occ| occ.with_timezone(&Utc) > after && !is_repeated_local_time(&tz, occ))
+        .take(count)
+        .collect())
+}
+
+/// Refuses a trigger the scheduler could not evaluate as written: an unknown
+/// timezone, or a Watch without a source or with an invalid interval.
+pub fn validate_trigger(trigger: &WorkflowTrigger) -> Result<(), String> {
+    match trigger {
+        WorkflowTrigger::Cron { timezone, .. } => validate_timezone(timezone.as_deref()),
+        WorkflowTrigger::Tracker { .. } | WorkflowTrigger::Manual => Ok(()),
+        WorkflowTrigger::Watch(watch) => {
+            validate_timezone(watch.timezone.as_deref())?;
+            // Five fields only: a poll more often than once a minute is refused.
+            if watch.interval.split_whitespace().count() != 5
+                || parse_schedule(&watch.interval).is_err()
+            {
+                return Err(format!(
+                    "Watch trigger: `{}` is not a five-field cron expression \
+                     (minute hour day month weekday; at most once a minute).",
+                    watch.interval
+                ));
+            }
+            let filled =
+                |value: &Option<String>| value.as_deref().is_some_and(|v| !v.trim().is_empty());
+            let api = filled(&watch.api_plugin_slug)
+                && filled(&watch.api_config_id)
+                && filled(&watch.api_endpoint_path);
+            if !api && !filled(&watch.quick_api_id) {
+                return Err(
+                    "Watch trigger: choose a Quick API, or an API (api_plugin_slug, \
+                     api_config_id) and an endpoint path (api_endpoint_path)."
+                        .into(),
+                );
+            }
+            if let WatchDetection::JsonPath { path } = &watch.detection {
+                serde_json_path::JsonPath::parse(path)
+                    .map_err(|e| format!("Watch trigger: invalid JSONPath `{path}`: {e}"))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_timezone(timezone: Option<&str>) -> Result<(), String> {
+    trigger_timezone(timezone, Tz::UTC).map(|_| ())
+}
+
+/// True when the cron expression, read in `tz`, has an occurrence in
+/// `(since, now]`.
+fn cron_fires_between(cron_expr: &str, tz: Tz, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    match parse_schedule(cron_expr) {
+        // An ambiguous local time yields its earlier instant first, even when
+        // it precedes `since`, then the later one: skip both cases.
+        Ok(schedule) => schedule
+            .after(&since.with_timezone(&tz))
+            .take(8)
+            .find(|occ| occ.with_timezone(&Utc) > since && !is_repeated_local_time(&tz, occ))
+            .map(|occ| occ.with_timezone(&Utc) <= now)
+            .unwrap_or(false),
+        Err(e) => {
+            tracing::error!("Invalid cron expression '{}': {}", cron_expr, e);
+            false
+        }
+    }
+}
+
+/// The second pass of a local time the autumn DST change repeats: a schedule
+/// fires once, at the first pass. (A local time the spring change skips has
+/// no instant, so it does not fire that day.)
+fn is_repeated_local_time(tz: &Tz, occ: &DateTime<Tz>) -> bool {
+    use chrono::TimeZone;
+    matches!(
+        tz.from_local_datetime(&occ.naive_local()),
+        chrono::LocalResult::Ambiguous(_, later) if later == *occ
+    )
+}
+
+/// Kronn's five-field cron (or the crate's own six/seven-field form).
+fn parse_schedule(cron_expr: &str) -> Result<cron::Schedule, cron::error::Error> {
     let fields: Vec<&str> = cron_expr.split_whitespace().collect();
     // Kronn's editor exposes standard five-field cron where Sunday is 0/7
     // and Monday is 1. The `cron` crate uses Sunday=1 through Saturday=7,
@@ -44,18 +161,7 @@ fn cron_fires_between(cron_expr: &str, since: DateTime<Utc>, now: DateTime<Utc>)
     } else {
         cron_expr.to_string()
     };
-
-    match cron::Schedule::from_str(&expr) {
-        Ok(schedule) => schedule
-            .after(&since)
-            .next()
-            .map(|occ| occ <= now)
-            .unwrap_or(false),
-        Err(e) => {
-            tracing::error!("Invalid cron expression '{}': {}", cron_expr, e);
-            false
-        }
-    }
+    cron::Schedule::from_str(&expr)
 }
 
 fn normalize_five_field_weekdays(field: &str) -> String {
@@ -126,6 +232,7 @@ mod tests {
         let now = Utc::now();
         assert!(!should_fire(
             &WorkflowTrigger::Manual,
+            Tz::UTC,
             now - Duration::seconds(30),
             now
         ));
@@ -134,7 +241,7 @@ mod tests {
     // ─── Cron trigger ────────────────────────────────────────────────────
 
     fn fires(expr: &str, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-        cron_fires_between(expr, since, now)
+        cron_fires_between(expr, Tz::UTC, since, now)
     }
 
     #[test]
@@ -258,8 +365,14 @@ mod tests {
         let now = Utc::now();
         let trigger = WorkflowTrigger::Cron {
             schedule: "invalid cron".into(),
+            timezone: None,
         };
-        assert!(!should_fire(&trigger, now - Duration::seconds(30), now));
+        assert!(!should_fire(
+            &trigger,
+            Tz::UTC,
+            now - Duration::seconds(30),
+            now
+        ));
     }
 
     #[test]
@@ -274,7 +387,12 @@ mod tests {
             labels: vec![],
             interval: "* * * * *".into(),
         };
-        assert!(should_fire(&trigger, now - Duration::seconds(61), now));
+        assert!(should_fire(
+            &trigger,
+            Tz::UTC,
+            now - Duration::seconds(61),
+            now
+        ));
         let invalid = WorkflowTrigger::Tracker {
             source: TrackerSourceConfig::GitHub {
                 owner: "o".into(),
@@ -284,6 +402,387 @@ mod tests {
             labels: vec![],
             interval: "invalid".into(),
         };
-        assert!(!should_fire(&invalid, now - Duration::seconds(61), now));
+        assert!(!should_fire(
+            &invalid,
+            Tz::UTC,
+            now - Duration::seconds(61),
+            now
+        ));
+    }
+
+    // ─── KT-1099 — timezone and Watch validation ─────────────────────────
+
+    fn paris_cron(schedule: &str) -> WorkflowTrigger {
+        WorkflowTrigger::Cron {
+            schedule: schedule.into(),
+            timezone: Some("Europe/Paris".into()),
+        }
+    }
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        rfc3339.parse().unwrap()
+    }
+
+    #[test]
+    fn a_cron_with_a_timezone_follows_its_local_hours_across_dst() {
+        let seven_paris = paris_cron("0 7 * * *");
+        // Summer (UTC+2): 07:00 Paris is 05:00Z, not 07:00Z.
+        let summer = at("2026-07-09T05:00:00Z");
+        assert!(should_fire(
+            &seven_paris,
+            Tz::UTC,
+            summer - Duration::seconds(30),
+            summer
+        ));
+        let utc_seven = at("2026-07-09T07:00:00Z");
+        assert!(!should_fire(
+            &seven_paris,
+            Tz::UTC,
+            utc_seven - Duration::seconds(30),
+            utc_seven
+        ));
+        // Winter (UTC+1): the same expression follows the clock change.
+        let winter = at("2026-12-09T06:00:00Z");
+        assert!(should_fire(
+            &seven_paris,
+            Tz::UTC,
+            winter - Duration::seconds(30),
+            winter
+        ));
+    }
+
+    /// Fires of `trigger` over 30-second ticks from `from` to `to`.
+    fn fires_over_ticks(trigger: &WorkflowTrigger, from: &str, to: &str) -> Vec<DateTime<Utc>> {
+        fires_over_ticks_in(trigger, Tz::UTC, from, to)
+    }
+
+    /// Same, with `default_tz` as Kronn's global zone.
+    fn fires_over_ticks_in(
+        trigger: &WorkflowTrigger,
+        default_tz: Tz,
+        from: &str,
+        to: &str,
+    ) -> Vec<DateTime<Utc>> {
+        let (mut since, end) = (at(from), at(to));
+        let mut fired = vec![];
+        while since < end {
+            let now = since + Duration::seconds(30);
+            if should_fire(trigger, default_tz, since, now) {
+                fired.push(now);
+            }
+            since = now;
+        }
+        fired
+    }
+
+    #[test]
+    fn a_local_time_the_spring_change_skips_does_not_fire_that_day() {
+        // 2026-03-29: Paris jumps from 02:00 to 03:00; 02:30 does not exist.
+        let half_past_two = paris_cron("30 2 * * *");
+        assert!(fires_over_ticks(
+            &half_past_two,
+            "2026-03-28T23:00:00Z",
+            "2026-03-29T23:00:00Z"
+        )
+        .is_empty());
+        // The next day it fires again, at 02:30 CEST.
+        assert_eq!(
+            fires_over_ticks(
+                &half_past_two,
+                "2026-03-29T23:00:00Z",
+                "2026-03-30T23:00:00Z"
+            ),
+            vec![at("2026-03-30T00:30:00Z")]
+        );
+    }
+
+    #[test]
+    fn a_local_time_the_autumn_change_repeats_fires_once_at_its_first_pass() {
+        // 2026-10-25: Paris goes from 03:00 CEST back to 02:00 CET; 02:30
+        // happens at 00:30Z and again at 01:30Z.
+        let half_past_two = paris_cron("30 2 * * *");
+        assert_eq!(
+            fires_over_ticks(
+                &half_past_two,
+                "2026-10-24T22:00:00Z",
+                "2026-10-25T04:00:00Z"
+            ),
+            vec![at("2026-10-25T00:30:00Z")]
+        );
+        // A frequent schedule fires once per local time: the repeated hour
+        // (01:00Z–02:00Z) adds no fire, and nothing is skipped either side.
+        let hourly = paris_cron("0 * * * *");
+        assert_eq!(
+            fires_over_ticks(&hourly, "2026-10-24T22:30:00Z", "2026-10-25T03:30:00Z"),
+            vec![
+                at("2026-10-24T23:00:00Z"),
+                at("2026-10-25T00:00:00Z"),
+                at("2026-10-25T02:00:00Z"),
+                at("2026-10-25T03:00:00Z"),
+            ]
+        );
+    }
+
+    // ─── KT-1103 — Kronn's global timezone ───────────────────────────────
+
+    fn cron(schedule: &str, timezone: Option<&str>) -> WorkflowTrigger {
+        WorkflowTrigger::Cron {
+            schedule: schedule.into(),
+            timezone: timezone.map(String::from),
+        }
+    }
+
+    const PARIS: Tz = Tz::Europe__Paris;
+
+    #[test]
+    fn a_cron_without_a_timezone_follows_the_global_zone() {
+        // Romu's poller: weekdays 07:00–21:00 Paris, written once in local time.
+        let working_hours = cron("0 7-21 * * 1-5", None);
+        let summer = fires_over_ticks_in(
+            &working_hours,
+            PARIS,
+            "2026-10-22T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+        );
+        assert_eq!(summer.first(), Some(&at("2026-10-22T05:00:00Z")));
+        assert_eq!(summer.last(), Some(&at("2026-10-22T19:00:00Z")));
+        assert_eq!(summer.len(), 15);
+        // After 2026-10-25 the same expression follows the clock: no rewrite.
+        let winter = fires_over_ticks_in(
+            &working_hours,
+            PARIS,
+            "2026-10-26T00:00:00Z",
+            "2026-10-27T00:00:00Z",
+        );
+        assert_eq!(winter.first(), Some(&at("2026-10-26T06:00:00Z")));
+        assert_eq!(winter.last(), Some(&at("2026-10-26T20:00:00Z")));
+        assert_eq!(winter.len(), 15);
+    }
+
+    #[test]
+    fn the_global_zone_skips_the_spring_gap_and_fires_the_autumn_overlap_once() {
+        let half_past_two = cron("30 2 * * *", None);
+        // 2026-03-29: 02:30 Paris does not exist, so nothing fires that day.
+        assert!(fires_over_ticks_in(
+            &half_past_two,
+            PARIS,
+            "2026-03-28T23:00:00Z",
+            "2026-03-29T23:00:00Z"
+        )
+        .is_empty());
+        // 2026-10-25: 02:30 Paris happens twice and fires at its first pass.
+        assert_eq!(
+            fires_over_ticks_in(
+                &half_past_two,
+                PARIS,
+                "2026-10-24T22:00:00Z",
+                "2026-10-25T04:00:00Z"
+            ),
+            vec![at("2026-10-25T00:30:00Z")]
+        );
+        // Every 15 minutes through the repeated hour: 02:00–02:45 once each.
+        let quarter = cron("*/15 2 * * *", None);
+        assert_eq!(
+            fires_over_ticks_in(
+                &quarter,
+                PARIS,
+                "2026-10-24T23:00:00Z",
+                "2026-10-25T03:00:00Z"
+            ),
+            vec![
+                at("2026-10-25T00:00:00Z"),
+                at("2026-10-25T00:15:00Z"),
+                at("2026-10-25T00:30:00Z"),
+                at("2026-10-25T00:45:00Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_zone_without_dst_keeps_a_fixed_offset() {
+        let seven = cron("0 7 * * *", None);
+        let tokyo = Tz::Asia__Tokyo;
+        // 07:00 JST is 22:00Z the day before, whatever the season in Europe.
+        for day in ["2026-03-28", "2026-07-08", "2026-10-24", "2026-12-08"] {
+            let start = at(&format!("{day}T00:00:00Z"));
+            assert_eq!(
+                fires_over_ticks_in(
+                    &seven,
+                    tokyo,
+                    &start.to_rfc3339(),
+                    &(start + Duration::days(1)).to_rfc3339()
+                ),
+                vec![start + Duration::hours(22)],
+                "{day}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_utc_trigger_ignores_the_global_zone() {
+        let seven_utc = cron("0 7 * * *", Some("UTC"));
+        assert_eq!(
+            fires_over_ticks_in(
+                &seven_utc,
+                PARIS,
+                "2026-07-09T00:00:00Z",
+                "2026-07-10T00:00:00Z"
+            ),
+            vec![at("2026-07-09T07:00:00Z")]
+        );
+        // With a UTC global zone, an unset timezone keeps the old UTC hours.
+        let unset = cron("0 7 * * *", None);
+        assert_eq!(
+            fires_over_ticks_in(
+                &unset,
+                Tz::UTC,
+                "2026-07-09T00:00:00Z",
+                "2026-07-10T00:00:00Z"
+            ),
+            vec![at("2026-07-09T07:00:00Z")]
+        );
+        // A trigger's own zone wins over the global one.
+        let tokyo = cron("0 7 * * *", Some("Asia/Tokyo"));
+        assert_eq!(
+            fires_over_ticks_in(
+                &tokyo,
+                PARIS,
+                "2026-07-08T12:00:00Z",
+                "2026-07-09T12:00:00Z"
+            ),
+            vec![at("2026-07-08T22:00:00Z")]
+        );
+        // Saved before the field existed: no `timezone` key, none written back.
+        let stored: WorkflowTrigger =
+            serde_json::from_str(r#"{"type":"Cron","schedule":"0 7 * * *"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            r#"{"type":"Cron","schedule":"0 7 * * *"}"#
+        );
+    }
+
+    #[test]
+    fn a_tracker_interval_and_a_watch_without_zone_follow_their_rules() {
+        let tracker = WorkflowTrigger::Tracker {
+            source: TrackerSourceConfig::GitHub {
+                owner: "o".into(),
+                repo: "r".into(),
+            },
+            query: "".into(),
+            labels: vec![],
+            interval: "0 7 * * *".into(),
+        };
+        assert_eq!(
+            fires_over_ticks_in(
+                &tracker,
+                PARIS,
+                "2026-07-09T00:00:00Z",
+                "2026-07-10T00:00:00Z"
+            ),
+            vec![at("2026-07-09T07:00:00Z")],
+            "a tracker interval stays in UTC"
+        );
+        let watch = WorkflowTrigger::Watch(watch("0 7 * * *"));
+        assert_eq!(
+            fires_over_ticks_in(
+                &watch,
+                PARIS,
+                "2026-07-09T00:00:00Z",
+                "2026-07-10T00:00:00Z"
+            ),
+            vec![at("2026-07-09T05:00:00Z")],
+            "a watch without a zone follows the global one"
+        );
+    }
+
+    #[test]
+    fn next_fires_previews_what_the_scheduler_will_do() {
+        let fmt = |v: Vec<DateTime<Tz>>| v.iter().map(|d| d.to_rfc3339()).collect::<Vec<_>>();
+        // Friday evening: the next three working-hour firings are Monday's.
+        let next = next_fires("0 7-21 * * 1-5", PARIS, at("2026-10-23T19:30:00Z"), 3).unwrap();
+        assert_eq!(
+            fmt(next),
+            [
+                "2026-10-26T07:00:00+01:00",
+                "2026-10-26T08:00:00+01:00",
+                "2026-10-26T09:00:00+01:00"
+            ]
+        );
+        // Across the autumn change: the repeated 02:30 appears once.
+        let next = next_fires("30 2 * * *", PARIS, at("2026-10-24T12:00:00Z"), 2).unwrap();
+        assert_eq!(
+            fmt(next),
+            ["2026-10-25T02:30:00+02:00", "2026-10-26T02:30:00+01:00"]
+        );
+        // Across the spring change: the missing 02:30 is skipped.
+        let next = next_fires("30 2 * * *", PARIS, at("2026-03-28T12:00:00Z"), 1).unwrap();
+        assert_eq!(fmt(next), ["2026-03-30T02:30:00+02:00"]);
+        let utc = next_fires("0 7 * * *", Tz::UTC, at("2026-07-09T07:00:00Z"), 1).unwrap();
+        assert_eq!(fmt(utc), ["2026-07-10T07:00:00+00:00"], "strictly after");
+        assert!(next_fires("not a cron", PARIS, at("2026-07-09T07:00:00Z"), 3).is_err());
+    }
+
+    fn watch(interval: &str) -> WatchTrigger {
+        WatchTrigger {
+            api_plugin_slug: Some("github".into()),
+            api_config_id: Some("cfg".into()),
+            api_endpoint_path: Some("/repos/o/r/commits".into()),
+            interval: interval.into(),
+            ..WatchTrigger::default()
+        }
+    }
+
+    #[test]
+    fn a_watch_interval_is_read_in_its_timezone() {
+        let mut trigger = watch("0 7 * * *");
+        trigger.timezone = Some("Europe/Paris".into());
+        let trigger = WorkflowTrigger::Watch(trigger);
+        let summer = at("2026-07-09T05:00:00Z");
+        assert!(should_fire(
+            &trigger,
+            Tz::UTC,
+            summer - Duration::seconds(30),
+            summer
+        ));
+    }
+
+    #[test]
+    fn validation_refuses_what_the_scheduler_could_not_run() {
+        assert!(validate_trigger(&paris_cron("0 7 * * *")).is_ok());
+        let unknown = WorkflowTrigger::Cron {
+            schedule: "0 7 * * *".into(),
+            timezone: Some("Europe/Atlantis".into()),
+        };
+        assert!(validate_trigger(&unknown)
+            .unwrap_err()
+            .contains("Europe/Atlantis"));
+
+        assert!(validate_trigger(&WorkflowTrigger::Watch(watch("*/5 * * * *"))).is_ok());
+        let every_second = WorkflowTrigger::Watch(watch("* * * * * *"));
+        assert!(validate_trigger(&every_second)
+            .unwrap_err()
+            .contains("five-field"));
+        let invalid = WorkflowTrigger::Watch(watch("not a cron at all"));
+        assert!(validate_trigger(&invalid).is_err());
+
+        let no_source = WorkflowTrigger::Watch(WatchTrigger {
+            interval: "*/5 * * * *".into(),
+            ..WatchTrigger::default()
+        });
+        assert!(validate_trigger(&no_source)
+            .unwrap_err()
+            .contains("Quick API"));
+        let quick_api = WorkflowTrigger::Watch(WatchTrigger {
+            quick_api_id: Some("qa-1".into()),
+            interval: "*/5 * * * *".into(),
+            ..WatchTrigger::default()
+        });
+        assert!(validate_trigger(&quick_api).is_ok());
+
+        let mut bad_path = watch("*/5 * * * *");
+        bad_path.detection = WatchDetection::JsonPath { path: "$[".into() };
+        assert!(validate_trigger(&WorkflowTrigger::Watch(bad_path))
+            .unwrap_err()
+            .contains("JSONPath"));
     }
 }

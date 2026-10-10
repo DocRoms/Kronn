@@ -1,6 +1,7 @@
 //! Artifact portability: a bounded, versioned graph of content and automation
 //! definitions. Export and preview are read-only; import never starts a run.
 mod import;
+pub(crate) use import::import_shipped_in_transaction;
 pub use import::{import, preview};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -62,6 +63,8 @@ fn export_embed_origins(conn: &Connection, page_id: &str, html: &str) -> Result<
 }
 
 pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundlePage> {
+    let page_id = crate::db::live_pages::resolve_live_page_id(conn, id)?
+        .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     // Refuse oversized observations before hydrating the complete dataset graph.
     let estimated: Option<i64> = conn.query_row(
         "SELECT length(CAST(r.html AS BLOB)) +
@@ -71,12 +74,12 @@ pub(crate) fn export_page(conn: &Connection, id: &str) -> Result<ArtifactBundleP
                 FROM live_page_dataset_points pt JOIN live_page_datasets d ON d.id = pt.dataset_id
                 WHERE d.page_id = p.id), 0)
          FROM live_pages p JOIN live_page_revisions r ON r.id = p.current_revision_id
-         WHERE p.id = ?1 OR p.slug = ?1 ORDER BY (p.id = ?1) DESC LIMIT 1", [id], |row| row.get(0)).optional()?;
+         WHERE p.id = ?1", [&page_id], |row| row.get(0)).optional()?;
     let estimated = estimated.ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     if estimated > MAX_BUNDLE_BYTES as i64 {
         bail!("Artifact exceeds the 16 MiB bundle limit");
     }
-    let detail = crate::db::live_pages::get_live_page(conn, id)?
+    let detail = crate::db::live_pages::get_live_page(conn, &page_id)?
         .ok_or_else(|| anyhow!("Artifact not found: {id}"))?;
     let mut datasets = Vec::with_capacity(detail.datasets.len());
     for view in detail.datasets {
@@ -149,16 +152,23 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
     // Include all saved publishers of the exported root, including on_failure.
     // Referenced secondary Artifacts do not pull in unrelated incoming workflows.
     for workflow in crate::db::workflows::list_workflows(conn)? {
-        if workflow
+        let mut publishes_root = false;
+        for publish in workflow
             .steps
             .iter()
             .chain(&workflow.on_failure)
-            .any(|step| {
-                step.page_publish.as_ref().is_some_and(|publish| {
-                    publish.page_id == root_id || publish.page_id == root_slug
-                })
-            })
+            .filter_map(|step| step.page_publish.as_ref())
         {
+            // A publisher may still name a slug the root was renamed from.
+            if publish.page_id == root_id
+                || crate::db::live_pages::resolve_live_page_id(conn, &publish.page_id)?.as_deref()
+                    == Some(root_id.as_str())
+            {
+                publishes_root = true;
+                break;
+            }
+        }
+        if publishes_root {
             queue.push_back((ResourceKind::Workflow, workflow.id));
         }
     }
@@ -181,8 +191,12 @@ fn export_bundle(conn: &Connection, id: &str) -> Result<ArtifactBundle> {
                 size
             }
             ResourceKind::Workflow => {
-                let workflow = crate::db::workflows::get_workflow(conn, &id)?
+                let mut workflow = crate::db::workflows::get_workflow(conn, &id)?
                     .ok_or_else(|| anyhow!("Missing workflow dependency: {id}"))?;
+                super::workflows::canonicalize_exported_page_refs(
+                    conn,
+                    std::slice::from_mut(&mut workflow),
+                )?;
                 queue.extend(
                     super::workflows::workflow_sub_workflow_child_ids(&workflow)
                         .into_iter()
@@ -423,6 +437,223 @@ mod tests {
             "{}",
             record.summary
         );
+    }
+
+    /// KT-1098 — an export taken after renames imports into a fresh database
+    /// with every Page reference (steps, on_failure, a button's workflow) on
+    /// the imported Pages, even where the source named a former slug.
+    #[tokio::test]
+    async fn a_renamed_artifact_round_trips_with_former_slug_references() {
+        let source = state();
+        let content = source
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                for (id, title, slug, html) in [
+                    ("page-1", "Board", "board-old", r#"<script type="application/kronn-action" data-action-id="go">{"kind":"workflow","target_id":"wf-btn"}</script>"#),
+                    ("page-2", "Side", "side-old", "<p>side</p>"),
+                ] {
+                    let page = crate::models::LivePage {
+                        id: id.into(),
+                        project_id: None,
+                        title: title.into(),
+                        slug: slug.into(),
+                        current_revision_id: format!("rev-{id}"),
+                        data_revision: 0,
+                        created_at: now,
+                        updated_at: now,
+                        last_published_at: None,
+                        pinned: false,
+                        archived: false,
+                    };
+                    let revision = crate::models::LivePageRevision {
+                        id: format!("rev-{id}"),
+                        page_id: id.into(),
+                        revision: 1,
+                        html: html.into(),
+                        created_by_agent: None,
+                        created_at: now,
+                    };
+                    let summary = crate::models::CreateLivePageDataset {
+                        name: "summary".into(),
+                        kind: crate::models::LivePageDatasetKind::Snapshot,
+                        initial: None,
+                        schema: None,
+                        max_points: None,
+                        max_age_days: None,
+                    };
+                    crate::db::live_pages::create_live_page(conn, &page, &revision, &[summary], None)?;
+                }
+                let publish = |page: &str| {
+                    format!(r#"[{{"name":"a","step_type":{{"type":"Agent"}},"prompt_template":"go"}},{{"name":"p","step_type":{{"type":"PublishPageData"}},"page_publish":{{"page_id":"{page}","writes":[{{"dataset":"summary","operation":"replace","value_from":"steps.a.data"}}]}}}}]"#)
+                };
+                let agent = r#"[{"name":"a","step_type":{"type":"Agent"},"prompt_template":"go"}]"#.to_string();
+                for (id, steps, on_failure) in [
+                    ("wf-step", publish("board-old"), "[]".to_string()),
+                    ("wf-fail", agent.clone(), publish("board-old")),
+                    ("wf-btn", publish("side-old"), "[]".to_string()),
+                ] {
+                    conn.execute(
+                        "INSERT INTO workflows (id, name, trigger_json, steps_json, on_failure, enabled, created_at, updated_at)
+                         VALUES (?1, ?1, '{\"type\":\"Manual\"}', ?2, ?3, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                        rusqlite::params![id, steps, on_failure],
+                    )?;
+                }
+                for (id, slug) in [("page-1", "board-new"), ("page-2", "side-new")] {
+                    crate::db::live_pages::update_live_page(
+                        conn,
+                        id,
+                        &crate::models::UpdateLivePageRequest {
+                            title: None,
+                            slug: Some(slug.into()),
+                            pinned: None,
+                            archived: None,
+                        },
+                    )?;
+                }
+                // The source workflows keep their own references.
+                let kept: String = conn.query_row(
+                    "SELECT steps_json FROM workflows WHERE id = 'wf-step'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert!(kept.contains("board-old"));
+                Ok(serde_json::to_string(&export_bundle(conn, "board-old")?)?)
+            })
+            .await
+            .unwrap();
+
+        let target = state();
+        let request = |digest: Option<String>| ArtifactImportRequest {
+            content: content.clone(),
+            project_id: None,
+            choices: vec![],
+            approved_quick_exec_ids: vec![],
+            preview_digest: digest,
+            allow_embed_origins: vec![],
+        };
+        let axum::Json(preview) = import::preview(
+            axum::extract::State(target.clone()),
+            axum::Json(request(None)),
+        )
+        .await;
+        let preview = preview
+            .data
+            .unwrap_or_else(|| panic!("preview: {:?}", preview.error));
+        let axum::Json(imported) = import::import(
+            axum::extract::State(target.clone()),
+            axum::Json(request(Some(preview.digest.clone()))),
+        )
+        .await;
+        assert!(imported.success, "{:?}", imported.error);
+
+        let (pages, workflows) = target
+            .db
+            .with_conn(|conn| {
+                let mut pages = std::collections::HashMap::new();
+                for title in ["Board", "Side"] {
+                    let id: String = conn.query_row(
+                        "SELECT id FROM live_pages WHERE title = ?1",
+                        [title],
+                        |row| row.get(0),
+                    )?;
+                    pages.insert(title, id);
+                }
+                Ok((pages, crate::db::workflows::list_workflows(conn)?))
+            })
+            .await
+            .unwrap();
+        assert!(!["page-1", "page-2"].contains(&pages["Board"].as_str()));
+        let target_of = |name: &str, on_failure: bool| {
+            let workflow = workflows.iter().find(|w| w.name == name).expect(name);
+            let steps = if on_failure {
+                &workflow.on_failure
+            } else {
+                &workflow.steps
+            };
+            steps
+                .iter()
+                .find_map(|step| step.page_publish.as_ref())
+                .unwrap()
+                .page_id
+                .clone()
+        };
+        assert_eq!(target_of("wf-step", false), pages["Board"]);
+        assert_eq!(target_of("wf-fail", true), pages["Board"]);
+        assert_eq!(target_of("wf-btn", false), pages["Side"]);
+    }
+
+    /// KT-1098 — after a rename, the old slug still exports the Artifact, and a
+    /// publisher naming the old slug (step or on_failure) stays in the bundle.
+    #[test]
+    fn a_renamed_artifact_exports_by_old_slug_with_its_old_slug_publishers() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let now = chrono::Utc::now();
+        let page = crate::models::LivePage {
+            id: "page-1".into(),
+            project_id: None,
+            title: "Board".into(),
+            slug: "board-old".into(),
+            current_revision_id: "rev-1".into(),
+            data_revision: 0,
+            created_at: now,
+            updated_at: now,
+            last_published_at: None,
+            pinned: false,
+            archived: false,
+        };
+        let revision = crate::models::LivePageRevision {
+            id: "rev-1".into(),
+            page_id: "page-1".into(),
+            revision: 1,
+            html: "<p>board</p>".into(),
+            created_by_agent: None,
+            created_at: now,
+        };
+        crate::db::live_pages::create_live_page(&conn, &page, &revision, &[], None).unwrap();
+        let publish = r#"[{"name":"p","step_type":{"type":"PublishPageData"},"page_publish":{"page_id":"board-old","writes":[]}}]"#;
+        let agent = r#"[{"name":"a","step_type":{"type":"Agent"}}]"#;
+        for (id, steps, on_failure) in [
+            ("wf-step", publish, "[]"),
+            ("wf-fail", agent, publish),
+            ("wf-other", agent, "[]"),
+        ] {
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, on_failure, enabled, created_at, updated_at)
+                 VALUES (?1, ?1, '{\"type\":\"Manual\"}', ?2, ?3, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, steps, on_failure],
+            )
+            .unwrap();
+        }
+        crate::db::live_pages::update_live_page(
+            &conn,
+            "page-1",
+            &crate::models::UpdateLivePageRequest {
+                title: None,
+                slug: Some("board-new".into()),
+                pinned: None,
+                archived: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        for selector in ["board-old", "board-new", "page-1"] {
+            let bundle = export_bundle(&conn, selector).unwrap();
+            assert_eq!(bundle.artifact.id, "page-1", "{selector}");
+            assert_eq!(bundle.artifact.slug, "board-new", "{selector}");
+            let mut ids: Vec<_> = bundle
+                .referenced_workflows
+                .iter()
+                .map(|workflow| workflow.id.as_str())
+                .collect();
+            ids.sort();
+            assert_eq!(ids, ["wf-fail", "wf-step"], "{selector}");
+            assert!(bundle.referenced_artifacts.is_empty(), "{selector}");
+        }
+        assert!(export_page(&conn, "never-existed").is_err());
     }
 
     #[test]

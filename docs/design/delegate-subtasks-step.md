@@ -1,7 +1,8 @@
 # Design note — the `DelegateSubtasks` workflow step (KT-909)
 
-> Status: **design only (0.14.3)**. Implementation is planned for 0.15.x.
-> Grounded in the code of `feat/0.14.3`; every claim cites `file:line`.
+> Status: **implemented in 0.15.0** (`backend/src/workflows/delegate_subtasks_step.rs`).
+> Sections 1-8 are the 0.14.3 design, grounded in `feat/0.14.3`; section 9
+> records what the implementation chose for the open decisions.
 
 ## 1. Problem
 
@@ -215,3 +216,29 @@ field today. `[src: file: backend/src/models/discussions.rs:360]`
    campaign's `escalation_notify_url`?
 8. **Budget**: reuse the campaign `token_budget`, the workflow run's shared
    budget, or both (the stricter wins)?
+
+## 9. Implementation choices (0.15.0)
+
+1. **Owner discussion**: one technical discussion per run and step, id prefix
+   `wf-delegate-`, linked to the run (`workflow_run_id`); no `room_id`. Boot
+   recovery does not wake a principal agent there: the step reviews on resume.
+2. **Plan**: the step links the parent's subtasks into that discussion's plan,
+   in rank order; a campaign (`auto_continue: false`) owns them.
+3. **Reviewer transport**: a one-shot Agent call with the step's `agent` and
+   `agent_settings`, no Kronn tools and no retry (one review, one session), in
+   the delivered worktree. The diff is cut at 40,000 characters; an HTTP
+   reviewer has no tool to read the worktree, so past that cut it does not
+   review the whole change. The step deadline bounds the call; a late verdict
+   is kept and applied by the resumed step, never past the deadline. Its reply is
+   kept as a message keyed by `(execution, attempt)`, applied again on resume
+   instead of a second call.
+4. **Verdicts**: `reassign` and `escalate` stay step-only. `reassign` uses
+   `reassign_native_execution` once per subtask, behind a marker keyed by the
+   reviewed attempt, so an interrupted reassignment resumes instead of
+   escalating; a second one escalates.
+   `escalate` moves the execution to `Escalated`.
+5. **Dirty target**: refused before anything launches (`BLOCKED`).
+6. **Workers**: native and HTTP only (`worker_map` has no CLI session).
+7. **Escalation path**: the step stops; no notification of its own.
+8. **Budget**: each review counts against the run's shared `max_llm_calls`;
+   the campaign has no token budget of its own.

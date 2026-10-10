@@ -472,6 +472,12 @@ describe('api.workflows (rest)', () => {
   it('listRuns can complete the boundary parent group', async () => {
     await exec(workflows.listRuns('wf-1', 10, 0, true), 'GET', '/workflows/wf-1/runs?limit=10&offset=0&complete_group=true');
   });
+  it('listRuns can leave out the runs without changes', async () => {
+    await exec(workflows.listRuns('wf-1', 10, 0, true, true), 'GET', '/workflows/wf-1/runs?limit=10&offset=0&complete_group=true&hide_no_op=true');
+  });
+  it('countRuns can leave out the runs without changes', async () => {
+    await exec(workflows.countRuns('wf-1', true), 'GET', '/workflows/wf-1/runs/count?hide_no_op=true');
+  });
   it('countRuns', async () => {
     await exec(workflows.countRuns('wf-1'), 'GET', '/workflows/wf-1/runs/count');
   });

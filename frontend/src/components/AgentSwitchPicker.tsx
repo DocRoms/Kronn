@@ -49,6 +49,8 @@ interface AgentSwitchPickerProps {
   staticClassName?: string;
   suffix?: string;
   displayName?: string;
+  /** Agents that cannot run until their full access is turned on (badged in the list). */
+  needsFullAccess?: (agent: AgentType) => boolean;
 }
 
 /**
@@ -78,6 +80,7 @@ export function AgentSwitchPicker({
   staticClassName,
   suffix,
   displayName,
+  needsFullAccess,
 }: AgentSwitchPickerProps) {
   const { t } = useT();
   const pickerId = useId();
@@ -119,6 +122,11 @@ export function AgentSwitchPicker({
 
   const targetLabel = (target: AgentSwitchTarget) =>
     target.label ?? AGENT_LABELS[target.agent] ?? target.agent;
+  const fullAccessBadge = (target: AgentSwitchTarget) => needsFullAccess?.(target.agent) && (
+    <span className="kr-agent-switch-badge" data-testid="agent-needs-full-access">
+      {t('agentPicker.needsFullAccess')}
+    </span>
+  );
   const resolvedTier = (target: AgentSwitchTarget, tier: ModelTier) => resolveCatalogTier(
     catalog, target, tier, modelTiers,
     targetKey(target) === targetKey(currentTarget) && tier === currentTier ? currentModel : null,
@@ -344,6 +352,7 @@ export function AgentSwitchPicker({
                   style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
                 />
                 {targetLabel(target)}
+                {fullAccessBadge(target)}
               </span>
               <span className="kr-agent-switch-tier-choices">
                 {tierOptions.map(tier => {
@@ -352,7 +361,8 @@ export function AgentSwitchPicker({
                   const icon = tier === null ? null : MODEL_TIER_ICONS[tier];
                   const label = tier === null ? defaultModelLabel : (tierLabels?.[tier] ?? tier);
                   const entry = tier === null ? null : catalogEntry(target, tier);
-                  const unavailable = entry?.availability === 'unavailable';
+                  const resolution = tier === null ? null : resolvedTier(target, tier);
+                  const unavailable = resolution?.unavailable ?? false;
                   const provenance = entry
                     ? t(`modelCatalog.provenance.${resolvedTier(target, tier as ModelTier).provenance}`)
                     : null;
@@ -367,7 +377,8 @@ export function AgentSwitchPicker({
                       data-current={selected}
                       aria-label={`${targetLabel(target)} · ${label}`}
                       aria-describedby={descriptionId}
-                      title={tier === null ? label : tierTitle(target, tier)}
+                      title={tier === null ? label : [tierTitle(target, tier), resolution?.notice, resolution?.refusal]
+                        .filter(Boolean).join(' — ')}
                       disabled={saving || selected || unavailable}
                       onClick={() => void select(target, tier)}
                     >
@@ -375,13 +386,19 @@ export function AgentSwitchPicker({
                       <span>{label}</span>
                       <span id={descriptionId} hidden>
                         {[tier === null ? label : tierTitle(target, tier), provenance ?? (tier !== null && configuredModel(target, tier) ? t('modelCatalog.notInCatalog') : ''),
-                          unavailable ? t('modelCatalog.unavailable') : ''].filter(Boolean).join(' · ')}
+                          unavailable ? t('modelCatalog.unavailable') : '', resolution?.refusal ?? '',
+                          resolution?.replacement ? t('modelCatalog.runsInstead', resolution.replacement, resolution.configured || entry?.model_id || '') : '',
+                          resolution?.notice ?? '',
+                        ].filter(Boolean).join(' · ')}
                       </span>
                       {tier !== null && (entry || configuredModel(target, tier)) && (
-                        <span className="kr-agent-switch-catalog-meta">
+                        <span className="kr-agent-switch-catalog-meta"
+                          data-catalog-warning={!unavailable && resolution?.notice ? 'true' : undefined}>
                           {unavailable
                             ? t('modelCatalog.unavailable')
-                            : provenance ?? t('modelCatalog.notInCatalog')}
+                            : resolution?.notice
+                              ? `⚠ ${t('modelCatalog.notListedBadge')}`
+                              : provenance ?? t('modelCatalog.notInCatalog')}
                         </span>
                       )}
                       {selected && <Check size={8} aria-hidden="true" />}
@@ -405,6 +422,7 @@ export function AgentSwitchPicker({
                 style={{ background: AGENT_COLORS[target.agent] ?? 'var(--kr-text-faint)' }}
               />
               {targetLabel(target)}
+              {fullAccessBadge(target)}
               {targetKey(target) === targetKey(currentTarget) && <Check size={10} />}
             </button>
           ))}

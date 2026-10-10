@@ -1176,6 +1176,18 @@ pub struct CampaignTaskReason {
 pub struct TaskWorkerTier {
     pub tier: ModelTier,
     pub resolved_model: Option<String>,
+    /// Set when the launch preflight would refuse this tier, with its reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub refusal: Option<CampaignTaskReason>,
+    /// The configured model when the catalogue runs `resolved_model` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requested_model: Option<String>,
+    /// A launchable tier's warning, e.g. a model absent from the CLI's listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub warning: Option<CampaignTaskReason>,
 }
 
 /// A media generation slot a worker can actually serve.
@@ -1225,6 +1237,44 @@ pub struct TaskWorkerCatalogueEntry {
     pub reasons: Vec<CampaignTaskReason>,
     #[serde(default)]
     pub warnings: Vec<CampaignTaskReason>,
+    /// HTTP workers only: what the bounded network probe observed. `reachable`
+    /// is true only when this says `verified`; absent for host CLIs and joined
+    /// sessions, whose reachability is not a network fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub connectivity: Option<WorkerConnectivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WorkerConnectivityState {
+    /// A probe got an answer within its bound.
+    Verified,
+    /// A probe ran and failed; `unreachable_reason` says how when known.
+    Unreachable,
+    /// No probe result, or one too old to vouch for now. Never success.
+    Unverified,
+}
+
+/// Observed network connectivity, kept apart from `configured` (an address is
+/// saved) and `available` (Kronn would attempt a launch).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkerConnectivity {
+    pub state: WorkerConnectivityState,
+    /// `dns` | `refused` | `timeout` | `tls` | `http_status` |
+    /// `invalid_endpoint` | `connect`. Never an address or upstream text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unreachable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub http_status: Option<u16>,
+    /// RFC 3339 instant of the observation, when one is reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub checked_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1586,6 +1636,9 @@ pub struct TaskExecutionPreparation {
     pub project_id: Option<String>,
     pub launchable: bool,
     pub reasons: Vec<CampaignTaskReason>,
+    /// Shown before launch without blocking it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<CampaignTaskReason>,
     pub active_execution: Option<TaskExecution>,
 }
 
